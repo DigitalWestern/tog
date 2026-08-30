@@ -54,16 +54,25 @@ Per design review with Sol: **Plan → Realize → Project.**
   rather than per-package store objects merged by clonefile. Sharing is at
   whole-environment level. Per-package objects are a later optimization
   the identity scheme already permits.
-- **Wheels only** in the realize path; an sdist in the plan is a clear
-  error. Sandboxed sdist builds (sandbox-exec, network denied) are M3.
+- **Sdists build in a sandbox** (sandbox-exec, deny-by-default, no
+  network) using a pinned hermetic pip/setuptools/wheel toolchain; the
+  built wheel is a derivation-style store object. v0 sandbox limitations,
+  eyes open: mach-lookup and process-exec are still broad (Seatbelt
+  hermeticity, not hostile-code containment), and macOS deployment-target
+  versions in wheel tags are not compared.
 - **CPython pins are trust-on-first-use** (hashes computed at pin time).
   A signed provider manifest replaces the static table post-MVP.
 - **No solver**: blanket consumes existing hash-pinned lockfiles
   (`uv pip compile --generate-hashes`). Sol's "locked-plan realizer, not a
   universal resolver."
-- `__pycache__` writes fail silently inside read-only store envs; Python
-  degrades gracefully (no bytecode cache). Precompilation is a later
-  optimization.
+- `blanket run` sets PYTHONDONTWRITEBYTECODE=1 (site-packages is
+  read-only). Precompilation at realize time is a later optimization.
+- **RECORD is left as shipped** inside installed dist-info: not verified
+  on install, not rewritten to reflect actual layout. importlib.metadata
+  version/metadata queries work; file listings may be inaccurate. Honest
+  gap, scheduled with the M5 hardening pass.
+- These are **immutable Python environments**, venv-shaped — not drop-in
+  venvs: no activate scripts, and pip cannot mutate them (by design).
 
 ## Layout
 
@@ -77,10 +86,13 @@ Per design review with Sol: **Plan → Realize → Project.**
     src/project.rs  env realization + projection
     tests/acceptance.sh   end-to-end checklist against real PyPI
 
-## Roadmap after MVP
+## Roadmap
 
-M3: sandboxed sdist builds (sandbox-exec deny-by-default, no network).
-M4: npm lockfile importer against the same kernel (peer-aware node_modules
-    projection) — the second-ecosystem stress test of the kernel thesis.
-M5: garbage collection (`blanket gc`), per-package store objects, binary
-    cache + `/opt/blanket/store` decision, signed toolchain manifests.
+M3 (done): sandboxed sdist builds.
+M4 (in progress): npm lockfile importer against the same kernel — the
+    second-ecosystem stress test of the kernel thesis.
+M5: hardening pass — RECORD verification/rewrite, Mach-service allowlist in
+    the sandbox, macOS deployment-target tag comparison, reproducibility
+    checks (rebuild + compare), garbage collection (`blanket gc`),
+    per-package store objects, binary cache + /opt/blanket/store decision,
+    signed toolchain manifests.
