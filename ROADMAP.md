@@ -73,6 +73,80 @@ binary:
 Boiling the ocean is the point; the architecture (kernel + tailors) is
 what makes the ocean boilable one pot at a time.
 
+## Expansion: breadth AND depth (decided 2026-08-30)
+
+The "go wide vs. go deep" question is answered: **both, as parallel
+tracks.** Breadth proves the kernel thesis keeps compounding (each new
+tailor should get cheaper); depth proves blanket is a daily driver, not
+a demo. Neither is credible alone: ten shallow languages is a toy, two
+perfect languages is a niche tool.
+
+### Breadth track — more tailors
+
+Ordered by (usefulness to Ethan) x (cheapness given the kernel):
+
+1. **cargo (Rust)** — cheapest possible tailor: Cargo.lock is already
+   exact + checksummed, and per Sol, wrapping cargo hermetically
+   (sandboxed, vendored registry sources, pinned rustc toolchain object)
+   may be *permanently* correct rather than a stopgap. Proves the "wrap
+   first, native later — or never" doctrine.
+2. **Go** — go.sum is hash-pinned by design; toolchain is one tarball;
+   no install scripts anywhere in the ecosystem. Second-cheapest, very
+   enterprise-relevant.
+3. **Ruby (Gemfile.lock)** — moderate; native extensions reuse the
+   sandboxed-build machinery Python already built.
+4. **System packages (the Homebrew replacement)** — the big one, kept
+   deliberately last: Sol's review was right that GUI apps, services,
+   and privileged installs are a *different product* (host-effects
+   model). Start with the easy 80%: CLI tools and libraries, which fit
+   the closet perfectly.
+5. **JVM (Maven/Gradle)** — explicitly deprioritized: Sol's analysis
+   says Gradle's executable build logic effectively requires embedding
+   Gradle itself. Route around the dragon until enterprise pull demands
+   it.
+
+Breadth-track health metric: **lines of code per new tailor should keep
+falling** (npm took ~450 where Python took ~1500 + the kernel). If a new
+tailor costs more than the last one, the kernel is leaking and we stop
+and fix the kernel instead.
+
+### Depth track — make Python + JavaScript daily drivers
+
+Python tailor:
+- environment markers (`; python_version < "3.13"`) and extras
+  (`package[extra]`) — the two loudest v0 rejections real lockfiles hit
+- editable installs (`-e .`) as an explicit **mutable overlay** on top of
+  the immutable comforter (Sol's design: the closet stays pure; the
+  workspace is a declared exception)
+- sdists with dynamic build requirements (PEP 517 `get_requires_...`
+  metadata jobs run in the planning sandbox, per the original Sol design)
+- RECORD verification on install + rewrite after (closes the loudest
+  documented lie)
+- bytecode precompilation at realize time (startup speed, deterministic)
+
+JavaScript tailor:
+- **lifecycle scripts in the build sandbox** — the gate blocking native
+  addons (esbuild, sharp…) and therefore most real frontend projects
+  (vite!). Same recipe as Python sdists: network denied, declared
+  inputs, outputs become store objects.
+- workspaces/monorepos (`link:` entries) — the other loud v0 rejection
+- `blanket add <pkg>` — delegate resolution to a vendored resolver or
+  embedded tool, keep realization ours (the "cheat early" doctrine)
+
+Shared depth (kernel):
+- per-package store objects with copy-on-write assembly (APFS clonefile)
+  so comforters share squares-worth of disk, not just whole-environment
+  dedup
+- reproducibility spot-checks: rebuild a derivation twice, compare bytes,
+  quarantine mismatches (the last unimplemented item from Sol's original
+  acceptance list)
+- the M5 hardening backlog (ARCHITECTURE.md)
+
+Sequencing rule of thumb: alternate. Ship one depth item that unblocks a
+real project of Ethan's (npm lifecycle scripts → vite works), then one
+breadth item (cargo tailor), and keep alternating so neither track
+starves.
+
 ## Standing follow-up list
 
 - [ ] `blanket sbom` — CycloneDX export of a project's closure(s)
@@ -93,6 +167,6 @@ what makes the ocean boilable one pot at a time.
    ("watch blanket refuse a denied package at the door")?
 2. Does the task runner earn its place before a third language does, or
    after? (What would *you* use first, day to day?)
-3. When blanket meets a package needing install scripts (native addons),
-   do we extend the sandboxed-build story to npm next, or keep Python the
-   deep ecosystem and go wide instead?
+3. ~~Deep vs. wide?~~ **Answered: both, alternating** — see the
+   expansion tracks above. First concrete pair: npm lifecycle scripts
+   (depth, unblocks vite projects), then the cargo tailor (breadth).
