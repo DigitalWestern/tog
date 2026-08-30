@@ -86,3 +86,33 @@ Not "one package manager that natively replaces everything" (destination, not ar
 ## Open question (next grind)
 
 The Plan format — the typed, locked description that every ecosystem compiles down to (Sol sketched required fields: source digests, package-instance context like features/peers/extras, build vs host vs target platforms, typed dependency edges, toolchain identity, sandbox capabilities, projection instructions).
+
+## Build log — 2026-08-30 (MVP built)
+
+The MVP is real and in this repo. What got built in one run:
+
+- Rust kernel: input-addressed immutable store (160-bit ids, atomic
+  read-only publication), verified artifact cache (sha256/sha512),
+  sandboxed builds (sandbox-exec, deny-default, network denied).
+- Python adapter: hash-pinned requirements → PyPI-locked plan → CPython
+  (python-build-standalone) + wheels + hermetic sdist builds → immutable
+  venv-shaped env objects, projected as one `.venv` symlink.
+- npm adapter: package-lock v2/v3 → immutable node_modules objects +
+  pinned Node 24.20.0 — the second ecosystem through the same kernel,
+  which was the thesis test. ~350 lines.
+- 16/16 end-to-end acceptance tests against real registries, including
+  true offline reconstruction and a malicious build that tries to phone
+  home and gets denied.
+- Two adversarial Sol reviews; round 1 produced 18 findings, the
+  serious ones fixed same-day (identity gaps, cache poisoning via
+  hard links, ABI-tag selection bugs, zip-slip/zip-bomb guards,
+  publication races).
+
+Deviations from the earlier plan, with reasons:
+- Store root is user-local (~/.blanket/store, BLANKET_STORE override),
+  not /opt/blanket/store: binary-cache sharing is the only thing that
+  needs the fixed global path and it's post-MVP; identities carry the
+  store root so this can't silently bite later.
+- Luna (Codex) agents were unreliable in this environment — one of three
+  hung indefinitely twice; wheel installer came from Luna, the planner
+  and npm adapter I wrote directly. Sol reviews worked well throughout.
