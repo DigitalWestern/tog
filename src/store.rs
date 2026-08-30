@@ -26,6 +26,9 @@ impl Store {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(sub))?;
         }
+        // Canonical path: sandbox subpath rules and store identities must
+        // never see /tmp-style symlinked prefixes (macOS: /tmp -> /private/tmp).
+        let root = root.canonicalize()?;
         Ok(Store { root })
     }
 
