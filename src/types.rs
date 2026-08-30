@@ -14,13 +14,13 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Object id: first 16 hex chars of sha256 over canonical JSON, plus a
-    /// human-readable suffix. Stable across machines.
+    /// Object id: first 40 hex chars (160 bits) of sha256 over canonical
+    /// JSON, plus a human-readable suffix. Stable across machines.
     pub fn object_id(&self) -> String {
         use sha2::{Digest, Sha256};
         let canon = serde_json::to_vec(self).expect("identity serializes");
         let h = hex::encode(Sha256::digest(&canon));
-        format!("{}-{}-{}", &h[..16], sanitize(&self.name), sanitize(&self.version))
+        format!("{}-{}-{}", &h[..40], sanitize(&self.name), sanitize(&self.version))
     }
 }
 

@@ -58,17 +58,31 @@ impl Store {
         let id = identity.object_id();
         let dest = self.object_path(&id);
         if dest.is_dir() {
-            let _ = fs::remove_dir_all(staged);
+            let _ = remove_tree(staged);
             return Ok(dest);
         }
-        match fs::rename(staged, &dest) {
+        // Read-only BEFORE publication (contents; APFS can't rename a
+        // read-only dir, so the root is locked right after the rename —
+        // the only window is top-level entry creation, never mutation).
+        for entry in fs::read_dir(staged)? {
+            make_read_only(&entry?.path())?;
+        }
+        match fs::rename(staged, &dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("publish {}: {e}", dest.display())))
+        {
             Ok(()) => {}
             // Lost a race to a concurrent build of the same object: fine.
             Err(_) if dest.is_dir() => {
-                let _ = fs::remove_dir_all(staged);
+                let _ = remove_tree(staged);
                 return Ok(dest);
             }
             Err(e) => return Err(e),
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest)?.permissions();
+            perms.set_mode(perms.mode() & !0o222);
+            fs::set_permissions(&dest, perms)?;
         }
         let meta = serde_json::json!({
             "id": id,
@@ -79,13 +93,34 @@ impl Store {
             self.root.join("meta").join(format!("{id}.json")),
             serde_json::to_vec_pretty(&meta)?,
         )?;
-        make_read_only(&dest)?;
         Ok(dest)
     }
 
     pub fn cache_path(&self, algo: &str, hex: &str) -> PathBuf {
         self.root.join("cache").join(algo).join(hex)
     }
+}
+
+/// Remove a possibly read-only staged tree (restore write bits first).
+fn remove_tree(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fn unlock(p: &Path) -> io::Result<()> {
+        let md = fs::symlink_metadata(p)?;
+        if md.file_type().is_symlink() {
+            return Ok(());
+        }
+        let mut perms = md.permissions();
+        perms.set_mode(perms.mode() | 0o200);
+        let _ = fs::set_permissions(p, perms);
+        if md.is_dir() {
+            for entry in fs::read_dir(p)? {
+                unlock(&entry?.path())?;
+            }
+        }
+        Ok(())
+    }
+    let _ = unlock(path);
+    fs::remove_dir_all(path)
 }
 
 /// Recursively remove write permission (files and dirs). Symlinks untouched.
@@ -103,6 +138,7 @@ fn make_read_only(path: &Path) -> io::Result<()> {
     let mut perms = md.permissions();
     perms.set_mode(perms.mode() & !0o222);
     fs::set_permissions(path, perms)
+        .map_err(|e| io::Error::new(e.kind(), format!("chmod {}: {e}", path.display())))
 }
 
 fn home() -> PathBuf {

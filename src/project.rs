@@ -35,13 +35,34 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
     })?;
     let python_obj = python::ensure_python(store, pin)?;
 
+    // Canonical package order + duplicate rejection: identity must commit
+    // to exactly one artifact per name, installed in a deterministic order.
+    let mut packages: Vec<&crate::types::LockedPackage> = plan.packages.iter().collect();
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    for w in packages.windows(2) {
+        if w[0].name == w[1].name {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate package in plan: {}", w[0].name),
+            ));
+        }
+    }
+
     let mut inputs = BTreeMap::new();
+    inputs.insert("schema".to_string(), "python-env/2".to_string());
+    inputs.insert(
+        "store_root".to_string(),
+        store.root.to_string_lossy().into_owned(),
+    );
     inputs.insert(
         "cpython".to_string(),
         python_obj.file_name().unwrap().to_string_lossy().into_owned(),
     );
-    for p in &plan.packages {
-        inputs.insert(format!("pkg:{}", p.name), p.sha256.clone());
+    for p in &packages {
+        inputs.insert(
+            format!("pkg:{}", p.name),
+            format!("{:?}:{}", p.kind, p.sha256),
+        );
     }
     let identity = Identity {
         kind: "python-env".into(),
@@ -56,7 +77,7 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
 
     // Fetch everything first (all-or-nothing before assembly starts).
     let mut artifacts: Vec<(&crate::types::LockedPackage, PathBuf)> = Vec::new();
-    for p in &plan.packages {
+    for &p in &packages {
         let wheel_file = match p.kind {
             ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
             // sdist -> wheel via sandboxed derivation (network denied).
@@ -105,8 +126,14 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
 /// plus `.blanket/closure.json` provenance.
 pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
     let venv = project_dir.join(".venv");
-    let tmp = project_dir.join(".venv.blanket-swap");
-    let _ = fs::remove_file(&tmp);
+    let tmp = project_dir.join(format!(
+        ".venv.blanket-swap.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     symlink(env_obj, &tmp)?;
     fs::rename(&tmp, &venv)?; // atomic replace, including over an old symlink
 

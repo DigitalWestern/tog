@@ -9,44 +9,12 @@ use std::path::Path;
 
 use zip::ZipArchive;
 
-/// Install one wheel file into an environment being assembled.
-///
-/// * `wheel_path`     — verified .whl on disk (a zip).
-/// * `site_packages`  — env's lib/pythonX.Y/site-packages (exists).
-/// * `bin_dir`        — env's bin/ (exists).
-/// * `python_exe`     — absolute path to the env's bin/python (for shebangs
-///                      and console-script generation).
-///
-/// Required behavior (PEP 427, pragmatic subset):
-/// 1. Unzip everything except `{name}-{ver}.data/` into `site_packages`.
-///    Preserve unix mode bits from zip external attrs when present.
-/// 2. For `{name}-{ver}.data/`:
-///      purelib/, platlib/  -> merge into site_packages
-///      scripts/            -> into bin_dir; rewrite `#!python` shebang
-///                             (any first line starting with b"#!python")
-///                             to `#!{python_exe}`; set exec bit.
-///      data/               -> merge into env root (bin_dir.parent()).
-/// 3. Read `{name}-{ver}.dist-info/entry_points.txt`; for each entry in
-///    [console_scripts] `name = module:func`, write an executable launcher
-///    to bin_dir:
-///        #!{python_exe}
-///        import sys
-///        from module import func_root  (handle dotted attrs: from m import a; obj = a.b.c)
-///        sys.exit(obj())
-///    Use the standard pattern:
-///        #!/abs/python
-///        # -*- coding: utf-8 -*-
-///        import re, sys
-///        from {module} import {attr0}
-///        if __name__ == "__main__":
-///            sys.argv[0] = re.sub(r"(-script\.pyw?|\.exe)?$", "", sys.argv[0])
-///            sys.exit({attr_full}())
-/// 4. Never write outside site_packages / bin_dir / env root. Reject zip
-///    entries containing ".." or absolute paths (zip-slip guard).
-/// 5. Leave RECORD as shipped; do not rewrite it (v0).
-///
-/// [gui_scripts] may be treated as console_scripts. Other entry point groups
-/// are ignored.
+/// Install one wheel into an environment being assembled (PEP 427,
+/// pragmatic subset). Routes `{name}.data/{purelib,platlib,scripts,data}`,
+/// rewrites `#!python` shebangs, generates console/gui-script launchers,
+/// guards against zip-slip/symlinks, and errors on file collisions.
+/// Known v0 gaps: RECORD is left as shipped (not verified or rewritten);
+/// `headers` .data scheme is rejected rather than implemented.
 pub fn install_wheel(
     wheel_path: &Path,
     site_packages: &Path,
@@ -56,7 +24,7 @@ pub fn install_wheel(
     let file = fs::File::open(wheel_path)?;
     let mut archive = ZipArchive::new(file).map_err(zip_error)?;
 
-    let mut dist_info = None;
+    let mut dist_info: Option<String> = None;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(zip_error)?;
         let name = entry.name();
@@ -66,10 +34,16 @@ pub fn install_wheel(
                 "symlink entry is not allowed: {name}"
             )));
         }
-        if dist_info.is_none() {
-            let top_level = name.split('/').next().unwrap_or_default();
-            if top_level.ends_with(".dist-info") {
-                dist_info = Some(top_level.to_string());
+        let top_level = name.split('/').next().unwrap_or_default();
+        if top_level.ends_with(".dist-info") {
+            match &dist_info {
+                None => dist_info = Some(top_level.to_string()),
+                Some(existing) if existing == top_level => {}
+                Some(existing) => {
+                    return Err(invalid_data(format!(
+                        "wheel has multiple .dist-info dirs: {existing}, {top_level}"
+                    )))
+                }
             }
         }
     }
@@ -100,6 +74,9 @@ pub fn install_wheel(
     })?;
     let mut directory_modes = Vec::new();
 
+    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
+    let mut total_written: u64 = 0;
+
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(zip_error)?;
         let name = entry.name().to_string();
@@ -112,7 +89,11 @@ pub fn install_wheel(
                     "purelib" | "platlib" => (site_packages, relative, false),
                     "scripts" => (bin_dir, relative, true),
                     "data" => (env_root, relative, false),
-                    _ => continue,
+                    other => {
+                        return Err(invalid_data(format!(
+                            "unsupported wheel .data scheme '{other}' in {name}"
+                        )))
+                    }
                 }
             } else {
                 (site_packages, name.as_str(), false)
@@ -130,15 +111,33 @@ pub fn install_wheel(
             continue;
         }
 
-        let mut contents = Vec::new();
-        entry.read_to_end(&mut contents)?;
-        if executable && contents.starts_with(b"#!python") {
-            contents = rewrite_shebang(&contents, python_exe);
+        if destination.symlink_metadata().is_ok() {
+            return Err(invalid_data(format!(
+                "file collision: {} already exists (from an earlier wheel or entry)",
+                destination.display()
+            )));
         }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&destination, contents)?;
+        total_written += entry.size();
+        if total_written > MAX_UNPACKED_BYTES {
+            return Err(invalid_data(format!(
+                "wheel expands past {MAX_UNPACKED_BYTES} bytes; refusing (zip bomb guard)"
+            )));
+        }
+        if executable {
+            // Scripts are small; buffer them for shebang rewriting.
+            let mut contents = Vec::new();
+            entry.read_to_end(&mut contents)?;
+            if contents.starts_with(b"#!python") {
+                contents = rewrite_shebang(&contents, python_exe);
+            }
+            fs::write(&destination, contents)?;
+        } else {
+            let mut out = fs::File::create(&destination)?;
+            io::copy(&mut entry, &mut out)?;
+        }
         let mode = if executable {
             Some(0o755)
         } else {
@@ -172,6 +171,12 @@ pub fn install_wheel(
                 attr = attr
             );
             let destination = bin_dir.join(name);
+            if destination.symlink_metadata().is_ok() {
+                return Err(invalid_data(format!(
+                    "console-script collision: {}",
+                    destination.display()
+                )));
+            }
             fs::create_dir_all(bin_dir)?;
             fs::write(&destination, launcher)?;
             set_mode(&destination, 0o755)?;

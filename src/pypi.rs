@@ -116,6 +116,13 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
         if name.is_empty() || version.is_empty() {
             return Err(err(format!("malformed requirement: {spec}")));
         }
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+            || !name.as_bytes()[0].is_ascii_alphanumeric()
+        {
+            return Err(err(format!("invalid project name: {name}")));
+        }
         if hashes.is_empty() {
             return Err(err(format!(
                 "{spec}: blanket requires hash-pinned requirements; \
@@ -127,6 +134,12 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
             version: version.to_string(),
             sha256s: hashes,
         });
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for r in &reqs {
+        if !seen.insert(&r.name) {
+            return Err(err(format!("duplicate requirement: {}", r.name)));
+        }
     }
     Ok(reqs)
 }
@@ -170,9 +183,15 @@ fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
         .any(|p| p.starts_with("macosx_") && p.ends_with("_universal2"));
     let anyplat = plats.iter().any(|p| *p == "any");
 
-    let exact = pys.iter().any(|t| *t == python_tag);
+    let abis: Vec<&str> = abi.split('.').collect();
+    // Exact requires a matching ABI too: cpNNN wheels must carry our cpNNN
+    // abi (or abi3/none); a cp312-cp311-* wheel is NOT usable on 3.12.
+    let abi_ok = abis
+        .iter()
+        .any(|a| *a == python_tag || *a == "abi3" || *a == "none");
+    let exact = pys.iter().any(|t| *t == python_tag) && abi_ok;
     // abi3: any cpNNN <= ours counts; prefer the highest such NNN.
-    let abi3_best = if abi.split('.').any(|a| a == "abi3") {
+    let abi3_best = if abis.iter().any(|a| *a == "abi3") {
         pys.iter()
             .filter_map(|t| t.strip_prefix("cp")?.parse::<u32>().ok())
             .filter(|n| *n <= ours)
@@ -180,7 +199,8 @@ fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
     } else {
         None
     };
-    let pure = pys.iter().any(|t| *t == "py3");
+    // Pure wheels must be abi-none.
+    let pure = pys.iter().any(|t| *t == "py3") && abis.iter().any(|a| *a == "none");
 
     if arm64 && exact {
         return Some((0, 0));
@@ -248,11 +268,7 @@ fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>>
 }
 
 /// Lock every requirement against PyPI, honoring the hash pins.
-pub fn lock_requirements(
-    reqs: &[Requirement],
-    _python_version: &str,
-    python_tag: &str,
-) -> io::Result<Vec<LockedPackage>> {
+pub fn lock_requirements(reqs: &[Requirement], python_tag: &str) -> io::Result<Vec<LockedPackage>> {
     let mut out = Vec::new();
     for r in reqs {
         let all = fetch_candidates(&r.name, &r.version)?;
@@ -307,7 +323,7 @@ pub fn plan_python(requirements_text: &str, python_version: &str) -> io::Result<
         .collect::<Vec<_>>()
         .join("");
     let tag = format!("cp{minor}");
-    let packages = lock_requirements(&reqs, python_version, &tag)?;
+    let packages = lock_requirements(&reqs, &tag)?;
     Ok(Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
@@ -346,12 +362,25 @@ six==1.17.0 \\\n\
 
     #[test]
     fn comment_only_when_preceded_by_whitespace() {
-        // '#' inside a token is not a comment
+        // '#' inside a token is not a comment -- but such names then fail
+        // the project-name grammar, which is the correct outcome.
         let text = "a#b==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001\n";
-        let reqs = parse_requirements(text).unwrap();
-        assert_eq!(reqs[0].name, "a#b"); // silly name but parsing is faithful
+        assert!(parse_requirements(text).is_err());
         let text2 = "six==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001 # trailing\n";
         assert_eq!(parse_requirements(text2).unwrap()[0].version, "1.0");
+    }
+
+    #[test]
+    fn rejects_duplicates_and_bad_abi_wheels() {
+        let dup = "six==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001\n\
+Six==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000002\n";
+        assert!(parse_requirements(dup).is_err());
+        // cp312 python tag with cp311 abi: unusable, must be rejected.
+        let files = vec![fc("pkg-1.0-cp312-cp311-macosx_11_0_arm64.whl")];
+        assert!(select_file(&files, "cp312").is_none());
+        // py3 with non-none abi is not a pure wheel.
+        let files2 = vec![fc("pkg-1.0-py3-cp39-any.whl")];
+        assert!(select_file(&files2, "cp312").is_none());
     }
 
     #[test]

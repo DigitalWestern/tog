@@ -70,13 +70,18 @@ pub fn build_sdist_wheel(
     pkg: &LockedPackage,
     python_version: &str,
 ) -> io::Result<PathBuf> {
+    let pin = crate::python::lookup(python_version).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("no pinned CPython {python_version}"))
+    })?;
     let identity = Identity {
         kind: "sdist-build".into(),
         name: pkg.name.clone(),
         version: pkg.version.clone(),
         inputs: BTreeMap::from([
+            ("schema".to_string(), "sdist-build/2".to_string()),
             ("sdist_sha256".to_string(), pkg.sha256.clone()),
-            ("python".to_string(), python_version.to_string()),
+            ("python".to_string(), format!("{}:{}", pin.version, pin.sha256)),
+            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
             (
                 "toolchain".to_string(),
                 BUILD_TOOLCHAIN
@@ -102,12 +107,26 @@ pub fn build_sdist_wheel(
     fs::create_dir_all(&outdir)?;
     // pip only treats arguments with archive-looking names as paths; the
     // cache stores by bare hash, so give the sdist its real filename.
+    // COPY, never hard-link: a build writing through a hard link would
+    // poison the verified artifact cache.
+    if pkg.filename.contains('/') || pkg.filename.contains("..") || pkg.filename.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsafe sdist filename: {:?}", pkg.filename),
+        ));
+    }
     let sdist_named = work.join(&pkg.filename);
-    fs::hard_link(&sdist, &sdist_named).or_else(|_| fs::copy(&sdist, &sdist_named).map(|_| ()))?;
+    fs::copy(&sdist, &sdist_named)?;
+    // The copy inherits the cache's read-only mode; the build may not care,
+    // but keep it writable-free either way.
 
     let py = build_env.join("bin/python");
+    // Narrow reads to declared inputs only: the build env object and the
+    // CPython object its bin/python resolves to. (mach-lookup and broad
+    // process-exec remain allowed -- documented v0 sandbox limitation.)
+    let cpython_obj = crate::python::ensure_python(store, pin)?;
     let sb = Sandbox {
-        read: vec![&store.root],
+        read: vec![&build_env, &cpython_obj],
         write: vec![&work],
     };
     let env_path = format!("{}:/usr/bin:/bin", build_env.join("bin").display());
@@ -139,7 +158,23 @@ pub fn build_sdist_wheel(
     })?;
 
     // Exactly one wheel expected; stage it alone as the object's content.
-    let built = find_wheel(&outdir)?;
+    let wheels: Vec<_> = fs::read_dir(&outdir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "whl").unwrap_or(false))
+        .collect();
+    if wheels.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}=={}: expected exactly 1 built wheel, found {}",
+                pkg.name,
+                pkg.version,
+                wheels.len()
+            ),
+        ));
+    }
+    let built = wheels[0].clone();
     let staged = store.stage()?;
     fs::copy(&built, staged.join(built.file_name().unwrap()))?;
     let _ = fs::remove_dir_all(&work);

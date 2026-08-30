@@ -9,7 +9,7 @@ blanket — universal realization & environment kernel (MVP: python)
 
 USAGE:
   blanket sync            realize + project env from requirements.txt
-  blanket plan            print the locked plan as JSON (no side effects)
+  blanket plan            print the locked plan as JSON (caches to .blanket/)
   blanket run <cmd...>    run a command inside the projected environment
   blanket store path      print the store root
 
@@ -63,8 +63,10 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     })?;
 
     use sha2::{Digest, Sha256};
+    // PLANNER_SCHEMA busts stale caches when planner semantics change.
+    const PLANNER_SCHEMA: &str = "python-planner/2";
     let input_hash = hex::encode(Sha256::digest(
-        format!("{}\x00{}", pin.version, text).as_bytes(),
+        format!("{PLANNER_SCHEMA}\x00{}\x00{}", pin.version, text).as_bytes(),
     ));
     let cache_path = dir.join(".blanket/plan.json");
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
@@ -123,6 +125,7 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
     let err = std::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .env("VIRTUAL_ENV", &venv)
+        .env("PYTHONDONTWRITEBYTECODE", "1") // site-packages is read-only
         .env("PATH", format!("{}:{}", bin.display(), path))
         .exec(); // only returns on failure
     Err(err)

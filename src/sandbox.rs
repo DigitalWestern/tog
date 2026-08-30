@@ -38,8 +38,7 @@ impl Sandbox<'_> {
                 (subpath \"/System\") (subpath \"/Library\") (subpath \"/private/etc\")\n\
                 (subpath \"/opt\") (subpath \"/var/db/timezone\") (subpath \"/dev\"))\n\
              (allow file-read-metadata)\n\
-             (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n\
-             (allow file-write* (subpath \"/private/var/folders\") (subpath \"/private/tmp\"))\n",
+             (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n",
         );
         for r in &self.read {
             p.push_str(&format!("(allow file-read* (subpath {:?}))\n", r.display().to_string()));

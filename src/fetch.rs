@@ -4,24 +4,48 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Algo {
+    Sha256,
+    Sha512,
+}
+
 /// Content digest for artifact verification and cache addressing.
+/// Fields are private: a Digest can only hold validated lowercase hex of
+/// the exact right length, so it can never smuggle path components into
+/// cache paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Digest {
-    Sha256(String), // lowercase hex
-    Sha512(String), // lowercase hex
+pub struct Digest {
+    algo: Algo,
+    hex: String,
 }
 
 impl Digest {
-    pub fn algo(&self) -> &'static str {
-        match self {
-            Digest::Sha256(_) => "sha256",
-            Digest::Sha512(_) => "sha512",
+    fn validated(algo: Algo, hex: &str) -> io::Result<Digest> {
+        let want = match algo {
+            Algo::Sha256 => 64,
+            Algo::Sha512 => 128,
+        };
+        let hex = hex.to_ascii_lowercase();
+        if hex.len() != want || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed {} hex digest: {hex}", algo_name(algo)),
+            ));
         }
+        Ok(Digest { algo, hex })
+    }
+    pub fn sha256(hex: &str) -> io::Result<Digest> {
+        Digest::validated(Algo::Sha256, hex)
+    }
+    pub fn sha512(hex: &str) -> io::Result<Digest> {
+        Digest::validated(Algo::Sha512, hex)
+    }
+    pub fn algo(&self) -> &'static str {
+        algo_name(self.algo)
     }
     pub fn hex(&self) -> &str {
-        match self {
-            Digest::Sha256(h) | Digest::Sha512(h) => h,
-        }
+        &self.hex
     }
     /// Parse an npm SRI string like "sha512-<base64>" or "sha256-<base64>".
     pub fn from_sri(sri: &str) -> io::Result<Digest> {
@@ -33,13 +57,20 @@ impl Digest {
         })?;
         let hex = hex::encode(bytes);
         match algo {
-            "sha256" => Ok(Digest::Sha256(hex)),
-            "sha512" => Ok(Digest::Sha512(hex)),
+            "sha256" => Digest::sha256(&hex),
+            "sha512" => Digest::sha512(&hex),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported integrity algorithm: {other}"),
             )),
         }
+    }
+}
+
+fn algo_name(a: Algo) -> &'static str {
+    match a {
+        Algo::Sha256 => "sha256",
+        Algo::Sha512 => "sha512",
     }
 }
 
@@ -81,7 +112,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Back-compat convenience for sha256 hex callers.
 pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<PathBuf> {
-    download_verified_digest(store, url, &Digest::Sha256(sha256.to_lowercase()))
+    download_verified_digest(store, url, &Digest::sha256(sha256)?)
 }
 
 /// Download `url`, verify its digest, and place it in the store's artifact
@@ -118,18 +149,18 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
         if n == 0 {
             break;
         }
-        match digest {
-            Digest::Sha256(_) => h256.update(&buf[..n]),
-            Digest::Sha512(_) => h512.update(&buf[..n]),
+        match digest.algo {
+            Algo::Sha256 => h256.update(&buf[..n]),
+            Algo::Sha512 => h512.update(&buf[..n]),
         }
         file.write_all(&buf[..n])?;
     }
     file.flush()?;
     drop(file);
 
-    let got = match digest {
-        Digest::Sha256(_) => hex::encode(h256.finalize()),
-        Digest::Sha512(_) => hex::encode(h512.finalize()),
+    let got = match digest.algo {
+        Algo::Sha256 => hex::encode(h256.finalize()),
+        Algo::Sha512 => hex::encode(h512.finalize()),
     };
     if got != digest.hex() {
         let _ = fs::remove_file(&tmp);
@@ -141,6 +172,13 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
                 digest.hex()
             ),
         ));
+    }
+    // Publish read-only, atomically.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(&tmp, perms)?;
     }
     match fs::rename(&tmp, &dest) {
         Ok(()) => {}
