@@ -9,6 +9,11 @@
 //! v0 limits: registry tarballs only (no git/file/workspace links), and
 //! lifecycle scripts are NOT run — packages requiring postinstall (native
 //! addons) will not work until the sandboxed-build story extends to npm.
+//!
+//! Trust model: the lockfile is a TRUSTED input. Integrity pins every
+//! tarball's bytes, but `resolved` URLs choose where the GET goes, so a
+//! hostile lockfile is a network capability. A registry allowlist is the
+//! M5 control for that.
 
 use crate::fetch::{download_verified_digest, Digest};
 use crate::store::Store;
@@ -83,14 +88,37 @@ pub struct NpmPlan {
     pub packages: Vec<NpmPackage>,
 }
 
-/// Validate a lockfile "packages" key as a safe relative node_modules path.
+/// Validate a lockfile "packages" key as a safe, well-formed npm path:
+/// repeated `node_modules/<name>` or `node_modules/@scope/<name>` units.
 fn validate_lock_path(path: &str) -> io::Result<()> {
-    if !path.starts_with("node_modules/") {
-        return Err(err(format!("unexpected lockfile package path: {path}")));
-    }
-    for comp in path.split('/') {
-        if comp.is_empty() || comp == ".." || comp == "." {
-            return Err(err(format!("unsafe lockfile package path: {path}")));
+    let bad = || err(format!("malformed lockfile package path: {path}"));
+    let ok_name = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s != "node_modules"
+            && !s.starts_with('.')
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+')
+            })
+    };
+    let mut comps = path.split('/').peekable();
+    while comps.peek().is_some() {
+        if comps.next() != Some("node_modules") {
+            return Err(bad());
+        }
+        match comps.next() {
+            Some(scope) if scope.starts_with('@') => {
+                if !ok_name(&scope[1..]) {
+                    return Err(bad());
+                }
+                match comps.next() {
+                    Some(name) if ok_name(name) => {}
+                    _ => return Err(bad()),
+                }
+            }
+            Some(name) if ok_name(name) => {}
+            _ => return Err(bad()),
         }
     }
     Ok(())
@@ -127,6 +155,36 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
         validate_lock_path(path)?;
         if entry["link"].as_bool() == Some(true) {
             return Err(err(format!("{path}: workspaces/links unsupported (v0)")));
+        }
+        // Platform filtering: lock entries carry os/cpu arrays. Incompatible
+        // optional deps are skipped (npm does the same); incompatible
+        // required deps are an error.
+        let platform_ok = |field: &str, ours: &str| -> bool {
+            match entry[field].as_array() {
+                None => true,
+                Some(list) => {
+                    let allowed: Vec<&str> =
+                        list.iter().filter_map(|v| v.as_str()).collect();
+                    let negated: Vec<&str> = allowed
+                        .iter()
+                        .filter_map(|s| s.strip_prefix('!'))
+                        .collect();
+                    if !negated.is_empty() {
+                        !negated.contains(&ours)
+                    } else {
+                        allowed.is_empty() || allowed.contains(&ours)
+                    }
+                }
+            }
+        };
+        let compatible = platform_ok("os", "darwin") && platform_ok("cpu", "arm64");
+        if !compatible {
+            if entry["optional"].as_bool() == Some(true) {
+                continue;
+            }
+            return Err(err(format!(
+                "{path}: required dependency does not support darwin/arm64"
+            )));
         }
         let resolved = entry["resolved"].as_str().ok_or_else(|| {
             err(format!("{path}: missing 'resolved' URL (regenerate the lockfile)"))
@@ -169,6 +227,27 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
     })
 }
 
+/// Reject a package.json whose dependency maps disagree with the lock's
+/// root entry (npm ci does the same). No solver needed: name -> spec
+/// equality on dependencies/devDependencies/optionalDependencies.
+pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
+    let p: serde_json::Value =
+        serde_json::from_str(pkg_json).map_err(|e| err(format!("package.json: {e}")))?;
+    let l: serde_json::Value =
+        serde_json::from_str(lock_json).map_err(|e| err(format!("package-lock.json: {e}")))?;
+    let root = &l["packages"][""];
+    for field in ["dependencies", "devDependencies", "optionalDependencies"] {
+        let a = p[field].as_object().cloned().unwrap_or_default();
+        let b = root[field].as_object().cloned().unwrap_or_default();
+        if a != b {
+            return Err(err(format!(
+                "package.json {field} disagree with package-lock.json;                  regenerate the lock (npm install --package-lock-only)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Realize the node_modules tree as an immutable store object.
 /// Object content root contains exactly `node_modules/`.
 pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
@@ -186,8 +265,15 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
     );
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
+        // bin mappings change the realized tree, so they are identity inputs.
+        let mut bins: Vec<String> =
+            p.bin.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        bins.sort();
         if inputs
-            .insert(format!("pkg:{}", p.path), format!("{}:{}", digest.algo(), digest.hex()))
+            .insert(
+                format!("pkg:{}", p.path),
+                format!("{}:{}:bin[{}]", digest.algo(), digest.hex(), bins.join(",")),
+            )
             .is_some()
         {
             return Err(err(format!("duplicate lockfile path: {}", p.path)));
@@ -227,9 +313,16 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
+        // ponytail: post-extraction size cap (1 GiB/package) — catches
+        // decompression bombs after the fact; a streaming extractor with
+        // preflight limits is the M5 upgrade. Lockfiles are trusted inputs.
+        if dir_size(&dest)? > 1 << 30 {
+            return Err(err(format!("{}: package expands past 1 GiB; refusing", p.path)));
+        }
     }
 
-    // .bin launchers for direct dependencies.
+    // .bin launchers for physically top-level (hoisted) packages, which is
+    // what node_modules/.bin holds in npm's own layout.
     let bin_dir = staged.join("node_modules/.bin");
     for (p, _) in &tarballs {
         if p.path.matches("node_modules/").count() != 1 || p.bin.is_empty() {
@@ -237,12 +330,43 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
         }
         fs::create_dir_all(&bin_dir)?;
         for (bin_name, rel) in &p.bin {
-            if bin_name.contains('/') || rel.contains("..") {
-                continue; // refuse weird names silently-but-safely (v0)
+            // bin metadata comes from the lockfile (attacker-editable), so
+            // it is validated hard: single normal name component, relative
+            // target with only normal components, canonical target inside
+            // the package directory, not a symlink.
+            let name_ok = !bin_name.is_empty()
+                && !bin_name.starts_with('.')
+                && !bin_name.contains('/')
+                && !bin_name.contains('\\');
+            let rel_ok = !rel.is_empty()
+                && !rel.starts_with('/')
+                && rel
+                    .split('/')
+                    .all(|c| !c.is_empty() && c != "." && c != "..");
+            if !name_ok || !rel_ok {
+                return Err(err(format!(
+                    "{}: unsafe bin entry {bin_name:?} -> {rel:?}",
+                    p.path
+                )));
             }
-            let target_file = staged.join(&p.path).join(rel);
-            if !target_file.is_file() {
-                continue;
+            let pkg_dir = staged.join(&p.path);
+            let target_file = pkg_dir.join(rel);
+            let md = match fs::symlink_metadata(&target_file) {
+                Ok(md) => md,
+                Err(_) => continue, // bin target genuinely absent: npm tolerates this
+            };
+            if !md.is_file() {
+                return Err(err(format!(
+                    "{}: bin target {rel} is not a regular file",
+                    p.path
+                )));
+            }
+            let canon = target_file.canonicalize()?;
+            if !canon.starts_with(pkg_dir.canonicalize()?) {
+                return Err(err(format!(
+                    "{}: bin target {rel} escapes the package directory",
+                    p.path
+                )));
             }
             // Relative link: node_modules/.bin/x -> ../<name>/<rel>
             let link_target = Path::new("..")
@@ -253,9 +377,8 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
                 return Err(err(format!("bin collision: {bin_name}")));
             }
             std::os::unix::fs::symlink(&link_target, &link)?;
-            // ensure exec bit on the target
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&target_file)?.permissions();
+            let mut perms = md.permissions();
             perms.set_mode(perms.mode() | 0o755);
             fs::set_permissions(&target_file, perms)?;
         }
@@ -300,6 +423,20 @@ pub fn project_node_env(project_dir: &Path, env_obj: &Path, plan: &NpmPlan) -> i
         meta_dir.join("node-closure.json"),
         serde_json::to_vec_pretty(&closure)?,
     )
+}
+
+fn dir_size(path: &Path) -> io::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let md = entry.metadata()?;
+        total += if md.is_dir() {
+            dir_size(&entry.path())?
+        } else {
+            md.len()
+        };
+    }
+    Ok(total)
 }
 
 #[cfg(test)]

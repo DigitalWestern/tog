@@ -36,8 +36,25 @@ impl Store {
         self.root.join("objects").join(id)
     }
 
+    /// An object is valid only when fully published: directory present,
+    /// root read-only, and metadata written (in that commit order). A
+    /// crash mid-publication leaves an invalid object, which is swept and
+    /// rebuilt instead of trusted.
     pub fn has(&self, id: &str) -> bool {
-        self.object_path(id).is_dir()
+        let path = self.object_path(id);
+        let Ok(md) = fs::metadata(&path) else {
+            return false;
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let complete = md.is_dir()
+            && md.permissions().mode() & 0o222 == 0
+            && self.root.join("meta").join(format!("{id}.json")).is_file();
+        if !complete && md.is_dir() {
+            // Incomplete publication (crash window): remove so the caller
+            // rebuilds it. Best-effort; failure just means a later error.
+            let _ = remove_tree(&path);
+        }
+        complete
     }
 
     /// Stage dir for building a new object; caller fills it, then calls commit.
@@ -57,7 +74,7 @@ impl Store {
     pub fn commit(&self, identity: &Identity, staged: &Path) -> io::Result<PathBuf> {
         let id = identity.object_id();
         let dest = self.object_path(&id);
-        if dest.is_dir() {
+        if self.has(&id) {
             let _ = remove_tree(staged);
             return Ok(dest);
         }

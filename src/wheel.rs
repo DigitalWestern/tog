@@ -48,6 +48,12 @@ pub fn install_wheel(
         }
     }
 
+    if dist_info.is_none() {
+        return Err(invalid_data(format!(
+            "{} contains no .dist-info directory; not a wheel",
+            wheel_path.display()
+        )));
+    }
     let data_prefix = dist_info
         .as_deref()
         .map(|name| format!("{}.data/", name.strip_suffix(".dist-info").unwrap_or(name)));

@@ -45,6 +45,16 @@ const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
+/// Everything (besides the sdist bytes and interpreter) that determines a
+/// built wheel: schema + build-toolchain hashes. Parent env identities must
+/// include this so a toolchain upgrade re-derives dependents.
+pub fn derivation_fingerprint() -> String {
+    format!(
+        "sdist-build/2;toolchain:{}",
+        BUILD_TOOLCHAIN.iter().map(|t| t.4).collect::<Vec<_>>().join(",")
+    )
+}
+
 fn build_toolchain_plan(python_version: &str) -> Plan {
     Plan {
         ecosystem: "python".into(),

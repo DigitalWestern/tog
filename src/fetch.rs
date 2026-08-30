@@ -67,6 +67,27 @@ impl Digest {
     }
 }
 
+fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
+    let mut f = fs::File::open(path)?;
+    let mut buf = [0u8; 65536];
+    let mut h256 = Sha256::new();
+    let mut h512 = Sha512::new();
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        match algo {
+            Algo::Sha256 => h256.update(&buf[..n]),
+            Algo::Sha512 => h512.update(&buf[..n]),
+        }
+    }
+    Ok(match algo {
+        Algo::Sha256 => hex::encode(h256.finalize()),
+        Algo::Sha512 => hex::encode(h512.finalize()),
+    })
+}
+
 fn algo_name(a: Algo) -> &'static str {
     match a {
         Algo::Sha256 => "sha256",
@@ -121,7 +142,12 @@ pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<P
 pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io::Result<PathBuf> {
     let dest = store.cache_path(digest.algo(), digest.hex());
     if dest.is_file() {
-        return Ok(dest);
+        // Re-verify on every hit: read-only bits stop accidents, not disk
+        // corruption or same-user replacement.
+        if hash_file(&dest, digest.algo)? == digest.hex() {
+            return Ok(dest);
+        }
+        let _ = fs::remove_file(&dest); // poisoned/corrupt: drop and refetch
     }
     fs::create_dir_all(dest.parent().unwrap())?;
     let tmp = store

@@ -199,8 +199,18 @@ fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
     } else {
         None
     };
-    // Pure wheels must be abi-none.
-    let pure = pys.iter().any(|t| *t == "py3") && abis.iter().any(|a| *a == "none");
+    // Pure wheels must be abi-none. Interpreter tag may be py3, a generic
+    // pyNNN <= ours, or our exact cpNNN (e.g. cp312-none-any).
+    let none_abi = abis.iter().any(|a| *a == "none");
+    let py_ok = pys.iter().any(|t| {
+        *t == "py3"
+            || *t == python_tag
+            || t.strip_prefix("py")
+                .and_then(|n| n.parse::<u32>().ok())
+                .map(|n| n == 3 || n <= ours)
+                .unwrap_or(false)
+    });
+    let pure = py_ok && none_abi;
 
     if arm64 && exact {
         return Some((0, 0));

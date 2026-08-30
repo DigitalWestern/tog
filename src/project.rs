@@ -59,10 +59,18 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
         python_obj.file_name().unwrap().to_string_lossy().into_owned(),
     );
     for p in &packages {
-        inputs.insert(
-            format!("pkg:{}", p.name),
-            format!("{:?}:{}", p.kind, p.sha256),
-        );
+        let value = match p.kind {
+            ArtifactKind::Wheel => format!("Wheel:{}", p.sha256),
+            // The built wheel is a derivation of the sdist + build
+            // toolchain; both must be committed to, or a toolchain upgrade
+            // would leave stale envs under an unchanged id.
+            ArtifactKind::Sdist => format!(
+                "Sdist:{}:{}",
+                p.sha256,
+                crate::build::derivation_fingerprint()
+            ),
+        };
+        inputs.insert(format!("pkg:{}", p.name), value);
     }
     let identity = Identity {
         kind: "python-env".into(),

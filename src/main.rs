@@ -143,7 +143,11 @@ fn run_sync() -> io::Result<()> {
         any = true;
     }
     if dir.join("package-lock.json").exists() {
-        let plan = npm::plan_npm(&std::fs::read_to_string(dir.join("package-lock.json"))?)?;
+        let lock = std::fs::read_to_string(dir.join("package-lock.json"))?;
+        if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
+            npm::check_lock_freshness(&pkg, &lock)?;
+        }
+        let plan = npm::plan_npm(&lock)?;
         let env = npm::realize_node_env(&store, &plan)?;
         npm::project_node_env(&dir, &env, &plan)?;
         eprintln!("synced: node_modules -> {}", env.display());
