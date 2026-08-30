@@ -95,6 +95,22 @@ else
   bad "evil build did not fail as required"
 fi
 
+echo "== 10. npm: lockfile -> immutable node_modules, store-provisioned node"
+cp -R "$FIXTURES/proj-npm" "$WORK/n"
+(cd "$WORK/n" && "$BLANKET" sync)
+OUT=$(cd "$WORK/n" && "$BLANKET" run node index.js)
+[ "$OUT" = "is-odd(3): true" ] && ok "npm deps resolve + run ($OUT)" || bad "got '$OUT'"
+NV=$(cd "$WORK/n" && "$BLANKET" run node -e 'console.log(process.version)')
+[ "$NV" = "v24.20.0" ] && ok "node came from the store ($NV)" || bad "node version: $NV"
+if touch "$WORK/n/node_modules/tamper" 2>/dev/null; then bad "node_modules writable"; else ok "node_modules immutable"; fi
+
+echo "== 11. polyglot project: python + node from one sync, one kernel"
+cp -R "$FIXTURES/proj-poly" "$WORK/p"
+(cd "$WORK/p" && "$BLANKET" sync)
+PY=$(cd "$WORK/p" && "$BLANKET" run python -c 'import six; print(six.__version__)')
+JS=$(cd "$WORK/p" && "$BLANKET" run node index.js)
+[ "$PY" = "1.17.0" ] && [ "$JS" = "is-odd(3): true" ] && ok "both ecosystems projected (py six=$PY, $JS)" || bad "py=$PY js=$JS"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

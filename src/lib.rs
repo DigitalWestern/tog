@@ -1,5 +1,6 @@
 pub mod build;
 pub mod fetch;
+pub mod npm;
 pub mod project;
 pub mod pypi;
 pub mod python;

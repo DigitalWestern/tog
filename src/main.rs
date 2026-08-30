@@ -1,21 +1,22 @@
-use blanket::{project, pypi, python, store, types};
+use blanket::{npm, project, pypi, python, store, types};
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
 const USAGE: &str = "\
-blanket — universal realization & environment kernel (MVP: python)
+blanket — universal realization & environment kernel (python + node)
 
 USAGE:
-  blanket sync            realize + project env from requirements.txt
-  blanket plan            print the locked plan as JSON (caches to .blanket/)
-  blanket run <cmd...>    run a command inside the projected environment
+  blanket sync            realize + project env(s) from lockfiles
+  blanket plan            print the locked plan(s) as JSON
+  blanket run <cmd...>    run a command inside the projected environment(s)
   blanket store path      print the store root
 
-Project inputs:
-  requirements.txt        hash-pinned (pip/uv --generate-hashes format)
+Project inputs (either or both):
+  requirements.txt        hash-pinned python deps (uv pip compile --generate-hashes)
   .python-version         optional; e.g. 3.12 (default: 3.12)
+  package-lock.json       npm lockfile v2/v3 (npm install --package-lock-only)
 ";
 
 fn main() {
@@ -92,18 +93,65 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
 }
 
 fn run_plan() -> io::Result<()> {
-    let plan = read_plan(&project_dir())?;
-    println!("{}", serde_json::to_string_pretty(&plan)?);
+    let dir = project_dir();
+    let mut any = false;
+    if dir.join("requirements.txt").exists() {
+        let plan = read_plan(&dir)?;
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        any = true;
+    }
+    if dir.join("package-lock.json").exists() {
+        let plan = npm::plan_npm(&std::fs::read_to_string(dir.join("package-lock.json"))?)?;
+        let v: Vec<_> = plan
+            .packages
+            .iter()
+            .map(|p| {
+                serde_json::json!({"path": p.path, "version": p.version,
+                                   "url": p.url, "integrity": p.integrity})
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ecosystem": "node", "node_version": plan.node_version, "packages": v
+            }))?
+        );
+        any = true;
+    }
+    if !any {
+        return Err(no_inputs());
+    }
     Ok(())
+}
+
+fn no_inputs() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        "nothing to sync here (need requirements.txt and/or package-lock.json)",
+    )
 }
 
 fn run_sync() -> io::Result<()> {
     let dir = project_dir();
-    let plan = read_plan(&dir)?;
     let store = store::Store::open()?;
-    let env = project::realize_env(&store, &plan)?;
-    project::project_env(&dir, &env, &plan)?;
-    eprintln!("synced: .venv -> {}", env.display());
+    let mut any = false;
+    if dir.join("requirements.txt").exists() {
+        let plan = read_plan(&dir)?;
+        let env = project::realize_env(&store, &plan)?;
+        project::project_env(&dir, &env, &plan)?;
+        eprintln!("synced: .venv -> {}", env.display());
+        any = true;
+    }
+    if dir.join("package-lock.json").exists() {
+        let plan = npm::plan_npm(&std::fs::read_to_string(dir.join("package-lock.json"))?)?;
+        let env = npm::realize_node_env(&store, &plan)?;
+        npm::project_node_env(&dir, &env, &plan)?;
+        eprintln!("synced: node_modules -> {}", env.display());
+        any = true;
+    }
+    if !any {
+        return Err(no_inputs());
+    }
     Ok(())
 }
 
@@ -113,20 +161,31 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
     }
     let dir = project_dir();
     let venv = dir.join(".venv");
-    if !venv.exists() {
+    let nm = dir.join("node_modules");
+    let mut prefix: Vec<String> = Vec::new();
+    let mut command = std::process::Command::new(&cmd[0]);
+    command.args(&cmd[1..]);
+    if venv.exists() {
+        prefix.push(venv.join("bin").to_string_lossy().into_owned());
+        command.env("VIRTUAL_ENV", &venv);
+        command.env("PYTHONDONTWRITEBYTECODE", "1"); // site-packages is read-only
+    }
+    if nm.exists() {
+        prefix.push(nm.join(".bin").to_string_lossy().into_owned());
+        // Node toolchain from the store (cache hit after sync).
+        let store = store::Store::open()?;
+        let node = npm::ensure_node(&store)?;
+        prefix.push(node.join("bin").to_string_lossy().into_owned());
+    }
+    if prefix.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "no .venv projected here; run `blanket sync` first",
+            "no environment projected here; run `blanket sync` first",
         ));
     }
-    let bin = venv.join("bin");
     let path = std::env::var("PATH").unwrap_or_default();
+    prefix.push(path);
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .env("VIRTUAL_ENV", &venv)
-        .env("PYTHONDONTWRITEBYTECODE", "1") // site-packages is read-only
-        .env("PATH", format!("{}:{}", bin.display(), path))
-        .exec(); // only returns on failure
+    let err = command.env("PATH", prefix.join(":")).exec(); // only returns on failure
     Err(err)
 }
