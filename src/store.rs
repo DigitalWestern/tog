@@ -83,8 +83,8 @@ impl Store {
         Ok(dest)
     }
 
-    pub fn cache_path(&self, sha256: &str) -> PathBuf {
-        self.root.join("cache/sha256").join(sha256)
+    pub fn cache_path(&self, algo: &str, hex: &str) -> PathBuf {
+        self.root.join("cache").join(algo).join(hex)
     }
 }
 
