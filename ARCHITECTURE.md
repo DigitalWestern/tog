@@ -17,7 +17,7 @@ The MVP proves the kernel with one ecosystem (Python) end to end.
   are committed atomically (staged dir + rename) and made read-only.
 - **Artifact cache** (`cache/sha256/<hash>`): every downloaded file, stored
   by verified content hash. Never refetched; enables offline reconstruction.
-- **Environments are store objects too** (quilts): a `python-env` object is a
+- **Environments are store objects too** (comforters): a `python-env` object is a
   venv-shaped immutable tree (pyvenv.cfg + `bin/python` symlink to the
   CPython object + merged site-packages). Identity = CPython object +
   sorted set of package artifact hashes. Identical locks share one object;
@@ -34,24 +34,28 @@ technical identifiers):
 | word | meaning | technical term in code |
 |---|---|---|
 | **blanket** | the tool itself | binary `blanket` (crate name would be `blanket-pm`; `blanket` is taken on crates.io) |
-| **quilt** | a realized environment object — many squares stitched into one immutable finished piece; identical locks share one quilt | env object (`python-env` / `node-env`) |
-| **loom** | a per-ecosystem adapter: weaves an ecosystem's raw material into squares (the PyPI loom, the npm loom) | adapter modules `pypi.rs`, `npm.rs` |
-| **pattern** | the fully locked plan a loom produces — the exact instructions a quilt is made from | `Plan` / `NpmPlan` |
-| **square** | one package's realized contents within a quilt | (future per-package store objects) |
-| **closet** | where finished quilts are kept, folded, never altered | the store |
+| **tailor** | a per-ecosystem adapter: measures an ecosystem and cuts its packages to fit (the PyPI tailor, the npm tailor) | adapter modules `pypi.rs`, `npm.rs` |
+| **pattern** | the fully locked plan a tailor cuts — the exact instructions an environment is made from | `Plan` / `NpmPlan` |
+| **comforter** | a realized environment — stitched once, immutable, shared by every project with the same lock | env object (`python-env` / `node-env`) |
+| **closet** | where finished comforters are kept, folded, never altered | the store |
 
-Naming collisions checked (2026-08-30) and accepted with eyes open:
-`quilt` is an old Unix patch tool (Debian packaging uses it) — fine as a
-noun, never as a command; `loom` is a well-known Rust testing crate, a
-Java project, and a screen recorder — fine in prose, NEVER as a Rust
-module/crate name; `closet` is informal only — "store" stays the
-technical term because it's what Nix-literate readers will search for.
+The story: each language's tailor cuts a pattern; blanket realizes it
+into a comforter, kept folded in the closet. Your `.venv` and
+`node_modules` are comforters.
+
+Names were collision-checked (2026-08-30): every word passes the
+"no famous tool already means this to developers" test. Earlier
+candidates rejected for failing it: loom (major Rust testing crate,
+Java's Project Loom), quilt (the Unix patch tool Debian packaging uses).
+"blanket" itself: kept per the yarn precedent (npm's yarn thrived beside
+Hadoop YARN) — the only cost is publishing any future crate as
+`blanket-pm`.
 
 ## Phases (the kernel-adapter boundary)
 
 Per design review with Sol: **Plan → Realize → Project.**
 
-1. **Plan** (the loom — adapter, `pypi.rs`): parse hash-pinned `requirements.txt`
+1. **Plan** (the tailor — adapter, `pypi.rs`): parse hash-pinned `requirements.txt`
    (pip/uv `--generate-hashes` format, `==` pins only), lock each
    requirement to one exact PyPI artifact by matching file hashes and
    selecting the best wheel for the platform (native arm64 > abi3 >

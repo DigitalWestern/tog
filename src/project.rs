@@ -1,4 +1,4 @@
-//! Environment realization + projection.
+//! Environment (comforter) realization + projection.
 //!
 //! An environment is itself a store object (venv-shaped, immutable) whose
 //! identity is the python object id plus every locked artifact hash. Two

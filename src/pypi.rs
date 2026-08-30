@@ -1,5 +1,6 @@
-//! Python planner: parse a hash-pinned requirements.txt and lock each
-//! requirement to one exact PyPI artifact (wheel preferred, sdist fallback).
+//! The PyPI tailor: parses a hash-pinned requirements.txt and locks each
+//! requirement to one exact PyPI artifact (wheel preferred, sdist
+//! fallback), cutting the pattern (Plan) the kernel realizes.
 
 use crate::types::{ArtifactKind, LockedPackage, Plan};
 use std::io;

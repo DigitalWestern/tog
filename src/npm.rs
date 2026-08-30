@@ -1,4 +1,4 @@
-//! npm ecosystem adapter: package-lock.json importer (no solver).
+//! The npm tailor: package-lock.json importer (no solver).
 //!
 //! npm's lockfile v2/v3 already encodes the complete node_modules tree —
 //! every key in "packages" is a literal filesystem path — so planning is

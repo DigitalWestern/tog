@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Content/input-addressed immutable store.
+/// Content/input-addressed immutable store (the closet).
 ///
 /// Layout:
 ///   <root>/objects/<object-id>/     immutable realized outputs

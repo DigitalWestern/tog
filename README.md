@@ -7,10 +7,11 @@ content-addressed store, project an environment, run your code.
 Nix's model, without Nix's interface. See [ARCHITECTURE.md](ARCHITECTURE.md)
 and [blanket-notes.md](blanket-notes.md) for the design history.
 
-The vocabulary: each language gets a **loom** (adapter) that weaves its
+The vocabulary: each language gets a **tailor** (adapter) that cuts its
 ecosystem's packages into a **pattern** (locked plan), which blanket
-realizes into a **quilt** (an immutable, shareable environment) kept in
-the **closet** (the store). Your `.venv` and `node_modules` are quilts.
+realizes into a **comforter** (an immutable, shareable environment) kept
+in the **closet** (the store). Your `.venv` and `node_modules` are
+comforters.
 
 **Status: MVP — Python + Node ecosystems, macOS arm64.**
 
