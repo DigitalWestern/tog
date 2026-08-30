@@ -68,6 +68,22 @@ echo "== 7. store objects are immutable"
 OBJ="$BLANKET_STORE/objects/$(basename "$ENV_A")"
 if touch "$OBJ/tamper" 2>/dev/null; then bad "store object writable"; rm -f "$OBJ/tamper"; else ok "write into store object refused"; fi
 
+echo "== 8. sdist builds in a network-denied sandbox (docopt, sdist-only on PyPI)"
+cp -R "$FIXTURES/proj-c" "$WORK/c"
+if (cd "$WORK/c" && "$BLANKET" sync); then
+  OUT=$(cd "$WORK/c" && "$BLANKET" run python -c 'import docopt; print(docopt.__version__)')
+  [ "$OUT" = "0.6.2" ] && ok "sdist built + importable ($OUT)" || bad "docopt import: $OUT"
+else
+  bad "sdist sync failed"
+fi
+
+echo "== 9. a build that attempts network access fails (evil sdist fixture)"
+if (cd "$(dirname "$0")/.." && cargo test --quiet --test sandbox_deny -- --ignored) ; then
+  ok "network egress during build was denied"
+else
+  bad "evil build did not fail as required"
+fi
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

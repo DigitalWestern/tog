@@ -1,10 +1,4 @@
-mod fetch;
-mod project;
-mod pypi;
-mod python;
-mod store;
-mod types;
-mod wheel;
+use blanket::{project, pypi, python, store, types};
 
 use std::io;
 use std::path::{Path, PathBuf};

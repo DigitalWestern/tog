@@ -57,16 +57,12 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
     // Fetch everything first (all-or-nothing before assembly starts).
     let mut artifacts: Vec<(&crate::types::LockedPackage, PathBuf)> = Vec::new();
     for p in &plan.packages {
-        if p.kind == ArtifactKind::Sdist {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "{}=={} resolves to an sdist ({}); sdist builds land in M3",
-                    p.name, p.version, p.filename
-                ),
-            ));
-        }
-        artifacts.push((p, download_verified(store, &p.url, &p.sha256)?));
+        let wheel_file = match p.kind {
+            ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
+            // sdist -> wheel via sandboxed derivation (network denied).
+            ArtifactKind::Sdist => crate::build::build_sdist_wheel(store, p, &pin.version)?,
+        };
+        artifacts.push((p, wheel_file));
     }
 
     let minor = pin

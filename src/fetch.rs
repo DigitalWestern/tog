@@ -17,10 +17,17 @@ pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<P
         .join("tmp")
         .join(format!("dl-{}-{}", std::process::id(), sha256));
 
-    let resp = ureq::get(url).call().map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}"))
-    })?;
-    let mut reader = resp.into_reader();
+    // file:// URLs support local mirrors and test fixtures.
+    let mut reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
+        Box::new(fs::File::open(path).map_err(|e| {
+            io::Error::new(e.kind(), format!("open {path}: {e}"))
+        })?)
+    } else {
+        let resp = ureq::get(url).call().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}"))
+        })?;
+        Box::new(resp.into_reader())
+    };
     let mut file = fs::File::create(&tmp)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
