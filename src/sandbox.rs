@@ -26,9 +26,13 @@ impl Sandbox<'_> {
              ; process basics\n\
              (allow process-exec*)\n\
              (allow process-fork)\n\
+             (allow process-info*)\n\
              (allow signal (target same-sandbox))\n\
              (allow sysctl-read)\n\
              (allow mach-lookup)\n\
+             ; dyld must map dylibs; without this every exec SIGABRTs\n\
+             (allow file-map-executable)\n\
+             (allow file-read* (literal \"/\"))\n\
              ; system runtime, read-only\n\
              (allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\")\n\
                 (subpath \"/System\") (subpath \"/Library\") (subpath \"/private/etc\")\n\
@@ -57,6 +61,7 @@ impl Sandbox<'_> {
             .arg("-p")
             .arg(&profile)
             .args(cmd)
+            .current_dir(tmp) // cwd must be readable in-sandbox (getcwd)
             .env_clear()
             .env("PATH", env_path)
             .env("HOME", tmp)

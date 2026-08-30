@@ -100,6 +100,10 @@ pub fn build_sdist_wheel(
     let work = store.stage()?; // writable build area
     let outdir = work.join("out");
     fs::create_dir_all(&outdir)?;
+    // pip only treats arguments with archive-looking names as paths; the
+    // cache stores by bare hash, so give the sdist its real filename.
+    let sdist_named = work.join(&pkg.filename);
+    fs::hard_link(&sdist, &sdist_named).or_else(|_| fs::copy(&sdist, &sdist_named).map(|_| ()))?;
 
     let py = build_env.join("bin/python");
     let sb = Sandbox {
@@ -115,11 +119,9 @@ pub fn build_sdist_wheel(
             "wheel",
             "--no-deps",
             "--no-build-isolation",
-            "--no-index",
-            "--quiet",
-            "-w",
+            "--no-index",            "-w",
             outdir.to_str().unwrap(),
-            sdist.to_str().unwrap(),
+            sdist_named.to_str().unwrap(),
         ],
         &env_path,
         &work,
