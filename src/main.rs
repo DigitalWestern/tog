@@ -50,6 +50,9 @@ fn project_dir() -> PathBuf {
     std::env::current_dir().expect("cwd")
 }
 
+/// Plan from project inputs. Planning hits PyPI, so successful plans are
+/// cached in .blanket/plan.json keyed by a hash of the inputs; an unchanged
+/// lock replans offline and instantly.
 fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     let req_path = dir.join("requirements.txt");
     let text = std::fs::read_to_string(&req_path).map_err(|e| {
@@ -64,7 +67,32 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
             format!("no pinned CPython matching '{pyver}'"),
         )
     })?;
-    pypi::plan_python(&text, pin.version)
+
+    use sha2::{Digest, Sha256};
+    let input_hash = hex::encode(Sha256::digest(
+        format!("{}\x00{}", pin.version, text).as_bytes(),
+    ));
+    let cache_path = dir.join(".blanket/plan.json");
+    if let Ok(cached) = std::fs::read_to_string(&cache_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
+            if v["input_hash"] == input_hash.as_str() {
+                if let Ok(plan) = serde_json::from_value(v["plan"].clone()) {
+                    return Ok(plan);
+                }
+            }
+        }
+    }
+
+    let plan = pypi::plan_python(&text, pin.version)?;
+    std::fs::create_dir_all(dir.join(".blanket"))?;
+    std::fs::write(
+        &cache_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "input_hash": input_hash,
+            "plan": plan,
+        }))?,
+    )?;
+    Ok(plan)
 }
 
 fn run_plan() -> io::Result<()> {
