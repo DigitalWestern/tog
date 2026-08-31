@@ -634,34 +634,28 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         // The deps projection is a writable clone OUTSIDE the store; verify
         // it lives under the blanket home and matches the recorded deps id.
         let deps_obj = project::closure_object(&store, &closure, "deps_object", "")?;
-        let projection = closure["deps_projection"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|p| {
-                p.is_absolute()
-                    && store
-                        .root
-                        .parent()
-                        .map(|home| p.starts_with(home))
-                        .unwrap_or(false)
-                    && p.parent()
-                        .and_then(|d| d.file_name())
-                        .map(|n| Some(n) == deps_obj.file_name())
-                        .unwrap_or(false)
-                    && p.is_dir()
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "elixir closure has no valid deps projection; run `blanket sync` first",
-                )
-            })?;
+        // Never trust the recorded projection path: reconstruct the ONE
+        // expected forest path from canonical project + deps id and require
+        // exact canonical equality (Sol: lexical checks admitted foreign
+        // forests, dot-dot tricks, and symlinked dirs).
+        let projection = elixir::expected_projection(&store, &dir, &deps_obj)?;
+        let recorded = closure["deps_projection"].as_str().map(PathBuf::from);
+        if recorded.as_deref().and_then(|p| p.canonicalize().ok())
+            != Some(projection.clone())
+            || !projection.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "elixir closure projection is not the expected forest path; \
+                 run `blanket sync` first",
+            ));
+        }
         prefix.push(beam.join("elixir/bin").to_string_lossy().into_owned());
         prefix.push(beam.join("otp/bin").to_string_lossy().into_owned());
         let scratch = std::env::temp_dir().join(format!("blanket-mix-run-{}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
         let (prefixes, remove, set) =
-            elixir::run_env(&beam, &projection, &elixir::build_root(&dir), &scratch);
+            elixir::run_env(&beam, &projection, &elixir::build_root(&dir), &scratch)?;
         blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if prefix.is_empty() {

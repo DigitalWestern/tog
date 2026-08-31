@@ -160,18 +160,27 @@ pub fn run_env(
     deps_path: &Path,
     build_root: &Path,
     scratch_home: &Path,
-) -> (Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>) {
+) -> io::Result<(Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>)> {
     let mut set = forced_env(beam_obj, deps_path, scratch_home);
     set.push((
         "MIX_BUILD_ROOT".to_string(),
         build_root.display().to_string(),
     ));
+    // Host HOME/XDG config would let rebar3 global plugins back in.
+    set.push(("HOME".to_string(), scratch_home.display().to_string()));
+    set.push(("XDG_CONFIG_HOME".to_string(), scratch_home.join("xdg").display().to_string()));
+    set.push(("XDG_CACHE_HOME".to_string(), scratch_home.join("xdg-cache").display().to_string()));
     if let Ok(env) = std::env::var("MIX_ENV") {
-        if env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            set.push(("MIX_ENV".to_string(), env));
+        // Strict: nonempty, bounded, loud on garbage — never silently dev.
+        if env.is_empty()
+            || env.len() > 32
+            || !env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(err(format!("invalid MIX_ENV {env:?}")));
         }
+        set.push(("MIX_ENV".to_string(), env));
     }
-    (ENV_REMOVE_PREFIXES.to_vec(), ENV_REMOVE.to_vec(), set)
+    Ok((ENV_REMOVE_PREFIXES.to_vec(), ENV_REMOVE.to_vec(), set))
 }
 
 fn beam_path(beam_obj: &Path) -> String {
@@ -267,7 +276,9 @@ case mode do
     # fetch): {{:hex, 2, 0}, %{name, version, managers, inner_checksum,
     # outer_checksum, repo}}. Mismatch => "lock mismatch" at compile.
     [dep_dir, name, version, inner, outer, managers_csv] = args
-    managers = managers_csv |> String.split(",", trim: true) |> Enum.map(&String.to_atom/1)
+    allowed = %{"mix" => :mix, "rebar3" => :rebar3, "rebar" => :rebar, "make" => :make}
+    managers = managers_csv |> String.split(",", trim: true)
+               |> Enum.map(fn m -> Map.fetch!(allowed, m) end)
     term = {{:hex, 2, 0},
             %{name: name, version: version, managers: managers,
               inner_checksum: inner, outer_checksum: outer, repo: "hexpm"}}
@@ -319,6 +330,13 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
         if !seen.insert(d.app.clone()) {
             return Err(err(format!("duplicate dep {} in plan", d.app)));
         }
+        // Managers reach an atom conversion in the helper AND the .hex
+        // marker bytes: closed allowlist only (Sol review 6, finding 2).
+        for m in &d.managers {
+            if !matches!(m.as_str(), "mix" | "rebar3" | "rebar" | "make") {
+                return Err(err(format!("{}: unsupported manager {m:?}", d.app)));
+            }
+        }
     }
     Ok(())
 }
@@ -342,6 +360,28 @@ pub fn plan_elixir(
             let _ = crate::store::remove_tree(&scratch);
             return Err(err(format!(
                 "store mix deps.get failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    } else {
+        // Consistency gate for EXISTING locks: exit status only (this
+        // evaluates mix.exs — delegated trust, never artifact authority).
+        // Network-permitted (plan-phase doctrine): --check-locked needs
+        // the hex registry; a persistent planner HEX_HOME keeps it warm.
+        let planner_home = store.root.join("planner-hexhome");
+        fs::create_dir_all(&planner_home)?;
+        let out = run_mix(
+            beam_obj,
+            project_dir,
+            &planner_home,
+            false,
+            &["mix", "deps.get", "--check-locked"],
+        )?;
+        if !out.status.success() {
+            let _ = crate::store::remove_tree(&scratch);
+            return Err(err(format!(
+                "mix.exs and mix.lock are out of sync; run `blanket run mix \
+                 deps.get` and retry\n{}",
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
@@ -435,7 +475,16 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
     for d in &plan.deps {
         inputs.insert(
             format!("dep:{}", d.app),
-            format!("{}@{}:{}:{}", d.package, d.version, d.outer_sha256, d.inner_sha256),
+            format!(
+                "{}@{}:{}:{}:{}",
+                d.package,
+                d.version,
+                d.outer_sha256,
+                d.inner_sha256,
+                // Managers shape the generated .hex marker bytes — they
+                // are object-determining inputs (Sol review 6, finding 2).
+                d.managers.join("+")
+            ),
         );
     }
     let identity = Identity {
@@ -470,19 +519,33 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
         if !st.success() {
             return Err(err(format!("{}: outer tar extraction failed", d.app)));
         }
-        // Inner checksum per hex spec.
+        // Inner checksum per hex spec — over REGULAR outer members only.
         let mut hasher = Sha256::new();
-        for part in ["VERSION", "metadata.config", "contents.tar.gz"] {
+        for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
             let p = outer_dir.join(part);
-            let bytes = fs::read(&p)
+            let md = fs::symlink_metadata(&p)
                 .map_err(|e| err(format!("{}: missing {part} in tarball: {e}", d.app)))?;
-            hasher.update(&bytes);
+            if !md.file_type().is_file() {
+                return Err(err(format!("{}: {part} is not a regular file", d.app)));
+            }
+            if part != "CHECKSUM" {
+                hasher.update(&fs::read(&p)?);
+            }
         }
         let got_inner = hex::encode(hasher.finalize());
         if got_inner != d.inner_sha256 {
             return Err(err(format!(
                 "{}: inner checksum mismatch\n  expected {}\n  got      {got_inner}",
                 d.app, d.inner_sha256
+            )));
+        }
+        // The tarball's own CHECKSUM member is the (deprecated) inner hash;
+        // agreement is cheap belt-and-braces.
+        let shipped = fs::read_to_string(outer_dir.join("CHECKSUM"))?;
+        if !shipped.trim().eq_ignore_ascii_case(&d.inner_sha256) {
+            return Err(err(format!(
+                "{}: tarball CHECKSUM member disagrees with the lock",
+                d.app
             )));
         }
         // Layout keyed by the lock APP name (may differ from package).
@@ -498,6 +561,29 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
             return Err(err(format!("{}: contents extraction failed", d.app)));
         }
         check_dep_tree(&dep_dir, &d.app)?;
+        // Reserved destinations must not pre-exist in package contents —
+        // a shipped symlink named .hex/hex_metadata.config would carry our
+        // writes through the link (Sol review 6, finding 4).
+        for reserved in [".hex", "hex_metadata.config"] {
+            if fs::symlink_metadata(dep_dir.join(reserved)).is_ok() {
+                return Err(err(format!(
+                    "{}: package ships a reserved {reserved} entry; refusing",
+                    d.app
+                )));
+            }
+        }
+        // Metadata cross-check: the app/version inside metadata.config must
+        // agree with the lock coordinates.
+        let meta = fs::read_to_string(outer_dir.join("metadata.config"))?;
+        let has_kv = |k: &str, v: &str| {
+            meta.contains(&format!("{{<<\"{k}\">>,<<\"{v}\">>}}"))
+        };
+        if !has_kv("app", &d.app) || !has_kv("version", &d.version) {
+            return Err(err(format!(
+                "{}: hex metadata disagrees with the lock (app/version)",
+                d.app
+            )));
+        }
         fs::copy(outer_dir.join("metadata.config"), dep_dir.join("hex_metadata.config"))?;
         // .hex marker via the pinned toolchain (ETF binary).
         let out = run_mix(
@@ -529,6 +615,28 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
     store.commit(&identity, &staged)
 }
 
+/// The ONE forest path a project's deps projection may live at: derived
+/// from the canonical project dir and the deps object id, never from
+/// closure-recorded strings (Sol review 6, finding 1).
+pub fn expected_projection(
+    store: &Store,
+    project_dir: &Path,
+    deps_obj: &Path,
+) -> io::Result<PathBuf> {
+    let home = store
+        .root
+        .parent()
+        .ok_or_else(|| err("cannot locate blanket home"))?;
+    let key = hex::encode(&Sha256::digest(
+        project_dir.canonicalize()?.to_string_lossy().as_bytes(),
+    )[..8]);
+    let obj_id = deps_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| err("deps object id not UTF-8"))?;
+    Ok(home.join("forests").join(key).join(obj_id).join("hex-deps"))
+}
+
 /// Project: clonefile the deps object into a writable per-project tree
 /// (native builds write into their source dirs — npm mutablePackages
 /// precedent; recorded unattested) + closure envelope.
@@ -542,27 +650,22 @@ pub fn project_elixir_env(
 ) -> io::Result<PathBuf> {
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
-    // Projection home mirrors npm's forests: outside the project, keyed by
-    // project + deps object id.
-    let home = deps_obj
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .ok_or_else(|| err("cannot locate blanket home"))?;
-    let key = hex::encode(&Sha256::digest(
-        project_dir.canonicalize()?.to_string_lossy().as_bytes(),
-    )[..8]);
-    let obj_id = deps_obj
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| err("deps object id not UTF-8"))?;
-    let proj_dir = home.join("forests").join(&key).join(obj_id).join("hex-deps");
+    let store = Store::open()?;
+    let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
     if fresh && proj_dir.exists() {
         crate::store::remove_tree(&proj_dir)?;
     }
     if !proj_dir.exists() {
-        fs::create_dir_all(proj_dir.parent().unwrap())?;
-        crate::project::clone_tree(&deps_obj, &proj_dir)?;
+        // Atomic publication: clone into a tmp sibling, then rename — a
+        // crashed clone must never be trusted as a complete forest.
+        let parent = proj_dir.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        let tmp = parent.join(format!(".hex-deps.tmp.{}", std::process::id()));
+        if tmp.exists() {
+            crate::store::remove_tree(&tmp)?;
+        }
+        crate::project::clone_tree(&deps_obj, &tmp)?;
+        fs::rename(&tmp, &proj_dir)?;
     }
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
