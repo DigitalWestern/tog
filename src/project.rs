@@ -130,10 +130,57 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
     store.commit(&identity, &staged)
 }
 
+/// If `path` is a real directory (a pre-blanket install), move it out of the
+/// project into `<blanket-home>/backups/` so no tool (tsc, vitest, eslint)
+/// ever crawls it again. blanket-home is derived from the env object's store
+/// (`<store>/objects/<id>` -> store parent), so tests with temp stores back
+/// up into the temp dir, never the real one. Returns the backup location.
+pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::symlink_metadata(path) {
+        Ok(md) if !md.file_type().is_symlink() && md.is_dir() => {}
+        _ => return Ok(None),
+    }
+    let home = env_obj
+        .parent() // objects/
+        .and_then(|p| p.parent()) // store root
+        .and_then(|p| p.parent()) // blanket home
+        .ok_or_else(|| io::Error::other("cannot locate blanket home for backup"))?;
+    let backups = home.join("backups");
+    fs::create_dir_all(&backups)?;
+    let project = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let dirname = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dir".into());
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let dest = backups.join(format!("{project}-{dirname}-{secs}"));
+    fs::rename(path, &dest).map_err(|e| {
+        io::Error::other(format!(
+            "could not move existing {} aside to {}: {e}",
+            path.display(),
+            dest.display()
+        ))
+    })?;
+    eprintln!(
+        "blanket: moved existing {} to {} (delete it once you're happy)",
+        path.display(),
+        dest.display()
+    );
+    Ok(Some(dest))
+}
+
 /// Project an env into a project directory: `.venv` symlink (atomic swap)
 /// plus `.blanket/closure.json` provenance.
 pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
     let venv = project_dir.join(".venv");
+    backup_real_dir(&venv, env_obj)?;
     let tmp = project_dir.join(format!(
         ".venv.blanket-swap.{}.{}",
         std::process::id(),

@@ -302,7 +302,8 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
     // already holds after sort, since "a/node_modules/b" sorts after "a").
     for (p, tarball) in &tarballs {
         let dest = staged.join(&p.path);
-        fs::create_dir_all(&dest)?;
+        fs::create_dir_all(&dest)
+            .map_err(|e| err(format!("{}: create dir: {e}", p.path)))?;
         let status = Command::new("/usr/bin/tar")
             .arg("-xzf")
             .arg(tarball)
@@ -313,10 +314,12 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
+        normalize_modes(&dest)
+            .map_err(|e| err(format!("{}: normalize modes: {e}", p.path)))?;
         // ponytail: post-extraction size cap (1 GiB/package) — catches
         // decompression bombs after the fact; a streaming extractor with
         // preflight limits is the M5 upgrade. Lockfiles are trusted inputs.
-        if dir_size(&dest)? > 1 << 30 {
+        if dir_size(&dest).map_err(|e| err(format!("{}: size walk: {e}", p.path)))? > 1 << 30 {
             return Err(err(format!("{}: package expands past 1 GiB; refusing", p.path)));
         }
     }
@@ -374,7 +377,15 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
                 .join(rel);
             let link = bin_dir.join(bin_name);
             if link.symlink_metadata().is_ok() {
-                return Err(err(format!("bin collision: {bin_name}")));
+                // Real graphs collide (playwright + @playwright/test both
+                // declare `playwright`). npm keeps the first hoisted claim;
+                // plan order is sorted, so first-wins is deterministic.
+                eprintln!(
+                    "blanket: warning: bin {bin_name:?} already claimed; \
+                     skipping the one from {}",
+                    p.path
+                );
+                continue;
             }
             std::os::unix::fs::symlink(&link_target, &link)?;
             use std::os::unix::fs::PermissionsExt;
@@ -390,15 +401,9 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
 /// Project: atomic node_modules symlink + provenance.
 pub fn project_node_env(project_dir: &Path, env_obj: &Path, plan: &NpmPlan) -> io::Result<()> {
     let nm = project_dir.join("node_modules");
-    match fs::symlink_metadata(&nm) {
-        Ok(md) if !md.file_type().is_symlink() => {
-            return Err(err(
-                "node_modules exists and is a real directory; remove it first \
-                 (blanket projects node_modules as a symlink)",
-            ));
-        }
-        _ => {}
-    }
+    // A real (npm-made) node_modules is moved aside automatically so
+    // pointing blanket at an existing project is one command.
+    crate::project::backup_real_dir(&nm, env_obj)?;
     let tmp = project_dir.join(format!(
         ".node_modules.blanket-swap.{}.{}",
         std::process::id(),
@@ -423,6 +428,33 @@ pub fn project_node_env(project_dir: &Path, env_obj: &Path, plan: &NpmPlan) -> i
         meta_dir.join("node-closure.json"),
         serde_json::to_vec_pretty(&closure)?,
     )
+}
+
+/// npm-compatible mode normalization: tarballs in the wild carry broken
+/// permission bits (e.g. pngjs ships directories without the execute bit,
+/// making them untraversable). npm's extractor ORs minimum modes onto every
+/// entry (0o777-under-umask for dirs, 0o666 for files, exec bits preserved);
+/// we do the same after extraction. Top-down so unreadable dirs get fixed
+/// before we descend into them.
+fn normalize_modes(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let md = fs::symlink_metadata(path)?;
+    let ft = md.file_type();
+    if ft.is_symlink() {
+        return Ok(());
+    }
+    let mode = md.permissions().mode();
+    if ft.is_dir() {
+        if mode & 0o755 != 0o755 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o755))?;
+        }
+        for entry in fs::read_dir(path)? {
+            normalize_modes(&entry?.path())?;
+        }
+    } else if mode & 0o644 != 0o644 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o644))?;
+    }
+    Ok(())
 }
 
 fn dir_size(path: &Path) -> io::Result<u64> {
