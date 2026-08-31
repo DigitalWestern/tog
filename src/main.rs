@@ -247,19 +247,17 @@ fn locked_requirements(dir: &Path, source: &str, pyver: &str) -> io::Result<Stri
             return Ok(lock);
         }
     }
-    eprintln!("blanket: requirements.txt is not hash-pinned; resolving with uv...");
-    let status = std::process::Command::new("uv")
+    eprintln!("blanket: requirements.txt is not hash-pinned; resolving with the store uv...");
+    // Store-pinned uv, not host uv: a bare machine needs only blanket.
+    let uv = python::ensure_uv(&store::Store::open()?)?.join("uv");
+    let status = std::process::Command::new(&uv)
         .args(["pip", "compile", "requirements.txt", "--generate-hashes", "--quiet"])
         .args(["--python-version", pyver])
         .args(["-o", "requirements.lock.txt"])
         .current_dir(dir)
         .status()
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                "requirements.txt is not hash-pinned and `uv` was not found; \
-                 install uv (https://astral.sh/uv) or provide a hash-pinned file",
-            )
+            io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
         })?;
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
@@ -331,17 +329,22 @@ fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
             break;
         }
     }
-    eprintln!("blanket: no package-lock.json; resolving with npm...");
-    let status = std::process::Command::new("npm")
+    eprintln!("blanket: no package-lock.json; resolving with the store npm...");
+    // Store node's bundled npm, not host npm: a bare machine needs only
+    // blanket. npm-cli's shebang is `env node`, so the store bin leads PATH.
+    let node = npm::ensure_node(&store::Store::open()?)?;
+    let path = format!(
+        "{}:{}",
+        node.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = std::process::Command::new(node.join("bin/npm"))
         .args(["install", "--package-lock-only", "--ignore-scripts", "--silent"])
         .current_dir(dir)
+        .env("PATH", path)
         .status()
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                "package.json has no package-lock.json and `npm` was not found; \
-                 install Node/npm or provide a package-lock.json",
-            )
+            io::Error::new(e.kind(), format!("run store npm ({}/bin/npm): {e}", node.display()))
         })?;
     if !status.success() {
         return Err(io::Error::other("npm install --package-lock-only failed"));

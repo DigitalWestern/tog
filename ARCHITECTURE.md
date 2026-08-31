@@ -179,11 +179,18 @@ over a light first plan.
 
 ## Resolution is delegated; realization is owned
 
-- Ranged `requirements.txt` → blanket runs `uv pip compile
-  --generate-hashes` into `requirements.lock.txt` (staleness-stamped,
-  regenerated when the source changes).
+- Ranged `requirements.txt` → blanket runs the STORE-pinned uv
+  (`uv pip compile --generate-hashes`) into `requirements.lock.txt`
+  (staleness-stamped, regenerated when the source changes).
 - `package.json` with no `package-lock.json` (bun/yarn/pnpm projects) →
-  blanket runs `npm install --package-lock-only`.
+  blanket runs the store node's bundled npm (`npm install
+  --package-lock-only`).
+- Missing `Cargo.lock` → the store cargo runs `generate-lockfile`.
+
+All three resolvers come from the store (uv is a pinned single-binary
+artifact like CPython/Node) — a bare machine needs nothing installed
+besides blanket itself. Proven with a scrubbed-PATH (`/usr/bin:/bin`)
+sync + run on both ecosystems, 2026-08-31.
 
 Planning may touch the network with the ecosystem's own resolver; every
 byte that reaches an environment still goes through the verified cache and
