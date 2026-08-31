@@ -8,7 +8,8 @@ const USAGE: &str = "\
 blanket — universal realization & environment kernel (python + node)
 
 USAGE:
-  blanket sync            realize + project env(s) from lockfiles
+  blanket sync [--fresh]  realize + project env(s) from lockfiles
+                          (--fresh rebuilds the projection, dropping caches)
   blanket plan            print the locked plan(s) as JSON
   blanket run <cmd...>    run a command inside the projected environment(s)
   blanket store path      print the store root
@@ -23,7 +24,7 @@ Project inputs (either or both):
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        Some("sync") => run_sync(),
+        Some("sync") => run_sync(args.iter().any(|a| a == "--fresh")),
         Some("plan") => run_plan(),
         Some("run") => run_run(&args[1..]),
         Some("store") if args.get(1).map(String::as_str) == Some("path") => {
@@ -207,7 +208,7 @@ fn no_inputs() -> io::Error {
     )
 }
 
-fn run_sync() -> io::Result<()> {
+fn run_sync(fresh: bool) -> io::Result<()> {
     let dir = project_dir();
     let store = store::Store::open()?;
     let mut any = false;
@@ -220,12 +221,14 @@ fn run_sync() -> io::Result<()> {
     }
     if dir.join("package-lock.json").exists() {
         let lock = std::fs::read_to_string(dir.join("package-lock.json"))?;
+        let mut mutable = Vec::new();
         if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
             npm::check_lock_freshness(&pkg, &lock)?;
+            mutable = npm::parse_blanket_config(&pkg)?;
         }
         let plan = npm::plan_npm(&lock)?;
         let env = npm::realize_node_env(&store, &plan)?;
-        npm::project_node_env(&dir, &env, &plan)?;
+        npm::project_node_env(&dir, &env, &plan, &mutable, fresh)?;
         eprintln!("synced: node_modules -> {}", env.display());
         any = true;
     }

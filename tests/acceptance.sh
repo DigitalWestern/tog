@@ -102,7 +102,18 @@ OUT=$(cd "$WORK/n" && "$BLANKET" run node index.js)
 [ "$OUT" = "is-odd(3): true" ] && ok "npm deps resolve + run ($OUT)" || bad "got '$OUT'"
 NV=$(cd "$WORK/n" && "$BLANKET" run node -e 'console.log(process.version)')
 [ "$NV" = "v24.20.0" ] && ok "node came from the store ($NV)" || bad "node version: $NV"
-if touch "$WORK/n/node_modules/tamper" 2>/dev/null; then bad "node_modules writable"; else ok "node_modules immutable"; fi
+# Forest contract: the node_modules TOP LEVEL is writable scratch space
+# (vite/.prisma caches), while package CONTENTS stay immutable in the store.
+if touch "$WORK/n/node_modules/.scratch" 2>/dev/null; then ok "node_modules top level writable (forest)"; else bad "forest top level not writable"; fi
+if touch "$WORK/n/node_modules/is-odd/tamper" 2>/dev/null; then bad "package contents writable"; else ok "package contents immutable"; fi
+
+echo "== 10b. declared mutable packages: clone projection, writable, unattested"
+cp -R "$FIXTURES/proj-npm" "$WORK/nm"
+(cd "$WORK/nm" && node -e "const p=require('./package.json'); p.blanket={mutablePackages:['is-odd']}; require('fs').writeFileSync('package.json', JSON.stringify(p))" 2>/dev/null \
+  || python3 -c "import json;p=json.load(open('$WORK/nm/package.json'));p['blanket']={'mutablePackages':['is-odd']};json.dump(p,open('$WORK/nm/package.json','w'))")
+(cd "$WORK/nm" && "$BLANKET" sync)
+if touch "$WORK/nm/node_modules/is-odd/scratch" 2>/dev/null; then ok "declared mutable package is writable"; else bad "mutable package not writable"; fi
+grep -q '"mutable_state": "unattested"' "$WORK/nm/.blanket/node-closure.json" && ok "closure records unattested mutable state" || bad "closure missing mutable_state"
 
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"

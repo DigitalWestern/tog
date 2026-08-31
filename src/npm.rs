@@ -148,11 +148,26 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
         .ok_or_else(|| err("package-lock.json has no packages map"))?;
 
     let mut out = Vec::new();
-    for (path, entry) in packages {
+    // Sorted so parents precede children ("a/node_modules/b" sorts after
+    // "a"), letting a skipped parent drop its whole subtree.
+    let mut paths: Vec<&String> = packages.keys().collect();
+    paths.sort();
+    let mut skipped: Vec<String> = Vec::new();
+    for path in paths {
+        let entry = &packages[path];
         if path.is_empty() {
             continue; // root project entry
         }
         validate_lock_path(path)?;
+        if skipped.iter().any(|s| path.starts_with(s.as_str())) {
+            continue; // descendant of a platform-skipped package
+        }
+        // Bundled deps ship inside the parent tarball (covered by the
+        // parent's integrity hash) and carry no resolved/integrity of
+        // their own; extraction of the parent materializes them.
+        if entry["inBundle"].as_bool() == Some(true) {
+            continue;
+        }
         if entry["link"].as_bool() == Some(true) {
             return Err(err(format!("{path}: workspaces/links unsupported (v0)")));
         }
@@ -180,6 +195,7 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
         let compatible = platform_ok("os", "darwin") && platform_ok("cpu", "arm64");
         if !compatible {
             if entry["optional"].as_bool() == Some(true) {
+                skipped.push(format!("{path}/"));
                 continue;
             }
             return Err(err(format!(
@@ -398,13 +414,126 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
     store.commit(&identity, &staged)
 }
 
-/// Project: atomic node_modules symlink + provenance.
-pub fn project_node_env(project_dir: &Path, env_obj: &Path, plan: &NpmPlan) -> io::Result<()> {
+/// Strictly parse the optional `"blanket"` config field of package.json.
+/// Returns the sorted, deduplicated mutable-package list. Unknown keys and
+/// malformed names are hard errors: this list weakens provenance, so typos
+/// must not be silently ignored.
+pub fn parse_blanket_config(pkg_json: &str) -> io::Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(pkg_json)
+        .map_err(|e| err(format!("package.json: {e}")))?;
+    let cfg = match v.get("blanket") {
+        None => return Ok(Vec::new()),
+        Some(c) => c
+            .as_object()
+            .ok_or_else(|| err("package.json: \"blanket\" must be an object"))?,
+    };
+    for key in cfg.keys() {
+        if key != "mutablePackages" {
+            return Err(err(format!("package.json: unknown blanket key {key:?}")));
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    if let Some(list) = cfg.get("mutablePackages") {
+        let arr = list
+            .as_array()
+            .ok_or_else(|| err("blanket.mutablePackages must be an array"))?;
+        for item in arr {
+            let name = item
+                .as_str()
+                .ok_or_else(|| err("blanket.mutablePackages entries must be strings"))?;
+            let bare = name.strip_prefix('@').unwrap_or(name);
+            let ok = !name.is_empty()
+                && name.matches('/').count() == if name.starts_with('@') { 1 } else { 0 }
+                && bare
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c));
+            if !ok {
+                return Err(err(format!("blanket.mutablePackages: bad name {name:?}")));
+            }
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Project the env into the project as a "forest": node_modules is a symlink
+/// to a WRITABLE per-project dir under .blanket/nm/<projection-id>, holding
+/// one symlink per top-level entry into the immutable store object. Tools
+/// that treat node_modules' top level as scratch space (vite's .vite dep
+/// cache, prisma's .prisma client) get real writable directories, while
+/// package contents stay read-only in the store — pnpm's proven layout.
+///
+/// If mutable packages are declared, the whole tree is instead cloned
+/// (APFS copy-on-write) so runtime writes inside those packages succeed and
+/// realpath stays coherent; the closure records them as unattested.
+pub fn project_node_env(
+    project_dir: &Path,
+    env_obj: &Path,
+    plan: &NpmPlan,
+    mutable: &[String],
+    fresh: bool,
+) -> io::Result<()> {
     let nm = project_dir.join("node_modules");
     // A real (npm-made) node_modules is moved aside automatically so
     // pointing blanket at an existing project is one command.
     crate::project::backup_real_dir(&nm, env_obj)?;
-    let tmp = project_dir.join(format!(
+
+    // Projection id: env object + mutable declarations + layout schema.
+    use sha2::{Digest as _, Sha256};
+    let env_name = env_obj.file_name().unwrap().to_string_lossy().into_owned();
+    let proj_id = hex::encode(Sha256::digest(
+        format!("node-forest/1\x00{env_name}\x00{}", mutable.join(",")).as_bytes(),
+    ))[..16]
+        .to_string();
+
+    // Forests live OUTSIDE the project (under the blanket home, keyed by
+    // project path): anything inside the project gets crawled by test
+    // runners and type checkers, and the forest links into store packages
+    // whose own test files must never be picked up.
+    let home = env_obj
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or_else(|| err("cannot locate blanket home for forests"))?;
+    let project_key = &hex::encode(Sha256::digest(
+        project_dir.canonicalize()?.to_string_lossy().as_bytes(),
+    ))[..16];
+    let nm_root = home.join("forests").join(project_key);
+    let proj_dir = nm_root.join(&proj_id);
+    // The projected tree must itself be NAMED node_modules: Node's module
+    // resolution only treats a directory as a package root when its
+    // basename is node_modules, and cloned packages realpath to this tree.
+    let forest = proj_dir.join("node_modules");
+    if fresh && proj_dir.exists() {
+        crate::store::remove_tree(&proj_dir)?;
+    }
+    if !forest.exists() {
+        fs::create_dir_all(&nm_root)?;
+        let tmp = nm_root.join(format!(".{proj_id}.tmp.{}", std::process::id()));
+        if tmp.exists() {
+            crate::store::remove_tree(&tmp)?;
+        }
+        fs::create_dir_all(&tmp)?;
+        let src = env_obj.join("node_modules");
+        if mutable.is_empty() {
+            build_forest(&src, &tmp.join("node_modules"))?;
+        } else {
+            clone_tree(&src, &tmp.join("node_modules"))?;
+        }
+        fs::rename(&tmp, &proj_dir)?;
+    }
+    // Prune forests for other projections (regenerable; only caches lost).
+    if let Ok(entries) = fs::read_dir(&nm_root) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy() != proj_id.as_str() {
+                let _ = crate::store::remove_tree(&e.path());
+            }
+        }
+    }
+
+    let tmp_link = project_dir.join(format!(
         ".node_modules.blanket-swap.{}.{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -412,14 +541,27 @@ pub fn project_node_env(project_dir: &Path, env_obj: &Path, plan: &NpmPlan) -> i
             .unwrap()
             .as_nanos()
     ));
-    std::os::unix::fs::symlink(env_obj.join("node_modules"), &tmp)?;
-    fs::rename(&tmp, &nm)?;
+    std::os::unix::fs::symlink(&forest, &tmp_link)?;
+    fs::rename(&tmp_link, &nm)?;
+
+    // Mutable declarations expand to every matching physical lockfile path.
+    let mutable_paths: Vec<&str> = plan
+        .packages
+        .iter()
+        .filter(|p| mutable.iter().any(|m| *m == p.name))
+        .map(|p| p.path.as_str())
+        .collect();
 
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
     let closure = serde_json::json!({
         "env_object": env_obj,
+        "projection_schema": "node-forest/1",
+        "projection_id": proj_id,
         "node_version": plan.node_version,
+        "mutable_packages": mutable,
+        "mutable_paths": mutable_paths,
+        "mutable_state": if mutable.is_empty() { "none" } else { "unattested" },
         "packages": plan.packages.iter().map(|p| {
             serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
         }).collect::<Vec<_>>(),
@@ -428,6 +570,63 @@ pub fn project_node_env(project_dir: &Path, env_obj: &Path, plan: &NpmPlan) -> i
         meta_dir.join("node-closure.json"),
         serde_json::to_vec_pretty(&closure)?,
     )
+}
+
+/// One symlink per top-level entry of the object's node_modules; scoped
+/// packages get a real @scope dir with per-package symlinks so new scoped
+/// siblings can be written at runtime.
+fn build_forest(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('@') {
+            let scope_dir = dest.join(&name);
+            fs::create_dir(&scope_dir)?;
+            for sub in fs::read_dir(entry.path())? {
+                let sub = sub?;
+                std::os::unix::fs::symlink(sub.path(), scope_dir.join(sub.file_name()))?;
+            }
+        } else {
+            std::os::unix::fs::symlink(entry.path(), dest.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy-on-write clone of the whole tree (cp -c uses APFS clonefile; falls
+/// back to a plain copy elsewhere), then restore user-write bits, which the
+/// clone inherits as read-only from the store.
+fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    let clone = Command::new("/bin/cp").args(["-Rc"]).arg(src).arg(dest).status()?;
+    if !clone.success() {
+        if dest.exists() {
+            crate::store::remove_tree(dest)?;
+        }
+        let plain = Command::new("/bin/cp").arg("-R").arg(src).arg(dest).status()?;
+        if !plain.success() {
+            return Err(err("cloning node_modules tree failed"));
+        }
+    }
+    restore_write_bits(dest)
+}
+
+fn restore_write_bits(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let md = fs::symlink_metadata(path)?;
+    if md.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = md.permissions().mode();
+    if mode & 0o200 == 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    }
+    if md.is_dir() {
+        for entry in fs::read_dir(path)? {
+            restore_write_bits(&entry?.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// npm-compatible mode normalization: tarballs in the wild carry broken
@@ -516,5 +715,38 @@ mod tests {
             r#""node_modules/a":{"version":"1","resolved":"git+ssh://git@x/a.git","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
         );
         assert!(plan_npm(&l).is_err());
+    }
+
+    #[test]
+    fn bundled_and_platform_skipped_subtrees() {
+        // inBundle entries are provided by the parent tarball: skipped.
+        let l = lock(
+            r#""node_modules/a":{"version":"1","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
+               "node_modules/a/node_modules/b":{"version":"1","inBundle":true}"#,
+        );
+        assert_eq!(plan_npm(&l).unwrap().packages.len(), 1);
+        // descendants of a platform-skipped optional package are dropped
+        // even without their own os/cpu/resolved fields.
+        let l = lock(
+            r#""node_modules/w":{"version":"1","optional":true,"cpu":["wasm32"],"resolved":"https://r/w.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
+               "node_modules/w/node_modules/c":{"version":"1"}"#,
+        );
+        assert_eq!(plan_npm(&l).unwrap().packages.len(), 0);
+    }
+
+    #[test]
+    fn blanket_config_parsing() {
+        assert!(parse_blanket_config(r#"{"name":"x"}"#).unwrap().is_empty());
+        let ok = parse_blanket_config(
+            r#"{"blanket":{"mutablePackages":["b","@prisma/engines","b"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(ok, vec!["@prisma/engines".to_string(), "b".to_string()]);
+        // unknown key, bad names, wrong types: hard errors
+        assert!(parse_blanket_config(r#"{"blanket":{"mutable":["a"]}}"#).is_err());
+        assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":["../x"]}}"#).is_err());
+        assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":"a"}}"#).is_err());
+        assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":[""]}}"#).is_err());
+        assert!(parse_blanket_config(r#"{"blanket":[]}"#).is_err());
     }
 }

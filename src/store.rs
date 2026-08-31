@@ -119,7 +119,7 @@ impl Store {
 }
 
 /// Remove a possibly read-only staged tree (restore write bits first).
-fn remove_tree(path: &Path) -> io::Result<()> {
+pub fn remove_tree(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fn unlock(p: &Path) -> io::Result<()> {
         let md = fs::symlink_metadata(p)?;
