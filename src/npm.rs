@@ -861,6 +861,33 @@ pub fn project_node_env(
         }
     }
 
+    // iCloud/Drive-synced folders resurrect each replaced symlink as a
+    // "node_modules 2"-style duplicate. Ones that are symlinks into
+    // blanket-owned paths are ours from earlier projections: remove them
+    // (test runners crawl through them otherwise). Anything else is only
+    // warned about — never delete what we didn't create.
+    if let Ok(entries) = fs::read_dir(project_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("node_modules ") {
+                continue;
+            }
+            let p = e.path();
+            let is_ours = fs::read_link(&p)
+                .map(|t| t.starts_with(home) || t.to_string_lossy().contains("/.blanket/"))
+                .unwrap_or(false);
+            if is_ours {
+                let _ = fs::remove_file(&p);
+                eprintln!("blanket: removed stale sync-duplicate symlink {name:?}");
+            } else {
+                eprintln!(
+                    "blanket: warning: {name:?} looks like a cloud-sync duplicate \
+                     of node_modules; consider removing it"
+                );
+            }
+        }
+    }
+
     let tmp_link = project_dir.join(format!(
         ".node_modules.blanket-swap.{}.{}",
         std::process::id(),
