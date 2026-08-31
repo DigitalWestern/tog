@@ -80,10 +80,25 @@ fn ruby_sync_native_ext_and_run() {
         "run",
     );
     assert!(out.trim().starts_with("ok 13."), "{out}");
-    // Gem binstub through the projected bin dir, ruby-first PATH.
-    let version = assert_ok(
-        blanket(&binary, &project, &store, &["run", "rake", "--version"]),
-        "rake binstub",
+    // The binstub that runs must be the STORE object's wrapper, not a host
+    // /usr/bin fallback (Sol review 5: symlink binstubs dangled after the
+    // commit rename and the old assertion passed via host rake).
+    let which = assert_ok(
+        blanket(&binary, &project, &store, &["run", "sh", "-c", "command -v rake"]),
+        "which rake",
     );
+    let which = which.trim().to_string();
+    assert!(
+        which.contains("/objects/") && which.contains("gems"),
+        "rake resolved outside the store: {which}"
+    );
+    // The wrapper itself must execute (relocatable, not a dangling link).
+    let direct = blanket(
+        &binary,
+        &project,
+        &store,
+        &["run", "sh", "-c", &format!("{which} --version")],
+    );
+    let version = assert_ok(direct, "store binstub direct exec");
     assert!(version.contains("13."), "{version}");
 }

@@ -78,6 +78,44 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
     Ok(v["body"].clone())
 }
 
+/// Resolve an object reference from a closure body, CONTAINED to the
+/// active store: the recorded id must exist in the store and the recorded
+/// path must be exactly the store's path for that id. A project-editable
+/// closure must never inject arbitrary executable paths into `blanket run`
+/// (Sol review 5, reproduced against the ruby closure).
+pub fn closure_object(
+    store: &crate::store::Store,
+    closure: &serde_json::Value,
+    key: &str,
+    probe: &str,
+) -> io::Result<PathBuf> {
+    let bad = |msg: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("closure {key}: {msg}; run `blanket sync` first"),
+        )
+    };
+    let id = closure[key]["id"].as_str().ok_or_else(|| bad("missing id"))?;
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return Err(bad("malformed id"));
+    }
+    if !store.has(id) {
+        return Err(bad("object not in the store"));
+    }
+    let path = store.object_path(id);
+    if closure[key]["path"].as_str().map(Path::new) != Some(path.as_path()) {
+        return Err(bad("recorded path disagrees with the store"));
+    }
+    if !probe.is_empty() && !path.join(probe).exists() {
+        return Err(bad("object is missing its expected content"));
+    }
+    Ok(path)
+}
+
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.

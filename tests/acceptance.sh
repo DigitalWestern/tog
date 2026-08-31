@@ -205,8 +205,10 @@ printf -- "---\nBUNDLE_PATH: \"/nonexistent\"\n" > "$WORK/rb/.bundle/config"  # 
 (cd "$WORK/rb" && "$BLANKET" sync)
 OUT=$(cd "$WORK/rb" && "$BLANKET" run ruby -e 'require "racc/parser"; require "rake"; puts "ok"')
 [ "$OUT" = "ok" ] && ok "ruby native-ext gems load ($OUT)" || bad "ruby output: $OUT"
-OUT=$(cd "$WORK/rb" && "$BLANKET" run rake --version)
-case "$OUT" in *13.*) ok "gem binstub runs ($OUT)";; *) bad "rake binstub: $OUT";; esac
+WHICH=$(cd "$WORK/rb" && "$BLANKET" run sh -c 'command -v rake')
+case "$WHICH" in */objects/*) ok "rake resolves in the store";; *) bad "rake resolved at: $WHICH";; esac
+OUT=$(cd "$WORK/rb" && "$BLANKET" run sh -c "$WHICH --version")
+case "$OUT" in *13.*) ok "store binstub executes ($OUT)";; *) bad "store binstub: $OUT";; esac
 
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"

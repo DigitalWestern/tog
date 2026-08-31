@@ -196,6 +196,12 @@ starves.
       subprocess sandboxing (uv/npm run unsandboxed by design for now);
       process-tree quiescence after install scripts; Xcode/SDK fingerprint
       in build identity
+- [ ] Store-object content verification on use (Sol ruby review, kernel
+      scope): objects are currently trusted from permissions + metadata;
+      same-user replacement of an object's contents is undetected. Either
+      content-hash spot verification or an explicitly documented narrower
+      trust boundary. Also: contained atomic writes for the remaining
+      project-side plan caches (go-plan.json, python plan.json).
 - [ ] Central closet / binary cache + fixed store path decision
 - [ ] Friendlier CLI errors (e.g. `node.js` typo → "did you mean node?")
 - [ ] Linux support (also unlocks the "Linux as reference hermetic

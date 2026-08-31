@@ -312,7 +312,7 @@ fn run_plan() -> io::Result<()> {
     if dir.join("Gemfile").is_file() {
         let store = store::Store::open()?;
         let ruby_obj = ruby::ensure_ruby(&store)?;
-        let plan = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
+        let (plan, _) = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
@@ -420,11 +420,9 @@ fn run_sync(fresh: bool) -> io::Result<()> {
     }
     if dir.join("Gemfile").is_file() {
         let ruby_obj = ruby::ensure_ruby(&store)?;
-        let plan = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
+        let (plan, lock_sha256) = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
         let gems = ruby::realize_gems(&store, &plan, &ruby_obj)?;
-        use sha2::{Digest, Sha256};
-        let lock = std::fs::read_to_string(dir.join("Gemfile.lock")).unwrap_or_default();
-        ruby::project_ruby_env(&dir, &ruby_obj, &gems, &plan, &hex::encode(Sha256::digest(lock.as_bytes())))?;
+        ruby::project_ruby_env(&dir, &ruby_obj, &gems, &plan, &lock_sha256)?;
         eprintln!("synced: gems -> {}", gems.display());
         any = true;
     }
@@ -550,17 +548,11 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         prefix.push(node.join("bin").to_string_lossy().into_owned());
     }
     if cargo_home.exists() {
+        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "cargo")?;
-        let rust_obj = closure["rust_object"]["path"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute() && path.join("bin/rustc").is_file())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "cargo closure has no valid Rust object; run `blanket sync` first",
-                )
-            })?;
+        // Store-contained resolution: a project-editable closure must never
+        // inject arbitrary executable paths (Sol review 5).
+        let rust_obj = project::closure_object(&store, &closure, "rust_object", "bin/rustc")?;
         prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());
         prefix.push(rust_obj.join("bin").to_string_lossy().into_owned());
         command.env("CARGO_HOME", cargo_home.canonicalize()?);
@@ -568,27 +560,10 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         command.env_remove("RUSTUP_TOOLCHAIN");
     }
     if dir.join(".blanket/closures/go.json").exists() {
+        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "go")?;
-        let go_obj = closure["go_object"]["path"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.join("bin/go").is_file())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "go closure has no valid Go object; run `blanket sync` first",
-                )
-            })?;
-        let modcache = closure["modcache_object"]["path"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.is_dir())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "go closure has no valid modcache object; run `blanket sync` first",
-                )
-            })?;
+        let go_obj = project::closure_object(&store, &closure, "go_object", "bin/go")?;
+        let modcache = project::closure_object(&store, &closure, "modcache_object", "")?;
         prefix.push(go_obj.join("bin").to_string_lossy().into_owned());
         for (k, v) in golang::go_env(&go_obj, &modcache, true) {
             if v.is_empty() {
@@ -599,21 +574,10 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         }
     }
     if dir.join(".blanket/closures/ruby.json").exists() {
+        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "ruby")?;
-        let obj = |key: &str, probe: &str| -> io::Result<PathBuf> {
-            closure[key]["path"]
-                .as_str()
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute() && p.join(probe).exists())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("ruby closure has no valid {key}; run `blanket sync` first"),
-                    )
-                })
-        };
-        let ruby_obj = obj("ruby_object", "bin/ruby")?;
-        let gems_obj = obj("gems_object", "")?;
+        let ruby_obj = project::closure_object(&store, &closure, "ruby_object", "bin/ruby")?;
+        let gems_obj = project::closure_object(&store, &closure, "gems_object", "")?;
         // Ruby FIRST, then gem binstubs (a gem exe must never shadow ruby).
         prefix.push(ruby_obj.join("bin").to_string_lossy().into_owned());
         prefix.push(gems_obj.join("bin").to_string_lossy().into_owned());

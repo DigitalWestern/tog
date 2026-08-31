@@ -67,7 +67,7 @@ pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
 /// The forced environment for EVERY blanket-controlled ruby/bundler run.
 /// Removal lists close the .bundle/config and preload side doors.
 const ENV_REMOVE_PREFIXES: &[&str] = &["BUNDLE_", "BUNDLER_"];
-const ENV_REMOVE: &[&str] = &["RUBYOPT", "RUBYLIB", "RUBYGEMS_GEMDEPS", "GEMRC", "GEM_SPEC_CACHE", "GEM_HOME", "GEM_PATH"];
+const ENV_REMOVE: &[&str] = &["RUBYOPT", "RUBYLIB", "RUBYGEMS_GEMDEPS", "GEM_SPEC_CACHE", "GEM_HOME", "GEM_PATH"];
 
 fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
     vec![
@@ -82,6 +82,9 @@ fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
         ("BUNDLE_DISABLE_SHARED_GEMS".to_string(), "true".to_string()),
         ("BUNDLE_AUTO_INSTALL".to_string(), "false".to_string()),
         ("BUNDLE_DISABLE_VERSION_CHECK".to_string(), "true".to_string()),
+        // Unsetting GEMRC would re-enable ~/.gemrc; point it at an empty
+        // config instead (system /etc/gemrc remains a documented impurity).
+        ("GEMRC".to_string(), "/dev/null".to_string()),
     ]
 }
 
@@ -125,7 +128,9 @@ mode = ARGV.shift
 if mode == "install"
   # Direct Gem::Installer: the `gem install` CLI requires remote_fetcher at
   # LOAD time, which trips EPERM under the network-denied sandbox. This
-  # path is offline-only code.
+  # path is offline-only code. wrappers: real wrapper scripts, NEVER
+  # symlinks — symlink binstubs point into the staging dir and dangle
+  # after the store commit rename (Sol review, reproduced).
   require "rubygems/installer"
   gemfile, install_dir = ARGV
   installer = Gem::Installer.at(
@@ -133,10 +138,32 @@ if mode == "install"
     install_dir: install_dir,
     bin_dir: File.join(install_dir, "bin"),
     ignore_dependencies: true,
-    document: []
+    document: [],
+    wrappers: true,
+    env_shebang: true
   )
   installer.install
   puts "installed #{File.basename(gemfile)}"
+  exit 0
+end
+if mode == "check"
+  # Gemfile/lock equivalence + ruby-version gate. This mode EVALS THE
+  # GEMFILE (arbitrary ruby, delegated resolver trust): its stdout is
+  # never parsed by blanket — only the exit status counts, so a hostile
+  # Gemfile cannot forge plan data through this process.
+  require "bundler"
+  gemfile, lockfile = ARGV
+  definition = Bundler::Definition.build(Pathname.new(gemfile), Pathname.new(lockfile), false)
+  begin
+    definition.send(:ensure_equivalent_gemfile_and_lockfile)
+  rescue NoMethodError
+    abort "store bundler cannot validate gemfile/lock equivalence"
+  end
+  begin
+    definition.validate_runtime!
+  rescue Bundler::GemNotFound, Bundler::SolveFailure
+  rescue NotImplementedError, NoMethodError
+  end
   exit 0
 end
 if mode == "spec"
@@ -147,54 +174,68 @@ if mode == "spec"
          "executables" => spec.executables }.to_json)
   exit 0
 end
-abort "usage: helper plan <gemfile> <lockfile>" unless mode == "plan"
+abort "usage: helper plan <lockfile>" unless mode == "plan"
+# LOCK-ONLY: this mode never evaluates the Gemfile (arbitrary ruby must
+# not be able to forge artifact coordinates); the lockfile is the sole
+# artifact authority (Sol review, forged-JSON repro).
 require "bundler"
-gemfile, lockfile = ARGV
-definition = Bundler::Definition.build(Pathname.new(gemfile), Pathname.new(lockfile), false)
-begin
-  definition.validate_runtime!
-rescue Bundler::GemNotFound, Bundler::SolveFailure
-  # runtime validation wants installed gems; we only need ruby/platform checks
-rescue NotImplementedError, NoMethodError
-end
+lockfile = ARGV[0]
 lock = Bundler::LockfileParser.new(File.read(lockfile))
 unless (lock.bundler_version rescue nil).nil?
   if Gem::Version.new(lock.bundler_version.to_s) > Gem::Version.new(Bundler::VERSION)
     abort "lockfile BUNDLED WITH #{lock.bundler_version} is newer than the store bundler #{Bundler::VERSION}"
   end
 end
+require "uri"
 lock.specs.each do |s|
   src = s.source
-  ok = src.is_a?(Bundler::Source::Rubygems) &&
-       src.remotes.all? { |r| r.to_s.start_with?("https://rubygems.org") }
+  ok = src.is_a?(Bundler::Source::Rubygems) && src.remotes.all? do |r|
+    u = URI.parse(r.to_s)
+    u.scheme == "https" && u.host == "rubygems.org" && u.userinfo.nil? &&
+      (u.port == 443) && ["", "/"].include?(u.path)
+  end
   abort "unsupported source for #{s.name} (#{src.class}); only https://rubygems.org is supported" unless ok
 end
 local = Gem::Platform.local
 selected = lock.specs.group_by(&:name).map do |name, specs|
-  matching = specs.select do |s|
-    p = s.platform.to_s
-    p == "ruby" || Gem::Platform.new(p) =~ local
-  end
-  abort "#{name}: no variant for #{local} (have: #{specs.map { |s| s.platform.to_s }.uniq.join(", ")}); run: bundle lock --add-platform #{local}" if matching.empty?
-  exact = matching.reject { |s| s.platform.to_s == "ruby" }
-  best = if exact.empty?
-    matching.first
-  else
-    exact.max_by { |s| Gem::Platform.sort_priority(Gem::Platform.new(s.platform.to_s)) rescue 0 } || exact.first
-  end
-  best
+  # Bundler's OWN best-platform scoring (arm64-darwin vs arm64-darwin-20
+  # etc.); hand-rolled specificity picks the wrong artifact.
+  best = Bundler::GemHelpers.select_best_platform_match(specs, local)
+  best = Array(best)
+  abort "#{name}: no variant for #{local} (have: #{specs.map { |s| s.platform.to_s }.uniq.join(", ")}); run: bundle lock --add-platform #{local}" if best.empty?
+  best.first
 end
+# Bundler's parsed checksum registry (handles every format it writes).
+# If a CHECKSUMS section exists but yields no usable sha256 for a
+# selected gem, fail CLOSED rather than falling back to the live API.
+has_checksums_section = File.read(lockfile).lines.any? { |l| l.chomp == "CHECKSUMS" }
 checksums = {}
-begin
-  raw = File.read(lockfile)
-  if raw =~ /^CHECKSUMS\n((?:  .*\n)+)/
-    $1.each_line do |line|
-      if line =~ /^  (\S+) \((\S+)\) sha256=([0-9a-f]{64})/
-        checksums["#{$1}-#{$2}"] = $3
+if has_checksums_section
+  reg = (lock.respond_to?(:checksums) ? lock.checksums : nil)
+  selected.each do |s|
+    entry = nil
+    if reg
+      key = begin
+        Bundler::LazySpecification.new(s.name, s.version, s.platform)
+      rescue StandardError
+        s
+      end
+      cs = (reg[key] rescue nil) || (reg[s] rescue nil)
+      entry = Array(cs).flatten.find { |c| c.respond_to?(:algo) && c.algo == "sha256" } rescue nil
+    end
+    hexval = nil
+    if entry
+      begin
+        raw = entry.respond_to?(:digest) ? entry.digest : nil
+        hexval = raw.unpack1("H*") if raw
+        hexval ||= entry.to_s[/sha256[-=]([A-Za-z0-9+\/=]+)/, 1]&.unpack1("m0")&.unpack1("H*") rescue nil
+      rescue StandardError
       end
     end
+    abort "#{s.name}: CHECKSUMS section present but no usable sha256 for #{s.name}-#{s.version}; refusing API fallback" if hexval.nil?
+    plat = s.platform.to_s
+    checksums["#{s.name}-#{s.version}#{plat == "ruby" ? "" : "-#{plat}"}"] = hexval
   end
-rescue StandardError
 end
 by_name = selected.to_h { |s| [s.name, s] }
 ordered = []
@@ -270,9 +311,14 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
 /// selection, blanket-pinned hashes (lock CHECKSUMS section when present,
 /// rubygems.org v2 API otherwise). Cached in .blanket/ruby-plan.json.
-pub fn plan_ruby(store: &Store, project_dir: &Path, ruby_obj: &Path) -> io::Result<RubyPlan> {
-    let gemfile = fs::read_to_string(project_dir.join("Gemfile"))
-        .map_err(|e| io::Error::new(e.kind(), format!("Gemfile: {e}")))?;
+pub fn plan_ruby(
+    store: &Store,
+    project_dir: &Path,
+    ruby_obj: &Path,
+) -> io::Result<(RubyPlan, String)> {
+    if !project_dir.join("Gemfile").is_file() {
+        return Err(err("Gemfile not found"));
+    }
     let lock_path = project_dir.join("Gemfile.lock");
     if !lock_path.is_file() {
         eprintln!("blanket: no Gemfile.lock; resolving with the store bundler...");
@@ -287,37 +333,44 @@ pub fn plan_ruby(store: &Store, project_dir: &Path, ruby_obj: &Path) -> io::Resu
         }
     }
     let lock = fs::read_to_string(&lock_path)?;
+    // No plan cache: an editable cache with a predictable key is forgeable
+    // authority (Sol review 5). Planning re-derives from the lock every
+    // sync; the store's object cache still makes realizes instant.
 
-    const PLANNER_SCHEMA: &str = "ruby-planner/1";
-    let input_hash = hex::encode(Sha256::digest(
-        format!("{PLANNER_SCHEMA}\x00{RUBY_VERSION}\x00{RUBY_SHA256}\x00{gemfile}\x00{lock}")
-            .as_bytes(),
-    ));
-    let cache_path = project_dir.join(".blanket/ruby-plan.json");
-    if let Ok(cached) = fs::read_to_string(&cache_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
-            if v["input_hash"] == input_hash.as_str() {
-                if let Ok(plan) = serde_json::from_value::<RubyPlan>(v["plan"].clone()) {
-                    validate_plan(&plan)?;
-                    return Ok(plan);
-                }
-            }
-        }
-    }
-
-    // Helper under the pinned ruby: lock parse + platform closure.
     let scratch = store.stage()?;
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
+    let helper_path = helper.to_str().ok_or_else(|| err("helper path not UTF-8"))?;
+    // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
+    // (delegated resolver trust) — exit status only, stdout untrusted.
     let out = run_ruby(
         ruby_obj,
         project_dir,
         &scratch,
         &[
             "ruby",
-            helper.to_str().ok_or_else(|| err("helper path not UTF-8"))?,
-            "plan",
+            helper_path,
+            "check",
             project_dir.join("Gemfile").to_str().ok_or_else(|| err("path not UTF-8"))?,
+            lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
+        ],
+    )?;
+    if !out.status.success() {
+        let _ = crate::store::remove_tree(&scratch);
+        return Err(err(format!(
+            "Gemfile/Gemfile.lock validation failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
+    let out = run_ruby(
+        ruby_obj,
+        project_dir,
+        &scratch,
+        &[
+            "ruby",
+            helper_path,
+            "plan",
             lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
         ],
     )?;
@@ -394,15 +447,13 @@ pub fn plan_ruby(store: &Store, project_dir: &Path, ruby_obj: &Path) -> io::Resu
         gems,
     };
     validate_plan(&plan)?;
-    fs::create_dir_all(project_dir.join(".blanket"))?;
-    fs::write(
-        &cache_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "input_hash": input_hash,
-            "plan": plan,
-        }))?,
-    )?;
-    Ok(plan)
+    // Snapshot guard: the lock this plan derives from is the lock whose
+    // digest provenance will record (Go precedent).
+    let now = fs::read_to_string(&lock_path)?;
+    if now != lock {
+        return Err(err("Gemfile.lock changed while planning; re-run blanket sync"));
+    }
+    Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }
 
 /// Realize the immutable GEM_HOME object: dependency-first sandboxed
@@ -463,12 +514,19 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
         }
         let spec: serde_json::Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| err(format!("{}: spec json: {e}", g.full_name)))?;
+        let canonical = if g.platform == "ruby" {
+            format!("{}-{}", g.name, g.version)
+        } else {
+            format!("{}-{}-{}", g.name, g.version, g.platform)
+        };
         if spec["name"].as_str() != Some(g.name.as_str())
             || spec["version"].as_str() != Some(g.version.as_str())
+            || spec["platform"].as_str() != Some(g.platform.as_str())
+            || g.full_name != canonical
         {
             return Err(err(format!(
-                "{}: embedded gemspec disagrees with the plan ({} {})",
-                g.full_name, spec["name"], spec["version"]
+                "{}: embedded gemspec disagrees with the plan ({} {} {})",
+                g.full_name, spec["name"], spec["version"], spec["platform"]
             )));
         }
         if let Some(exes) = spec["executables"].as_array() {

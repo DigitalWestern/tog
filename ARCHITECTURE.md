@@ -220,8 +220,16 @@ installed dependency-first INSIDE the network-denied sandbox via
 Gem::Installer driven directly by the helper (the `gem install` CLI
 requires network-class code at load time and dies EPERM in-sandbox) —
 native C extensions compile here against host clang (standing impurity).
-Executable-name collisions are detected before install, not left to
-PATH order. Toolchain: Homebrew portable-ruby 3.4.6 (relocatable,
+Binstubs are wrapper SCRIPTS, never symlinks (symlinks dangle after the
+store-commit rename — Sol reproduced the e2e passing via host /usr/bin
+fallback). Executable-name collisions are detected before install, not
+left to PATH order. The planning helper is split: the Gemfile-evaluating
+consistency gate's output is never parsed (a hostile Gemfile can't forge
+plan JSON); artifact coordinates come from a LOCK-ONLY mode. There is no
+project-side plan cache (an editable cache with a predictable key is
+forgeable authority); `blanket run` resolves closure objects THROUGH the
+store by recorded id, never by recorded path (kernel-wide:
+project::closure_object, applied to cargo/go/ruby). Toolchain: Homebrew portable-ruby 3.4.6 (relocatable,
 bundler included; the ruby Homebrew itself ships on — newest portable
 artifact; ruby-lang source may be ahead, documented gap).
 
