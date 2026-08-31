@@ -1,0 +1,737 @@
+//! The Go tailor: module closure via the pinned Go toolchain, blanket-owned
+//! verification (dirhash h1 + raw sha256), immutable GOMODCACHE objects.
+//!
+//! go.sum is an authentication ledger, not a lock graph (Sol review 4): the
+//! authoritative closure comes from `go mod download -json all` run by the
+//! STORE Go in a disposable copy. Blanket then independently re-verifies
+//! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
+//! the store — delegation computes, the kernel verifies.
+
+use crate::dirhash;
+use crate::fetch::{cache_insert, download_verified};
+use crate::sandbox::BuildSpec;
+use crate::store::Store;
+use crate::types::Identity;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const PLATFORM: &str = "aarch64-apple-darwin";
+const GO_VERSION: &str = "1.27.0";
+const GO_URL: &str = "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz";
+const GO_SHA256: &str = "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e";
+const GO_PINS: &[&str] = &[GO_VERSION];
+
+fn err(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// Ensure the pinned Go toolchain is realized in the store.
+pub fn ensure_go(store: &Store) -> io::Result<PathBuf> {
+    let identity = Identity {
+        kind: "go".into(),
+        name: "go".into(),
+        version: GO_VERSION.into(),
+        inputs: BTreeMap::from([
+            ("schema".to_string(), "go-toolchain/1".to_string()),
+            ("artifact_sha256".to_string(), GO_SHA256.to_string()),
+            ("platform".to_string(), PLATFORM.to_string()),
+        ]),
+    };
+    let id = identity.object_id();
+    if store.has(&id) {
+        return Ok(store.object_path(&id));
+    }
+    let tarball = download_verified(store, GO_URL, GO_SHA256)?;
+    let staged = store.stage()?;
+    let status = Command::new("/usr/bin/tar")
+        .args(["-xzf"])
+        .arg(&tarball)
+        .args(["-C"])
+        .arg(&staged)
+        .args(["--strip-components", "1"])
+        .status()?;
+    if !status.success() || !staged.join("bin/go").is_file() {
+        return Err(err("go tarball extraction failed or has unexpected layout"));
+    }
+    store.commit(&identity, &staged)
+}
+
+/// The forced environment for EVERY blanket-controlled go invocation.
+/// Real process env, never a GOENV file: GOTOOLCHAIN=local stops silent
+/// toolchain swaps, GOROOT pins the stdlib, GOWORK/GOENV=off close the
+/// config side doors (Sol review 4).
+pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("GOTOOLCHAIN".to_string(), "local".to_string()),
+        ("GOROOT".to_string(), go_obj.display().to_string()),
+        ("GOENV".to_string(), "off".to_string()),
+        ("GOWORK".to_string(), "off".to_string()),
+        ("GOMODCACHE".to_string(), modcache.display().to_string()),
+        ("GOFLAGS".to_string(), String::new()),
+        ("GOPRIVATE".to_string(), String::new()),
+        ("GONOPROXY".to_string(), String::new()),
+        ("GONOSUMDB".to_string(), String::new()),
+        ("GOINSECURE".to_string(), String::new()),
+        ("GOCACHEPROG".to_string(), String::new()),
+    ];
+    if offline {
+        env.push(("GOPROXY".to_string(), "off".to_string()));
+        env.push(("GOSUMDB".to_string(), "off".to_string()));
+    }
+    env
+}
+
+fn run_go(
+    go_obj: &Path,
+    cwd: &Path,
+    modcache: &Path,
+    offline: bool,
+    args: &[&str],
+) -> io::Result<std::process::Output> {
+    let mut cmd = Command::new(go_obj.join("bin/go"));
+    cmd.args(args).current_dir(cwd);
+    for (k, v) in go_env(go_obj, modcache, offline) {
+        if v.is_empty() {
+            cmd.env_remove(&k);
+        } else {
+            cmd.env(&k, &v);
+        }
+    }
+    cmd.output()
+        .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
+}
+
+/// Toolchain selection from go.mod directives (Sol rules): `go` is a
+/// minimum, `toolchain` a suggestion; pick the lowest pin satisfying both.
+pub fn resolve_toolchain(gomod: &str) -> io::Result<&'static str> {
+    let mut min_go: Option<Vec<u64>> = None;
+    let mut suggestion: Option<Vec<u64>> = None;
+    for line in gomod.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("go ") {
+            min_go = Some(go_version_key(v.trim())?);
+        } else if let Some(v) = line.strip_prefix("toolchain ") {
+            let v = v.trim();
+            if v == "default" {
+                continue;
+            }
+            let v = v.strip_prefix("go").unwrap_or(v);
+            suggestion = Some(go_version_key(v)?);
+        }
+    }
+    let floor = |k: &Option<Vec<u64>>| k.clone().unwrap_or_default();
+    let (need_a, need_b) = (floor(&min_go), floor(&suggestion));
+    GO_PINS
+        .iter()
+        .copied()
+        .filter_map(|p| go_version_key(p).ok().map(|k| (k, p)))
+        .filter(|(k, _)| *k >= need_a && *k >= need_b)
+        .min_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, p)| p)
+        .ok_or_else(|| {
+            err(format!(
+                "no pinned Go toolchain satisfies this module's go/toolchain \
+                 directives; pinned: {}",
+                GO_PINS.join(", ")
+            ))
+        })
+}
+
+/// Go version ordering: numeric dot components, missing patch = 0.
+/// Prerelease suffixes (rc/beta) are rejected — no pins carry them.
+fn go_version_key(v: &str) -> io::Result<Vec<u64>> {
+    let mut key: Vec<u64> = Vec::new();
+    for part in v.split('.') {
+        key.push(part.parse::<u64>().map_err(|_| {
+            err(format!(
+                "unsupported Go version {v:?} (prerelease/custom toolchains \
+                 are not supported; pinned: {})",
+                GO_PINS.join(", ")
+            ))
+        })?);
+    }
+    while key.len() < 3 {
+        key.push(0);
+    }
+    Ok(key)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoModule {
+    pub path: String,
+    pub version: String,
+    pub h1: String,
+    pub zip_sha256: String,
+    pub modfile_h1: String,
+    pub modfile_sha256: String,
+    pub info_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoPlan {
+    pub go_version: String,
+    pub module: String,
+    pub modules: Vec<GoModule>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DownloadEntry {
+    path: String,
+    version: String,
+    #[serde(default)]
+    sum: Option<String>,
+    #[serde(default)]
+    go_mod_sum: Option<String>,
+    #[serde(default)]
+    zip: Option<String>,
+    #[serde(default)]
+    go_mod: Option<String>,
+    #[serde(default)]
+    info: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    replace: Option<Box<DownloadEntry>>,
+}
+
+/// Reject go.work anywhere up the tree (v0: single-module projects only).
+pub fn reject_workspaces(project_dir: &Path) -> io::Result<()> {
+    if std::env::var_os("GOWORK").map_or(false, |v| !v.is_empty() && v != "off") {
+        return Err(err("GOWORK is set; Go workspaces are not supported yet"));
+    }
+    for dir in project_dir.ancestors() {
+        if dir.join("go.work").is_file() {
+            return Err(err(format!(
+                "{}/go.work found; Go workspaces are not supported yet — \
+                 run from a single-module project",
+                dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse the module path from go.mod.
+pub fn module_path(gomod: &str) -> io::Result<String> {
+    for line in gomod.lines() {
+        if let Some(m) = line.trim().strip_prefix("module ") {
+            return Ok(m.trim().trim_matches('"').to_string());
+        }
+    }
+    Err(err("go.mod has no module directive"))
+}
+
+/// Plan the module closure. Network-permitted delegation to the store Go in
+/// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
+/// by blanket-owned verification of every artifact. Cached in
+/// .blanket/go-plan.json keyed by go.mod+go.sum content.
+pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<GoPlan> {
+    reject_workspaces(project_dir)?;
+    let gomod = fs::read_to_string(project_dir.join("go.mod"))
+        .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
+    let go_version = resolve_toolchain(&gomod)?;
+
+    const PLANNER_SCHEMA: &str = "go-planner/1";
+    let input_hash = hex::encode(Sha256::digest(
+        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}").as_bytes(),
+    ));
+    let cache_path = project_dir.join(".blanket/go-plan.json");
+    if let Ok(cached) = fs::read_to_string(&cache_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
+            if v["input_hash"] == input_hash.as_str() {
+                if let Ok(plan) = serde_json::from_value(v["plan"].clone()) {
+                    return Ok(plan);
+                }
+            }
+        }
+    }
+
+    // Consistency gate: tidy -diff is non-mutating (prints a diff, exit
+    // nonzero when go.mod/go.sum need changes). Needs the source tree, so
+    // it runs in the real project — but never writes.
+    let scratch = store.stage()?;
+    let gate_cache = scratch.join("gate-modcache");
+    fs::create_dir_all(&gate_cache)?;
+    let out = run_go(go_obj, project_dir, &gate_cache, false, &["mod", "tidy", "-diff"])?;
+    let (gomod, gosum) = if out.status.success() {
+        (gomod, gosum)
+    } else {
+        // Out-of-sync manifest: run the ecosystem's resolver, the same
+        // delegated mutation as uv pip compile / cargo generate-lockfile.
+        eprintln!("blanket: go.mod/go.sum need updating; resolving with the store go mod tidy...");
+        let out = run_go(go_obj, project_dir, &gate_cache, false, &["mod", "tidy"])?;
+        if !out.status.success() {
+            let _ = crate::store::remove_tree(&scratch);
+            return Err(err(format!(
+                "store go mod tidy failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        (
+            fs::read_to_string(project_dir.join("go.mod"))?,
+            fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default(),
+        )
+    };
+    // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
+    let go_version = resolve_toolchain(&gomod)?;
+    let module = module_path(&gomod)?;
+    let input_hash = hex::encode(Sha256::digest(
+        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}").as_bytes(),
+    ));
+
+    // Disposable copy for download (it may rewrite go.mod/go.sum).
+    let work = scratch.join("plan");
+    fs::create_dir_all(&work)?;
+    fs::write(work.join("go.mod"), &gomod)?;
+    if !gosum.is_empty() {
+        fs::write(work.join("go.sum"), &gosum)?;
+    }
+    let modcache = scratch.join("modcache");
+    fs::create_dir_all(&modcache)?;
+    eprintln!("blanket: computing Go module closure with the store toolchain...");
+    let out = run_go(go_obj, &work, &modcache, false, &["mod", "download", "-json", "all"])?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Parse the JSON stream (concatenated objects) BEFORE checking status:
+    // per-module errors ride in the stream.
+    let mut modules = Vec::new();
+    let mut de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
+    let result: io::Result<()> = (|| {
+        while let Some(entry) = de.next() {
+            let entry = entry.map_err(|e| err(format!("go mod download JSON: {e}")))?;
+            if let Some(msg) = &entry.error {
+                return Err(err(format!(
+                    "{}@{}: {msg} (a selected module failed to download; the \
+                     closure would be incomplete)",
+                    entry.path, entry.version
+                )));
+            }
+            // A version-to-version replace surfaces the replacement's
+            // artifacts on the outer entry; a local-path replace has no
+            // Version and no integrity — fail closed.
+            if let Some(rep) = &entry.replace {
+                if rep.version.is_empty()
+                    || rep.path.starts_with('.')
+                    || rep.path.starts_with('/')
+                {
+                    return Err(err(format!(
+                        "{}: local-path replace directives are not supported \
+                         yet (no go.sum integrity); vendor a released version",
+                        entry.path
+                    )));
+                }
+            }
+            let (Some(zip), Some(gomod_file), Some(sum), Some(gomod_sum)) =
+                (&entry.zip, &entry.go_mod, &entry.sum, &entry.go_mod_sum)
+            else {
+                continue; // main module / no artifacts
+            };
+            // Blanket-owned verification: recompute both dirhashes.
+            let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
+            if got_h1 != *sum {
+                return Err(err(format!(
+                    "{}@{}: zip dirhash mismatch\n  expected {sum}\n  got      {got_h1}",
+                    entry.path, entry.version
+                )));
+            }
+            let got_mod_h1 = dirhash::hash_gomod(Path::new(gomod_file))?;
+            if got_mod_h1 != *gomod_sum {
+                return Err(err(format!(
+                    "{}@{}: go.mod dirhash mismatch\n  expected {gomod_sum}\n  got      {got_mod_h1}",
+                    entry.path, entry.version
+                )));
+            }
+            let (zip_sha256, _) = cache_insert(store, Path::new(zip))?;
+            let (modfile_sha256, _) = cache_insert(store, Path::new(gomod_file))?;
+            let info = entry.info.as_deref().ok_or_else(|| {
+                err(format!("{}@{}: download entry has no Info file", entry.path, entry.version))
+            })?;
+            let (info_sha256, _) = cache_insert(store, Path::new(info))?;
+            modules.push(GoModule {
+                path: entry.path,
+                version: entry.version,
+                h1: sum.clone(),
+                zip_sha256,
+                modfile_h1: gomod_sum.clone(),
+                modfile_sha256,
+                info_sha256,
+            });
+        }
+        if !out.status.success() {
+            return Err(err(format!(
+                "go mod download failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(())
+    })();
+    let _ = crate::store::remove_tree(&scratch);
+    result?;
+    modules.sort_by(|a, b| (&a.path, &a.version).cmp(&(&b.path, &b.version)));
+
+    let plan = GoPlan {
+        go_version: go_version.to_string(),
+        module,
+        modules,
+    };
+    fs::create_dir_all(project_dir.join(".blanket"))?;
+    fs::write(
+        &cache_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "input_hash": input_hash,
+            "plan": plan,
+        }))?,
+    )?;
+    Ok(plan)
+}
+
+/// Go's module path/version escaping: uppercase c -> "!c" (module paths
+/// never contain '!' themselves; validated below).
+pub fn escape_go_path(s: &str) -> io::Result<String> {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' => {
+                out.push('!');
+                out.push(c.to_ascii_lowercase());
+            }
+            '!' => return Err(err(format!("invalid Go module path/version {s:?}"))),
+            _ => out.push(c),
+        }
+    }
+    for seg in out.split('/') {
+        if seg == ".." || seg == "." || seg.is_empty() {
+            return Err(err(format!("unsafe Go module path/version {s:?}")));
+        }
+    }
+    if !out
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._~!+-/".contains(&b))
+    {
+        return Err(err(format!("invalid characters in Go module path/version {s:?}")));
+    }
+    Ok(out)
+}
+
+/// Stage the cache/download skeleton for a plan (zips, .mod, .info,
+/// blanket-verified .ziphash) from the verified artifact cache.
+pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> io::Result<()> {
+    for m in &plan.modules {
+        let dir = staged
+            .join("cache/download")
+            .join(escape_go_path(&m.path)?)
+            .join("@v");
+        fs::create_dir_all(&dir)?;
+        let ver = escape_go_path(&m.version)?;
+        for (hash, ext) in [
+            (&m.zip_sha256, "zip"),
+            (&m.modfile_sha256, "mod"),
+            (&m.info_sha256, "info"),
+        ] {
+            let src = store.cache_path("sha256", hash);
+            if !src.is_file() {
+                return Err(err(format!(
+                    "{}@{}: artifact {hash} missing from cache; re-run sync",
+                    m.path, m.version
+                )));
+            }
+            // COPY, never hardlink: builds must not reach the cache.
+            fs::copy(&src, dir.join(format!("{ver}.{ext}")))?;
+        }
+        fs::write(dir.join(format!("{ver}.ziphash")), &m.h1)?;
+    }
+    Ok(())
+}
+
+/// Realize the immutable GOMODCACHE object: verified skeleton + extraction
+/// delegated to the store Go offline (full x/mod/zip validation), whose
+/// recipe is part of the identity.
+pub fn realize_modcache(store: &Store, plan: &GoPlan, go_obj: &Path) -> io::Result<PathBuf> {
+    let mut inputs = BTreeMap::from([
+        ("schema".to_string(), "go-modcache/1".to_string()),
+        (
+            "extractor".to_string(),
+            format!("go{}:{}", GO_VERSION, GO_SHA256),
+        ),
+    ]);
+    for m in &plan.modules {
+        inputs.insert(
+            format!("mod:{}@{}", m.path, m.version),
+            format!("{}:{}", m.h1, m.zip_sha256),
+        );
+        inputs.insert(
+            format!("modfile:{}@{}", m.path, m.version),
+            format!("{}:{}", m.modfile_h1, m.modfile_sha256),
+        );
+        inputs.insert(format!("info:{}@{}", m.path, m.version), m.info_sha256.clone());
+    }
+    let identity = Identity {
+        kind: "go-modcache".into(),
+        name: "modcache".into(),
+        version: plan.modules.len().to_string(),
+        inputs,
+    };
+    let id = identity.object_id();
+    if store.has(&id) {
+        return Ok(store.object_path(&id));
+    }
+
+    let staged = store.stage()?;
+    stage_modcache_skeleton(store, plan, &staged)?;
+    // Offline extraction by the store Go: it re-verifies ziphash and runs
+    // its full zip validation while materializing <module>@<version>/ dirs.
+    if !plan.modules.is_empty() {
+        let scratch = store.stage()?;
+        let mut gomod = format!("module blanket.invalid/extract\n\ngo {}\n\nrequire (\n", {
+            // go directive: major.minor only
+            let mut it = GO_VERSION.split('.');
+            format!("{}.{}", it.next().unwrap_or("1"), it.next().unwrap_or("0"))
+        });
+        let mut gosum = String::new();
+        for m in &plan.modules {
+            gomod.push_str(&format!("\t{} {}\n", m.path, m.version));
+            gosum.push_str(&format!("{} {} {}\n", m.path, m.version, m.h1));
+            gosum.push_str(&format!("{} {}/go.mod {}\n", m.path, m.version, m.modfile_h1));
+        }
+        gomod.push_str(")\n");
+        fs::write(scratch.join("go.mod"), &gomod)?;
+        fs::write(scratch.join("go.sum"), &gosum)?;
+        let out = run_go(go_obj, &scratch, &staged, true, &["mod", "download", "all"])?;
+        let _ = crate::store::remove_tree(&scratch);
+        if !out.status.success() {
+            return Err(err(format!(
+                "offline module extraction failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    }
+    // The extraction writes lock files under cache/lock and per-module
+    // .lock files; harmless immutable residue.
+    store.commit(&identity, &staged)
+}
+
+/// Project provenance (closure envelope). Go needs no wrapper or config
+/// projection: enforcement is process env, set by blanket run/build.
+pub fn project_go_env(
+    project_dir: &Path,
+    go_obj: &Path,
+    modcache_obj: &Path,
+    plan: &GoPlan,
+    gosum_sha256: &str,
+) -> io::Result<()> {
+    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
+        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
+    };
+    crate::project::write_closure(
+        project_dir,
+        "go",
+        serde_json::json!({
+            "go_object": object_ref(&go_obj.canonicalize()?)?,
+            "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
+            "go_sum_sha256": gosum_sha256,
+            "plan": plan,
+        }),
+    )
+}
+
+/// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
+/// staged in scratch and moved into the project by blanket afterwards.
+pub fn build_sandboxed(
+    project_dir: &Path,
+    go_obj: &Path,
+    modcache_obj: &Path,
+    args: &[String],
+) -> io::Result<()> {
+    const FORBIDDEN: &[&str] = &["-mod", "-modfile", "-modcacherw", "-toolexec", "-overlay", "-exec", "-o"];
+    for arg in args {
+        if FORBIDDEN
+            .iter()
+            .any(|f| arg == f || arg.starts_with(&format!("{f}=")))
+        {
+            return Err(err(format!(
+                "{arg}: this flag is managed by blanket (module mode, output \
+                 staging, and tool execution are enforced)"
+            )));
+        }
+    }
+    let project_dir = project_dir.canonicalize()?;
+    let go_obj = go_obj.canonicalize()?;
+    let modcache_obj = modcache_obj.canonicalize()?;
+    let store = Store::open()?;
+    let scratch = store.stage()?;
+    let outdir = scratch.join("out");
+    for sub in ["out", "gocache", "gotmp", "gopath"] {
+        fs::create_dir_all(scratch.join(sub))?;
+    }
+    let mut argv = vec![
+        go_obj.join("bin/go").display().to_string(),
+        "build".to_string(),
+        "-mod=readonly".to_string(),
+        "-o".to_string(),
+        format!("{}/", outdir.display()),
+    ];
+    let mut env = go_env(&go_obj, &modcache_obj, true);
+    env.push(("GOCACHE".to_string(), scratch.join("gocache").display().to_string()));
+    env.push(("GOTMPDIR".to_string(), scratch.join("gotmp").display().to_string()));
+    env.push(("GOPATH".to_string(), scratch.join("gopath").display().to_string()));
+    let env: Vec<(String, String)> = env.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+    argv.extend(args.iter().cloned());
+    // Default package is "." (go's own default) — never "./...": recursing
+    // the whole tree trips over nested non-project Go files (testdata,
+    // vendored tools). Multi-package builds pass patterns explicitly.
+    if !args.iter().any(|a| !a.starts_with('-')) {
+        argv.push(".".to_string());
+    }
+    let spec = BuildSpec {
+        argv,
+        cwd: project_dir.clone(),
+        env,
+        read: vec![project_dir.clone(), go_obj.clone(), modcache_obj.clone()],
+        write: vec![],
+        scratch: scratch.clone(),
+        path: format!("{}:/usr/bin:/bin", go_obj.join("bin").display()),
+    };
+    let result = crate::sandbox::run_build_spec(&spec).map_err(|e| {
+        err(format!(
+            "go build failed: {e}; network is denied during builds (local \
+             replace directives and network-dependent tooling are unsupported)"
+        ))
+    });
+    let moved: io::Result<()> = result.and_then(|_| {
+        for entry in fs::read_dir(&outdir)? {
+            let entry = entry?;
+            let dest = project_dir.join(entry.file_name());
+            fs::rename(entry.path(), &dest)
+                .or_else(|_| fs::copy(entry.path(), &dest).map(|_| ()))?;
+            eprintln!("blanket: built {}", dest.display());
+        }
+        Ok(())
+    });
+    let _ = crate::store::remove_tree(&scratch);
+    moved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolchain_selection_rules() {
+        assert_eq!(resolve_toolchain("module m\n\ngo 1.21\n").unwrap(), "1.27.0");
+        assert_eq!(
+            resolve_toolchain("module m\n\ngo 1.27\n\ntoolchain go1.27.0\n").unwrap(),
+            "1.27.0"
+        );
+        assert_eq!(
+            resolve_toolchain("module m\n\ngo 1.24\n\ntoolchain default\n").unwrap(),
+            "1.27.0"
+        );
+        // Requirement above every pin -> fail.
+        assert!(resolve_toolchain("module m\n\ngo 1.99\n").is_err());
+        // Prerelease -> fail with instructions.
+        assert!(resolve_toolchain("module m\n\ngo 1.27rc1\n").is_err());
+    }
+
+    #[test]
+    fn escaping_matches_go_rules() {
+        assert_eq!(escape_go_path("rsc.io/quote").unwrap(), "rsc.io/quote");
+        assert_eq!(
+            escape_go_path("github.com/BurntSushi/toml").unwrap(),
+            "github.com/!burnt!sushi/toml"
+        );
+        assert!(escape_go_path("a/../b").is_err());
+        assert!(escape_go_path("weird!path").is_err());
+        assert!(escape_go_path("sp ace").is_err());
+    }
+
+    #[test]
+    fn download_json_parsing_and_replace_rules() {
+        let entry: DownloadEntry = serde_json::from_str(
+            r#"{"Path":"a","Version":"v1.0.0","Sum":"h1:x","GoModSum":"h1:y",
+                "Zip":"/z","GoMod":"/m","Info":"/i",
+                "Replace":{"Path":"b","Version":"v1.0.1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(entry.replace.as_ref().unwrap().path, "b");
+        let local: DownloadEntry = serde_json::from_str(
+            r#"{"Path":"a","Version":"v1.0.0","Replace":{"Path":"../local","Version":""}}"#,
+        )
+        .unwrap();
+        let rep = local.replace.unwrap();
+        assert!(rep.version.is_empty() || rep.path.starts_with('.'));
+    }
+
+    #[test]
+    fn build_rejects_managed_flags() {
+        for bad in ["-mod=mod", "-toolexec", "-o", "-overlay=x", "-modcacherw"] {
+            let e = build_sandboxed(
+                Path::new("/nonexistent"),
+                Path::new("/nonexistent"),
+                Path::new("/nonexistent"),
+                &[bad.to_string()],
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(e.contains("managed by blanket"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn module_path_and_workspace_guard() {
+        assert_eq!(module_path("module hello\n\ngo 1.27\n").unwrap(), "hello");
+        assert!(module_path("go 1.27\n").is_err());
+    }
+
+    #[test]
+    fn modcache_skeleton_layout() {
+        let temp = std::env::temp_dir().join(format!(
+            "blanket-go-skel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_var("BLANKET_STORE", temp.join("store"));
+        let store = Store::open().unwrap();
+        std::env::remove_var("BLANKET_STORE");
+        // Seed three fake artifacts into the cache.
+        let mut hashes = Vec::new();
+        for content in ["zipbytes", "modbytes", "infobytes"] {
+            let f = temp.join(content);
+            std::fs::write(&f, content).unwrap();
+            hashes.push(cache_insert(&store, &f).unwrap().0);
+        }
+        let plan = GoPlan {
+            go_version: "1.27.0".into(),
+            module: "m".into(),
+            modules: vec![GoModule {
+                path: "github.com/BurntSushi/toml".into(),
+                version: "v1.4.0".into(),
+                h1: "h1:zip".into(),
+                zip_sha256: hashes[0].clone(),
+                modfile_h1: "h1:mod".into(),
+                modfile_sha256: hashes[1].clone(),
+                info_sha256: hashes[2].clone(),
+            }],
+        };
+        let staged = temp.join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        stage_modcache_skeleton(&store, &plan, &staged).unwrap();
+        let base = staged.join("cache/download/github.com/!burnt!sushi/toml/@v");
+        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.ziphash")).unwrap(), "h1:zip");
+        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.zip")).unwrap(), "zipbytes");
+        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.mod")).unwrap(), "modbytes");
+        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.info")).unwrap(), "infobytes");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+}

@@ -6,14 +6,14 @@ per-language package managers by owning the outer loop every ecosystem
 shares: fetch a toolchain, lock a dependency graph, materialize it into an
 immutable store, project an environment, run tasks.
 
-Three ecosystems are built. Python and JavaScript/npm are proven on real
+Four ecosystems are built. Python and JavaScript/npm are proven on real
 projects: Next.js 15 + vitest suites, vite apps (build AND dev server),
 prisma, native addons compiled hermetically (better-sqlite3, sharp),
-FastAPI apps with native wheels. Cargo (Rust) landed 2026-08-31 as the
-wrap-hermetically tailor. Tailor cost, measured honestly (adapter code
-excluding tests): Python ~1030 lines (pypi+wheel+python+build), npm ~1015
-(self-contained), cargo ~690 — the lines-per-tailor curve falls, modestly;
-the kernel thesis holds.
+FastAPI apps with native wheels. Cargo (Rust) and Go both landed
+2026-08-31 as wrap-hermetically tailors. Tailor cost, measured honestly
+(adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+
+build), npm ~1015 (self-contained), cargo ~690, go ~600 — the
+lines-per-tailor curve keeps falling; the kernel thesis holds.
 
 ## The model (stolen from Nix, minus the interface)
 
@@ -176,6 +176,31 @@ dependencies aren't validated at plan time; the build sandbox makes them
 fail loudly. Because rooting delegates to cargo, even `blanket plan`
 realizes the toolchain first (~105MB once, then cached) — correctness
 over a light first plan.
+
+## The Go tailor (delegation computes, the kernel verifies)
+
+go.sum is an authentication ledger, not a lock graph (Sol review 4), so
+the closure is computed by the STORE Go toolchain itself: `go mod tidy
+-diff` gates consistency (an out-of-sync manifest triggers a delegated
+`go mod tidy`, the same named-resolver mutation as uv/cargo lockfile
+generation), then `go mod download -json all` runs in a disposable copy.
+Blanket then re-verifies EVERY artifact itself — dirhash h1 (`dirhash.rs`
+reproduces go.sum's Hash1 byte-for-byte, proven against real values) plus
+raw sha256 — before bytes enter the verified cache. The comforter is a
+`go-modcache` object: cache/download skeleton (zips/.mod/.info/.ziphash)
+from the verified cache, extracted offline by the store Go (whose version
+is an identity input — the extractor is part of the recipe).
+
+Enforcement is pure process environment (Go has no project config file):
+GOTOOLCHAIN=local (the "auto" default silently swaps toolchains!),
+GOROOT=<store go>, GOENV=off, GOWORK=off, GOFLAGS cleared, GOPROXY=off +
+GOSUMDB=off when offline — set as real env vars by `blanket run` and
+`blanket build`, one helper, everywhere. `blanket build [go]` runs
+`go build -mod=readonly` in the sandbox with the project READ-ONLY:
+outputs are staged in scratch and moved in by blanket afterwards;
+-mod/-modfile/-modcacherw/-toolexec/-overlay/-exec/-o are rejected.
+v0 fail-closed gaps: go.work workspaces, local-path replace directives.
+cgo uses host clang (the standing accepted impurity).
 
 ## Resolution is delegated; realization is owned
 

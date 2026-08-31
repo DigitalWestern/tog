@@ -185,6 +185,19 @@ else
   bad "netdeny build failed (or network was reachable)"
 fi
 
+echo "== 10e. go: modcache projection + sandboxed build + offline rebuild"
+cp -R "$FIXTURES/go-hello" "$WORK/go"
+(cd "$WORK/go" && "$BLANKET" sync)
+(cd "$WORK/go" && "$BLANKET" build)
+OUT=$(cd "$WORK/go" && ./hello)
+[ "$OUT" = "Hello, world." ] && ok "go build + run ($OUT)" || bad "go output: $OUT"
+rm -f "$WORK/go/hello"
+if (cd "$WORK/go" && "$BLANKET" build go); then
+  ok "go rebuild from store (sandboxed, network-denied)"
+else
+  bad "go rebuild failed"
+fi
+
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$BLANKET" sync)

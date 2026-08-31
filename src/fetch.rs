@@ -136,6 +136,41 @@ pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<P
     download_verified_digest(store, url, &Digest::sha256(sha256)?)
 }
 
+/// Insert a local file into the verified artifact cache by its computed
+/// sha256 (for artifacts obtained through delegated tools and then verified
+/// by blanket — e.g. Go module zips h1-checked by dirhash). Returns
+/// (sha256 hex, cache path). Publication mirrors download_verified.
+pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String, PathBuf)> {
+    let hex = hash_file(src, Algo::Sha256)?;
+    let dest = store.cache_path("sha256", &hex);
+    if dest.is_file() {
+        return Ok((hex, dest));
+    }
+    fs::create_dir_all(dest.parent().unwrap())?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = store.root.join("tmp").join(format!(
+        "ins-{}-{}-{hex}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::copy(src, &tmp)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(&tmp, perms)?;
+    }
+    match fs::rename(&tmp, &dest) {
+        Ok(()) => {}
+        Err(_) if dest.is_file() => {
+            let _ = fs::remove_file(&tmp);
+        }
+        Err(e) => return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}"))),
+    }
+    Ok((hex, dest))
+}
+
 /// Download `url`, verify its digest, and place it in the store's artifact
 /// cache (keyed by algo/hex). Idempotent; an existing entry short-circuits
 /// (offline reconstruction). file:// URLs read local files (mirrors, tests).

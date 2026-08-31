@@ -98,9 +98,16 @@ Ordered by (usefulness to Ethan) x (cheapness given the kernel):
    lines (npm ~1015, python ~1030 incl. wheel/toolchain/build) — the
    curve falls, modestly. Known v0 gaps (fail closed): git deps,
    alternative registries, beta/nightly/cross targets.
-2. **Go** — go.sum is hash-pinned by design; toolchain is one tarball;
-   no install scripts anywhere in the ecosystem. Second-cheapest, very
-   enterprise-relevant.
+2. ~~**Go**~~ **DONE 2026-08-31** — fourth tailor, one session after
+   cargo. Closure via store-Go `go mod download -json` (go.sum is a
+   ledger, not a lock — Sol), blanket-owned dirhash h1 + sha256
+   verification, immutable go-modcache objects, env-enforced pinning
+   (GOTOOLCHAIN=local et al.), sandboxed staged-output builds. Kernel
+   gained the universality contracts Sol prescribed: closure envelope
+   (.blanket/closures/<eco>.json) + generic sandbox BuildSpec +
+   multi-ecosystem `blanket build` dispatch. Real-project proof: cobra +
+   BurntSushi/toml from a bare go.mod (auto-tidy resolution, 8-module
+   verified closure). v0 gaps fail closed: go.work, local-path replaces.
 3. **Ruby (Gemfile.lock)** — moderate; native extensions reuse the
    sandboxed-build machinery Python already built.
 4. **System packages (the Homebrew replacement)** — the big one, kept
