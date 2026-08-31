@@ -122,6 +122,22 @@ cp -R "$FIXTURES/proj-npm" "$WORK/nm"
 if touch "$WORK/nm/node_modules/is-odd/scratch" 2>/dev/null; then ok "declared mutable package is writable"; else bad "mutable package not writable"; fi
 grep -q '"mutable_state": "unattested"' "$WORK/nm/.blanket/node-closure.json" && ok "closure records unattested mutable state" || bad "closure missing mutable_state"
 
+echo "== 10c. cargo: vendor projection + sandboxed build + offline rebuild"
+cp -R "$FIXTURES/cargo-hello" "$WORK/cargo"
+(cd "$WORK/cargo" && "$BLANKET" sync)
+(cd "$WORK/cargo" && "$BLANKET" build)
+OUT=$(cd "$WORK/cargo" && "$BLANKET" run target/debug/cargo-hello)
+[ "$OUT" = "hello 128" ] && ok "cargo build + run ($OUT)" || bad "cargo output: $OUT"
+# blanket build itself runs cargo inside the network-denied sandbox (an
+# outer sandbox-exec cannot nest); a clean-target rebuild proves the store
+# serves everything.
+rm -rf "$WORK/cargo/target"
+if (cd "$WORK/cargo" && "$BLANKET" build); then
+  ok "cargo rebuild from store (sandboxed, network-denied)"
+else
+  bad "cargo rebuild failed"
+fi
+
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$BLANKET" sync)

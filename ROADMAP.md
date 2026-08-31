@@ -65,8 +65,8 @@ binary:
 
 | pillar | status | next step |
 |---|---|---|
-| **Package manager** | ✅ built for Python + npm (hash-pinned lockfile realizer) | third ecosystem (cargo wrap is cheapest); native resolver later |
-| **Toolchain manager** | ✅ built (pinned CPython 3.12/3.13, Node 24) | more versions + languages; signed manifests; `.python-version`-style selection per project everywhere |
+| **Package manager** | ✅ built for Python + npm + cargo (hash-pinned lockfile realizer) | fourth ecosystem (Go is next-cheapest); native resolver later |
+| **Toolchain manager** | ✅ built (pinned CPython 3.12/3.13, Node 24, Rust 1.96.1 w/ rust-toolchain.toml resolution) | more versions + languages; signed manifests; `.python-version`-style selection per project everywhere |
 | **Task runner** | ⬜ not started | `blanket test` / `blanket build` / `blanket <script>` reading package.json scripts + a `blanket.toml` for cross-language tasks. Sol's caution: mise already owns this shape — differentiate by running tasks *inside the projected env* with provenance, or wait for a real polyglot workspace need |
 | **Runtime manager** | 🟡 partial | today blanket owns *distribution + invocation* of runtimes (the uv/zig model, deliberately chosen over bun-style engine rewrites). A native runtime remains a possible later optimization, per-ecosystem, where it buys speed or security — the interface already allows it |
 
@@ -85,11 +85,19 @@ perfect languages is a niche tool.
 
 Ordered by (usefulness to Ethan) x (cheapness given the kernel):
 
-1. **cargo (Rust)** — cheapest possible tailor: Cargo.lock is already
-   exact + checksummed, and per Sol, wrapping cargo hermetically
-   (sandboxed, vendored registry sources, pinned rustc toolchain object)
-   may be *permanently* correct rather than a stopgap. Proves the "wrap
-   first, native later — or never" doctrine.
+1. ~~**cargo (Rust)**~~ **DONE 2026-08-31** — wrapped hermetically per
+   Sol's design (GO-WITH-CHANGES, all adopted except plan-time `cargo
+   metadata` path-dep validation — the build sandbox enforces it
+   naturally): vendored directory sources with generated checksums, cargo
+   wrapper forcing `--frozen --config`, sandboxed `blanket build`, pinned
+   toolchain with rust-toolchain.toml resolution. Sol's code review
+   (round 2) was NO-GO with four reproduced exploits — user --config
+   override, symlinked-bin projection escape, ancestor-lock mis-rooting,
+   build-script wrapper poisoning — all fixed same day (+ RUSTC forcing,
+   toolchain identity schema) with regression tests. Cost: ~690 adapter
+   lines (npm ~1015, python ~1030 incl. wheel/toolchain/build) — the
+   curve falls, modestly. Known v0 gaps (fail closed): git deps,
+   alternative registries, beta/nightly/cross targets.
 2. **Go** — go.sum is hash-pinned by design; toolchain is one tarball;
    no install scripts anywhere in the ecosystem. Second-cheapest, very
    enterprise-relevant.
@@ -160,7 +168,10 @@ starves.
 - [ ] `blanket sbom` — CycloneDX export of a project's closure(s)
 - [ ] Policy engine v0 — registry allowlist + package allow/deny, fail closed
 - [ ] Task runner v0 — `blanket run <script>` from package.json scripts
-- [ ] Third tailor — cargo (wrap, hermetically)
+- [x] Third tailor — cargo (wrap, hermetically) — done 2026-08-31
+- [ ] Cargo follow-ups: git deps, per-crate vendor objects (M5
+      per-package plan), `blanket build` for test/clippy invocations,
+      declared artifacts for network-needing build scripts
 - [ ] M5 hardening backlog (ARCHITECTURE.md): RECORD rewrite, Mach-service
       allowlist, deployment-target tags, streaming extractors, `blanket gc`
       (now also: forests + backups, with liveness checks)

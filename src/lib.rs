@@ -1,4 +1,5 @@
 pub mod build;
+pub mod cargo;
 pub mod fetch;
 pub mod npm;
 pub mod project;

@@ -31,6 +31,7 @@ blanket sync        # realize + project -> ./.venv and/or ./node_modules
 blanket run python app.py       # run inside the projected env(s)
 blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
+blanket build                   # sandboxed Cargo build (network denied)
 blanket store path              # where the store lives
 blanket sync --fresh            # rebuild the projection (drops caches)
 ```
@@ -61,6 +62,12 @@ verified toolchains (python-build-standalone CPython; nodejs.org Node)
 into the store and wires `.venv` / `node_modules` to them. A project with
 both lockfiles gets both ecosystems from one sync — one kernel, two
 adapters.
+
+Cargo projects use the pinned store Rust toolchain and a vendor directory
+source. `blanket build` runs Cargo in the network-denied sandbox; `blanket run
+cargo ...` uses the projected offline wrapper without sandboxing. `cargo
+install` through that wrapper writes unmanaged binaries into the projected
+Cargo home and is not recorded in `cargo-closure.json`.
 
 Properties the store gives you (see `tests/acceptance.sh`, which proves
 each one against real PyPI):
