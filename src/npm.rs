@@ -321,7 +321,11 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
 
 /// Realize the node_modules tree as an immutable store object.
 /// Object content root contains exactly `node_modules/`.
-pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
+pub fn realize_node_env(
+    store: &Store,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+) -> io::Result<PathBuf> {
     let node_obj = ensure_node(store).map_err(|e| err(format!("ensure node: {e}")))?;
 
     let mut inputs = BTreeMap::new();
@@ -349,6 +353,16 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
             .is_some()
         {
             return Err(err(format!("duplicate lockfile path: {}", p.path)));
+        }
+    }
+    // Declared artifacts are build inputs: they change what install
+    // scripts produce, so they are part of the identity.
+    for a in artifacts {
+        if inputs
+            .insert(format!("artifact:{}", a.path), a.sha256.clone())
+            .is_some()
+        {
+            return Err(err(format!("duplicate artifact path: {}", a.path)));
         }
     }
     let identity = Identity {
@@ -469,7 +483,7 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
         }
     }
 
-    run_install_scripts(store, &staged, &node_obj, plan)?;
+    run_install_scripts(store, &staged, &node_obj, plan, artifacts)?;
 
     store
         .commit(&identity, &staged)
@@ -492,6 +506,7 @@ fn run_install_scripts(
     staged: &Path,
     node_obj: &Path,
     plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
 ) -> io::Result<()> {
     // Deepest first: nested deps build before their dependents.
     let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
@@ -541,6 +556,18 @@ fn run_install_scripts(
                 )?;
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(bin.join("node-gyp"), fs::Permissions::from_mode(0o755))?;
+                // Plant declared artifacts where installers look for them
+                // (paths are HOME-relative; HOME is this scratch dir).
+                for a in artifacts {
+                    let src = crate::fetch::download_verified(store, &a.url, &a.sha256)
+                        .map_err(|e| err(format!("declared artifact {}: {e}", a.url)))?;
+                    let dest = t.join(&a.path);
+                    fs::create_dir_all(dest.parent().unwrap())?;
+                    fs::copy(&src, &dest).map_err(|e| {
+                        err(format!("placing declared artifact {}: {e}", a.path))
+                    })?;
+                    eprintln!("blanket: declared artifact ready: ~/{}", a.path);
+                }
                 scratch.insert(t).clone()
             }
         };
@@ -587,9 +614,17 @@ fn run_install_scripts(
                     .display()
                     .to_string(),
             ),
-            // Skip prebuilt-binary download attempts entirely; they would
-            // only burn time failing against the denied network.
-            ("npm_config_build_from_source".into(), "true".into()),
+            // NOTE: npm_config_build_from_source is deliberately NOT set:
+            // it would make packages like sharp skip their local-cache
+            // lookup (where declared artifacts land). Downloaders fail
+            // fast against the denied network and fall through to their
+            // source-build path on their own.
+            // Deterministic npm cache location inside the scratch HOME —
+            // also where declared artifacts under .npm/ land.
+            (
+                "npm_config_cache".into(),
+                tmp.join(".npm").display().to_string(),
+            ),
             ("npm_package_name".into(), p.name.clone()),
             ("npm_package_version".into(), p.version.clone()),
         ];
@@ -637,25 +672,45 @@ fn run_install_scripts(
     Ok(())
 }
 
+/// A project-declared build input: a URL + sha256 that blanket prefetches
+/// into the verified artifact cache and plants at `path` (relative to the
+/// sandbox HOME) before install scripts run. This is how packages that
+/// "download prebuilt binaries at install time" (old sharp, etc.) build
+/// hermetically: their downloader finds the file already cached, the
+/// network stays denied, and the hash is a declared, verified input.
+#[derive(Debug, Clone)]
+pub struct DeclaredArtifact {
+    pub url: String,
+    pub sha256: String,
+    /// Where the file must appear, relative to the sandbox HOME
+    /// (e.g. ".npm/_libvips/libvips-8.14.5-darwin-arm64v8.tar.br").
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BlanketConfig {
+    pub mutable_packages: Vec<String>,
+    pub artifacts: Vec<DeclaredArtifact>,
+}
+
 /// Strictly parse the optional `"blanket"` config field of package.json.
-/// Returns the sorted, deduplicated mutable-package list. Unknown keys and
-/// malformed names are hard errors: this list weakens provenance, so typos
-/// must not be silently ignored.
-pub fn parse_blanket_config(pkg_json: &str) -> io::Result<Vec<String>> {
+/// Unknown keys and malformed values are hard errors: this config weakens
+/// or extends the trust boundary, so typos must not be silently ignored.
+pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
     let v: serde_json::Value = serde_json::from_str(pkg_json)
         .map_err(|e| err(format!("package.json: {e}")))?;
     let cfg = match v.get("blanket") {
-        None => return Ok(Vec::new()),
+        None => return Ok(BlanketConfig::default()),
         Some(c) => c
             .as_object()
             .ok_or_else(|| err("package.json: \"blanket\" must be an object"))?,
     };
     for key in cfg.keys() {
-        if key != "mutablePackages" {
+        if key != "mutablePackages" && key != "artifacts" {
             return Err(err(format!("package.json: unknown blanket key {key:?}")));
         }
     }
-    let mut names: Vec<String> = Vec::new();
+    let mut out = BlanketConfig::default();
     if let Some(list) = cfg.get("mutablePackages") {
         let arr = list
             .as_array()
@@ -673,12 +728,44 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<Vec<String>> {
             if !ok {
                 return Err(err(format!("blanket.mutablePackages: bad name {name:?}")));
             }
-            names.push(name.to_string());
+            out.mutable_packages.push(name.to_string());
         }
     }
-    names.sort();
-    names.dedup();
-    Ok(names)
+    if let Some(list) = cfg.get("artifacts") {
+        let arr = list
+            .as_array()
+            .ok_or_else(|| err("blanket.artifacts must be an array"))?;
+        for item in arr {
+            let url = item["url"].as_str().unwrap_or_default();
+            let sha256 = item["sha256"].as_str().unwrap_or_default();
+            let path = item["path"].as_str().unwrap_or_default();
+            if !url.starts_with("https://") {
+                return Err(err(format!("blanket.artifacts: url must be https ({url:?})")));
+            }
+            if sha256.len() != 64
+                || !sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            {
+                return Err(err("blanket.artifacts: sha256 must be 64 lowercase hex chars"));
+            }
+            let path_ok = !path.is_empty()
+                && !path.starts_with('/')
+                && path
+                    .split('/')
+                    .all(|c| !c.is_empty() && c != "." && c != "..");
+            if !path_ok {
+                return Err(err(format!("blanket.artifacts: unsafe path {path:?}")));
+            }
+            out.artifacts.push(DeclaredArtifact {
+                url: url.into(),
+                sha256: sha256.into(),
+                path: path.into(),
+            });
+        }
+    }
+    out.mutable_packages.sort();
+    out.mutable_packages.dedup();
+    out.artifacts.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
 }
 
 /// Project the env into the project as a "forest": node_modules is a symlink
@@ -980,17 +1067,35 @@ mod tests {
 
     #[test]
     fn blanket_config_parsing() {
-        assert!(parse_blanket_config(r#"{"name":"x"}"#).unwrap().is_empty());
+        let empty = parse_blanket_config(r#"{"name":"x"}"#).unwrap();
+        assert!(empty.mutable_packages.is_empty() && empty.artifacts.is_empty());
         let ok = parse_blanket_config(
             r#"{"blanket":{"mutablePackages":["b","@prisma/engines","b"]}}"#,
         )
         .unwrap();
-        assert_eq!(ok, vec!["@prisma/engines".to_string(), "b".to_string()]);
+        assert_eq!(
+            ok.mutable_packages,
+            vec!["@prisma/engines".to_string(), "b".to_string()]
+        );
         // unknown key, bad names, wrong types: hard errors
         assert!(parse_blanket_config(r#"{"blanket":{"mutable":["a"]}}"#).is_err());
         assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":["../x"]}}"#).is_err());
         assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":"a"}}"#).is_err());
         assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":[""]}}"#).is_err());
         assert!(parse_blanket_config(r#"{"blanket":[]}"#).is_err());
+        // artifacts: happy path + validation
+        let a = parse_blanket_config(
+            r#"{"blanket":{"artifacts":[{"url":"https://x/y.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":".npm/_libvips/y.tar"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(a.artifacts.len(), 1);
+        assert!(parse_blanket_config(
+            r#"{"blanket":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#
+        )
+        .is_err());
+        assert!(parse_blanket_config(
+            r#"{"blanket":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#
+        )
+        .is_err());
     }
 }

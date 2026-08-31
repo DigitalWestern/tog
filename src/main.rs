@@ -171,6 +171,7 @@ fn locked_requirements(dir: &Path, source: &str, pyver: &str) -> io::Result<Stri
 
 fn run_plan() -> io::Result<()> {
     let dir = project_dir();
+    ensure_npm_lock(&dir)?;
     let mut any = false;
     if dir.join("requirements.txt").exists() {
         let plan = read_plan(&dir)?;
@@ -208,9 +209,44 @@ fn no_inputs() -> io::Error {
     )
 }
 
+/// A package.json without a package-lock.json (bun/yarn/pnpm projects):
+/// delegate lock generation to npm, mirroring the uv flow for Python.
+/// Resolution is the ecosystem's job; realization is blanket's.
+fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
+    if !dir.join("package.json").exists() || dir.join("package-lock.json").exists() {
+        return Ok(());
+    }
+    for other in ["bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml"] {
+        if dir.join(other).exists() {
+            eprintln!(
+                "blanket: note: {other} found; generating package-lock.json via npm \
+                 (versions resolve fresh — they may differ from {other})"
+            );
+            break;
+        }
+    }
+    eprintln!("blanket: no package-lock.json; resolving with npm...");
+    let status = std::process::Command::new("npm")
+        .args(["install", "--package-lock-only", "--ignore-scripts", "--silent"])
+        .current_dir(dir)
+        .status()
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                "package.json has no package-lock.json and `npm` was not found; \
+                 install Node/npm or provide a package-lock.json",
+            )
+        })?;
+    if !status.success() {
+        return Err(io::Error::other("npm install --package-lock-only failed"));
+    }
+    Ok(())
+}
+
 fn run_sync(fresh: bool) -> io::Result<()> {
     let dir = project_dir();
     let store = store::Store::open()?;
+    ensure_npm_lock(&dir)?;
     let mut any = false;
     if dir.join("requirements.txt").exists() {
         let plan = read_plan(&dir)?;
@@ -221,14 +257,14 @@ fn run_sync(fresh: bool) -> io::Result<()> {
     }
     if dir.join("package-lock.json").exists() {
         let lock = std::fs::read_to_string(dir.join("package-lock.json"))?;
-        let mut mutable = Vec::new();
+        let mut config = npm::BlanketConfig::default();
         if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
             npm::check_lock_freshness(&pkg, &lock)?;
-            mutable = npm::parse_blanket_config(&pkg)?;
+            config = npm::parse_blanket_config(&pkg)?;
         }
         let plan = npm::plan_npm(&lock)?;
-        let env = npm::realize_node_env(&store, &plan)?;
-        npm::project_node_env(&dir, &env, &plan, &mutable, fresh)?;
+        let env = npm::realize_node_env(&store, &plan, &config.artifacts)?;
+        npm::project_node_env(&dir, &env, &plan, &config.mutable_packages, fresh)?;
         eprintln!("synced: node_modules -> {}", env.display());
         any = true;
     }

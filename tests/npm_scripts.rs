@@ -83,7 +83,7 @@ fn network_access_during_install_script_fails() {
          () => process.exit(0)).on('error', () => process.exit(1))\"",
     );
     let store = Store::open().expect("store");
-    let result = npm::realize_node_env(&store, &plan_for(&tarball, &sri));
+    let result = npm::realize_node_env(&store, &plan_for(&tarball, &sri), &[]);
     let err = result.expect_err("install script reaching the network must fail");
     assert!(
         err.to_string().contains("network-denied"),
@@ -100,7 +100,7 @@ fn benign_install_script_runs_and_output_is_captured() {
     std::fs::create_dir_all(&dir).unwrap();
     let (tarball, sri) = make_pkg_tarball(&dir, "node -e \"require('fs').writeFileSync('built.txt','ok')\"");
     let store = Store::open().expect("store");
-    let env = npm::realize_node_env(&store, &plan_for(&tarball, &sri)).expect("realize");
+    let env = npm::realize_node_env(&store, &plan_for(&tarball, &sri), &[]).expect("realize");
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
     let _ = std::fs::remove_dir_all(&dir);
