@@ -1,4 +1,4 @@
-use blanket::{cargo, elixir, golang, npm, project, pypi, python, ruby, store, types};
+use blanket::{cargo, dotnet, elixir, golang, npm, project, pypi, python, ruby, store, types};
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ Project inputs (either or both):
   go.mod/go.sum           Go deps; closure computed by the store Go toolchain
   Gemfile/Gemfile.lock    Ruby gems; missing lock resolved by store bundler
   mix.exs/mix.lock        Elixir hex deps; missing lock resolved by store mix
+  *.csproj + packages.lock.json  .NET NuGet deps (lock made mandatory)
 ";
 
 fn main() {
@@ -324,6 +325,13 @@ fn run_plan() -> io::Result<()> {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
+    if dotnet::find_project(&dir).is_ok() {
+        let store = store::Store::open()?;
+        let sdk = dotnet::ensure_sdk(&store)?;
+        let (plan, _) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        any = true;
+    }
     if !any {
         return Err(no_inputs());
     }
@@ -442,6 +450,14 @@ fn run_sync(fresh: bool) -> io::Result<()> {
         eprintln!("synced: hex deps -> {}", projection.display());
         any = true;
     }
+    if dotnet::find_project(&dir).is_ok() {
+        let sdk = dotnet::ensure_sdk(&store)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
+        let packages = dotnet::realize_packages(&store, &plan, &sdk, &dir)?;
+        dotnet::project_dotnet_env(&dir, &sdk, &packages, &plan, &lock_sha256)?;
+        eprintln!("synced: nuget packages -> {}", packages.display());
+        any = true;
+    }
     if is_cargo_here(&dir) {
         let inputs = load_cargo_inputs(&dir, &store)?;
         let rust_obj = &inputs.rust_obj;
@@ -476,6 +492,7 @@ fn run_build(args: &[String]) -> io::Result<()> {
         Some("cargo") => ("cargo", &args[1..]),
         Some("go") => ("go", &args[1..]),
         Some("elixir") => ("elixir", &args[1..]),
+        Some("dotnet") => ("dotnet", &args[1..]),
         _ => {
             let mut present = Vec::new();
             if cwd.ancestors().any(is_cargo_here) {
@@ -486,6 +503,9 @@ fn run_build(args: &[String]) -> io::Result<()> {
             }
             if cwd.ancestors().any(|d| d.join("mix.exs").is_file()) {
                 present.push("elixir");
+            }
+            if dotnet::find_project(&cwd).is_ok() {
+                present.push("dotnet");
             }
             match present.as_slice() {
                 [one] => (*one, args),
@@ -535,7 +555,7 @@ fn run_build(args: &[String]) -> io::Result<()> {
             golang::project_go_env(&root, &inputs.go_obj, &modcache, &inputs.plan, &inputs.gosum_sha256)?;
             golang::build_sandboxed(&root, &inputs.go_obj, &modcache, rest)
         }
-        _ => {
+        "elixir" => {
             let root = cwd
                 .ancestors()
                 .find(|d| d.join("mix.exs").is_file())
@@ -549,6 +569,13 @@ fn run_build(args: &[String]) -> io::Result<()> {
             let projection =
                 elixir::project_elixir_env(&root, &beam, &deps, &plan, &lock_sha256, false)?;
             elixir::build_sandboxed(&root, &beam, &projection, rest)
+        }
+        _ => {
+            let sdk = dotnet::ensure_sdk(&store)?;
+            let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &cwd, &sdk)?;
+            let packages = dotnet::realize_packages(&store, &plan, &sdk, &cwd)?;
+            dotnet::project_dotnet_env(&cwd, &sdk, &packages, &plan, &lock_sha256)?;
+            dotnet::build_sandboxed(&cwd, &sdk, &packages, rest)
         }
     }
 }
@@ -569,6 +596,7 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
                 || d.join(".blanket/closures/go.json").exists()
                 || d.join(".blanket/closures/ruby.json").exists()
                 || d.join(".blanket/closures/elixir.json").exists()
+                || d.join(".blanket/closures/dotnet.json").exists()
         })
         .unwrap_or(&cwd)
         .to_path_buf();
@@ -656,6 +684,31 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         std::fs::create_dir_all(&scratch)?;
         let (prefixes, remove, set) =
             elixir::run_env(&beam, &projection, &elixir::build_root(&dir), &scratch)?;
+        blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
+    }
+    if dir.join(".blanket/closures/dotnet.json").exists() {
+        // Build-capable dotnet verbs execute arbitrary MSBuild code and are
+        // sandbox-only (Sol review 7): `blanket run dotnet build` is refused.
+        if cmd[0] == "dotnet"
+            && cmd.get(1).map(|v| dotnet::BUILD_VERBS.contains(&v.as_str())) == Some(true)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "`dotnet {}` compiles/executes MSBuild code and must run \
+                     sandboxed: use `blanket build dotnet ...`",
+                    cmd[1]
+                ),
+            ));
+        }
+        let store = store::Store::open()?;
+        let closure = project::read_closure(&dir, "dotnet")?;
+        let sdk = project::closure_object(&store, &closure, "sdk_object", "dotnet")?;
+        let packages = project::closure_object(&store, &closure, "packages_object", "")?;
+        prefix.push(sdk.to_string_lossy().into_owned());
+        let scratch = std::env::temp_dir().join(format!("blanket-dn-run-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch)?;
+        let (prefixes, remove, set) = dotnet::run_env(&sdk, &packages, &scratch);
         blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if prefix.is_empty() {

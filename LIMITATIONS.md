@@ -166,6 +166,31 @@ say what breaks, for whom, and how it fails (loud/silent).
   cooperative hermeticity, same class as npm's clone mode. Recorded
   unattested in the closure.
 
+## .NET
+
+- **Strictest v0 boundary of any tailor** (all loud): one SDK-style
+  .csproj only; no solutions/.sln, no ProjectReference lock entries, no
+  Central Package Management (lock v2/v3), no packages.config, no
+  PackageDownload (targeting/runtime packs must ship in the pinned SDK),
+  no workloads, no custom MSBuild SDKs, nuget.org only.
+- **Build-capable dotnet verbs refused at `blanket run`** — stricter
+  than other tailors; everything compiling goes through `blanket build
+  dotnet`. Deliberate (MSBuild executes arbitrary code), but a UX cliff
+  for `dotnet test`/`dotnet run` habits; `blanket build dotnet` covers
+  build only (no test/publish verbs yet).
+- **Restore-time MSBuild evaluation is delegated-planning trust** (props/
+  targets/property functions run unsandboxed during lock generation).
+  Same class as other resolvers, but with more code surface.
+- **Machine-wide /tmp/.dotnet mutex dir is a sandbox write allowance**
+  (bounded, local-only; still shared mutable state between sandboxed and
+  host dotnet processes).
+- **releases.json is a checksum channel, not signed metadata** — SDK
+  pins are only as strong as HTTPS to Microsoft's CDN.
+- **Lock does not cover asset selection**: project.assets.json is
+  re-derived per build and attested but not diffed against expectations;
+  a NuGet behavior change across SDK pins changes builds under the same
+  lock (SDK is in identity, so objects differ — but silently).
+
 ## Real-project proof gaps (all ecosystems)
 
 - Python/npm were proven on Ethan's real projects (CX-Games, deja,

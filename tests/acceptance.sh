@@ -217,6 +217,19 @@ cp -R "$FIXTURES/elixir-hello" "$WORK/ex"
 OUT=$(cd "$WORK/ex" && "$BLANKET" run mix run -e 'IO.puts(ExReal.hello())')
 case "$OUT" in *'{"beam":"ok"}'*) ok "elixir build + run ($OUT)";; *) bad "elixir output: $OUT";; esac
 
+echo "== 10h. dotnet: locked nuget packages + sandboxed two-phase build"
+cp -R "$FIXTURES/dotnet-hello" "$WORK/dn"
+(cd "$WORK/dn" && "$BLANKET" sync)
+(cd "$WORK/dn" && "$BLANKET" build)
+DLL=$(command ls "$WORK/dn"/bin/blanket-*/proj.dll | head -1)
+OUT=$(cd "$WORK/dn" && "$BLANKET" run dotnet "$DLL")
+case "$OUT" in *'{"dotnet":"ok"}'*) ok "dotnet build + run ($OUT)";; *) bad "dotnet output: $OUT";; esac
+if (cd "$WORK/dn" && "$BLANKET" run dotnet build 2>/dev/null); then
+  bad "dotnet build verb accepted at run"
+else
+  ok "build-capable dotnet verbs are sandbox-only"
+fi
+
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$BLANKET" sync)

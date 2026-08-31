@@ -126,6 +126,13 @@ Ordered by (usefulness to Ethan) x (cheapness given the kernel):
    written into by native builds — the "writable unattested projection"
    kernel lesson), sandboxed mix compile with the loopback-TCP Mix lock
    disabled. Real proof: telemetry (rebar3) + jason. ~620 adapter lines.
+3c. ~~**.NET/NuGet**~~ **DONE 2026-08-31** — seventh tailor. Mandatory
+   packages.lock.json (v1), semantic contentHash verified THROUGH the
+   pinned NuGet (signed nupkgs hash transformed bytes — never raw
+   compare), per-build fresh offline restore (obj/ never authority),
+   build-capable verbs sandbox-only, SDK pinned from Microsoft's
+   release-metadata checksum channel. ~540 adapter lines. Strict v0
+   boundary (see LIMITATIONS.md).
 4. **System packages (the Homebrew replacement)** — the big one, kept
    deliberately last: Sol's review was right that GUI apps, services,
    and privileged installs are a *different product* (host-effects

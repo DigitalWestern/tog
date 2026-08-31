@@ -6,16 +6,15 @@ per-language package managers by owning the outer loop every ecosystem
 shares: fetch a toolchain, lock a dependency graph, materialize it into an
 immutable store, project an environment, run tasks.
 
-Six ecosystems are built. Python and JavaScript/npm are proven on real
+Seven ecosystems are built. Python and JavaScript/npm are proven on real
 projects: Next.js 15 + vitest suites, vite apps (build AND dev server),
 prisma, native addons compiled hermetically (better-sqlite3, sharp),
-FastAPI apps with native wheels. Cargo (Rust), Go, Ruby, and Elixir all
-landed 2026-08-31 as wrap-hermetically tailors. Tailor cost, measured
-honestly (adapter code excluding tests): Python ~1030 lines (pypi+wheel+
-python+build), npm ~1015 (self-contained), cargo ~690, go ~600,
-ruby ~540, elixir ~620 (four-artifact toolchain + AST lock grammar
-bought back some lines) — the curve's overall trend holds; the kernel
-thesis holds.
+FastAPI apps with native wheels. Cargo (Rust), Go, Ruby, Elixir, and
+.NET all landed 2026-08-31 as wrap-hermetically tailors. Tailor cost,
+measured honestly (adapter code excluding tests): Python ~1030 lines
+(pypi+wheel+python+build), npm ~1015 (self-contained), cargo ~690,
+go ~600, ruby ~540, elixir ~620, dotnet ~540 — the curve's overall
+trend holds; the kernel thesis holds.
 
 ## The model (stolen from Nix, minus the interface)
 
@@ -276,6 +275,34 @@ Enforcement is env (force_env): scrub MIX_*/HEX_*/REBAR_*/ERL_*/ELIXIR_*
 and force MIX_DEPS_PATH/MIX_ARCHIVES/MIX_REBAR3/HEX_OFFLINE/MIX_TARGET.
 v0 fail-closed gaps: git deps, non-hexpm repos, umbrella projects
 untested, legacy lock entry shapes.
+
+## The .NET tailor (semantic hashes, mandatory locks, sandbox-only builds)
+
+NuGet's packages.lock.json is opt-in upstream; blanket makes it
+MANDATORY (missing → delegated store-SDK `restore --use-lock-file`).
+v1 locks only, one SDK-style .csproj, PackageReference only — solutions,
+Central Package Management (lock v2+), PackageDownload, workloads, and
+custom MSBuild SDKs fail closed (Sol review 7's boundary). The lock's
+contentHash is a SEMANTIC hash (signed nupkgs hash transformed bytes,
+not the download), so blanket never raw-compares: it fetches nupkgs into
+a local folder feed (raw sha256 into the verified cache), then the
+PINNED NuGet installs from that feed in locked mode — verifying every
+contentHash and writing the exact global-packages layout; the SDK is the
+extractor and part of the object identity (Go precedent). SDK pins come
+from Microsoft's release-metadata endpoint (an HTTPS checksum channel —
+published hashes, not signed metadata).
+
+Builds are the strictest boundary yet: project obj/ is NEVER authority —
+every `blanket build [dotnet]` runs a fresh offline locked restore into
+scratch (attesting project.assets.json) then `build --no-restore`, with
+build servers disabled, shared compilation off, response files and
+restore/source/path overrides rejected, and outputs staged into
+bin/blanket-<sdk-fp>. Build-capable verbs (build/run/test/publish/pack/
+msbuild/restore/clean/watch) are REFUSED by `blanket run` — MSBuild
+executes arbitrary code and belongs only in the sandbox; `blanket run
+dotnet <app.dll>` runs compiled apps. One bounded sandbox write root is
+added for CoreCLR's hardcoded /tmp/.dotnet mutex dir. global.json:
+exact pin + rollForward=disable, sdk.paths/msbuild-sdks rejected.
 
 ## Resolution is delegated; realization is owned
 

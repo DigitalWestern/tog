@@ -1,6 +1,7 @@
 pub mod build;
 pub mod cargo;
 pub mod dirhash;
+pub mod dotnet;
 pub mod elixir;
 pub mod fetch;
 pub mod golang;
