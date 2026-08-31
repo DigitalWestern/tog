@@ -6,7 +6,11 @@ per-language package managers by owning the outer loop every ecosystem
 shares: fetch a toolchain, lock a dependency graph, materialize it into an
 immutable store, project an environment, run tasks.
 
-The MVP proves the kernel with one ecosystem (Python) end to end.
+Two ecosystems (Python, JavaScript/npm) are built and proven on real
+projects: Next.js 15 + vitest suites, vite apps (build AND dev server),
+prisma, native addons compiled hermetically (better-sqlite3, sharp),
+FastAPI apps with native wheels. The npm tailor cost ~450 lines against
+Python's ~1500 + kernel — the kernel thesis holding empirically.
 
 ## The model (stolen from Nix, minus the interface)
 
@@ -25,6 +29,19 @@ The MVP proves the kernel with one ecosystem (Python) end to end.
 - **Projection**: a project's `.venv` is one symlink into the store, swapped
   atomically. Rollback = swapping back (instant cache hit). Provenance is
   written to `.blanket/closure.json`.
+- **Node projection is a forest** (`node-forest/1`): `node_modules` is a
+  symlink to `~/.blanket/forests/<project-key>/<projection-id>/node_modules`,
+  a WRITABLE per-project directory holding one symlink per top-level package
+  into the immutable store object (pnpm's proven resolution model). The
+  ecosystem treats node_modules' top level as scratch space — vite's `.vite`
+  dep cache, prisma's `.prisma` client — and the forest absorbs those writes
+  while package contents stay read-only in the store. Forests live OUTSIDE
+  the project so test runners never crawl store packages' own test files.
+  Declared-mutable packages (`package.json` → `"blanket": {"mutablePackages":
+  [...]}`) switch the projection to a whole-tree APFS clonefile copy so
+  runtime writes inside those packages succeed; the closure records them as
+  `mutable_state: "unattested"`. `blanket sync --fresh` rebuilds the
+  projection, dropping caches and mutable state.
 
 ## Vocabulary
 
@@ -67,6 +84,51 @@ Per design review with Sol: **Plan → Realize → Project.**
    (astral-sh/python-build-standalone, checksums pinned in `python.rs`),
    assemble the env object, commit atomically.
 3. **Project** (`project.rs`): atomic `.venv` symlink + closure JSON.
+
+## Hermetic install scripts (the npm compatibility keystone)
+
+npm lifecycle scripts (preinstall/install/postinstall, plus npm's implicit
+`node-gyp rebuild` for binding.gyp packages) run at realize time inside the
+network-denied sandbox: writes confined to the package's own directory plus
+a scratch HOME, reads limited to the staged tree + toolchain objects +
+system. node-gyp comes shimmed from the store node's bundled npm, headers
+from the store node object (`npm_config_nodedir`), and gyp's Python is the
+store's pinned CPython — native addons compile against pinned toolchains,
+never developer-shell drift. Script failure in an optional package warns
+and continues (npm parity); in a required package it aborts, fail-closed.
+
+For packages that download binaries at install time (old sharp, various
+prebuild-install users), projects declare the downloads as verified inputs:
+
+    "blanket": { "artifacts": [ { "url": "https://...", "sha256": "<hex>",
+                                  "path": ".npm/_libvips/<file>" } ] }
+
+Blanket prefetches each through the verified artifact cache and plants it
+at the HOME-relative path before scripts run; the package's own downloader
+finds its cache warm and never touches the (denied) network. Artifacts are
+identity inputs, so the env object id changes with them.
+
+## Resolution is delegated; realization is owned
+
+- Ranged `requirements.txt` → blanket runs `uv pip compile
+  --generate-hashes` into `requirements.lock.txt` (staleness-stamped,
+  regenerated when the source changes).
+- `package.json` with no `package-lock.json` (bun/yarn/pnpm projects) →
+  blanket runs `npm install --package-lock-only`.
+
+Planning may touch the network with the ecosystem's own resolver; every
+byte that reaches an environment still goes through the verified cache and
+the hash-pinned plan.
+
+## Store concurrency
+
+Publication (rename→chmod→meta) and incomplete-object sweeping serialize on
+a cross-process file lock (`tmp/.publish.lock`), so a concurrent `has()`
+never mistakes a mid-publication object for a crashed one. Stage dirs and
+download temp files use collision-proof names (atomic sequence numbers —
+SystemTime ticks in microseconds on macOS and concurrent threads really do
+collide; a shared download tmp once passed stream-hash verification while
+the file held two writers' interleaved bytes).
 
 ## Deliberate MVP decisions
 
@@ -114,10 +176,17 @@ Per design review with Sol: **Plan → Realize → Project.**
 ## Roadmap
 
 M3 (done): sandboxed sdist builds.
-M4 (in progress): npm lockfile importer against the same kernel — the
-    second-ecosystem stress test of the kernel thesis.
+M4 (done): npm tailor — lockfile importer, pinned Node, forest projection.
+M4.5 (done): real-project compatibility — hermetic lifecycle scripts,
+    declared artifacts, workspaces (link entries), uv/npm resolution
+    delegation, mutable-package projections, store concurrency locks.
+    Known remaining npm gaps: per-workspace nested node_modules (version
+    conflicts inside workspaces are rejected with a hoisting hint), git/file
+    `resolved` URLs, install scripts that need network for logic (not just
+    artifacts) — those fail closed with instructions.
 M5: hardening pass — RECORD verification/rewrite, Mach-service allowlist in
     the sandbox, macOS deployment-target tag comparison, reproducibility
-    checks (rebuild + compare), garbage collection (`blanket gc`),
-    per-package store objects, binary cache + /opt/blanket/store decision,
-    signed toolchain manifests.
+    checks (rebuild + compare), garbage collection (`blanket gc` — forests
+    and backups included), per-package store objects, binary cache +
+    /opt/blanket/store decision, signed toolchain manifests.
+See ROADMAP.md for direction (enterprise frame, expansion tracks).

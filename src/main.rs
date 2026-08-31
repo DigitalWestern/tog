@@ -68,9 +68,21 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     // Real projects mostly carry ranged requirements, not hash-pinned ones.
     // Resolution is delegated to the ecosystem's own resolver (uv) — blanket
     // owns realization, not solving. The generated requirements.lock.txt is
-    // regenerated whenever requirements.txt changes.
+    // regenerated whenever requirements.txt changes. A file that IS pinned
+    // but uses features the direct parser rejects (environment markers,
+    // extras — e.g. `uv pip compile --universal` output) is re-locked for
+    // this platform the same way rather than hard-failing.
     let text = if is_fully_pinned(&source) {
-        source
+        match pypi::parse_requirements(&source) {
+            Ok(_) => source,
+            Err(e) => {
+                eprintln!(
+                    "blanket: requirements.txt is pinned but not directly \
+                     consumable ({e}); re-locking for this platform with uv..."
+                );
+                locked_requirements(dir, &source, pin.version)?
+            }
+        }
     } else {
         locked_requirements(dir, &source, pin.version)?
     };

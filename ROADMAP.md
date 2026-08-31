@@ -125,13 +125,21 @@ Python tailor:
 - bytecode precompilation at realize time (startup speed, deterministic)
 
 JavaScript tailor:
-- **lifecycle scripts in the build sandbox** — the gate blocking native
-  addons (esbuild, sharp…) and therefore most real frontend projects
-  (vite!). Same recipe as Python sdists: network denied, declared
-  inputs, outputs become store objects.
-- workspaces/monorepos (`link:` entries) — the other loud v0 rejection
+- ~~**lifecycle scripts in the build sandbox**~~ **DONE 2026-08-31** —
+  scripts run network-denied with pinned toolchains; better-sqlite3
+  compiles from source; download-at-install packages (old sharp) work via
+  declared artifacts (`blanket.artifacts`: url+sha256 as verified inputs).
+  Note the roadmap's original "same recipe as Python sdists" was
+  optimistic — Sol was right that download-dependent scripts needed their
+  own mechanism (declared artifacts), and vite turned out to be blocked by
+  something else entirely (writable node_modules top level → forest
+  projection), not by scripts.
+- ~~workspaces/monorepos (`link:` entries)~~ **DONE 2026-08-31** (nested
+  per-workspace node_modules still rejected with a hoisting hint)
 - `blanket add <pkg>` — delegate resolution to a vendored resolver or
-  embedded tool, keep realization ours (the "cheat early" doctrine)
+  embedded tool, keep realization ours (the "cheat early" doctrine).
+  Half-done: missing lockfiles are already delegated (npm
+  --package-lock-only, uv pip compile).
 
 Shared depth (kernel):
 - per-package store objects with copy-on-write assembly (APFS clonefile)

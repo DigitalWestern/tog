@@ -15,24 +15,45 @@ realizes into a **comforter** (an immutable, shareable environment) kept
 in the **closet** (the store). Your `.venv` and `node_modules` are
 comforters.
 
-**Status: MVP — Python + Node ecosystems, macOS arm64.**
+**Status: Python + Node ecosystems working on real projects, macOS arm64.**
+Proven on: Next.js 15 (build + vitest), vite apps (build AND dev server),
+prisma (generate/query), native addons compiled hermetically
+(better-sqlite3 from source, sharp via declared artifacts), npm
+workspaces, FastAPI + pandas/lxml stacks.
 
 ## Use
 
 ```sh
 cargo build --release
 
-cd your-project
-# blanket consumes hash-pinned lockfiles (no solver of its own yet):
-uv pip compile --generate-hashes requirements.in -o requirements.txt  # python
-npm install --package-lock-only                                      # node
-echo "3.12" > .python-version   # optional; 3.12 is the default
-
-blanket sync                    # realize + project -> ./.venv and/or ./node_modules
+cd your-project     # an EXISTING project works as-is:
+blanket sync        # realize + project -> ./.venv and/or ./node_modules
 blanket run python app.py       # run inside the projected env(s)
-blanket run node index.js
+blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
 blanket store path              # where the store lives
+blanket sync --fresh            # rebuild the projection (drops caches)
+```
+
+`sync` meets projects where they are: a ranged `requirements.txt` is
+locked via uv (`requirements.lock.txt`, hash-pinned, auto-refreshed); a
+`package.json` without `package-lock.json` (bun/yarn projects) gets one
+via npm; an existing real `node_modules`/`.venv` is moved aside to
+`~/.blanket/backups/`. Resolution belongs to the ecosystem's tools —
+realization, verification, and provenance belong to blanket.
+
+npm install scripts run inside a network-denied sandbox with pinned
+toolchains (store node headers + pinned CPython for node-gyp). Two escape
+hatches, both explicit in `package.json`:
+
+```jsonc
+"blanket": {
+  // packages that must write into their own directory at runtime (prisma):
+  "mutablePackages": ["@prisma/engines"],
+  // install-time downloads, declared as verified inputs (old sharp):
+  "artifacts": [{ "url": "https://...", "sha256": "<hex>",
+                  "path": ".npm/_libvips/libvips-8.14.5-darwin-arm64v8.tar.br" }]
+}
 ```
 
 You never install Python or Node: `blanket sync` materializes pinned,
@@ -49,10 +70,12 @@ each one against real PyPI):
 - environments rebuild offline from the verified artifact cache alone
 - lock switches and rollbacks are atomic symlink swaps
 - store objects are read-only; nothing can mutate an environment in place
-- sdists build hermetically (sandbox-exec, network denied) and a build
-  that attempts network access fails
-- npm lockfiles realize to immutable node_modules trees; polyglot
-  projects sync both ecosystems in one command
+- sdists AND npm install scripts build hermetically (sandbox-exec,
+  network denied); a build or install script that attempts undeclared
+  network access fails closed
+- node_modules projects as a writable forest over immutable store
+  packages: tool caches (vite) work, package contents can't be mutated
+- polyglot projects sync both ecosystems in one command
 
 ## Test
 
