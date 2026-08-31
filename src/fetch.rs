@@ -175,29 +175,49 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
             io::Error::new(e.kind(), format!("open {path}: {e}"))
         })?)
     } else {
-        let resp = ureq::get(url).call().map_err(|e| {
+        // https_only holds across redirects too — no downgrade-to-http.
+        let agent = ureq::AgentBuilder::new().https_only(true).build();
+        let resp = agent.get(url).call().map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}"))
         })?;
         Box::new(resp.into_reader())
     };
 
+    // Cap the stream so a hostile server can't fill the disk before the
+    // hash check fails. 8 GiB covers every real artifact class we handle.
+    const MAX_ARTIFACT: u64 = 8 << 30;
     let mut file = fs::File::create(&tmp)
         .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?;
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
     let mut buf = [0u8; 65536];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let mut total: u64 = 0;
+    let stream_result: io::Result<()> = loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => n,
+            Err(e) => break Err(e),
+        };
+        total += n as u64;
+        if total > MAX_ARTIFACT {
+            break Err(io::Error::other(format!(
+                "{url}: exceeds the {} GiB artifact cap; refusing",
+                MAX_ARTIFACT >> 30
+            )));
         }
         match digest.algo {
             Algo::Sha256 => h256.update(&buf[..n]),
             Algo::Sha512 => h512.update(&buf[..n]),
         }
-        file.write_all(&buf[..n])?;
+        if let Err(e) = file.write_all(&buf[..n]) {
+            break Err(e);
+        }
+    };
+    if let Err(e) = stream_result.and_then(|_| file.flush()) {
+        drop(file);
+        let _ = fs::remove_file(&tmp); // never leave partial downloads
+        return Err(e);
     }
-    file.flush()?;
     drop(file);
 
     let got = match digest.algo {

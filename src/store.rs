@@ -151,10 +151,12 @@ impl Store {
             "identity": identity,
             "created": unix_secs(),
         });
-        fs::write(
-            self.root.join("meta").join(format!("{id}.json")),
-            serde_json::to_vec_pretty(&meta)?,
-        )?;
+        // Meta is the completion marker: write via tmp + atomic rename so a
+        // crash mid-write can never leave a partial file that has() would
+        // accept as complete.
+        let meta_tmp = self.root.join("tmp").join(format!("meta-{id}.json"));
+        fs::write(&meta_tmp, serde_json::to_vec_pretty(&meta)?)?;
+        fs::rename(&meta_tmp, self.root.join("meta").join(format!("{id}.json")))?;
         Ok(dest)
     }
 

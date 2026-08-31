@@ -97,6 +97,18 @@ store's pinned CPython — native addons compile against pinned toolchains,
 never developer-shell drift. Script failure in an optional package warns
 and continues (npm parity); in a required package it aborts, fail-closed.
 
+Honesty notes (Sol review 3, 2026-08-31): this is a **cooperative
+network-denial build sandbox, not hostile-code containment** — mach-lookup
+is broad, daemons could outlive a script, and packages inside one
+realization are only partially isolated from each other (fresh scratch
+HOME per package and read-only tool shims, but a parent package's write
+rule covers its nested children). Any script failure aborts the whole
+realization — npm's tolerate-optional-failures behavior is deliberately
+NOT mirrored, because a half-built package must never enter an immutable,
+forever-cache-hit object. Scripts run per-package in lockfile order
+(deepest first), not dependency order. Host Xcode/SDK versions are not
+part of build identity (same accepted impurity as Python sdist builds).
+
 For packages that download binaries at install time (old sharp, various
 prebuild-install users), projects declare the downloads as verified inputs:
 
@@ -118,7 +130,17 @@ identity inputs, so the env object id changes with them.
 
 Planning may touch the network with the ecosystem's own resolver; every
 byte that reaches an environment still goes through the verified cache and
-the hash-pinned plan.
+the hash-pinned plan. Be clear about the trust boundary: delegated
+planning runs uv/npm **with your user privileges, unsandboxed** — exactly
+the exposure of running those tools yourself (which is the status quo it
+replaces), no more, no less. Resolving a hostile dependency tree can run
+code at plan time (PEP 517 metadata builds); blanket's guarantees start at
+realization.
+
+Declared artifacts, honestly: the mechanism is **cache seeding** — it
+works when the declaration matches where a package's downloader looks
+(sharp's npm-cache convention today). It is an explicit, verified escape
+hatch, not a stable contract with arbitrary installers.
 
 ## Store concurrency
 

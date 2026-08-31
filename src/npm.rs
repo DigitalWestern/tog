@@ -329,8 +329,11 @@ pub fn realize_node_env(
     let node_obj = ensure_node(store).map_err(|e| err(format!("ensure node: {e}")))?;
 
     let mut inputs = BTreeMap::new();
-    // /2: install scripts now run (sandboxed) during realization.
-    inputs.insert("schema".to_string(), "node-env/2".to_string());
+    // /3: install scripts run sandboxed; name@version joined the per-pkg
+    // identity (they reach scripts as npm_package_* env). Remaining known
+    // impurity, documented: host Xcode/SDK version is not fingerprinted
+    // (same standing as python sdist builds).
+    inputs.insert("schema".to_string(), "node-env/3".to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -348,7 +351,14 @@ pub fn realize_node_env(
         if inputs
             .insert(
                 format!("pkg:{}", p.path),
-                format!("{}:{}:bin[{}]", digest.algo(), digest.hex(), bins.join(",")),
+                format!(
+                    "{}:{}:{}@{}:bin[{}]",
+                    digest.algo(),
+                    digest.hex(),
+                    p.name,
+                    p.version,
+                    bins.join(",")
+                ),
             )
             .is_some()
         {
@@ -499,8 +509,11 @@ pub fn realize_node_env(
 ///
 /// npm semantics mirrored: preinstall/install/postinstall in that order;
 /// packages with a binding.gyp and no install script get the default
-/// `node-gyp rebuild`; a failing script in an OPTIONAL package warns and
-/// continues, in a required package it aborts.
+/// `node-gyp rebuild`. ANY script failure aborts the realization — a
+/// half-built package must never enter an immutable, forever-cache-hit
+/// object (Sol review 3). Isolation per package: a fresh scratch HOME
+/// each, tool shims in a directory scripts cannot write, declared
+/// artifacts planted per consuming HOME.
 fn run_install_scripts(
     store: &Store,
     staged: &Path,
@@ -512,10 +525,13 @@ fn run_install_scripts(
     let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
     pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
 
-    let mut scratch: Option<PathBuf> = None;
+    // Tools live in their own stage dir which is NOT in the sandbox write
+    // list — a script can execute the node-gyp shim but never replace it.
+    let mut tools: Option<PathBuf> = None;
     // node-gyp needs a Python; the store's pinned CPython keeps builds off
     // the system toolchain drift. Realized lazily, only when needed.
     let mut python_obj: Option<PathBuf> = None;
+    let mut cleanup: Vec<PathBuf> = Vec::new();
     for p in &pkgs {
         let pkg_dir = staged.join(&p.path);
         let manifest = match fs::read_to_string(pkg_dir.join("package.json")) {
@@ -535,7 +551,7 @@ fn run_install_scripts(
             continue;
         }
 
-        let tmp = match &scratch {
+        let tools_dir = match &tools {
             Some(t) => t.clone(),
             None => {
                 // A store stage dir: collision-proof and already canonical
@@ -556,21 +572,24 @@ fn run_install_scripts(
                 )?;
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(bin.join("node-gyp"), fs::Permissions::from_mode(0o755))?;
-                // Plant declared artifacts where installers look for them
-                // (paths are HOME-relative; HOME is this scratch dir).
-                for a in artifacts {
-                    let src = crate::fetch::download_verified(store, &a.url, &a.sha256)
-                        .map_err(|e| err(format!("declared artifact {}: {e}", a.url)))?;
-                    let dest = t.join(&a.path);
-                    fs::create_dir_all(dest.parent().unwrap())?;
-                    fs::copy(&src, &dest).map_err(|e| {
-                        err(format!("placing declared artifact {}: {e}", a.path))
-                    })?;
-                    eprintln!("blanket: declared artifact ready: ~/{}", a.path);
-                }
-                scratch.insert(t).clone()
+                cleanup.push(t.clone());
+                tools.insert(t).clone()
             }
         };
+        // Fresh scratch HOME per package: no shared writable state between
+        // one package's scripts and the next.
+        let tmp = store.stage()?;
+        cleanup.push(tmp.clone());
+        // Plant declared artifacts where this package's installer looks
+        // (paths are HOME-relative; HOME is this scratch dir).
+        for a in artifacts {
+            let src = crate::fetch::download_verified(store, &a.url, &a.sha256)
+                .map_err(|e| err(format!("declared artifact {}: {e}", a.url)))?;
+            let dest = tmp.join(&a.path);
+            fs::create_dir_all(dest.parent().unwrap())?;
+            fs::copy(&src, &dest)
+                .map_err(|e| err(format!("placing declared artifact {}: {e}", a.path)))?;
+        }
 
         let phases: Vec<(&str, String)> = ["preinstall", "install", "postinstall"]
             .iter()
@@ -599,7 +618,7 @@ fn run_install_scripts(
 
         let path_env = format!(
             "{}:{}:{}:/usr/bin:/bin:/usr/sbin:/sbin",
-            tmp.join("bin").display(),
+            tools_dir.join("bin").display(),
             node_obj.join("bin").display(),
             staged.join("node_modules/.bin").display(),
         );
@@ -628,8 +647,9 @@ fn run_install_scripts(
             ("npm_package_name".into(), p.name.clone()),
             ("npm_package_version".into(), p.version.clone()),
         ];
+        // Tools dir is readable+executable but NOT writable in-sandbox.
         let sandbox = crate::sandbox::Sandbox {
-            read: vec![staged, node_obj, &python],
+            read: vec![staged, node_obj, &python, &tools_dir],
             write: vec![&pkg_dir, &tmp],
         };
         for (phase, script) in &phases {
@@ -647,14 +667,13 @@ fn run_install_scripts(
                 &envs_phase,
             );
             if let Err(e) = result {
-                if p.optional {
-                    eprintln!(
-                        "blanket: warning: optional package {}: {phase} script \
-                         failed under the hermetic sandbox; continuing without it \
-                         ({e})",
-                        p.path
-                    );
-                    break;
+                // Sol (review 3, blocker 1): a failed script — optional or
+                // not — must never leave a half-built package in an
+                // immutable, forever-cache-hit object. Fail the whole
+                // realization; true npm optional parity means REMOVING the
+                // package subtree + updating identity, which is future work.
+                for t in &cleanup {
+                    let _ = crate::store::remove_tree(t);
                 }
                 return Err(err(format!(
                     "{}: {phase} script failed under the network-denied build \
@@ -668,7 +687,7 @@ fn run_install_scripts(
             }
         }
     }
-    if let Some(t) = scratch {
+    for t in cleanup {
         let _ = crate::store::remove_tree(&t);
     }
     Ok(())
@@ -802,7 +821,7 @@ pub fn project_node_env(
         .collect();
     let proj_id = hex::encode(Sha256::digest(
         format!("node-forest/1\x00{env_name}\x00{}\x00{link_key}", mutable.join(",")).as_bytes(),
-    ))[..16]
+    ))[..32]
         .to_string();
 
     // Forests live OUTSIDE the project (under the blanket home, keyed by
@@ -816,7 +835,7 @@ pub fn project_node_env(
         .ok_or_else(|| err("cannot locate blanket home for forests"))?;
     let project_key = &hex::encode(Sha256::digest(
         project_dir.canonicalize()?.to_string_lossy().as_bytes(),
-    ))[..16];
+    ))[..32];
     let nm_root = home.join("forests").join(project_key);
     let proj_dir = nm_root.join(&proj_id);
     // The projected tree must itself be NAMED node_modules: Node's module
@@ -854,14 +873,10 @@ pub fn project_node_env(
             std::os::unix::fs::symlink(project_dir.join(&l.target), &link)?;
         }
     }
-    // Prune forests for other projections (regenerable; only caches lost).
-    if let Ok(entries) = fs::read_dir(&nm_root) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy() != proj_id.as_str() {
-                let _ = crate::store::remove_tree(&e.path());
-            }
-        }
-    }
+    // Old forests are deliberately NOT pruned here (Sol review 3): a dev
+    // server may still be running from one, and pruning would break it
+    // mid-session. They are cheap symlink trees; explicit `blanket gc`
+    // with liveness checks is the collection path (M5).
 
     // iCloud/Drive-synced folders resurrect each replaced symlink as a
     // "node_modules 2"-style duplicate. Ones that are symlinks into
@@ -875,8 +890,14 @@ pub fn project_node_env(
                 continue;
             }
             let p = e.path();
+            // Only targets under blanket-owned roots count as ours — never
+            // delete a user's own symlink on a loose match.
             let is_ours = fs::read_link(&p)
-                .map(|t| t.starts_with(home) || t.to_string_lossy().contains("/.blanket/"))
+                .map(|t| {
+                    t.starts_with(home.join("forests"))
+                        || t.starts_with(home.join("store"))
+                        || t.starts_with(project_dir.join(".blanket/nm"))
+                })
                 .unwrap_or(false);
             if is_ours {
                 let _ = fs::remove_file(&p);
@@ -919,6 +940,10 @@ pub fn project_node_env(
         "mutable_packages": mutable,
         "mutable_paths": mutable_paths,
         "mutable_state": if mutable.is_empty() { "none" } else { "unattested" },
+        // Honest scope: clone mode makes the WHOLE projected tree writable
+        // (path coherence requires it); mutable_paths lists only where
+        // writes are expected, not where they are possible.
+        "mutable_scope": if mutable.is_empty() { "none" } else { "whole-tree-clone" },
         "workspace_links": plan.links.iter().map(|l| {
             serde_json::json!({"path": l.path, "target": l.target})
         }).collect::<Vec<_>>(),
