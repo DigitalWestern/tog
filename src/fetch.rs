@@ -143,17 +143,32 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
     let dest = store.cache_path(digest.algo(), digest.hex());
     if dest.is_file() {
         // Re-verify on every hit: read-only bits stop accidents, not disk
-        // corruption or same-user replacement.
-        if hash_file(&dest, digest.algo)? == digest.hex() {
-            return Ok(dest);
+        // corruption or same-user replacement. A concurrent publisher can
+        // replace/briefly unlink the entry, so a read race falls through
+        // to a fresh download instead of failing.
+        match hash_file(&dest, digest.algo) {
+            Ok(h) if h == digest.hex() => return Ok(dest),
+            Ok(_) => {
+                let _ = fs::remove_file(&dest); // poisoned/corrupt: refetch
+            }
+            Err(_) => {}
         }
-        let _ = fs::remove_file(&dest); // poisoned/corrupt: drop and refetch
     }
-    fs::create_dir_all(dest.parent().unwrap())?;
-    let tmp = store
-        .root
-        .join("tmp")
-        .join(format!("dl-{}-{}", std::process::id(), digest.hex()));
+    fs::create_dir_all(dest.parent().unwrap())
+        .map_err(|e| io::Error::new(e.kind(), format!("cache dir: {e}")))?;
+    // Unique per attempt: two concurrent downloads of the same artifact
+    // (even same-process threads) must never share a tmp file — the stream
+    // hash would verify while the file holds interleaved garbage. A
+    // process-wide sequence number breaks timestamp ties (SystemTime ticks
+    // in microseconds on macOS; concurrent threads collide on it).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = store.root.join("tmp").join(format!(
+        "dl-{}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+        digest.hex()
+    ));
 
     let mut reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
         Box::new(fs::File::open(path).map_err(|e| {
@@ -166,7 +181,8 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
         Box::new(resp.into_reader())
     };
 
-    let mut file = fs::File::create(&tmp)?;
+    let mut file = fs::File::create(&tmp)
+        .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?;
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
     let mut buf = [0u8; 65536];
@@ -202,16 +218,24 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
     // Publish read-only, atomically.
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&tmp)?.permissions();
+        let mut perms = fs::metadata(&tmp)
+            .map_err(|e| io::Error::new(e.kind(), format!("stat dl tmp: {e}")))?
+            .permissions();
         perms.set_mode(0o444);
-        fs::set_permissions(&tmp, perms)?;
+        fs::set_permissions(&tmp, perms)
+            .map_err(|e| io::Error::new(e.kind(), format!("chmod dl tmp: {e}")))?;
     }
     match fs::rename(&tmp, &dest) {
         Ok(()) => {}
         Err(_) if dest.is_file() => {
             let _ = fs::remove_file(&tmp);
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("cache publish {}: {e}", dest.display()),
+            ))
+        }
     }
     Ok(dest)
 }

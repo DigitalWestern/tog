@@ -36,36 +36,77 @@ impl Store {
         self.root.join("objects").join(id)
     }
 
+    /// Exclusive cross-process lock guarding publication and sweeping.
+    /// Held only for the short rename/chmod/meta window, never during
+    /// downloads or builds, so contention is negligible.
+    fn publish_lock(&self) -> io::Result<fs::File> {
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(self.root.join("tmp/.publish.lock"))?;
+        f.lock()?;
+        Ok(f)
+    }
+
+    /// Completeness check without sweeping (safe to call while holding the
+    /// publish lock).
+    fn is_complete(&self, id: &str) -> Option<bool> {
+        let md = fs::metadata(self.object_path(id)).ok()?;
+        use std::os::unix::fs::PermissionsExt;
+        Some(
+            md.is_dir()
+                && md.permissions().mode() & 0o222 == 0
+                && self.root.join("meta").join(format!("{id}.json")).is_file(),
+        )
+    }
+
     /// An object is valid only when fully published: directory present,
     /// root read-only, and metadata written (in that commit order). A
     /// crash mid-publication leaves an invalid object, which is swept and
     /// rebuilt instead of trusted.
     pub fn has(&self, id: &str) -> bool {
-        let path = self.object_path(id);
-        let Ok(md) = fs::metadata(&path) else {
-            return false;
-        };
-        use std::os::unix::fs::PermissionsExt;
-        let complete = md.is_dir()
-            && md.permissions().mode() & 0o222 == 0
-            && self.root.join("meta").join(format!("{id}.json")).is_file();
-        if !complete && md.is_dir() {
-            // Incomplete publication (crash window): remove so the caller
-            // rebuilds it. Best-effort; failure just means a later error.
-            let _ = remove_tree(&path);
+        match self.is_complete(id) {
+            None => false,
+            Some(true) => true,
+            Some(false) => {
+                // Looks like a crashed publication — but a CONCURRENT commit
+                // may be in its rename->chmod->meta window and must not be
+                // swept. Re-check under the publish lock; sweep only what is
+                // still incomplete once no publication is in flight.
+                if let Ok(_lock) = self.publish_lock() {
+                    match self.is_complete(id) {
+                        Some(true) => return true,
+                        Some(false) => {
+                            let _ = remove_tree(&self.object_path(id));
+                        }
+                        None => {}
+                    }
+                }
+                false
+            }
         }
-        complete
     }
 
     /// Stage dir for building a new object; caller fills it, then calls commit.
+    /// Collision-proof: SystemTime ticks in microseconds on macOS, so two
+    /// threads can draw the same timestamp — create_dir (not _all) makes a
+    /// collision an AlreadyExists we retry with a sequence number.
     pub fn stage(&self) -> io::Result<PathBuf> {
-        let dir = self.root.join("tmp").join(format!(
-            "stage-{}-{}",
-            std::process::id(),
-            nanos()
-        ));
-        fs::create_dir_all(&dir)?;
-        Ok(dir)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let dir = self.root.join("tmp").join(format!(
+                "stage-{}-{}-{}",
+                std::process::id(),
+                nanos(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Atomically move a staged dir into the store under `identity`, write
@@ -84,17 +125,21 @@ impl Store {
         for entry in fs::read_dir(staged)? {
             make_read_only(&entry?.path())?;
         }
-        match fs::rename(staged, &dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("publish {}: {e}", dest.display())))
-        {
-            Ok(()) => {}
-            // Lost a race to a concurrent build of the same object: fine.
-            Err(_) if dest.is_dir() => {
-                let _ = remove_tree(staged);
-                return Ok(dest);
-            }
-            Err(e) => return Err(e),
+        // Publish under the cross-process lock so a concurrent has() never
+        // mistakes the rename->chmod->meta window for a crashed object.
+        let _lock = self.publish_lock()?;
+        if self.is_complete(&id) == Some(true) {
+            let _ = remove_tree(staged);
+            return Ok(dest);
         }
+        // Under the lock, anything at dest is a crashed leftover (a live
+        // publication can't be mid-window, and a complete object returned
+        // above): sweep it so the rename lands.
+        if dest.is_dir() {
+            remove_tree(&dest)?;
+        }
+        fs::rename(staged, &dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("publish {}: {e}", dest.display())))?;
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&dest)?.permissions();

@@ -57,18 +57,21 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
         return Ok(store.object_path(&id));
     }
     let tarball = crate::fetch::download_verified(store, NODE.url, NODE.sha256)?;
-    let staged = store.stage()?;
+    let staged = store.stage().map_err(|e| err(format!("stage: {e}")))?;
     let status = Command::new("/usr/bin/tar")
         .arg("-xzf")
         .arg(&tarball)
         .arg("-C")
         .arg(&staged)
         .args(["--strip-components", "1"])
-        .status()?;
+        .status()
+        .map_err(|e| err(format!("spawn tar: {e}")))?;
     if !status.success() {
         return Err(err("node tarball extraction failed"));
     }
-    store.commit(&identity, &staged)
+    store
+        .commit(&identity, &staged)
+        .map_err(|e| err(format!("commit node object: {e}")))
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +83,9 @@ pub struct NpmPackage {
     pub url: String,
     pub integrity: String, // SRI string
     pub bin: Vec<(String, String)>,
+    /// npm semantics: an optional package whose install script fails is
+    /// kept but non-fatal; a required package's failure aborts.
+    pub optional: bool,
 }
 
 /// A workspace link: `node_modules/<name>` resolving to a source directory
@@ -280,6 +286,7 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
             url: resolved.to_string(),
             integrity: integrity.to_string(),
             bin,
+            optional: entry["optional"].as_bool() == Some(true),
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -315,10 +322,11 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
 /// Realize the node_modules tree as an immutable store object.
 /// Object content root contains exactly `node_modules/`.
 pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
-    let node_obj = ensure_node(store)?;
+    let node_obj = ensure_node(store).map_err(|e| err(format!("ensure node: {e}")))?;
 
     let mut inputs = BTreeMap::new();
-    inputs.insert("schema".to_string(), "node-env/1".to_string());
+    // /2: install scripts now run (sandboxed) during realization.
+    inputs.insert("schema".to_string(), "node-env/2".to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -358,7 +366,9 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
     let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
-        tarballs.push((p, download_verified_digest(store, &p.url, &digest)?));
+        let t = download_verified_digest(store, &p.url, &digest)
+            .map_err(|e| err(format!("{}: fetch {}: {e}", p.path, p.url)))?;
+        tarballs.push((p, t));
     }
 
     let staged = store.stage()?;
@@ -459,7 +469,172 @@ pub fn realize_node_env(store: &Store, plan: &NpmPlan) -> io::Result<PathBuf> {
         }
     }
 
-    store.commit(&identity, &staged)
+    run_install_scripts(store, &staged, &node_obj, plan)?;
+
+    store
+        .commit(&identity, &staged)
+        .map_err(|e| err(format!("commit env: {e}")))
+}
+
+/// npm lifecycle install scripts, run hermetically: network denied, writes
+/// confined to the package's own directory and a scratch dir, reads limited
+/// to the staged tree + node toolchain + system. This is what makes native
+/// addons (better-sqlite3, bcrypt) work: prebuilt-binary downloads fail
+/// closed and the node-gyp source fallback compiles offline against the
+/// store's node headers.
+///
+/// npm semantics mirrored: preinstall/install/postinstall in that order;
+/// packages with a binding.gyp and no install script get the default
+/// `node-gyp rebuild`; a failing script in an OPTIONAL package warns and
+/// continues, in a required package it aborts.
+fn run_install_scripts(
+    store: &Store,
+    staged: &Path,
+    node_obj: &Path,
+    plan: &NpmPlan,
+) -> io::Result<()> {
+    // Deepest first: nested deps build before their dependents.
+    let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
+    pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
+
+    let mut scratch: Option<PathBuf> = None;
+    // node-gyp needs a Python; the store's pinned CPython keeps builds off
+    // the system toolchain drift. Realized lazily, only when needed.
+    let mut python_obj: Option<PathBuf> = None;
+    for p in &pkgs {
+        let pkg_dir = staged.join(&p.path);
+        let manifest = match fs::read_to_string(pkg_dir.join("package.json")) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let manifest: serde_json::Value = match serde_json::from_str(&manifest) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let scripts = &manifest["scripts"];
+        let has = |k: &str| scripts[k].as_str().is_some();
+        let default_gyp = !has("install")
+            && !has("preinstall")
+            && pkg_dir.join("binding.gyp").exists();
+        if !has("preinstall") && !has("install") && !has("postinstall") && !default_gyp {
+            continue;
+        }
+
+        let tmp = match &scratch {
+            Some(t) => t.clone(),
+            None => {
+                // A store stage dir: collision-proof and already canonical
+                // (Seatbelt matches real paths).
+                let t = store.stage()?;
+                // node-gyp shim: npm normally injects this into PATH.
+                let bin = t.join("bin");
+                fs::create_dir_all(&bin)?;
+                let gyp_js = node_obj
+                    .join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js");
+                fs::write(
+                    bin.join("node-gyp"),
+                    format!(
+                        "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
+                        node_obj.join("bin/node").display(),
+                        gyp_js.display()
+                    ),
+                )?;
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(bin.join("node-gyp"), fs::Permissions::from_mode(0o755))?;
+                scratch.insert(t).clone()
+            }
+        };
+
+        let phases: Vec<(&str, String)> = ["preinstall", "install", "postinstall"]
+            .iter()
+            .filter_map(|ph| {
+                match scripts[*ph].as_str() {
+                    Some(s) => Some((*ph, s.to_string())),
+                    None if *ph == "install" && default_gyp => {
+                        Some((*ph, "node-gyp rebuild".to_string()))
+                    }
+                    None => None,
+                }
+            })
+            .collect();
+
+        let python = match &python_obj {
+            Some(p) => p.clone(),
+            None => {
+                let pin = crate::python::lookup("3.12")
+                    .ok_or_else(|| err("no pinned CPython for node-gyp"))?;
+                let p = crate::python::ensure_python(store, pin)
+                    .map_err(|e| err(format!("ensure python for node-gyp: {e}")))?;
+                python_obj.insert(p).clone()
+            }
+        };
+        let python_bin = python.join("bin/python3");
+
+        let path_env = format!(
+            "{}:{}:{}:/usr/bin:/bin:/usr/sbin:/sbin",
+            tmp.join("bin").display(),
+            node_obj.join("bin").display(),
+            staged.join("node_modules/.bin").display(),
+        );
+        let envs: Vec<(String, String)> = vec![
+            ("PYTHON".into(), python_bin.display().to_string()),
+            ("npm_config_python".into(), python_bin.display().to_string()),
+            ("npm_config_nodedir".into(), node_obj.display().to_string()),
+            (
+                "npm_config_node_gyp".into(),
+                node_obj
+                    .join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js")
+                    .display()
+                    .to_string(),
+            ),
+            // Skip prebuilt-binary download attempts entirely; they would
+            // only burn time failing against the denied network.
+            ("npm_config_build_from_source".into(), "true".into()),
+            ("npm_package_name".into(), p.name.clone()),
+            ("npm_package_version".into(), p.version.clone()),
+        ];
+        let sandbox = crate::sandbox::Sandbox {
+            read: vec![staged, node_obj, &python],
+            write: vec![&pkg_dir, &tmp],
+        };
+        for (phase, script) in &phases {
+            eprintln!("blanket: {} {}: {phase} (sandboxed)", p.name, p.version);
+            let envs_phase: Vec<(String, String)> = envs
+                .iter()
+                .cloned()
+                .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
+                .collect();
+            let result = sandbox.run_in(
+                &["/bin/sh", "-c", script],
+                &path_env,
+                &tmp,
+                &pkg_dir,
+                &envs_phase,
+            );
+            if let Err(e) = result {
+                if p.optional {
+                    eprintln!(
+                        "blanket: warning: optional package {}: {phase} script \
+                         failed under the hermetic sandbox; continuing without it \
+                         ({e})",
+                        p.path
+                    );
+                    break;
+                }
+                return Err(err(format!(
+                    "{}: {phase} script failed under the network-denied build \
+                     sandbox: {e}. If this package downloads prebuilt binaries \
+                     at install time, it needs a source build path or a blanket \
+                     mechanism for declared artifacts.",
+                    p.path
+                )));
+            }
+        }
+    }
+    if let Some(t) = scratch {
+        let _ = crate::store::remove_tree(&t);
+    }
+    Ok(())
 }
 
 /// Strictly parse the optional `"blanket"` config field of package.json.

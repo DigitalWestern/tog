@@ -37,6 +37,10 @@ impl Sandbox<'_> {
              (allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\")\n\
                 (subpath \"/System\") (subpath \"/Library\") (subpath \"/private/etc\")\n\
                 (subpath \"/opt\") (subpath \"/var/db/timezone\") (subpath \"/dev\"))\n\
+             ; C/C++ toolchain (read-only): Xcode or CLT via xcode-select\n\
+             (allow file-read* (subpath \"/Applications/Xcode.app\")\n\
+                (literal \"/var/db/xcode_select_link\")\n\
+                (literal \"/private/var/db/xcode_select_link\"))\n\
              (allow file-read-metadata)\n\
              (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n",
         );
@@ -55,19 +59,36 @@ impl Sandbox<'_> {
     /// Run `cmd` inside the sandbox with a scrubbed environment.
     /// `env_path` becomes PATH; HOME/TMPDIR point into the writable tmp.
     pub fn run(&self, cmd: &[&str], env_path: &str, tmp: &Path) -> io::Result<()> {
+        self.run_in(cmd, env_path, tmp, tmp, &[])
+    }
+
+    /// Like `run`, but with an explicit working directory and extra
+    /// environment variables (npm lifecycle scripts need npm_config_*).
+    pub fn run_in(
+        &self,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+    ) -> io::Result<()> {
         let profile = self.profile();
-        let status = Command::new("/usr/bin/sandbox-exec")
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
             .arg("-p")
             .arg(&profile)
             .args(cmd)
-            .current_dir(tmp) // cwd must be readable in-sandbox (getcwd)
+            .current_dir(cwd) // cwd must be readable in-sandbox (getcwd)
             .env_clear()
             .env("PATH", env_path)
             .env("HOME", tmp)
             .env("TMPDIR", tmp)
             .env("LANG", "en_US.UTF-8")
-            .env("SOURCE_DATE_EPOCH", "315532800") // reproducibility nudge
-            .status()?;
+            .env("SOURCE_DATE_EPOCH", "315532800"); // reproducibility nudge
+        for (k, v) in envs {
+            command.env(k, v);
+        }
+        let status = command.status()?;
         if !status.success() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,

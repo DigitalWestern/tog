@@ -95,6 +95,13 @@ else
   bad "evil build did not fail as required"
 fi
 
+echo "== 9b. npm install scripts: sandboxed, network access fails closed"
+if (cd "$(dirname "$0")/.." && cargo test --quiet --test npm_scripts -- --ignored) ; then
+  ok "install scripts run hermetically; network egress denied"
+else
+  bad "npm script sandbox tests failed"
+fi
+
 echo "== 10. npm: lockfile -> immutable node_modules, store-provisioned node"
 cp -R "$FIXTURES/proj-npm" "$WORK/n"
 (cd "$WORK/n" && "$BLANKET" sync)
