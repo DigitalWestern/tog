@@ -6,14 +6,16 @@ per-language package managers by owning the outer loop every ecosystem
 shares: fetch a toolchain, lock a dependency graph, materialize it into an
 immutable store, project an environment, run tasks.
 
-Five ecosystems are built. Python and JavaScript/npm are proven on real
+Six ecosystems are built. Python and JavaScript/npm are proven on real
 projects: Next.js 15 + vitest suites, vite apps (build AND dev server),
 prisma, native addons compiled hermetically (better-sqlite3, sharp),
-FastAPI apps with native wheels. Cargo (Rust), Go, and Ruby all landed
-2026-08-31 as wrap-hermetically tailors. Tailor cost, measured honestly
-(adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+
-build), npm ~1015 (self-contained), cargo ~690, go ~600, ruby ~540 —
-the lines-per-tailor curve keeps falling; the kernel thesis holds.
+FastAPI apps with native wheels. Cargo (Rust), Go, Ruby, and Elixir all
+landed 2026-08-31 as wrap-hermetically tailors. Tailor cost, measured
+honestly (adapter code excluding tests): Python ~1030 lines (pypi+wheel+
+python+build), npm ~1015 (self-contained), cargo ~690, go ~600,
+ruby ~540, elixir ~620 (four-artifact toolchain + AST lock grammar
+bought back some lines) — the curve's overall trend holds; the kernel
+thesis holds.
 
 ## The model (stolen from Nix, minus the interface)
 
@@ -242,6 +244,38 @@ contract). PATH is ruby-first, then gem binstubs: a gem executable named
 `ruby` must never shadow the toolchain. v0 fail-closed gaps: non-
 rubygems.org sources, PATH/GIT gems, gems whose installers need network
 or absent host libraries (mysql2-class).
+
+## The Elixir tailor (a code-shaped lockfile, parsed — never eval'd)
+
+mix.lock is an Elixir term LITERAL that Mix itself evaluates as code, so
+blanket's planning parses it under the pinned toolchain with a strict AST
+grammar (Code.string_to_quoted + static atom encoder; exact 8-field
+`{:hex, ...}` tuples of literals only — calls, variables, operators, and
+legacy shorter tuple shapes are rejected loudly). Artifact authority is
+the lock alone; the Gemfile-forging lesson from Ruby applied preemptively.
+Every hex tarball is dual-checksum verified by blanket: outer = sha256 of
+the .tar (the lock's 8th field), inner = sha256(VERSION ++
+metadata.config ++ contents.tar.gz) (the 4th field).
+
+Toolchain (`beam` object) is FOUR pinned artifacts: OTP
+(erlef/otp_builds community macOS arm64 build — relocatable by
+construction), the Elixir release zip (platform-neutral BEAM code keyed
+to the OTP major — it contains NEITHER Hex nor rebar3), plus Hex and
+rebar3 from builds.hex.pm, both OTP-QUALIFIED builds (the legacy
+unqualified hex.ez is compiled for old OTP and hangs on 29 — found
+live). Deps are SOURCE trees: realized as an immutable `hex-deps` object
+(extracted contents + hex_metadata.config + the exact binary `.hex`
+marker Mix pairs with the lock), then projected as a writable CLONEFILE
+copy in the forests dir — native builds (make/rebar3 ports) write into
+their own source trees (npm mutablePackages precedent, recorded
+unattested). `blanket build [elixir]` = sandboxed `mix compile`, network
+denied, writes only the beam-fingerprint-qualified build root
+(`_build/blanket-<fp>`) + the deps projection; Mix's loopback-TCP
+compilation lock is disabled in-sandbox (MIX_OS_CONCURRENCY_LOCK=false).
+Enforcement is env (force_env): scrub MIX_*/HEX_*/REBAR_*/ERL_*/ELIXIR_*
+and force MIX_DEPS_PATH/MIX_ARCHIVES/MIX_REBAR3/HEX_OFFLINE/MIX_TARGET.
+v0 fail-closed gaps: git deps, non-hexpm repos, umbrella projects
+untested, legacy lock entry shapes.
 
 ## Resolution is delegated; realization is owned
 

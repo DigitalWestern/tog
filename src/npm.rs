@@ -856,7 +856,7 @@ pub fn project_node_env(
         if mutable.is_empty() {
             build_forest(&src, &tmp.join("node_modules"))?;
         } else {
-            clone_tree(&src, &tmp.join("node_modules"))?;
+            crate::project::clone_tree(&src, &tmp.join("node_modules"))?;
         }
         fs::rename(&tmp, &proj_dir)?;
     }
@@ -976,40 +976,8 @@ fn build_forest(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Copy-on-write clone of the whole tree (cp -c uses APFS clonefile; falls
-/// back to a plain copy elsewhere), then restore user-write bits, which the
-/// clone inherits as read-only from the store.
-fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
-    let clone = Command::new("/bin/cp").args(["-Rc"]).arg(src).arg(dest).status()?;
-    if !clone.success() {
-        if dest.exists() {
-            crate::store::remove_tree(dest)?;
-        }
-        let plain = Command::new("/bin/cp").arg("-R").arg(src).arg(dest).status()?;
-        if !plain.success() {
-            return Err(err("cloning node_modules tree failed"));
-        }
-    }
-    restore_write_bits(dest)
-}
-
-fn restore_write_bits(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let md = fs::symlink_metadata(path)?;
-    if md.file_type().is_symlink() {
-        return Ok(());
-    }
-    let mode = md.permissions().mode();
-    if mode & 0o200 == 0 {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
-    }
-    if md.is_dir() {
-        for entry in fs::read_dir(path)? {
-            restore_write_bits(&entry?.path())?;
-        }
-    }
-    Ok(())
-}
+// clone_tree moved to project::clone_tree (kernel: elixir needs the same
+// writable copy-on-write projection for source deps).
 
 /// npm-compatible mode normalization: tarballs in the wild carry broken
 /// permission bits (e.g. pngjs ships directories without the execute bit,

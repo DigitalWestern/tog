@@ -118,6 +118,14 @@ Ordered by (usefulness to Ethan) x (cheapness given the kernel):
    env — inverse of cargo). Kernel gained force_env + BuildSpec stdin
    null. ~540 adapter lines. v0 gaps fail closed: git/path gems,
    non-rubygems sources, network-needing installers.
+3b. ~~**Elixir/Hex**~~ **DONE 2026-08-31** — sixth tailor. AST-parsed
+   mix.lock (never eval'd; strict 8-field grammar), dual-checksum hex
+   tarballs, four-artifact BEAM toolchain (OTP/Elixir/Hex/rebar3 — the
+   latter two OTP-qualified builds; unqualified legacy artifacts hang on
+   new OTP, found live), clonefile deps projection (source trees are
+   written into by native builds — the "writable unattested projection"
+   kernel lesson), sandboxed mix compile with the loopback-TCP Mix lock
+   disabled. Real proof: telemetry (rebar3) + jason. ~620 adapter lines.
 4. **System packages (the Homebrew replacement)** — the big one, kept
    deliberately last: Sol's review was right that GUI apps, services,
    and privileged installs are a *different product* (host-effects

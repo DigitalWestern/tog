@@ -78,6 +78,43 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
     Ok(v["body"].clone())
 }
 
+/// Copy-on-write clone of a whole tree (cp -c uses APFS clonefile; plain
+/// copy fallback), then restore user-write bits, which the clone inherits
+/// as read-only from the store. Used for writable projections of immutable
+/// objects (npm mutablePackages, elixir deps trees).
+pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    use std::process::Command;
+    let clone = Command::new("/bin/cp").args(["-Rc"]).arg(src).arg(dest).status()?;
+    if !clone.success() {
+        if dest.exists() {
+            crate::store::remove_tree(dest)?;
+        }
+        let plain = Command::new("/bin/cp").arg("-R").arg(src).arg(dest).status()?;
+        if !plain.success() {
+            return Err(io::Error::other("cloning projected tree failed"));
+        }
+    }
+    restore_write_bits(dest)
+}
+
+fn restore_write_bits(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let md = fs::symlink_metadata(path)?;
+    if md.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = md.permissions().mode();
+    if mode & 0o200 == 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    }
+    if md.is_dir() {
+        for entry in fs::read_dir(path)? {
+            restore_write_bits(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded
 /// path must be exactly the store's path for that id. A project-editable

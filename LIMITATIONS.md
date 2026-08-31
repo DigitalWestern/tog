@@ -141,6 +141,31 @@ say what breaks, for whom, and how it fails (loud/silent).
   API drifts** (deliberate fail-closed, but means new bundler formats
   need code updates).
 
+## Elixir
+
+- **git deps and non-hexpm repos fail closed.** Loud.
+- **Umbrella projects untested** — likely partially working, deliberately
+  unverified; treat as unsupported until the test matrix exists. Silent
+  risk if attempted.
+- **Legacy mix.lock entry shapes (3/6/7-field) fail closed** with a
+  "refresh the lock" message. Loud.
+- **No rebar3 build for OTP 29 published yet**: the pinned otp-28
+  escript runs on the 29 VM (BEAM forward-compat) — works, but is a
+  version-skew impurity until upstream publishes otp-29 builds.
+- **Mix's compilation lock is disabled in-sandbox**
+  (MIX_OS_CONCURRENCY_LOCK=false; it needs loopback TCP): concurrent
+  unsandboxed `blanket run mix compile` against the same build root is
+  unprotected. Narrow.
+- **`blanket build` runs MIX_ENV=dev only**; test/prod builds go through
+  `blanket run mix` (offline-configured, unsandboxed).
+- **Hex/OTP/Elixir version matrix is single-pin**: .tool-versions and
+  mix.exs elixir requirements are not consulted. Loud only when a build
+  fails.
+- **deps projection is whole-tree writable** (native builds write
+  in-tree): one dep's build can modify a sibling dep in the projection —
+  cooperative hermeticity, same class as npm's clone mode. Recorded
+  unattested in the closure.
+
 ## Real-project proof gaps (all ecosystems)
 
 - Python/npm were proven on Ethan's real projects (CX-Games, deja,

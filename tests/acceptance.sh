@@ -210,6 +210,13 @@ case "$WHICH" in */objects/*) ok "rake resolves in the store";; *) bad "rake res
 OUT=$(cd "$WORK/rb" && "$BLANKET" run sh -c "$WHICH --version")
 case "$OUT" in *13.*) ok "store binstub executes ($OUT)";; *) bad "store binstub: $OUT";; esac
 
+echo "== 10g. elixir: hex deps + sandboxed mix compile (rebar3 dep)"
+cp -R "$FIXTURES/elixir-hello" "$WORK/ex"
+(cd "$WORK/ex" && "$BLANKET" sync)
+(cd "$WORK/ex" && "$BLANKET" build)
+OUT=$(cd "$WORK/ex" && "$BLANKET" run mix run -e 'IO.puts(ExReal.hello())')
+case "$OUT" in *'{"beam":"ok"}'*) ok "elixir build + run ($OUT)";; *) bad "elixir output: $OUT";; esac
+
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$BLANKET" sync)
