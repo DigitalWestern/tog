@@ -6,6 +6,7 @@ pub mod golang;
 pub mod npm;
 pub mod project;
 pub mod pypi;
+pub mod ruby;
 pub mod python;
 pub mod sandbox;
 pub mod store;

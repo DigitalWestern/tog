@@ -198,6 +198,16 @@ else
   bad "go rebuild failed"
 fi
 
+echo "== 10f. ruby: gems projection + sandboxed native-ext install"
+cp -R "$FIXTURES/ruby-hello" "$WORK/rb"
+mkdir -p "$WORK/rb/.bundle"
+printf -- "---\nBUNDLE_PATH: \"/nonexistent\"\n" > "$WORK/rb/.bundle/config"  # must be neutralized
+(cd "$WORK/rb" && "$BLANKET" sync)
+OUT=$(cd "$WORK/rb" && "$BLANKET" run ruby -e 'require "racc/parser"; require "rake"; puts "ok"')
+[ "$OUT" = "ok" ] && ok "ruby native-ext gems load ($OUT)" || bad "ruby output: $OUT"
+OUT=$(cd "$WORK/rb" && "$BLANKET" run rake --version)
+case "$OUT" in *13.*) ok "gem binstub runs ($OUT)";; *) bad "rake binstub: $OUT";; esac
+
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$BLANKET" sync)

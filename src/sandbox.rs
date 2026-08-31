@@ -27,6 +27,27 @@ pub struct BuildSpec {
     pub path: String,
 }
 
+/// Authoritative environment projection (Sol review 5, kernel primitive):
+/// strip every variable matching `remove_prefixes` or listed in `remove`,
+/// then apply the forced `set`. Python/cargo/go/ruby all need this shape.
+pub fn force_env(
+    cmd: &mut Command,
+    remove_prefixes: &[&str],
+    remove: &[&str],
+    set: &[(String, String)],
+) {
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy().into_owned();
+        if remove_prefixes.iter().any(|p| name.starts_with(p)) || remove.contains(&name.as_str())
+        {
+            cmd.env_remove(&key);
+        }
+    }
+    for (k, v) in set {
+        cmd.env(k, v);
+    }
+}
+
 pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
     let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
     let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
@@ -116,6 +137,8 @@ impl Sandbox<'_> {
         for (k, v) in envs {
             command.env(k, v);
         }
+        // Installers must fail, never hang on a prompt (Sol review 5).
+        command.stdin(std::process::Stdio::null());
         let status = command.status()?;
         if !status.success() {
             return Err(io::Error::new(

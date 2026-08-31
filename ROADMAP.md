@@ -108,8 +108,16 @@ Ordered by (usefulness to Ethan) x (cheapness given the kernel):
    multi-ecosystem `blanket build` dispatch. Real-project proof: cobra +
    BurntSushi/toml from a bare go.mod (auto-tidy resolution, 8-module
    verified closure). v0 gaps fail closed: go.work, local-path replaces.
-3. **Ruby (Gemfile.lock)** — moderate; native extensions reuse the
-   sandboxed-build machinery Python already built.
+3. ~~**Ruby (Gemfile.lock)**~~ **DONE 2026-08-31** — fifth tailor, same
+   session as Go. Bundler-delegated lock/platform analysis (embedded
+   helper under the pinned portable-ruby 3.4.6), CHECKSUMS-or-API hash
+   pinning (v2 API must be platform-qualified — bare endpoint returns
+   the latest-pushed variant's sha), Gem::Installer driven directly
+   in-sandbox (the CLI needs network code at load), dependency-first
+   installs, BUNDLE_IGNORE_CONFIG enforcement (.bundle/config OUTRANKS
+   env — inverse of cargo). Kernel gained force_env + BuildSpec stdin
+   null. ~540 adapter lines. v0 gaps fail closed: git/path gems,
+   non-rubygems sources, network-needing installers.
 4. **System packages (the Homebrew replacement)** — the big one, kept
    deliberately last: Sol's review was right that GUI apps, services,
    and privileged installs are a *different product* (host-effects

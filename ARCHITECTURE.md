@@ -6,14 +6,14 @@ per-language package managers by owning the outer loop every ecosystem
 shares: fetch a toolchain, lock a dependency graph, materialize it into an
 immutable store, project an environment, run tasks.
 
-Four ecosystems are built. Python and JavaScript/npm are proven on real
+Five ecosystems are built. Python and JavaScript/npm are proven on real
 projects: Next.js 15 + vitest suites, vite apps (build AND dev server),
 prisma, native addons compiled hermetically (better-sqlite3, sharp),
-FastAPI apps with native wheels. Cargo (Rust) and Go both landed
+FastAPI apps with native wheels. Cargo (Rust), Go, and Ruby all landed
 2026-08-31 as wrap-hermetically tailors. Tailor cost, measured honestly
 (adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+
-build), npm ~1015 (self-contained), cargo ~690, go ~600 — the
-lines-per-tailor curve keeps falling; the kernel thesis holds.
+build), npm ~1015 (self-contained), cargo ~690, go ~600, ruby ~540 —
+the lines-per-tailor curve keeps falling; the kernel thesis holds.
 
 ## The model (stolen from Nix, minus the interface)
 
@@ -201,6 +201,39 @@ outputs are staged in scratch and moved in by blanket afterwards;
 -mod/-modfile/-modcacherw/-toolexec/-overlay/-exec/-o are rejected.
 v0 fail-closed gaps: go.work workspaces, local-path replace directives.
 cgo uses host clang (the standing accepted impurity).
+
+## The Ruby tailor (delegate the semantics, own the bytes)
+
+Bundler-shaped: lock parsing and platform selection are delegated to the
+pinned portable Ruby's OWN Bundler/RubyGems via an embedded helper script
+(Gem::Platform matching has wildcards and specificity scores no hand
+parser should reimplement — Sol review 5), emitting the local-platform
+closure dependency-first as JSON. Hashes come from the lock's CHECKSUMS
+section (bundler ≥2.6, when present) or the rubygems.org v2 API —
+ALWAYS platform-qualified: the bare endpoint returns the latest-PUSHED
+variant (racc 1.8.1 returns the java gem's sha; caught live by fetch
+verification). Every .gem is fetched through the verified cache and its
+embedded gemspec is cross-checked against the plan post-download.
+
+Realize: one immutable GEM_HOME object per closure (`ruby-gems`), gems
+installed dependency-first INSIDE the network-denied sandbox via
+Gem::Installer driven directly by the helper (the `gem install` CLI
+requires network-class code at load time and dies EPERM in-sandbox) —
+native C extensions compile here against host clang (standing impurity).
+Executable-name collisions are detected before install, not left to
+PATH order. Toolchain: Homebrew portable-ruby 3.4.6 (relocatable,
+bundler included; the ruby Homebrew itself ships on — newest portable
+artifact; ruby-lang source may be ahead, documented gap).
+
+Enforcement: bundler's local .bundle/config OUTRANKS plain env (the
+reverse of cargo), so every blanket-controlled invocation strips
+BUNDLE_*/BUNDLER_*/RUBYOPT/RUBYLIB/RUBYGEMS_GEMDEPS/GEMRC and forces
+BUNDLE_IGNORE_CONFIG=1, BUNDLE_GEMFILE, BUNDLE_FROZEN, GEM_HOME/GEM_PATH
+(kernel `sandbox::force_env` primitive — Sol review 5's env-projection
+contract). PATH is ruby-first, then gem binstubs: a gem executable named
+`ruby` must never shadow the toolchain. v0 fail-closed gaps: non-
+rubygems.org sources, PATH/GIT gems, gems whose installers need network
+or absent host libraries (mysql2-class).
 
 ## Resolution is delegated; realization is owned
 
