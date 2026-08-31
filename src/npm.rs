@@ -658,9 +658,11 @@ fn run_install_scripts(
                 }
                 return Err(err(format!(
                     "{}: {phase} script failed under the network-denied build \
-                     sandbox: {e}. If this package downloads prebuilt binaries \
-                     at install time, it needs a source build path or a blanket \
-                     mechanism for declared artifacts.",
+                     sandbox: {e}. If this package downloads files at install \
+                     time, declare them as verified inputs in package.json — \
+                     \"blanket\": {{\"artifacts\": [{{\"url\", \"sha256\", \
+                     \"path\"}}]}} — placed where the package's downloader \
+                     caches them (see README).",
                     p.path
                 )));
             }

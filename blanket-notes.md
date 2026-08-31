@@ -116,3 +116,60 @@ Deviations from the earlier plan, with reasons:
 - Luna (Codex) agents were unreliable in this environment — one of three
   hung indefinitely twice; wheel installer came from Luna, the planner
   and npm adapter I wrote directly. Sol reviews worked well throughout.
+
+## Build log — depth phase (2026-08-31, overnight /goal session)
+
+Objective: make Python + JS genuinely usable on real projects. Method:
+real projects as adversarial inputs (Ethan's grok-horror-site, CX-Games,
+deja, Pub-Med-Decoder, Financial-Filing + a corpus of representative
+stacks), fix by failure class, never by package hack.
+
+Failure classes found and solved, in discovery order:
+1. Real node_modules blocks onboarding → auto-backup OUTSIDE the project
+   (~/.blanket/backups; inside-project backups get crawled by tsc/vitest).
+2. pngjs tarball ships dirs without exec bit → npm-style mode
+   normalization post-extract.
+3. playwright + @playwright/test both claim the `playwright` bin → npm
+   parity: first hoisted claim wins, warn.
+4. vite dev writes node_modules/.vite → THE architecture change: forest
+   projection (writable dir of symlinks into the store object, outside
+   the project, pnpm-style). Sol: GO-WITH-CHANGES (whole-tree clonefile
+   for mutable case, provenance records unattested, package.json config,
+   --fresh). The tree must itself be NAMED node_modules or Node's
+   resolver won't treat it as one (found via prisma .prisma resolution).
+5. prisma writes into its own packages → blanket.mutablePackages.
+6. tailwind v4 lock carries inBundle entries (no resolved URL) → skip,
+   parent tarball provides them; also drop descendants of
+   platform-skipped optional packages.
+7. Ranged requirements.txt (every real Python project) → delegate to
+   `uv pip compile --generate-hashes`; universal locks with markers
+   re-lock for the platform instead of failing.
+8. No package-lock.json (deja is a bun app) → delegate to
+   `npm install --package-lock-only`.
+9. better-sqlite3 (native addon, hasInstallScript, no platform packages)
+   → lifecycle scripts now RUN in the network-denied sandbox: node-gyp
+   shim from the store node's bundled npm, headers via npm_config_nodedir,
+   gyp's Python = store pinned CPython, Xcode read-allowed in the
+   profile. Compiles from bundled source offline. Evil-postinstall test
+   proves network egress still fails closed.
+10. sharp 0.32 downloads libvips + prebuilt .node at install → declared
+    artifacts (blanket.artifacts: url+sha256+path planted in scratch
+    HOME); its own downloader finds the cache warm. Both artifacts are
+    identity inputs. deja fully works.
+11. Workspaces (link entries) → forest symlinks to workspace source dirs;
+    `blanket run` walks up from subdirs.
+12. iCloud Desktop sync resurrects every swapped node_modules symlink as
+    "node_modules 2" — sync removes blanket-owned dups, warns otherwise.
+
+Kernel bugs the new concurrency tests exposed (all real for two parallel
+blanket runs): shared download tmp (stream hash verifies while the file
+holds interleaved bytes from two writers — silent cache poisoning),
+shared stage dirs (same-microsecond SystemTime), has() sweeping objects
+mid-publication. Fixed with per-attempt unique names + a publish file
+lock. SystemTime on macOS ticks in MICROSECONDS; never use it alone for
+unique names.
+
+Electron remains the documented fail-closed case (its downloader would
+need a per-version declared artifact; error message points at the
+mechanism). Nested per-workspace node_modules rejected with a hoisting
+hint. Acceptance: 20/20.
