@@ -932,7 +932,7 @@ pub fn project_node_env(
 
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
-    let closure = serde_json::json!({
+    let body = serde_json::json!({
         "env_object": env_obj,
         "projection_schema": "node-forest/1",
         "projection_id": proj_id,
@@ -951,10 +951,7 @@ pub fn project_node_env(
             serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
         }).collect::<Vec<_>>(),
     });
-    fs::write(
-        meta_dir.join("node-closure.json"),
-        serde_json::to_vec_pretty(&closure)?,
-    )
+    crate::project::write_closure(project_dir, "node", body)
 }
 
 /// One symlink per top-level entry of the object's node_modules; scoped

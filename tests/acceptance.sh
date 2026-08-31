@@ -120,7 +120,7 @@ cp -R "$FIXTURES/proj-npm" "$WORK/nm"
   || python3 -c "import json;p=json.load(open('$WORK/nm/package.json'));p['blanket']={'mutablePackages':['is-odd']};json.dump(p,open('$WORK/nm/package.json','w'))")
 (cd "$WORK/nm" && "$BLANKET" sync)
 if touch "$WORK/nm/node_modules/is-odd/scratch" 2>/dev/null; then ok "declared mutable package is writable"; else bad "mutable package not writable"; fi
-grep -q '"mutable_state": "unattested"' "$WORK/nm/.blanket/node-closure.json" && ok "closure records unattested mutable state" || bad "closure missing mutable_state"
+grep -q '"mutable_state": "unattested"' "$WORK/nm/.blanket/closures/node.json" && ok "closure records unattested mutable state" || bad "closure missing mutable_state"
 
 echo "== 10c. cargo: vendor projection + sandboxed build + offline rebuild"
 cp -R "$FIXTURES/cargo-hello" "$WORK/cargo"

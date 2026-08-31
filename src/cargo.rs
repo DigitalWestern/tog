@@ -639,18 +639,15 @@ pub fn project_cargo_env(
             "id": id,
         }))
     };
-    let closure = serde_json::json!({
-        "rust_object": object_ref(&rust_obj)?,
-        "vendor_object": object_ref(&vendor_obj)?,
-        "cargo_lock_sha256": lock_digest,
-        "plan": plan,
-        "projected_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-    });
-    write_atomic(
-        &project_dir.join(".blanket/cargo-closure.json"),
-        &serde_json::to_vec_pretty(&closure)?,
-        None,
+    crate::project::write_closure(
+        &project_dir,
+        "cargo",
+        serde_json::json!({
+            "rust_object": object_ref(&rust_obj)?,
+            "vendor_object": object_ref(&vendor_obj)?,
+            "cargo_lock_sha256": lock_digest,
+            "plan": plan,
+        }),
     )
 }
 
@@ -687,9 +684,24 @@ pub fn build_sandboxed(
     fs::create_dir_all(&build_home)?;
     let config = build_home.join("blanket-config.toml");
     fs::write(&config, blanket_config_text(&vendor_obj)?)?;
-    let result = {
-        let env_path = format!("{}:/usr/bin:/bin", rust_obj.join("bin").display());
-        let envs = vec![
+    let mut argv = vec![
+        cargo_bin
+            .to_str()
+            .ok_or_else(|| err("Cargo path is not UTF-8"))?
+            .to_string(),
+        "--frozen".to_string(),
+        "--config".to_string(),
+        config
+            .to_str()
+            .ok_or_else(|| err("Cargo config path is not UTF-8"))?
+            .to_string(),
+        "build".to_string(),
+    ];
+    argv.extend(args.iter().cloned());
+    let spec = crate::sandbox::BuildSpec {
+        argv,
+        cwd: project_dir.clone(),
+        env: vec![
             ("CARGO_HOME".to_string(), build_home.display().to_string()),
             ("CARGO_TARGET_DIR".to_string(), target.display().to_string()),
             // Env outranks a project's [build] rustc / rustc-wrapper config:
@@ -700,21 +712,13 @@ pub fn build_sandboxed(
             ),
             ("RUSTC_WRAPPER".to_string(), String::new()),
             ("RUSTC_WORKSPACE_WRAPPER".to_string(), String::new()),
-        ];
-        let mut command = vec![
-            cargo_bin.to_str().ok_or_else(|| err("Cargo path is not UTF-8"))?,
-            "--frozen",
-            "--config",
-            config.to_str().ok_or_else(|| err("Cargo config path is not UTF-8"))?,
-            "build",
-        ];
-        command.extend(args.iter().map(String::as_str));
-        let sandbox = crate::sandbox::Sandbox {
-            read: vec![&project_dir, &rust_obj, &vendor_obj],
-            write: vec![&target, &scratch],
-        };
-        sandbox.run_in(&command, &env_path, &scratch, &project_dir, &envs)
+        ],
+        read: vec![project_dir.clone(), rust_obj.clone(), vendor_obj.clone()],
+        write: vec![target],
+        scratch: scratch.clone(),
+        path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
     };
+    let result = crate::sandbox::run_build_spec(&spec);
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
         err(format!(
@@ -1113,14 +1117,11 @@ checksum = "{hash_b}"
             assert_eq!(fs::metadata(wrapper_path).unwrap().permissions().mode() & 0o111, 0o111);
         }
 
-        let closure: serde_json::Value =
-            serde_json::from_slice(&fs::read(project.join(".blanket/cargo-closure.json")).unwrap())
-                .unwrap();
+        let closure = crate::project::read_closure(&project, "cargo").unwrap();
         assert_eq!(closure["rust_object"]["id"], "rust-id");
         assert_eq!(closure["vendor_object"]["id"], "vendor-id");
         assert_eq!(closure["cargo_lock_sha256"], digest);
         assert_eq!(closure["plan"]["members"][0], "app");
-        assert!(closure["projected_at"].is_number());
         // Wrapper enforces the pinned compiler and refuses --config takeover.
         assert!(wrapper.contains(&format!("export RUSTC=\"{}\"", rust.join("bin/rustc").display())));
         assert!(wrapper.contains("--config|--config=*"));

@@ -15,6 +15,50 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+/// Common closure envelope (Sol review 4): every tailor's provenance lands
+/// at .blanket/closures/<ecosystem>.json with a shared outer shape; the
+/// `body` stays tailor-owned. Written atomically.
+pub fn write_closure(
+    project_dir: &Path,
+    ecosystem: &str,
+    body: serde_json::Value,
+) -> io::Result<()> {
+    let dir = project_dir.join(".blanket/closures");
+    fs::create_dir_all(&dir)?;
+    let envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": ecosystem,
+        "projected_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        "body": body,
+    });
+    let dest = dir.join(format!("{ecosystem}.json"));
+    let tmp = dir.join(format!(
+        ".{ecosystem}.json.tmp.{}",
+        std::process::id()
+    ));
+    fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
+    fs::rename(&tmp, &dest)
+}
+
+/// Read a tailor's closure body back (for `blanket run` and friends).
+pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
+    let path = project_dir.join(format!(".blanket/closures/{ecosystem}.json"));
+    let text = fs::read_to_string(&path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("read {}: {e}; run `blanket sync` first", path.display()),
+        )
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse {}: {e}; run `blanket sync` first", path.display()),
+        )
+    })?;
+    Ok(v["body"].clone())
+}
+
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
@@ -177,7 +221,7 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
 }
 
 /// Project an env into a project directory: `.venv` symlink (atomic swap)
-/// plus `.blanket/closure.json` provenance.
+/// plus closure-envelope provenance (.blanket/closures/python.json).
 pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
     let venv = project_dir.join(".venv");
     backup_real_dir(&venv, env_obj)?;
@@ -194,14 +238,12 @@ pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Resul
 
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
-    let closure = serde_json::json!({
-        "env_object": env_obj,
-        "plan": plan,
-        "projected_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-    });
-    fs::write(
-        meta_dir.join("closure.json"),
-        serde_json::to_vec_pretty(&closure)?,
+    write_closure(
+        project_dir,
+        "python",
+        serde_json::json!({
+            "env_object": env_obj,
+            "plan": plan,
+        }),
     )
 }

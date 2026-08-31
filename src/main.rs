@@ -460,21 +460,7 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         prefix.push(node.join("bin").to_string_lossy().into_owned());
     }
     if cargo_home.exists() {
-        let closure_path = dir.join(".blanket/cargo-closure.json");
-        let closure: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&closure_path).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("read {}: {e}; run `blanket sync` first", closure_path.display()),
-                )
-            })?,
-        )
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("parse {}: {e}; run `blanket sync` first", closure_path.display()),
-            )
-        })?;
+        let closure = project::read_closure(&dir, "cargo")?;
         let rust_obj = closure["rust_object"]["path"]
             .as_str()
             .map(PathBuf::from)
@@ -482,10 +468,7 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "{} has no valid Rust object; run `blanket sync` first",
-                        closure_path.display()
-                    ),
+                    "cargo closure has no valid Rust object; run `blanket sync` first",
                 )
             })?;
         prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());

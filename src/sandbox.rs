@@ -7,8 +7,36 @@
 //! fails" true, which is what the kernel needs.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// A sandboxed build, ecosystem-agnostic (Sol review 4): tailors construct
+/// the spec — argv, environment, read/write roots, scratch — and the kernel
+/// executes it. Keeps sandbox policy in one place as tailors multiply.
+pub struct BuildSpec {
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+    /// Read-only roots beyond the system defaults (store objects, project).
+    pub read: Vec<PathBuf>,
+    /// Writable roots (outputs, caches). scratch is added automatically.
+    pub write: Vec<PathBuf>,
+    /// Writable scratch dir; becomes HOME and TMPDIR.
+    pub scratch: PathBuf,
+    /// PATH inside the sandbox.
+    pub path: String,
+}
+
+pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
+    let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
+    let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
+    write.push(&spec.scratch);
+    let sandbox = Sandbox {
+        read: spec.read.iter().map(PathBuf::as_path).collect(),
+        write,
+    };
+    sandbox.run_in(&argv, &spec.path, &spec.scratch, &spec.cwd, &spec.env)
+}
 
 pub struct Sandbox<'a> {
     /// Directories the build may read (store objects, staged sources).
