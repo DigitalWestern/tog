@@ -163,6 +163,13 @@ starves.
 - [ ] Third tailor — cargo (wrap, hermetically)
 - [ ] M5 hardening backlog (ARCHITECTURE.md): RECORD rewrite, Mach-service
       allowlist, deployment-target tags, streaming extractors, `blanket gc`
+      (now also: forests + backups, with liveness checks)
+- [ ] Sol review 3 leftovers (2026-08-31): dependency-order lifecycle
+      execution + ancestor .bin paths; true npm optional-failure parity
+      (remove failed package subtree from the object + identity); planner
+      subprocess sandboxing (uv/npm run unsandboxed by design for now);
+      process-tree quiescence after install scripts; Xcode/SDK fingerprint
+      in build identity
 - [ ] Central closet / binary cache + fixed store path decision
 - [ ] Friendlier CLI errors (e.g. `node.js` typo → "did you mean node?")
 - [ ] Linux support (also unlocks the "Linux as reference hermetic
