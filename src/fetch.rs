@@ -67,6 +67,28 @@ impl Digest {
     }
 }
 
+/// Fetch a cache entry by sha256, RE-VERIFYING its content (never trust a
+/// cache hit: read-only bits stop accidents, not same-user replacement).
+/// A poisoned entry is deleted and reported missing.
+pub fn cache_verified(store: &Store, sha256: &str) -> io::Result<PathBuf> {
+    let digest = Digest::sha256(sha256)?;
+    let path = store.cache_path("sha256", digest.hex());
+    match hash_file(&path, Algo::Sha256) {
+        Ok(h) if h == digest.hex() => Ok(path),
+        Ok(_) => {
+            let _ = fs::remove_file(&path);
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("cache entry {sha256} was corrupted (removed); re-run sync"),
+            ))
+        }
+        Err(e) => Err(io::Error::new(
+            e.kind(),
+            format!("cache entry {sha256} unreadable: {e}; re-run sync"),
+        )),
+    }
+}
+
 fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     let mut f = fs::File::open(path)?;
     let mut buf = [0u8; 65536];
@@ -144,7 +166,14 @@ pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String,
     let hex = hash_file(src, Algo::Sha256)?;
     let dest = store.cache_path("sha256", &hex);
     if dest.is_file() {
-        return Ok((hex, dest));
+        // Re-verify on hit, like download_verified: a same-user replacement
+        // must never ride an old address (poisoned -> drop and re-insert).
+        match hash_file(&dest, Algo::Sha256) {
+            Ok(h) if h == hex => return Ok((hex, dest)),
+            _ => {
+                let _ = fs::remove_file(&dest);
+            }
+        }
     }
     fs::create_dir_all(dest.parent().unwrap())?;
     use std::sync::atomic::{AtomicU64, Ordering};

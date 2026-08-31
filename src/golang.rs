@@ -82,6 +82,14 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
     if offline {
         env.push(("GOPROXY".to_string(), "off".to_string()));
         env.push(("GOSUMDB".to_string(), "off".to_string()));
+    } else {
+        // Resolver policy is FORCED, never inherited (Sol: an inherited
+        // GOPROXY=file:...+GOSUMDB=off resolves attacker code). Proxy-only,
+        // checksum-db on, VCS fallback off — private modules are a later,
+        // explicitly-designed feature.
+        env.push(("GOPROXY".to_string(), "https://proxy.golang.org".to_string()));
+        env.push(("GOSUMDB".to_string(), "sum.golang.org".to_string()));
+        env.push(("GOVCS".to_string(), "*:off".to_string()));
     }
     env
 }
@@ -217,6 +225,83 @@ pub fn reject_workspaces(project_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Local-path replace directives never appear in `go mod download -json`
+/// output (Go elides them), so they must be rejected from go.mod itself
+/// (Sol: reproduced unverified in-project code entering a build).
+pub fn reject_local_replaces(gomod: &str) -> io::Result<()> {
+    let mut in_block = false;
+    for raw in gomod.lines() {
+        let line = raw.split("//").next().unwrap_or("").trim();
+        let body = if in_block {
+            if line == ")" {
+                in_block = false;
+                continue;
+            }
+            line
+        } else if let Some(rest) = line.strip_prefix("replace") {
+            let rest = rest.trim();
+            if rest == "(" {
+                in_block = true;
+                continue;
+            }
+            rest
+        } else {
+            continue;
+        };
+        if let Some((_, target)) = body.split_once("=>") {
+            let target = target.trim();
+            let path = target.split_whitespace().next().unwrap_or("");
+            let has_version = target.split_whitespace().count() >= 2;
+            if path.starts_with("./") || path.starts_with("../") || path.starts_with('/')
+                || (!has_version && !path.is_empty())
+            {
+                return Err(err(format!(
+                    "go.mod replaces a module with local path {path:?}; \
+                     local replace directives are not supported yet \
+                     (no go.sum integrity for local trees)"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A plan (fresh or loaded from the .blanket cache) is untrusted input:
+/// every field that becomes a cache address or identity input is validated.
+fn validate_plan(plan: &GoPlan) -> io::Result<()> {
+    let hex_ok = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let h1_ok = |s: &str| {
+        s.len() == 47
+            && s.starts_with("h1:")
+            && s[3..].bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for m in &plan.modules {
+        escape_go_path(&m.path)?;
+        escape_go_path(&m.version)?;
+        if !seen.insert((m.path.clone(), m.version.clone())) {
+            return Err(err(format!("duplicate module {}@{} in plan", m.path, m.version)));
+        }
+        for sha in [&m.zip_sha256, &m.modfile_sha256, &m.info_sha256] {
+            if !hex_ok(sha) {
+                return Err(err(format!(
+                    "{}@{}: invalid sha256 in plan: {sha:?}",
+                    m.path, m.version
+                )));
+            }
+        }
+        for h1 in [&m.h1, &m.modfile_h1] {
+            if !h1_ok(h1) {
+                return Err(err(format!(
+                    "{}@{}: invalid h1 in plan: {h1:?}",
+                    m.path, m.version
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse the module path from go.mod.
 pub fn module_path(gomod: &str) -> io::Result<String> {
     for line in gomod.lines() {
@@ -236,17 +321,25 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
     let gomod = fs::read_to_string(project_dir.join("go.mod"))
         .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
+    reject_local_replaces(&gomod)?;
     let go_version = resolve_toolchain(&gomod)?;
 
-    const PLANNER_SCHEMA: &str = "go-planner/1";
+    // The tidy gate's inputs are exactly go.mod + go.sum + the .go sources,
+    // so the plan-cache key covers all three: a hit proves the last
+    // successful gate's inputs are unchanged, making a re-run redundant
+    // (Sol finding 7, solved by keying instead of re-running).
+    const PLANNER_SCHEMA: &str = "go-planner/2";
+    let src_digest = source_digest(project_dir)?;
     let input_hash = hex::encode(Sha256::digest(
-        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}").as_bytes(),
+        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}\x00{src_digest}").as_bytes(),
     ));
     let cache_path = project_dir.join(".blanket/go-plan.json");
     if let Ok(cached) = fs::read_to_string(&cache_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
             if v["input_hash"] == input_hash.as_str() {
-                if let Ok(plan) = serde_json::from_value(v["plan"].clone()) {
+                if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
+                    // The cache file is attacker-editable project state.
+                    validate_plan(&plan)?;
                     return Ok(plan);
                 }
             }
@@ -255,9 +348,10 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
 
     // Consistency gate: tidy -diff is non-mutating (prints a diff, exit
     // nonzero when go.mod/go.sum need changes). Needs the source tree, so
-    // it runs in the real project — but never writes.
+    // it runs in the real project — but never writes. Its module cache is a
+    // persistent planner scratch (resolver-trust only; never feeds objects).
     let scratch = store.stage()?;
-    let gate_cache = scratch.join("gate-modcache");
+    let gate_cache = store.root.join("planner-modcache");
     fs::create_dir_all(&gate_cache)?;
     let out = run_go(go_obj, project_dir, &gate_cache, false, &["mod", "tidy", "-diff"])?;
     let (gomod, gosum) = if out.status.success() {
@@ -279,24 +373,33 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
             fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default(),
         )
     };
+    reject_local_replaces(&gomod)?;
     // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
     let go_version = resolve_toolchain(&gomod)?;
     let module = module_path(&gomod)?;
     let input_hash = hex::encode(Sha256::digest(
-        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}").as_bytes(),
+        format!(
+            "{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}\x00{}",
+            source_digest(project_dir)?
+        )
+        .as_bytes(),
     ));
 
-    // Disposable copy for download (it may rewrite go.mod/go.sum).
+    // Disposable copy for download (it may rewrite go.mod/go.sum). The
+    // module cache is the persistent planner scratch — warm downloads;
+    // trust is irrelevant because every artifact is re-verified below.
     let work = scratch.join("plan");
     fs::create_dir_all(&work)?;
     fs::write(work.join("go.mod"), &gomod)?;
     if !gosum.is_empty() {
         fs::write(work.join("go.sum"), &gosum)?;
     }
-    let modcache = scratch.join("modcache");
-    fs::create_dir_all(&modcache)?;
     eprintln!("blanket: computing Go module closure with the store toolchain...");
-    let out = run_go(go_obj, &work, &modcache, false, &["mod", "download", "-json", "all"])?;
+    let out = run_go(go_obj, &work, &gate_cache, false, &["mod", "download", "-json", "all"])?;
+    // Ledger anchor: h1 values must ALSO appear in the project's go.sum —
+    // never trust sums that exist only in the delegated tool's output.
+    let ledger: std::collections::BTreeSet<String> =
+        gosum.lines().map(|l| l.trim().to_string()).collect();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     // Parse the JSON stream (concatenated objects) BEFORE checking status:
     // per-module errors ride in the stream.
@@ -332,6 +435,25 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
             else {
                 continue; // main module / no artifacts
             };
+            // Ledger anchor: the tidied go.sum is the authority. Modules
+            // whose zip sums it omits are build-GRAPH-only (tidy records
+            // zip sums for exactly the modules whose packages a build can
+            // import) — exclude them from the closure rather than fail:
+            // an offline build never loads their sources, and if one were
+            // ever needed the readonly+GOPROXY=off build fails loudly.
+            if !ledger.contains(&format!("{} {} {}", entry.path, entry.version, sum)) {
+                continue;
+            }
+            if !ledger.contains(&format!(
+                "{} {}/go.mod {}",
+                entry.path, entry.version, gomod_sum
+            )) {
+                return Err(err(format!(
+                    "{}@{}: go.mod sum is not in the project's go.sum \
+                     ledger; refusing (run `blanket run go mod tidy`)",
+                    entry.path, entry.version
+                )));
+            }
             // Blanket-owned verification: recompute both dirhashes.
             let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
             if got_h1 != *sum {
@@ -352,6 +474,18 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
             let info = entry.info.as_deref().ok_or_else(|| {
                 err(format!("{}@{}: download entry has no Info file", entry.path, entry.version))
             })?;
+            // .info is proxy metadata: verify it says what the plan says
+            // before its bytes become an identity input.
+            let info_json: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(info)?,
+            )
+            .map_err(|e| err(format!("{}@{}: bad .info: {e}", entry.path, entry.version)))?;
+            if info_json["Version"].as_str() != Some(entry.version.as_str()) {
+                return Err(err(format!(
+                    "{}@{}: .info Version {:?} does not match",
+                    entry.path, entry.version, info_json["Version"]
+                )));
+            }
             let (info_sha256, _) = cache_insert(store, Path::new(info))?;
             modules.push(GoModule {
                 path: entry.path,
@@ -380,6 +514,16 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
         module,
         modules,
     };
+    validate_plan(&plan)?;
+    // Snapshot guard: the manifest must not have changed under us between
+    // the gate and now, or the cache key would lie about the plan's inputs.
+    let now_mod = fs::read_to_string(project_dir.join("go.mod")).unwrap_or_default();
+    let now_sum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
+    if now_mod != gomod || now_sum != gosum {
+        return Err(err(
+            "go.mod/go.sum changed while planning; re-run blanket sync",
+        ));
+    }
     fs::create_dir_all(project_dir.join(".blanket"))?;
     fs::write(
         &cache_path,
@@ -389,6 +533,43 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
         }))?,
     )?;
     Ok(plan)
+}
+
+/// Digest of the project's .go sources (the tidy gate's third input).
+/// Sorted (relpath, sha256) pairs; hidden dirs and .blanket are skipped.
+fn source_digest(project_dir: &Path) -> io::Result<String> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    fn walk(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name.starts_with('_') {
+                continue;
+            }
+            let md = fs::symlink_metadata(&path)?;
+            if md.is_dir() {
+                walk(root, &path, files)?;
+            } else if md.is_file() && name.ends_with(".go") {
+                let rel = path
+                    .strip_prefix(root)
+                    .map_err(|e| err(format!("source walk: {e}")))?
+                    .to_string_lossy()
+                    .into_owned();
+                let content = fs::read(&path)?;
+                files.push((rel, hex::encode(Sha256::digest(&content))));
+            }
+        }
+        Ok(())
+    }
+    walk(project_dir, project_dir, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for (rel, hash) in &files {
+        hasher.update(format!("{hash}  {rel}\n").as_bytes());
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Go's module path/version escaping: uppercase c -> "!c" (module paths
@@ -422,6 +603,7 @@ pub fn escape_go_path(s: &str) -> io::Result<String> {
 /// Stage the cache/download skeleton for a plan (zips, .mod, .info,
 /// blanket-verified .ziphash) from the verified artifact cache.
 pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> io::Result<()> {
+    validate_plan(plan)?;
     for m in &plan.modules {
         let dir = staged
             .join("cache/download")
@@ -434,15 +616,23 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
             (&m.modfile_sha256, "mod"),
             (&m.info_sha256, "info"),
         ] {
-            let src = store.cache_path("sha256", hash);
-            if !src.is_file() {
-                return Err(err(format!(
-                    "{}@{}: artifact {hash} missing from cache; re-run sync",
-                    m.path, m.version
-                )));
-            }
+            // cache_verified re-hashes the entry: a cache hit is never
+            // trusted (Sol: go skips extraction checks when zip+ziphash
+            // already exist, so a poisoned cache byte would go straight
+            // into the object).
+            let src = crate::fetch::cache_verified(store, hash).map_err(|e| {
+                err(format!("{}@{}: {e}", m.path, m.version))
+            })?;
             // COPY, never hardlink: builds must not reach the cache.
             fs::copy(&src, dir.join(format!("{ver}.{ext}")))?;
+        }
+        // Belt over braces: the staged zip must still match its h1.
+        let got = dirhash::hash_zip(&dir.join(format!("{ver}.zip")), &m.path, &m.version)?;
+        if got != m.h1 {
+            return Err(err(format!(
+                "{}@{}: staged zip does not match its h1; refusing",
+                m.path, m.version
+            )));
         }
         fs::write(dir.join(format!("{ver}.ziphash")), &m.h1)?;
     }
@@ -502,7 +692,16 @@ pub fn realize_modcache(store: &Store, plan: &GoPlan, go_obj: &Path) -> io::Resu
         gomod.push_str(")\n");
         fs::write(scratch.join("go.mod"), &gomod)?;
         fs::write(scratch.join("go.sum"), &gosum)?;
-        let out = run_go(go_obj, &scratch, &staged, true, &["mod", "download", "all"])?;
+        // Explicit path@version args: extract exactly the plan's modules,
+        // never a graph walk (graph-only modules are deliberately absent).
+        let mut args = vec!["mod".to_string(), "download".to_string()];
+        args.extend(
+            plan.modules
+                .iter()
+                .map(|m| format!("{}@{}", m.path, m.version)),
+        );
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_go(go_obj, &scratch, &staged, true, &arg_refs)?;
         let _ = crate::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
@@ -554,9 +753,12 @@ pub fn build_sandboxed(
 ) -> io::Result<()> {
     const FORBIDDEN: &[&str] = &["-mod", "-modfile", "-modcacherw", "-toolexec", "-overlay", "-exec", "-o"];
     for arg in args {
+        // Go flags accept one or two dashes: normalize before checking.
+        let norm = arg.strip_prefix('-').map(|s| format!("-{}", s.trim_start_matches('-')));
+        let norm = norm.as_deref().unwrap_or(arg);
         if FORBIDDEN
             .iter()
-            .any(|f| arg == f || arg.starts_with(&format!("{f}=")))
+            .any(|f| norm == *f || norm.starts_with(&format!("{f}=")))
         {
             return Err(err(format!(
                 "{arg}: this flag is managed by blanket (module mode, output \
@@ -655,25 +857,68 @@ mod tests {
     }
 
     #[test]
-    fn download_json_parsing_and_replace_rules() {
-        let entry: DownloadEntry = serde_json::from_str(
-            r#"{"Path":"a","Version":"v1.0.0","Sum":"h1:x","GoModSum":"h1:y",
-                "Zip":"/z","GoMod":"/m","Info":"/i",
-                "Replace":{"Path":"b","Version":"v1.0.1"}}"#,
-        )
-        .unwrap();
-        assert_eq!(entry.replace.as_ref().unwrap().path, "b");
-        let local: DownloadEntry = serde_json::from_str(
-            r#"{"Path":"a","Version":"v1.0.0","Replace":{"Path":"../local","Version":""}}"#,
-        )
-        .unwrap();
-        let rep = local.replace.unwrap();
-        assert!(rep.version.is_empty() || rep.path.starts_with('.'));
+    fn local_replaces_rejected_from_gomod_text() {
+        // Go's download -json ELIDES local replacements entirely, so the
+        // rejection must parse go.mod itself (Sol finding 3, reproduced).
+        for bad in [
+            "module m\n\nreplace example.com/a => ./localdep\n",
+            "module m\n\nreplace example.com/a => ../up\n",
+            "module m\n\nreplace example.com/a v1.0.0 => /abs/path\n",
+            "module m\n\nreplace (\n\texample.com/a => ./x\n)\n",
+        ] {
+            assert!(reject_local_replaces(bad).is_err(), "{bad}");
+        }
+        // Version-to-version replaces are fine.
+        for good in [
+            "module m\n\nreplace example.com/a => example.com/b v1.2.3\n",
+            "module m\n\nreplace (\n\texample.com/a v1.0.0 => example.com/b v1.2.3\n)\n",
+            "module m\n\ngo 1.27\n",
+        ] {
+            assert!(reject_local_replaces(good).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn plan_validation_rejects_hostile_cache_fields() {
+        let base = GoModule {
+            path: "example.com/a".into(),
+            version: "v1.0.0".into(),
+            h1: format!("h1:{}=", "A".repeat(43)),
+            zip_sha256: "a".repeat(64),
+            modfile_h1: format!("h1:{}=", "B".repeat(43)),
+            modfile_sha256: "b".repeat(64),
+            info_sha256: "c".repeat(64),
+        };
+        let ok_plan = GoPlan {
+            go_version: "1.27.0".into(),
+            module: "m".into(),
+            modules: vec![base.clone()],
+        };
+        assert!(validate_plan(&ok_plan).is_ok());
+        // Path-traversal "sha256" from a tampered .blanket/go-plan.json.
+        let mut evil = base.clone();
+        evil.zip_sha256 = "../../objects/x".into();
+        assert!(validate_plan(&GoPlan {
+            go_version: "1.27.0".into(),
+            module: "m".into(),
+            modules: vec![evil],
+        })
+        .is_err());
+        let mut dup = GoPlan {
+            go_version: "1.27.0".into(),
+            module: "m".into(),
+            modules: vec![base.clone(), base.clone()],
+        };
+        assert!(validate_plan(&dup).is_err());
+        dup.modules.pop();
+        dup.modules[0].h1 = "not-an-h1".into();
+        assert!(validate_plan(&dup).is_err());
     }
 
     #[test]
     fn build_rejects_managed_flags() {
-        for bad in ["-mod=mod", "-toolexec", "-o", "-overlay=x", "-modcacherw"] {
+        for bad in ["-mod=mod", "-toolexec", "-o", "-overlay=x", "-modcacherw",
+                    "--mod=vendor", "--o=/tmp/x", "--toolexec"] {
             let e = build_sandboxed(
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
@@ -704,34 +949,52 @@ mod tests {
         std::env::set_var("BLANKET_STORE", temp.join("store"));
         let store = Store::open().unwrap();
         std::env::remove_var("BLANKET_STORE");
-        // Seed three fake artifacts into the cache.
-        let mut hashes = Vec::new();
-        for content in ["zipbytes", "modbytes", "infobytes"] {
-            let f = temp.join(content);
-            std::fs::write(&f, content).unwrap();
-            hashes.push(cache_insert(&store, &f).unwrap().0);
-        }
+        // Real fixture artifacts through the verified cache.
+        let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
+        let (zip_hash, _) = cache_insert(&store, &fix.join("quote-v1.5.2.zip")).unwrap();
+        let (mod_hash, _) = cache_insert(&store, &fix.join("quote-v1.5.2.mod")).unwrap();
+        let info = temp.join("info");
+        std::fs::write(&info, r#"{"Version":"v1.5.2"}"#).unwrap();
+        let (info_hash, info_cache) = cache_insert(&store, &info).unwrap();
+        let module = GoModule {
+            path: "rsc.io/quote".into(),
+            version: "v1.5.2".into(),
+            h1: "h1:w5fcysjrx7yqtD/aO+QwRjYZOKnaM9Uh2b40tElTs3Y=".into(),
+            zip_sha256: zip_hash,
+            modfile_h1: "h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPXsUe+TKr0=".into(),
+            modfile_sha256: mod_hash,
+            info_sha256: info_hash.clone(),
+        };
         let plan = GoPlan {
             go_version: "1.27.0".into(),
             module: "m".into(),
-            modules: vec![GoModule {
-                path: "github.com/BurntSushi/toml".into(),
-                version: "v1.4.0".into(),
-                h1: "h1:zip".into(),
-                zip_sha256: hashes[0].clone(),
-                modfile_h1: "h1:mod".into(),
-                modfile_sha256: hashes[1].clone(),
-                info_sha256: hashes[2].clone(),
-            }],
+            modules: vec![module.clone()],
         };
         let staged = temp.join("staged");
         std::fs::create_dir_all(&staged).unwrap();
         stage_modcache_skeleton(&store, &plan, &staged).unwrap();
-        let base = staged.join("cache/download/github.com/!burnt!sushi/toml/@v");
-        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.ziphash")).unwrap(), "h1:zip");
-        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.zip")).unwrap(), "zipbytes");
-        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.mod")).unwrap(), "modbytes");
-        assert_eq!(std::fs::read_to_string(base.join("v1.4.0.info")).unwrap(), "infobytes");
+        let base = staged.join("cache/download/rsc.io/quote/@v");
+        assert_eq!(
+            std::fs::read_to_string(base.join("v1.5.2.ziphash")).unwrap(),
+            "h1:w5fcysjrx7yqtD/aO+QwRjYZOKnaM9Uh2b40tElTs3Y="
+        );
+        assert!(base.join("v1.5.2.zip").is_file());
+        assert!(base.join("v1.5.2.mod").is_file());
+        assert!(base.join("v1.5.2.info").is_file());
+
+        // Poisoning regression (Sol finding 1): tamper the cached .info —
+        // staging must refuse instead of copying poisoned bytes.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&info_cache).unwrap().permissions();
+            p.set_mode(0o644);
+            std::fs::set_permissions(&info_cache, p).unwrap();
+            std::fs::write(&info_cache, r#"{"Version":"evil"}"#).unwrap();
+        }
+        let staged2 = temp.join("staged2");
+        std::fs::create_dir_all(&staged2).unwrap();
+        let e = stage_modcache_skeleton(&store, &plan, &staged2).unwrap_err();
+        assert!(e.to_string().contains(&info_hash), "{e}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

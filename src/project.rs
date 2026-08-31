@@ -23,8 +23,18 @@ pub fn write_closure(
     ecosystem: &str,
     body: serde_json::Value,
 ) -> io::Result<()> {
+    let project_dir = project_dir.canonicalize()?;
     let dir = project_dir.join(".blanket/closures");
     fs::create_dir_all(&dir)?;
+    // A symlinked closures dir would carry provenance writes outside the
+    // project (same class as the cargo-home/bin escape).
+    let dir = dir.canonicalize()?;
+    if !dir.starts_with(&project_dir) {
+        return Err(io::Error::other(format!(
+            "{} escapes the project; refusing to write closures there",
+            dir.display()
+        )));
+    }
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
@@ -56,6 +66,15 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
             format!("parse {}: {e}; run `blanket sync` first", path.display()),
         )
     })?;
+    if v["schema"] != "closure/1" || v["ecosystem"] != ecosystem {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: unknown closure schema/ecosystem; re-run `blanket sync`",
+                path.display()
+            ),
+        ));
+    }
     Ok(v["body"].clone())
 }
 
