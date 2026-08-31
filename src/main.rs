@@ -14,7 +14,8 @@ USAGE:
   blanket store path      print the store root
 
 Project inputs (either or both):
-  requirements.txt        hash-pinned python deps (uv pip compile --generate-hashes)
+  requirements.txt        python deps; ranged files are auto-locked via uv
+                          into requirements.lock.txt (hash-pinned)
   .python-version         optional; e.g. 3.12 (default: 3.12)
   package-lock.json       npm lockfile v2/v3 (npm install --package-lock-only)
 ";
@@ -50,7 +51,7 @@ fn project_dir() -> PathBuf {
 /// lock replans offline and instantly.
 fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     let req_path = dir.join("requirements.txt");
-    let text = std::fs::read_to_string(&req_path).map_err(|e| {
+    let source = std::fs::read_to_string(&req_path).map_err(|e| {
         io::Error::new(e.kind(), format!("{}: {e}", req_path.display()))
     })?;
     let pyver = std::fs::read_to_string(dir.join(".python-version"))
@@ -62,6 +63,16 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
             format!("no pinned CPython matching '{pyver}'"),
         )
     })?;
+
+    // Real projects mostly carry ranged requirements, not hash-pinned ones.
+    // Resolution is delegated to the ecosystem's own resolver (uv) — blanket
+    // owns realization, not solving. The generated requirements.lock.txt is
+    // regenerated whenever requirements.txt changes.
+    let text = if is_fully_pinned(&source) {
+        source
+    } else {
+        locked_requirements(dir, &source, pin.version)?
+    };
 
     use sha2::{Digest, Sha256};
     // PLANNER_SCHEMA busts stale caches when planner semantics change.
@@ -90,6 +101,71 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
         }))?,
     )?;
     Ok(plan)
+}
+
+/// Every non-comment logical line (after backslash continuations) carries a
+/// --hash= option. That is the shape `uv pip compile --generate-hashes`
+/// emits and the only shape the planner accepts directly.
+fn is_fully_pinned(text: &str) -> bool {
+    let mut logical = String::new();
+    let mut any = false;
+    for raw in text.lines().chain(std::iter::once("")) {
+        if let Some(stripped) = raw.strip_suffix('\\') {
+            logical.push_str(stripped);
+            continue;
+        }
+        logical.push_str(raw);
+        let line = logical.trim();
+        let line = match line.find(" #") {
+            Some(i) => line[..i].trim(),
+            None => line,
+        };
+        if !line.is_empty() && !line.starts_with('#') {
+            any = true;
+            if !line.contains("--hash=") {
+                return false;
+            }
+        }
+        logical.clear();
+    }
+    any
+}
+
+/// Resolve ranged requirements to a hash-pinned lock via uv, cached in
+/// requirements.lock.txt and regenerated when requirements.txt changes.
+fn locked_requirements(dir: &Path, source: &str, pyver: &str) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let lock_path = dir.join("requirements.lock.txt");
+    let stamp_path = dir.join(".blanket/lock-source.hash");
+    let source_hash = hex::encode(Sha256::digest(format!("{pyver}\x00{source}").as_bytes()));
+    if let (Ok(stamp), Ok(lock)) = (
+        std::fs::read_to_string(&stamp_path),
+        std::fs::read_to_string(&lock_path),
+    ) {
+        if stamp.trim() == source_hash {
+            return Ok(lock);
+        }
+    }
+    eprintln!("blanket: requirements.txt is not hash-pinned; resolving with uv...");
+    let status = std::process::Command::new("uv")
+        .args(["pip", "compile", "requirements.txt", "--generate-hashes", "--quiet"])
+        .args(["--python-version", pyver])
+        .args(["-o", "requirements.lock.txt"])
+        .current_dir(dir)
+        .status()
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                "requirements.txt is not hash-pinned and `uv` was not found; \
+                 install uv (https://astral.sh/uv) or provide a hash-pinned file",
+            )
+        })?;
+    if !status.success() {
+        return Err(io::Error::other("uv pip compile failed"));
+    }
+    std::fs::create_dir_all(dir.join(".blanket"))?;
+    std::fs::write(&stamp_path, &source_hash)?;
+    std::fs::read_to_string(&lock_path)
 }
 
 fn run_plan() -> io::Result<()> {
