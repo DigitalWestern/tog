@@ -82,10 +82,22 @@ pub struct NpmPackage {
     pub bin: Vec<(String, String)>,
 }
 
+/// A workspace link: `node_modules/<name>` resolving to a source directory
+/// inside the project (npm workspaces). Projection-time only — the target
+/// is the user's own source, never store content.
+#[derive(Debug, Clone)]
+pub struct NpmLink {
+    /// Lockfile path, e.g. "node_modules/@mono/lib".
+    pub path: String,
+    /// Project-relative target, e.g. "packages/lib".
+    pub target: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NpmPlan {
     pub node_version: String,
     pub packages: Vec<NpmPackage>,
+    pub links: Vec<NpmLink>,
 }
 
 /// Validate a lockfile "packages" key as a safe, well-formed npm path:
@@ -148,6 +160,15 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
         .ok_or_else(|| err("package-lock.json has no packages map"))?;
 
     let mut out = Vec::new();
+    let mut links = Vec::new();
+    // Workspace source dirs appear as lock entries whose path is NOT under
+    // node_modules/ (e.g. "packages/lib"). They are the user's own source,
+    // not installed content.
+    let workspace_dirs: Vec<&str> = packages
+        .keys()
+        .filter(|p| !p.is_empty() && !p.starts_with("node_modules/"))
+        .map(String::as_str)
+        .collect();
     // Sorted so parents precede children ("a/node_modules/b" sorts after
     // "a"), letting a skipped parent drop its whole subtree.
     let mut paths: Vec<&String> = packages.keys().collect();
@@ -158,18 +179,43 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
         if path.is_empty() {
             continue; // root project entry
         }
+        if workspace_dirs.contains(&path.as_str()) {
+            continue; // workspace source dir definition
+        }
+        if let Some(ws) = workspace_dirs
+            .iter()
+            .find(|w| path.starts_with(&format!("{w}/node_modules/")))
+        {
+            return Err(err(format!(
+                "{path}: dependencies nested inside workspace {ws:?} are \
+                 unsupported yet; hoist by aligning versions or dedupe"
+            )));
+        }
         validate_lock_path(path)?;
         if skipped.iter().any(|s| path.starts_with(s.as_str())) {
             continue; // descendant of a platform-skipped package
+        }
+        if entry["link"].as_bool() == Some(true) {
+            let target = entry["resolved"].as_str().unwrap_or_default();
+            let ok = !target.is_empty()
+                && !target.starts_with('/')
+                && target
+                    .split('/')
+                    .all(|c| !c.is_empty() && c != "." && c != "..");
+            if !ok {
+                return Err(err(format!("{path}: unsafe link target {target:?}")));
+            }
+            links.push(NpmLink {
+                path: path.clone(),
+                target: target.to_string(),
+            });
+            continue;
         }
         // Bundled deps ship inside the parent tarball (covered by the
         // parent's integrity hash) and carry no resolved/integrity of
         // their own; extraction of the parent materializes them.
         if entry["inBundle"].as_bool() == Some(true) {
             continue;
-        }
-        if entry["link"].as_bool() == Some(true) {
-            return Err(err(format!("{path}: workspaces/links unsupported (v0)")));
         }
         // Platform filtering: lock entries carry os/cpu arrays. Incompatible
         // optional deps are skipped (npm does the same); incompatible
@@ -237,9 +283,11 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    links.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(NpmPlan {
         node_version: NODE.version.to_string(),
         packages: out,
+        links,
     })
 }
 
@@ -483,8 +531,13 @@ pub fn project_node_env(
     // Projection id: env object + mutable declarations + layout schema.
     use sha2::{Digest as _, Sha256};
     let env_name = env_obj.file_name().unwrap().to_string_lossy().into_owned();
+    let link_key: String = plan
+        .links
+        .iter()
+        .map(|l| format!("{}={};", l.path, l.target))
+        .collect();
     let proj_id = hex::encode(Sha256::digest(
-        format!("node-forest/1\x00{env_name}\x00{}", mutable.join(",")).as_bytes(),
+        format!("node-forest/1\x00{env_name}\x00{}\x00{link_key}", mutable.join(",")).as_bytes(),
     ))[..16]
         .to_string();
 
@@ -524,6 +577,19 @@ pub fn project_node_env(
         }
         fs::rename(&tmp, &proj_dir)?;
     }
+    // Workspace links: symlinks into the project's own source dirs. The
+    // targets are user-owned and writable by nature. Idempotent — the
+    // projection id covers the link set, so a changed set is a new forest.
+    for l in &plan.links {
+        let rel = l.path.trim_start_matches("node_modules/");
+        let link = forest.join(rel);
+        if let Some(parent) = link.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if link.symlink_metadata().is_err() {
+            std::os::unix::fs::symlink(project_dir.join(&l.target), &link)?;
+        }
+    }
     // Prune forests for other projections (regenerable; only caches lost).
     if let Ok(entries) = fs::read_dir(&nm_root) {
         for e in entries.flatten() {
@@ -562,6 +628,9 @@ pub fn project_node_env(
         "mutable_packages": mutable,
         "mutable_paths": mutable_paths,
         "mutable_state": if mutable.is_empty() { "none" } else { "unattested" },
+        "workspace_links": plan.links.iter().map(|l| {
+            serde_json::json!({"path": l.path, "target": l.target})
+        }).collect::<Vec<_>>(),
         "packages": plan.packages.iter().map(|p| {
             serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
         }).collect::<Vec<_>>(),

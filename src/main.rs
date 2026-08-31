@@ -242,7 +242,14 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
     if cmd.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "run: no command given"));
     }
-    let dir = project_dir();
+    // Walk up from cwd to the nearest projected root, so `blanket run`
+    // works from workspace subdirectories like npm run does.
+    let cwd = project_dir();
+    let dir = cwd
+        .ancestors()
+        .find(|d| d.join(".venv").exists() || d.join("node_modules").exists())
+        .unwrap_or(&cwd)
+        .to_path_buf();
     let venv = dir.join(".venv");
     let nm = dir.join("node_modules");
     let mut prefix: Vec<String> = Vec::new();
