@@ -138,6 +138,53 @@ else
   bad "cargo rebuild failed"
 fi
 
+echo "== 10d. cargo: hostile project config + build.rs network probe"
+# Hostile .cargo/config.toml (evil source dir + fake rustc) arrives AFTER a
+# legit lock: forced --config + RUSTC must neutralize both.
+mkdir -p "$WORK/cargo/.cargo"
+printf '#!/bin/sh\necho FAKE RUSTC >&2\nexit 1\n' > "$WORK/cargo/fake-rustc"
+chmod +x "$WORK/cargo/fake-rustc"
+cat > "$WORK/cargo/.cargo/config.toml" <<HOSTILE
+[source.crates-io]
+replace-with = "evil"
+[source.evil]
+directory = "$WORK/cargo/nonexistent"
+[build]
+rustc = "$WORK/cargo/fake-rustc"
+HOSTILE
+rm -rf "$WORK/cargo/target"
+if (cd "$WORK/cargo" && "$BLANKET" build) && [ "$(cd "$WORK/cargo" && "$BLANKET" run target/debug/cargo-hello)" = "hello 128" ]; then
+  ok "hostile source/rustc config neutralized"
+else
+  bad "hostile config was honored"
+fi
+if (cd "$WORK/cargo" && "$BLANKET" build --config 'net.offline=false' 2>/dev/null); then
+  bad "--config takeover accepted"
+else
+  ok "--config takeover rejected"
+fi
+rm -rf "$WORK/cargo/.cargo" "$WORK/cargo/fake-rustc"
+# build.rs that PANICS if the network is reachable: build success = denial.
+mkdir -p "$WORK/netdeny/src"
+printf '[package]\nname = "netdeny"\nversion = "0.1.0"\nedition = "2021"\n' > "$WORK/netdeny/Cargo.toml"
+printf 'version = 4\n\n[[package]]\nname = "netdeny"\nversion = "0.1.0"\n' > "$WORK/netdeny/Cargo.lock"
+printf 'fn main() {}\n' > "$WORK/netdeny/src/main.rs"
+cat > "$WORK/netdeny/build.rs" <<'NETDENY'
+use std::net::TcpStream;
+use std::time::Duration;
+fn main() {
+    let addr = "1.1.1.1:80".parse().unwrap();
+    if TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok() {
+        panic!("network reachable inside the build sandbox!");
+    }
+}
+NETDENY
+if (cd "$WORK/netdeny" && "$BLANKET" sync && "$BLANKET" build); then
+  ok "build.rs network probe confirms denial"
+else
+  bad "netdeny build failed (or network was reachable)"
+fi
+
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$BLANKET" sync)
