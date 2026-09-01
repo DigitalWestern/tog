@@ -69,8 +69,8 @@ fn push_property(c: &mut Value, name: &str, value: &str) {
         .push(json!({"name": name, "value": value}));
 }
 
-/// A toolchain reference is either an object_ref {path,id} or a bare path
-/// string (python/node closures); the store id is the last path component.
+/// A store reference is either an object_ref {path,id} or a bare path string
+/// (python/node closures); the store id is the last path component.
 fn toolchain_component(body: &Value, key: &str, name: &str, version: &str) -> Option<Value> {
     let v = body.get(key)?;
     let id = match v {
@@ -98,11 +98,17 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
     let list = |key: &str| -> Vec<Value> {
         plan.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default()
     };
-    let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let required = |v: &Value, k: &str| -> io::Result<String> {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| err(format!("{eco} closure: package missing '{k}'")))
+    };
     match eco {
         "python" => {
             for p in list("packages") {
-                let (name, ver) = (s(&p, "name"), s(&p, "version"));
+                let (name, ver) = (required(&p, "name")?, required(&p, "version")?);
                 let norm = name.to_ascii_lowercase().replace('_', "-");
                 let mut c = component(
                     &name,
@@ -110,13 +116,13 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                     format!("pkg:pypi/{}@{}", purl_encode(&norm), purl_encode(&ver)),
                     eco,
                 );
-                push_hash(&mut c, "SHA-256", &s(&p, "sha256"));
+                push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
                 out.push(c);
             }
             if let Some(t) = toolchain_component(
                 body,
                 "env_object",
-                "cpython",
+                "python-env",
                 plan.get("python_version").and_then(|v| v.as_str()).unwrap_or(""),
             ) {
                 out.push(t);
@@ -124,9 +130,9 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
         }
         "node" => {
             for p in list("packages") {
-                let path = s(&p, "path");
+                let path = required(&p, "path")?;
                 let name = npm_name_from_path(&path).to_string();
-                let ver = s(&p, "version");
+                let ver = required(&p, "version")?;
                 // Scoped names: '@scope/x' -> '%40scope/x' per the purl spec.
                 let purl_name = match name.strip_prefix('@') {
                     Some(rest) => match rest.split_once('/') {
@@ -145,13 +151,13 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 );
                 // integrity is an SRI string (base64), not a hex digest;
                 // recorded as a property rather than a malformed hash entry.
-                push_property(&mut c, "blanket:integrity", &s(&p, "integrity"));
+                push_property(&mut c, "blanket:integrity", &required(&p, "integrity")?);
                 out.push(c);
             }
             if let Some(t) = toolchain_component(
                 body,
                 "env_object",
-                "node",
+                "node-env",
                 body.get("node_version").and_then(|v| v.as_str()).unwrap_or(""),
             ) {
                 out.push(t);
@@ -159,14 +165,14 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
         }
         "cargo" => {
             for p in list("crates") {
-                let (name, ver) = (s(&p, "name"), s(&p, "version"));
+                let (name, ver) = (required(&p, "name")?, required(&p, "version")?);
                 let mut c = component(
                     &name,
                     &ver,
                     format!("pkg:cargo/{}@{}", purl_encode(&name), purl_encode(&ver)),
                     eco,
                 );
-                push_hash(&mut c, "SHA-256", &s(&p, "sha256"));
+                push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
                 out.push(c);
             }
             if let Some(t) = toolchain_component(
@@ -180,15 +186,15 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
         }
         "go" => {
             for p in list("modules") {
-                let (path, ver) = (s(&p, "path"), s(&p, "version"));
+                let (path, ver) = (required(&p, "path")?, required(&p, "version")?);
                 let mut c = component(
                     &path,
                     &ver,
                     format!("pkg:golang/{}@{}", purl_encode_path(&path), purl_encode(&ver)),
                     eco,
                 );
-                push_hash(&mut c, "SHA-256", &s(&p, "zip_sha256"));
-                push_property(&mut c, "blanket:go:h1", &s(&p, "h1"));
+                push_hash(&mut c, "SHA-256", &required(&p, "zip_sha256")?);
+                push_property(&mut c, "blanket:go:h1", &required(&p, "h1")?);
                 out.push(c);
             }
             if let Some(t) = toolchain_component(
@@ -202,7 +208,11 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
         }
         "ruby" => {
             for p in list("gems") {
-                let (name, ver, platform) = (s(&p, "name"), s(&p, "version"), s(&p, "platform"));
+                let (name, ver, platform) = (
+                    required(&p, "name")?,
+                    required(&p, "version")?,
+                    required(&p, "platform")?,
+                );
                 let qualifier = if platform.is_empty() || platform == "ruby" {
                     String::new()
                 } else {
@@ -214,7 +224,7 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                     format!("pkg:gem/{}@{}{}", purl_encode(&name), purl_encode(&ver), qualifier),
                     eco,
                 );
-                push_hash(&mut c, "SHA-256", &s(&p, "sha256"));
+                push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
                 out.push(c);
             }
             if let Some(t) = toolchain_component(
@@ -228,15 +238,19 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
         }
         "elixir" => {
             for p in list("deps") {
-                let (name, ver) = (s(&p, "package"), s(&p, "version"));
+                let (name, ver) = (required(&p, "package")?, required(&p, "version")?);
                 let mut c = component(
                     &name,
                     &ver,
                     format!("pkg:hex/{}@{}", purl_encode(&name.to_ascii_lowercase()), purl_encode(&ver)),
                     eco,
                 );
-                push_hash(&mut c, "SHA-256", &s(&p, "outer_sha256"));
-                push_property(&mut c, "blanket:hex:inner-checksum", &s(&p, "inner_sha256"));
+                push_hash(&mut c, "SHA-256", &required(&p, "outer_sha256")?);
+                push_property(
+                    &mut c,
+                    "blanket:hex:inner-checksum",
+                    &required(&p, "inner_sha256")?,
+                );
                 out.push(c);
             }
             let beam_version = format!(
@@ -250,7 +264,7 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
         }
         "dotnet" => {
             for p in list("packages") {
-                let (id, ver) = (s(&p, "id"), s(&p, "version"));
+                let (id, ver) = (required(&p, "id")?, required(&p, "version")?);
                 let mut c = component(
                     &id,
                     &ver,
@@ -259,7 +273,11 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 );
                 // contentHash is NuGet's semantic (signature-stripped)
                 // sha512, base64 — not a raw file digest.
-                push_property(&mut c, "blanket:nuget:contentHash", &s(&p, "content_hash"));
+                push_property(
+                    &mut c,
+                    "blanket:nuget:contentHash",
+                    &required(&p, "content_hash")?,
+                );
                 out.push(c);
             }
             if let Some(t) = toolchain_component(
@@ -373,7 +391,7 @@ mod tests {
         assert_eq!(doc["specVersion"], "1.5");
         assert!(doc["serialNumber"].as_str().unwrap().starts_with("urn:uuid:"));
         let comps = doc["components"].as_array().unwrap();
-        // 1 pypi + cpython toolchain + 2 npm + node toolchain
+        // 1 pypi env + 2 npm + 2 dependency environments
         assert_eq!(comps.len(), 5);
         let purls: Vec<&str> =
             comps.iter().filter_map(|c| c["purl"].as_str()).collect();
@@ -389,7 +407,30 @@ mod tests {
             .collect();
         // Closures are processed in ecosystem name order: node, then python.
         assert_eq!(ids, ["def456", "abc123"]);
+        let env_names: Vec<&str> = comps
+            .iter()
+            .filter(|c| c["type"] == "application")
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(env_names, ["node-env", "python-env"]);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sbom_requires_package_fields() {
+        let body = json!({
+            "plan": {
+                "packages": [{"name": "Flask", "version": "3.0.0"}],
+            },
+        });
+        let mut components = Vec::new();
+        let error = eco_components("python", &body, &mut components)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("python closure: package missing 'sha256'"),
+            "{error}"
+        );
     }
 
     #[test]

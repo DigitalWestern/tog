@@ -178,15 +178,16 @@ say what breaks, for whom, and how it fails (loud/silent).
   dotnet`. Deliberate (MSBuild executes arbitrary code), but a UX cliff
   for `dotnet test`/`dotnet run` habits; `blanket build dotnet` covers
   build only (no test/publish verbs yet). The run guard is advisory, not a
-  security boundary: wrappers such as `sh -c` can bypass it. The enforced
-  boundary is that blanket itself never evaluates project code outside the
-  network-denied build sandbox.
+  security boundary: wrappers such as `sh -c` can bypass it. During
+  realization and build, blanket never evaluates project code outside the
+  network-denied build sandbox; missing-lock lock generation is the explicit
+  host-side exception.
 - **Restore-time MSBuild evaluation is delegated-planning trust** (props/
-  targets/property functions run unsandboxed during lock generation). The
-  NuGet config is pinned to nuget.org, but project MSBuild code still runs on
-  the host; only generate locks with sync for projects trusted enough to run
-  during lock generation. Same class as other resolvers, with more code
-  surface.
+  targets/property functions run unsandboxed during missing-lock generation).
+  The NuGet config and environment are pinned/cleared, but project MSBuild
+  code still runs on the host; only generate locks with sync for projects
+  trusted enough to run during lock generation. Same class as other resolvers,
+  with more code surface.
 - **Ancestor SDK inputs fail closed**: global.json above the project,
   Directory.Packages.props, Directory.Build.rsp, and packages.config in the
   project or any ancestor are rejected, even when the file is not in the

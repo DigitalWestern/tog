@@ -709,8 +709,9 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
     }
     if dir.join(".blanket/closures/dotnet.json").exists() {
         // This prevents accidental unsandboxed builds, not deliberate bypasses
-        // through wrappers such as `sh -c`; blanket's boundary is enforced by
-        // never evaluating project code outside its sandbox.
+        // through wrappers such as `sh -c`; during realization and build,
+        // blanket never evaluates project code outside its sandbox. Missing-lock
+        // lock generation is the explicit host-side exception.
         if let Some(reason) = dotnet::refused_run_command(cmd) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
         }

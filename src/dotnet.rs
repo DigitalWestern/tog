@@ -191,9 +191,11 @@ pub const BUILD_VERBS: &[&str] = &[
     "build", "run", "test", "publish", "pack", "msbuild", "restore", "clean", "watch",
 ];
 
-/// `blanket run`'s guard is advisory: wrappers can bypass it. The enforced
-/// boundary is that blanket itself never evaluates project code outside the
-/// build sandbox.
+/// `blanket run`'s guard is advisory: wrappers can bypass it. During
+/// realization and build, blanket never evaluates project code outside the
+/// build sandbox. Missing-lock lock generation is the explicit host-side
+/// exception: config and environment are pinned, but project MSBuild code
+/// runs on the host.
 pub fn refused_run_command(cmd: &[String]) -> Option<String> {
     if cmd.first().map(String::as_str) != Some("dotnet") {
         return None;
@@ -275,8 +277,14 @@ fn validate_plan(plan: &DotnetPlan) -> io::Result<()> {
     if plan.targets.is_empty() {
         return Err(err("packages.lock.json has no target frameworks"));
     }
+    let mut base_tfms = std::collections::BTreeSet::new();
     for target in &plan.targets {
-        target_framework(target)?;
+        base_tfms.insert(target_framework(target)?);
+    }
+    if base_tfms.len() > 1 {
+        return Err(err(
+            "multi-targeted locks are unsupported in v0; use a single TargetFramework",
+        ));
     }
     let mut seen = std::collections::BTreeSet::new();
     for p in &plan.packages {
@@ -324,14 +332,20 @@ pub fn find_project(dir: &Path) -> io::Result<PathBuf> {
 }
 
 pub fn has_marker(dir: &Path) -> bool {
-    let has_csproj = fs::read_dir(dir)
-        .map(|entries| {
+    let has_dotnet_file = match fs::read_dir(dir) {
+        Ok(entries) => {
             entries
                 .flatten()
-                .any(|entry| entry.file_name().to_string_lossy().ends_with(".csproj"))
-        })
-        .unwrap_or(false);
-    has_csproj
+                .any(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.ends_with(".csproj") || name.ends_with(".sln") || name.ends_with(".slnx")
+                })
+        }
+        // Participate so preflight can return the real read_dir error loudly.
+        Err(_) => true,
+    };
+    has_dotnet_file
         || fs::symlink_metadata(dir.join("packages.lock.json")).is_ok()
         || fs::symlink_metadata(dir.join(".blanket/closures/dotnet.json")).is_ok()
 }
@@ -339,8 +353,45 @@ pub fn has_marker(dir: &Path) -> bool {
 fn validate_csproj(path: &Path) -> io::Result<()> {
     let text = fs::read_to_string(path)?;
     let lower = text.to_ascii_lowercase();
+    let mut document = text.strip_prefix('\u{feff}').unwrap_or(&text).trim_start();
+    if document.starts_with("<?xml")
+        && document
+            .as_bytes()
+            .get(5)
+            .map(|b| b.is_ascii_whitespace())
+            .unwrap_or(false)
+    {
+        let end = document
+            .find("?>")
+            .ok_or_else(|| err(format!("{}: unterminated XML declaration", path.display())))?;
+        document = document[end + 2..].trim_start();
+    }
+    loop {
+        if !document.starts_with("<!--") {
+            break;
+        }
+        let end = document
+            .find("-->")
+            .ok_or_else(|| err(format!("{}: unterminated XML comment", path.display())))?;
+        document = document[end + 3..].trim_start();
+    }
+    if !document
+        .get(..8)
+        .map(|prefix| prefix.eq_ignore_ascii_case("<project"))
+        .unwrap_or(false)
+    {
+        return Err(err(format!(
+            "{}: not a supported project file (expected <Project root)",
+            path.display()
+        )));
+    }
     for marker in [
         "<import",
+        "<sdk ",
+        "<sdk/",
+        "<sdk>",
+        "<sdk\t",
+        "<sdk\n",
         "packagedownload",
         "projectreference",
         "usingtask",
@@ -419,10 +470,24 @@ fn validate_lock_shape(path: &Path) -> io::Result<()> {
             .as_object()
             .ok_or_else(|| err(format!("bad lock target {target}")))?
         {
-            if entry["type"].as_str() == Some("Project") {
-                return Err(err(format!(
-                    "{id}: Project lock entries are not supported; use package dependencies only"
-                )));
+            match entry["type"].as_str() {
+                Some("Direct") | Some("Transitive") => {}
+                Some("Project") => {
+                    return Err(err(format!(
+                        "{id}: Project lock entries are not supported; use package dependencies only"
+                    )))
+                }
+                Some(kind) => {
+                    return Err(err(format!(
+                        "{id}: unsupported lock dependency type {kind}; expected Direct or Transitive"
+                    )))
+                }
+                None => {
+                    return Err(err(format!(
+                        "{id}: unsupported lock dependency type {}; expected Direct or Transitive",
+                        entry["type"]
+                    )))
+                }
             }
         }
     }
@@ -789,7 +854,9 @@ pub fn realize_packages(
             .ok_or_else(|| err("plan has no target framework"))?,
     )?;
     if plan.targets.len() > 1 {
-        eprintln!("blanket: synthetic NuGet verifier uses the first lock target framework: {tfm}");
+        eprintln!(
+            "blanket: synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}"
+        );
     }
     fs::write(
         verifier.join("blanket-verifier.csproj"),
@@ -999,38 +1066,88 @@ fn checked_output_dir(project_dir: &Path, fingerprint: &str) -> io::Result<PathB
 
 fn publish_output(staged: &Path, project_dir: &Path, fingerprint: &str) -> io::Result<PathBuf> {
     let output = checked_output_dir(project_dir, fingerprint)?;
-    if output.exists() {
-        crate::store::remove_tree(&output)?;
-    }
-    match fs::rename(staged, &output) {
-        Ok(()) => Ok(output),
-        Err(e) if e.raw_os_error() == Some(18) => {
-            let bin = output
-                .parent()
-                .ok_or_else(|| err("output directory has no bin parent"))?;
-            let temp = bin.join(format!(
-                ".blanket-{}-tmp-{}",
-                fingerprint,
-                std::process::id()
-            ));
-            if fs::symlink_metadata(&temp).is_ok() {
-                return Err(err(format!(
-                    "temporary output already exists: {}",
-                    temp.display()
-                )));
-            }
-            crate::project::clone_tree(staged, &temp)?;
-            if output.exists() {
-                crate::store::remove_tree(&output)?;
-            }
-            fs::rename(&temp, &output)?;
-            Ok(output)
+    let bin = output
+        .parent()
+        .ok_or_else(|| err("output directory has no bin parent"))?;
+    let new = bin.join(format!(
+        ".blanket-{fingerprint}.new.{}",
+        std::process::id()
+    ));
+    let old = bin.join(format!(
+        ".blanket-{fingerprint}.old.{}",
+        std::process::id()
+    ));
+    for path in [&new, &old] {
+        if fs::symlink_metadata(path).is_ok() {
+            return Err(err(format!(
+                "temporary output already exists: {}",
+                path.display()
+            )));
         }
-        Err(e) => Err(io::Error::new(
-            e.kind(),
-            format!("publish {}: {e}", output.display()),
-        )),
     }
+    match fs::rename(staged, &new) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(18) => {
+            if let Err(clone_error) = crate::project::clone_tree(staged, &new) {
+                let _ = crate::store::remove_tree(&new);
+                return Err(io::Error::new(
+                    clone_error.kind(),
+                    format!("publish {}: {clone_error}", output.display()),
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("publish {}: {e}", output.display()),
+            ))
+        }
+    }
+
+    let had_old = output.exists();
+    if had_old {
+        if let Err(e) = fs::rename(&output, &old) {
+            let _ = crate::store::remove_tree(&new);
+            return Err(io::Error::new(
+                e.kind(),
+                format!("publish {}: {e}", output.display()),
+            ));
+        }
+    }
+    if let Err(e) = fs::rename(&new, &output) {
+        let _ = crate::store::remove_tree(&new);
+        let restore = if had_old {
+            fs::rename(&old, &output)
+        } else {
+            Ok(())
+        };
+        return Err(match restore {
+            Ok(()) => io::Error::new(e.kind(), format!("publish {}: {e}", output.display())),
+            Err(restore_error) => io::Error::new(
+                e.kind(),
+                format!(
+                    "publish {}: {e}; restoring previous output failed: {restore_error}",
+                    output.display()
+                ),
+            ),
+        });
+    }
+    if had_old {
+        if let Err(e) = crate::store::remove_tree(&old) {
+            let restore = crate::store::remove_tree(&output).and_then(|_| fs::rename(&old, &output));
+            return Err(match restore {
+                Ok(()) => io::Error::new(e.kind(), format!("publish {}: {e}", output.display())),
+                Err(restore_error) => io::Error::new(
+                    e.kind(),
+                    format!(
+                        "publish {}: {e}; restoring previous output failed: {restore_error}",
+                        output.display()
+                    ),
+                ),
+            });
+        }
+    }
+    Ok(output)
 }
 
 /// Sandboxed build: fresh offline locked restore into scratch obj, attest
@@ -1174,6 +1291,18 @@ mod tests {
             packages: vec![base.clone()],
         };
         assert!(validate_plan(&ok).is_ok());
+        let error = validate_plan(&DotnetPlan {
+            targets: vec!["net9.0".into(), "net8.0".into()],
+            ..ok.clone()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("multi-targeted locks are unsupported in v0"), "{error}");
+        let same_tfm_rids = DotnetPlan {
+            targets: vec!["net9.0".into(), "net9.0/osx-arm64".into()],
+            ..ok.clone()
+        };
+        assert!(validate_plan(&same_tfm_rids).is_ok());
         let mut evil = base.clone();
         evil.id = "../escape".into();
         assert!(validate_plan(&DotnetPlan {
@@ -1272,6 +1401,20 @@ mod tests {
         ));
         fs::create_dir_all(&base).unwrap();
 
+        let minimal = base.join("minimal.csproj");
+        fs::write(&minimal, minimal_csproj()).unwrap();
+        assert!(validate_csproj(&minimal).is_ok());
+        let sdk_element = base.join("sdk-element.csproj");
+        fs::write(
+            &sdk_element,
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk Name=\"X\" /></Project>",
+        )
+        .unwrap();
+        assert!(validate_csproj(&sdk_element).is_err());
+        let garbage = base.join("garbage.csproj");
+        fs::write(&garbage, "not XML").unwrap();
+        assert!(validate_csproj(&garbage).is_err());
+
         let symlinked = base.join("symlinked");
         fs::create_dir(&symlinked).unwrap();
         fs::write(symlinked.join("project.xml"), minimal_csproj()).unwrap();
@@ -1292,6 +1435,22 @@ mod tests {
         .unwrap();
         let error = preflight(&project_lock).unwrap_err().to_string();
         assert!(error.contains("Project lock entries"), "{error}");
+
+        let central_transitive = base.join("central-transitive");
+        fs::create_dir(&central_transitive).unwrap();
+        fs::write(
+            central_transitive.join("project.csproj"),
+            minimal_csproj(),
+        )
+        .unwrap();
+        fs::write(
+            central_transitive.join("packages.lock.json"),
+            r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"CentralTransitive","resolved":"1.0.0","contentHash":"A"}}}}"#,
+        )
+        .unwrap();
+        let error = preflight(&central_transitive).unwrap_err().to_string();
+        assert!(error.contains("Other"), "{error}");
+        assert!(error.contains("CentralTransitive"), "{error}");
 
         let import = base.join("import");
         fs::create_dir(&import).unwrap();
@@ -1316,6 +1475,12 @@ mod tests {
         fs::write(child.join("project.csproj"), minimal_csproj()).unwrap();
         let error = preflight(&child).unwrap_err().to_string();
         assert!(error.contains("ancestor global.json"), "{error}");
+
+        let solution_only = base.join("solution-only");
+        fs::create_dir(&solution_only).unwrap();
+        fs::write(solution_only.join("x.sln"), "solution").unwrap();
+        assert!(has_marker(&solution_only));
+        assert!(has_marker(&base.join("missing")));
 
         let _ = crate::store::remove_tree(&base);
     }
@@ -1349,6 +1514,26 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(metadata).unwrap()).unwrap();
         assert_eq!(value["source"], "blanket-feed");
+
+        let publish_project = base.join("publish-project");
+        fs::create_dir_all(publish_project.join("bin")).unwrap();
+        let staged_old = base.join("staged-old");
+        fs::create_dir(&staged_old).unwrap();
+        fs::write(staged_old.join("artifact"), "old").unwrap();
+        let output = publish_output(&staged_old, &publish_project, "fp").unwrap();
+        assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "old");
+
+        let staged_new = base.join("staged-new");
+        fs::create_dir(&staged_new).unwrap();
+        fs::write(staged_new.join("artifact"), "new").unwrap();
+        publish_output(&staged_new, &publish_project, "fp").unwrap();
+        assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "new");
+        assert!(!publish_project
+            .join(format!(".blanket-fp.new.{}", std::process::id()))
+            .exists());
+        assert!(!publish_project
+            .join(format!(".blanket-fp.old.{}", std::process::id()))
+            .exists());
 
         let _ = crate::store::remove_tree(&base);
     }
