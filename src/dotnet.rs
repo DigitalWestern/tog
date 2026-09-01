@@ -331,23 +331,18 @@ pub fn find_project(dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
-pub fn has_marker(dir: &Path) -> bool {
-    let has_dotnet_file = match fs::read_dir(dir) {
-        Ok(entries) => {
-            entries
-                .flatten()
-                .any(|entry| {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    name.ends_with(".csproj") || name.ends_with(".sln") || name.ends_with(".slnx")
-                })
+/// Directory-read failures propagate: guessing "no dotnet here" would hide
+/// them, and guessing "dotnet present" would trigger SDK realization first.
+pub fn has_marker(dir: &Path) -> io::Result<bool> {
+    for entry in fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".csproj") || name.ends_with(".sln") || name.ends_with(".slnx") {
+            return Ok(true);
         }
-        // Participate so preflight can return the real read_dir error loudly.
-        Err(_) => true,
-    };
-    has_dotnet_file
-        || fs::symlink_metadata(dir.join("packages.lock.json")).is_ok()
-        || fs::symlink_metadata(dir.join(".blanket/closures/dotnet.json")).is_ok()
+    }
+    Ok(fs::symlink_metadata(dir.join("packages.lock.json")).is_ok()
+        || fs::symlink_metadata(dir.join(".blanket/closures/dotnet.json")).is_ok())
 }
 
 fn validate_csproj(path: &Path) -> io::Result<()> {
@@ -375,11 +370,17 @@ fn validate_csproj(path: &Path) -> io::Result<()> {
             .ok_or_else(|| err(format!("{}: unterminated XML comment", path.display())))?;
         document = document[end + 3..].trim_start();
     }
-    if !document
+    // The root must be exactly <Project (word-bounded: <Projector/> is not).
+    let root_ok = document
         .get(..8)
         .map(|prefix| prefix.eq_ignore_ascii_case("<project"))
         .unwrap_or(false)
-    {
+        && document
+            .as_bytes()
+            .get(8)
+            .map(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+            .unwrap_or(false);
+    if !root_ok {
         return Err(err(format!(
             "{}: not a supported project file (expected <Project root)",
             path.display()
@@ -392,6 +393,7 @@ fn validate_csproj(path: &Path) -> io::Result<()> {
         "<sdk>",
         "<sdk\t",
         "<sdk\n",
+        "<sdk\r",
         "packagedownload",
         "projectreference",
         "usingtask",
@@ -1134,17 +1136,13 @@ fn publish_output(staged: &Path, project_dir: &Path, fingerprint: &str) -> io::R
     }
     if had_old {
         if let Err(e) = crate::store::remove_tree(&old) {
-            let restore = crate::store::remove_tree(&output).and_then(|_| fs::rename(&old, &output));
-            return Err(match restore {
-                Ok(()) => io::Error::new(e.kind(), format!("publish {}: {e}", output.display())),
-                Err(restore_error) => io::Error::new(
-                    e.kind(),
-                    format!(
-                        "publish {}: {e}; restoring previous output failed: {restore_error}",
-                        output.display()
-                    ),
-                ),
-            });
+            // The publish itself succeeded; rolling back here could lose
+            // BOTH versions (the old tree may be partially deleted). Keep
+            // the new output and report the leftover.
+            eprintln!(
+                "blanket: warning: previous output left at {} ({e}); remove it manually",
+                old.display()
+            );
         }
     }
     Ok(output)
@@ -1479,8 +1477,18 @@ mod tests {
         let solution_only = base.join("solution-only");
         fs::create_dir(&solution_only).unwrap();
         fs::write(solution_only.join("x.sln"), "solution").unwrap();
-        assert!(has_marker(&solution_only));
-        assert!(has_marker(&base.join("missing")));
+        assert!(has_marker(&solution_only).unwrap());
+        // An unreadable/missing dir propagates instead of guessing.
+        assert!(has_marker(&base.join("missing")).is_err());
+
+        let bypass = base.join("bypass");
+        fs::create_dir(&bypass).unwrap();
+        let cr_sdk = bypass.join("cr.csproj");
+        fs::write(&cr_sdk, "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk\rName=\"X\"/></Project>").unwrap();
+        assert!(validate_csproj(&cr_sdk).is_err());
+        let projector = bypass.join("projector.csproj");
+        fs::write(&projector, "<Projector/>").unwrap();
+        assert!(validate_csproj(&projector).is_err());
 
         let _ = crate::store::remove_tree(&base);
     }

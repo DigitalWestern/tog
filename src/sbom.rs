@@ -70,14 +70,27 @@ fn push_property(c: &mut Value, name: &str, value: &str) {
 }
 
 /// A store reference is either an object_ref {path,id} or a bare path string
-/// (python/node closures); the store id is the last path component.
-fn toolchain_component(body: &Value, key: &str, name: &str, version: &str) -> Option<Value> {
-    let v = body.get(key)?;
+/// (python/node closures); the store id is the last path component. A
+/// malformed or missing reference is an error, never a silent omission.
+fn toolchain_component(body: &Value, key: &str, name: &str, version: &str) -> io::Result<Value> {
+    let bad = || err(format!("closure: missing or malformed '{key}'"));
+    let v = body.get(key).ok_or_else(bad)?;
     let id = match v {
-        Value::String(p) => Path::new(p).file_name()?.to_str()?.to_string(),
-        _ => v.get("id")?.as_str()?.to_string(),
+        Value::String(p) => Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(bad)?
+            .to_string(),
+        _ => v
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or_else(bad)?
+            .to_string(),
     };
-    Some(json!({
+    if id.is_empty() {
+        return Err(bad());
+    }
+    Ok(json!({
         "type": "application",
         "name": name,
         "version": version,
@@ -95,8 +108,13 @@ fn npm_name_from_path(path: &str) -> &str {
 
 fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<()> {
     let plan = body.get("plan").unwrap_or(body);
-    let list = |key: &str| -> Vec<Value> {
-        plan.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default()
+    // Every extraction fails closed: an SBOM with silently absent packages
+    // or blank versions would be a lie about the inventory.
+    let list = |key: &str| -> io::Result<Vec<Value>> {
+        plan.get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .ok_or_else(|| err(format!("{eco} closure: missing or non-array '{key}'")))
     };
     let required = |v: &Value, k: &str| -> io::Result<String> {
         v.get(k)
@@ -105,9 +123,17 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
             .map(str::to_owned)
             .ok_or_else(|| err(format!("{eco} closure: package missing '{k}'")))
     };
+    let version_of = |holder: &Value, k: &str| -> io::Result<String> {
+        holder
+            .get(k)
+            .and_then(|x| x.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| err(format!("{eco} closure: missing '{k}'")))
+    };
     match eco {
         "python" => {
-            for p in list("packages") {
+            for p in list("packages")? {
                 let (name, ver) = (required(&p, "name")?, required(&p, "version")?);
                 let norm = name.to_ascii_lowercase().replace('_', "-");
                 let mut c = component(
@@ -119,17 +145,15 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
                 out.push(c);
             }
-            if let Some(t) = toolchain_component(
+            out.push(toolchain_component(
                 body,
                 "env_object",
                 "python-env",
-                plan.get("python_version").and_then(|v| v.as_str()).unwrap_or(""),
-            ) {
-                out.push(t);
-            }
+                &version_of(plan, "python_version")?,
+            )?);
         }
         "node" => {
-            for p in list("packages") {
+            for p in list("packages")? {
                 let path = required(&p, "path")?;
                 let name = npm_name_from_path(&path).to_string();
                 let ver = required(&p, "version")?;
@@ -154,17 +178,15 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 push_property(&mut c, "blanket:integrity", &required(&p, "integrity")?);
                 out.push(c);
             }
-            if let Some(t) = toolchain_component(
+            out.push(toolchain_component(
                 body,
                 "env_object",
                 "node-env",
-                body.get("node_version").and_then(|v| v.as_str()).unwrap_or(""),
-            ) {
-                out.push(t);
-            }
+                &version_of(body, "node_version")?,
+            )?);
         }
         "cargo" => {
-            for p in list("crates") {
+            for p in list("crates")? {
                 let (name, ver) = (required(&p, "name")?, required(&p, "version")?);
                 let mut c = component(
                     &name,
@@ -175,17 +197,15 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
                 out.push(c);
             }
-            if let Some(t) = toolchain_component(
+            out.push(toolchain_component(
                 body,
                 "rust_object",
                 "rust",
-                plan.get("rust_version").and_then(|v| v.as_str()).unwrap_or(""),
-            ) {
-                out.push(t);
-            }
+                &version_of(plan, "rust_version")?,
+            )?);
         }
         "go" => {
-            for p in list("modules") {
+            for p in list("modules")? {
                 let (path, ver) = (required(&p, "path")?, required(&p, "version")?);
                 let mut c = component(
                     &path,
@@ -197,17 +217,15 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 push_property(&mut c, "blanket:go:h1", &required(&p, "h1")?);
                 out.push(c);
             }
-            if let Some(t) = toolchain_component(
+            out.push(toolchain_component(
                 body,
                 "go_object",
                 "go",
-                plan.get("go_version").and_then(|v| v.as_str()).unwrap_or(""),
-            ) {
-                out.push(t);
-            }
+                &version_of(plan, "go_version")?,
+            )?);
         }
         "ruby" => {
-            for p in list("gems") {
+            for p in list("gems")? {
                 let (name, ver, platform) = (
                     required(&p, "name")?,
                     required(&p, "version")?,
@@ -227,17 +245,15 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
                 out.push(c);
             }
-            if let Some(t) = toolchain_component(
+            out.push(toolchain_component(
                 body,
                 "ruby_object",
                 "ruby",
-                plan.get("ruby_version").and_then(|v| v.as_str()).unwrap_or(""),
-            ) {
-                out.push(t);
-            }
+                &version_of(plan, "ruby_version")?,
+            )?);
         }
         "elixir" => {
-            for p in list("deps") {
+            for p in list("deps")? {
                 let (name, ver) = (required(&p, "package")?, required(&p, "version")?);
                 let mut c = component(
                     &name,
@@ -255,15 +271,13 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
             }
             let beam_version = format!(
                 "otp-{}-elixir-{}",
-                plan.get("otp_version").and_then(|v| v.as_str()).unwrap_or(""),
-                plan.get("elixir_version").and_then(|v| v.as_str()).unwrap_or("")
+                version_of(plan, "otp_version")?,
+                version_of(plan, "elixir_version")?,
             );
-            if let Some(t) = toolchain_component(body, "beam_object", "beam", &beam_version) {
-                out.push(t);
-            }
+            out.push(toolchain_component(body, "beam_object", "beam", &beam_version)?);
         }
         "dotnet" => {
-            for p in list("packages") {
+            for p in list("packages")? {
                 let (id, ver) = (required(&p, "id")?, required(&p, "version")?);
                 let mut c = component(
                     &id,
@@ -280,14 +294,12 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 );
                 out.push(c);
             }
-            if let Some(t) = toolchain_component(
+            out.push(toolchain_component(
                 body,
                 "sdk_object",
                 "dotnet-sdk",
-                plan.get("sdk_version").and_then(|v| v.as_str()).unwrap_or(""),
-            ) {
-                out.push(t);
-            }
+                &version_of(plan, "sdk_version")?,
+            )?);
         }
         other => {
             return Err(err(format!("unknown closure ecosystem '{other}'")));

@@ -192,6 +192,17 @@ say what breaks, for whom, and how it fails (loud/silent).
   Directory.Packages.props, Directory.Build.rsp, and packages.config in the
   project or any ancestor are rejected, even when the file is not in the
   project directory.
+- **Preflight is a fail-closed text scan, not an XML parse** (accepted
+  trade-off): banned MSBuild constructs are rejected by name scanning, so
+  exotic-but-legitimate projects can be refused; nothing banned can hide,
+  because XML cannot entity-encode element/attribute names. Full MSBuild
+  semantics are only known to MSBuild itself, which is why the build
+  sandbox — not preflight — is the actual security boundary.
+- **Output publication has a microsecond non-atomic window** (accepted
+  trade-off): the old bin/blanket-<fp> is renamed aside before the new one
+  is renamed in; a reader in that window sees no output. True atomic swap
+  needs macOS renamex_np(RENAME_SWAP) via libc. The last good build always
+  survives a failed publication.
 - **Machine-wide /tmp/.dotnet mutex dir is a sandbox write allowance**
   (bounded, local-only; still shared mutable state between sandboxed and
   host dotnet processes).

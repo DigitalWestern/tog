@@ -347,7 +347,10 @@ fn run_plan() -> io::Result<()> {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
-    if dotnet::has_marker(&dir) {
+    if dotnet::has_marker(&dir)? {
+        // Preflight before SDK realization: a broken layout should fail
+        // loudly here, not after a toolchain download.
+        dotnet::preflight(&dir)?;
         let store = store::Store::open()?;
         let sdk = dotnet::ensure_sdk(&store)?;
         let (plan, _) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
@@ -472,7 +475,8 @@ fn run_sync(fresh: bool) -> io::Result<()> {
         eprintln!("synced: hex deps -> {}", projection.display());
         any = true;
     }
-    if dotnet::has_marker(&dir) {
+    if dotnet::has_marker(&dir)? {
+        dotnet::preflight(&dir)?;
         let sdk = dotnet::ensure_sdk(&store)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
         let packages = dotnet::realize_packages(&store, &plan, &sdk, &dir)?;
@@ -526,7 +530,7 @@ fn run_build(args: &[String]) -> io::Result<()> {
             if cwd.ancestors().any(|d| d.join("mix.exs").is_file()) {
                 present.push("elixir");
             }
-            if dotnet::has_marker(&cwd) {
+            if dotnet::has_marker(&cwd)? {
                 present.push("dotnet");
             }
             match present.as_slice() {
