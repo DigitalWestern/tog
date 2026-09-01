@@ -237,6 +237,15 @@ PY=$(cd "$WORK/p" && "$BLANKET" run python -c 'import six; print(six.__version__
 JS=$(cd "$WORK/p" && "$BLANKET" run node index.js)
 [ "$PY" = "1.17.0" ] && [ "$JS" = "is-odd(3): true" ] && ok "both ecosystems projected (py six=$PY, $JS)" || bad "py=$PY js=$JS"
 
+echo "== 12. sbom: CycloneDX export covers every synced closure"
+SBOM=$(cd "$WORK/p" && "$BLANKET" sbom)
+case "$SBOM" in
+  *'"bomFormat": "CycloneDX"'*) ok "sbom emits CycloneDX";;
+  *) bad "sbom output missing bomFormat";;
+esac
+echo "$SBOM" | grep -q 'pkg:pypi/six@' && echo "$SBOM" | grep -q 'pkg:npm/is-odd@' \
+  && ok "sbom lists both ecosystems' packages" || bad "sbom missing expected purls"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
