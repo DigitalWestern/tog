@@ -195,7 +195,9 @@ starves.
 
 ## Standing follow-up list
 
-- [ ] `blanket sbom` — CycloneDX export of a project's closure(s)
+- [x] `blanket sbom` — CycloneDX 1.5 export of a project's closure(s) —
+      done 2026-08-31 (all seven ecosystems; purls, pinned hashes, toolchain
+      store-ids; SPDX and a dependency graph remain open)
 - [ ] Policy engine v0 — registry allowlist + package allow/deny, fail closed
 - [ ] Task runner v0 — `blanket run <script>` from package.json scripts
 - [x] Third tailor — cargo (wrap, hermetically) — done 2026-08-31

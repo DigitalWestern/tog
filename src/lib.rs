@@ -11,6 +11,7 @@ pub mod pypi;
 pub mod ruby;
 pub mod python;
 pub mod sandbox;
+pub mod sbom;
 pub mod store;
 pub mod types;
 pub mod wheel;

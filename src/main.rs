@@ -1,4 +1,4 @@
-use blanket::{cargo, dotnet, elixir, golang, npm, project, pypi, python, ruby, store, types};
+use blanket::{cargo, dotnet, elixir, golang, npm, project, pypi, python, ruby, sbom, store, types};
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ USAGE:
   blanket build [eco] [args...]  sandboxed, network-denied build (cargo | go;
                           inferred when only one is present)
   blanket run <cmd...>    run a command inside the projected environment(s)
+  blanket sbom [--output <file>]  CycloneDX 1.5 SBOM from the synced closures
   blanket store path      print the store root
 
 Project inputs (either or both):
@@ -35,6 +36,7 @@ fn main() {
         Some("plan") => run_plan(),
         Some("build") => run_build(&args[1..]),
         Some("run") => run_run(&args[1..]),
+        Some("sbom") => run_sbom(&args[1..]),
         Some("store") if args.get(1).map(String::as_str) == Some("path") => {
             store::Store::open().map(|s| println!("{}", s.root.display()))
         }
@@ -49,6 +51,26 @@ fn main() {
         1
     });
     exit(code);
+}
+
+fn run_sbom(args: &[String]) -> io::Result<()> {
+    let doc = sbom::generate(&project_dir())?;
+    let text = serde_json::to_string_pretty(&doc)?;
+    match args.first().map(String::as_str) {
+        Some("--output") => {
+            let path = args
+                .get(1)
+                .ok_or_else(|| io::Error::other("--output needs a file path"))?;
+            std::fs::write(path, text + "\n")?;
+            eprintln!("blanket: SBOM written to {path}");
+            Ok(())
+        }
+        Some(other) => Err(io::Error::other(format!("unknown sbom argument: {other}"))),
+        None => {
+            println!("{text}");
+            Ok(())
+        }
+    }
 }
 
 fn project_dir() -> PathBuf {
