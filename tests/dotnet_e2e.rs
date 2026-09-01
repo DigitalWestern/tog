@@ -69,7 +69,12 @@ fn dotnet_sync_sandboxed_build_and_run() {
         .expect("staged bin dir");
     assert!(dll.is_file());
     let out = assert_ok(
-        blanket(&binary, &project, &store, &["run", "dotnet", dll.to_str().unwrap()]),
+        blanket(
+            &binary,
+            &project,
+            &store,
+            &["run", "dotnet", dll.to_str().unwrap()],
+        ),
         "run built app",
     );
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
@@ -79,5 +84,33 @@ fn dotnet_sync_sandboxed_build_and_run() {
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("blanket build dotnet"),
         "build verb must be refused at run"
+    );
+}
+
+#[test]
+#[ignore]
+fn dotnet_realization_does_not_evaluate_user_project() {
+    let temp = TempDir::new();
+    let project = temp.0.join("dotnet-tripwire");
+    std::fs::create_dir_all(&project).unwrap();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dotnet-hello");
+    let mut csproj = std::fs::read_to_string(fixtures.join("proj.csproj")).unwrap();
+    csproj = csproj.replace(
+        "</Project>",
+        "<Target Name=\"Tripwire\" BeforeTargets=\"Restore\"><WriteLinesToFile File=\"tripwire.txt\" Lines=\"executed\" Overwrite=\"true\" /></Target></Project>",
+    );
+    std::fs::write(project.join("proj.csproj"), csproj).unwrap();
+    std::fs::copy(
+        fixtures.join("packages.lock.json"),
+        project.join("packages.lock.json"),
+    )
+    .unwrap();
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+
+    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    assert!(
+        !project.join("tripwire.txt").exists(),
+        "realization evaluated the user's project"
     );
 }

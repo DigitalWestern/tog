@@ -292,17 +292,27 @@ extractor and part of the object identity (Go precedent). SDK pins come
 from Microsoft's release-metadata endpoint (an HTTPS checksum channel —
 published hashes, not signed metadata).
 
+Realization verifies a synthetic project built only from the validated plan
+and lock: the user's .csproj and global.json are never evaluated, and the
+restore runs in the network-denied sandbox. All packages become exact-pinned
+direct references in that verifier; its first lock target is used when a lock
+contains multiple targets. The package identity includes both semantic lock
+hashes and raw downloaded sha256 values, plus the full SDK object id.
+
 Builds are the strictest boundary yet: project obj/ is NEVER authority —
 every `blanket build [dotnet]` runs a fresh offline locked restore into
 scratch (attesting project.assets.json) then `build --no-restore`, with
 build servers disabled, shared compilation off, response files and
-restore/source/path overrides rejected, and outputs staged into
+restore/source/path overrides rejected by an argument allowlist, and outputs
+built in scratch before an assets attestation and atomic publish to
 bin/blanket-<sdk-fp>. Build-capable verbs (build/run/test/publish/pack/
 msbuild/restore/clean/watch) are REFUSED by `blanket run` — MSBuild
 executes arbitrary code and belongs only in the sandbox; `blanket run
 dotnet <app.dll>` runs compiled apps. One bounded sandbox write root is
 added for CoreCLR's hardcoded /tmp/.dotnet mutex dir. global.json:
-exact pin + rollForward=disable, sdk.paths/msbuild-sdks rejected.
+exact pin + rollForward=disable, sdk.paths/msbuild-sdks rejected, and
+ancestor global.json/Directory.Packages.props/Directory.Build.rsp/
+packages.config files fail closed.
 
 ## Resolution is delegated; realization is owned
 

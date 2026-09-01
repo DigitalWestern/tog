@@ -325,7 +325,7 @@ fn run_plan() -> io::Result<()> {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
-    if dotnet::find_project(&dir).is_ok() {
+    if dotnet::has_marker(&dir) {
         let store = store::Store::open()?;
         let sdk = dotnet::ensure_sdk(&store)?;
         let (plan, _) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
@@ -450,7 +450,7 @@ fn run_sync(fresh: bool) -> io::Result<()> {
         eprintln!("synced: hex deps -> {}", projection.display());
         any = true;
     }
-    if dotnet::find_project(&dir).is_ok() {
+    if dotnet::has_marker(&dir) {
         let sdk = dotnet::ensure_sdk(&store)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
         let packages = dotnet::realize_packages(&store, &plan, &sdk, &dir)?;
@@ -504,7 +504,7 @@ fn run_build(args: &[String]) -> io::Result<()> {
             if cwd.ancestors().any(|d| d.join("mix.exs").is_file()) {
                 present.push("elixir");
             }
-            if dotnet::find_project(&cwd).is_ok() {
+            if dotnet::has_marker(&cwd) {
                 present.push("dotnet");
             }
             match present.as_slice() {
@@ -669,8 +669,7 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         let projection = elixir::expected_projection(&store, &dir, &deps_obj)?;
         let recorded = closure["deps_projection"].as_str().map(PathBuf::from);
         if recorded.as_deref().and_then(|p| p.canonicalize().ok())
-            != Some(projection.clone())
-            || !projection.is_dir()
+            != Some(projection.clone()) || !projection.is_dir()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -687,19 +686,11 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if dir.join(".blanket/closures/dotnet.json").exists() {
-        // Build-capable dotnet verbs execute arbitrary MSBuild code and are
-        // sandbox-only (Sol review 7): `blanket run dotnet build` is refused.
-        if cmd[0] == "dotnet"
-            && cmd.get(1).map(|v| dotnet::BUILD_VERBS.contains(&v.as_str())) == Some(true)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "`dotnet {}` compiles/executes MSBuild code and must run \
-                     sandboxed: use `blanket build dotnet ...`",
-                    cmd[1]
-                ),
-            ));
+        // This prevents accidental unsandboxed builds, not deliberate bypasses
+        // through wrappers such as `sh -c`; blanket's boundary is enforced by
+        // never evaluating project code outside its sandbox.
+        if let Some(reason) = dotnet::refused_run_command(cmd) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
         }
         let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "dotnet")?;
@@ -736,8 +727,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "blanket-main-test-{}-{}",
                 std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH).unwrap().as_nanos()
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
             ));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -761,5 +751,37 @@ mod tests {
         assert!(!is_cargo_here(&nested));
         std::fs::write(nested.join("Cargo.lock"), "version = 4\n").unwrap();
         assert!(is_cargo_here(&nested));
+    }
+
+    #[test]
+    fn dotnet_run_guard_handles_options_and_msbuild_dll() {
+        assert!(dotnet::refused_run_command(
+            &["dotnet", "-d", "build"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        )
+        .is_some());
+        assert!(dotnet::refused_run_command(
+            &["dotnet", "msbuild"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        )
+        .is_some());
+        assert!(dotnet::refused_run_command(
+            &["dotnet", "exec", "/tmp/tools/MSBuild.dll"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        )
+        .is_some());
+        assert!(dotnet::refused_run_command(
+            &["dotnet", "exec", "app.dll"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        )
+        .is_none());
     }
 }
