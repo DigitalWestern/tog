@@ -44,8 +44,9 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 - **RECORD files are left as shipped**: not verified on install, not
   rewritten; importlib file listings can lie. Silent.
-- **Editable installs (`-e .`) unsupported** — the loudest daily-driver
-  gap for library development. Loud (planner rejects).
+- **Project-local/editable and direct Python requirements are skipped** with
+  exception `requirement-skipped`; strict via policy. Other malformed
+  requirements still fail closed.
 - **Sdists with dynamic build requirements** (PEP 517 get_requires jobs)
   unsupported; setuptools-family only. Loud.
 - **Immutable venvs are not drop-in venvs**: no activate scripts; pip
@@ -64,16 +65,21 @@ say what breaks, for whom, and how it fails (loud/silent).
 - **Nested per-workspace node_modules rejected** (version conflicts
   inside workspaces need hoisting). Loud with hint.
 - **git:// and file:// `resolved` URLs fail closed.** Loud.
-- **Install scripts that need network for LOGIC** (not just artifacts)
-  fail closed; declared-artifacts only covers downloads whose cache
-  location matches the declaration (sharp-style). Electron-class
-  packages need per-version artifact declarations. Loud.
+- **Install scripts that need network for LOGIC** (not just artifacts) are
+  permissive with exception `install-script-failed`; strict via policy.
+  Declared-artifacts only covers downloads whose cache location matches the
+  declaration (sharp-style). Electron-class packages need per-version
+  artifact declarations.
+- **Wheels shipping the same file path** are permissive with exception
+  `file-collision`; the later deterministic wheel wins. Strict via policy.
+- **SHA-1 npm integrity** is permissive with exception `weak-integrity`;
+  the tarball is still verified. Strict via policy.
 - **Lifecycle scripts run in lockfile order, not dependency order**, and
   ancestor .bin dirs aren't on script PATH (Sol review 3 leftover).
   Rarely bites; silent when it does.
-- **npm optional-dependency failure parity deliberately not mirrored**
-  (any script failure aborts the whole realization; npm would tolerate
-  optional failures). Loud, stricter-than-npm.
+- **npm optional-dependency failure parity is permissive with exception
+  `install-script-failed`**; the extracted package is retained. Strict via
+  policy.
 - **Process-tree quiescence after scripts not enforced** (a daemon
   started by postinstall can outlive realization).
 - **bun/yarn/pnpm lockfiles are re-resolved via npm** — versions may
@@ -83,6 +89,8 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 - **git dependencies fail closed.** Loud.
 - **Alternative registries fail closed.** Loud.
+- **Extra rust-toolchain components** are permissive with exception
+  `toolchain-component-unavailable`; strict via policy.
 - **`cargo install` through the wrapper is unmanaged**: lands in
   .blanket/cargo-home/bin outside the closure. Silent gap, documented.
 - **Host Xcode/SDK not in build identity** (kernel-wide item; bites

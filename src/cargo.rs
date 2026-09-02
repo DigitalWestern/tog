@@ -77,6 +77,7 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -110,7 +111,8 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
     }
 
     store
-        .commit(&identity, &staged)
+        .commit(&identity, &staged, &[])
+        .map(|(path, _)| path)
         .map_err(|e| err(format!("commit rust object: {e}")))
 }
 
@@ -177,13 +179,17 @@ fn resolve_toolchain_spec(path: &Path, spec: ToolchainSpec) -> io::Result<&'stat
         }
     }
     if let Some(components) = spec.components {
-        for component in components {
-            if !matches!(component.as_str(), "rustc" | "cargo" | "rust-std") {
-                return Err(err(format!(
-                    "{}: component {component:?} is unsupported; only rustc, cargo, and rust-std are available",
-                    path.display()
-                )));
-            }
+        let unavailable: Vec<String> = components
+            .iter()
+            .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
+            .cloned()
+            .collect();
+        if !unavailable.is_empty() {
+            crate::policy::record(
+                crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
+                &path.display().to_string(),
+                &format!("components unavailable: {}", unavailable.join(", ")),
+            )?;
         }
     }
     let channel = spec
@@ -389,6 +395,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -453,7 +460,8 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     }
 
     store
-        .commit(&identity, &staged)
+        .commit(&identity, &staged, &[])
+        .map(|(path, _)| path)
         .map_err(|e| err(format!("commit cargo vendor object: {e}")))
 }
 
@@ -748,7 +756,9 @@ fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
             ".{prefix}.{}.{}.{}",
             std::process::id(),
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
             attempt
         ));
         match fs::create_dir(&path) {
@@ -992,7 +1002,7 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
         )
         .unwrap();
-        assert!(resolve_toolchain(&project).is_err());
+        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
@@ -1114,7 +1124,10 @@ checksum = "{hash_b}"
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(wrapper_path).unwrap().permissions().mode() & 0o111, 0o111);
+            assert_eq!(
+                fs::metadata(wrapper_path).unwrap().permissions().mode() & 0o111,
+                0o111
+            );
         }
 
         let closure = crate::project::read_closure(&project, "cargo").unwrap();
@@ -1123,7 +1136,10 @@ checksum = "{hash_b}"
         assert_eq!(closure["cargo_lock_sha256"], digest);
         assert_eq!(closure["plan"]["members"][0], "app");
         // Wrapper enforces the pinned compiler and refuses --config takeover.
-        assert!(wrapper.contains(&format!("export RUSTC=\"{}\"", rust.join("bin/rustc").display())));
+        assert!(wrapper.contains(&format!(
+            "export RUSTC=\"{}\"",
+            rust.join("bin/rustc").display()
+        )));
         assert!(wrapper.contains("--config|--config=*"));
     }
 
@@ -1145,7 +1161,10 @@ checksum = "{hash_b}"
             members: vec![],
         };
         let result = project_cargo_env(&project, &rust, &vendor, &plan, "digest");
-        assert!(result.is_err(), "symlinked bin must not carry writes outside the project");
+        assert!(
+            result.is_err(),
+            "symlinked bin must not carry writes outside the project"
+        );
         assert!(!outside.join("cargo").exists());
     }
 
@@ -1160,7 +1179,10 @@ checksum = "{hash_b}"
             )
             .unwrap_err()
             .to_string();
-            assert!(error.contains("--config is managed by blanket"), "{bad}: {error}");
+            assert!(
+                error.contains("--config is managed by blanket"),
+                "{bad}: {error}"
+            );
         }
     }
 }

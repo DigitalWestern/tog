@@ -51,7 +51,11 @@ const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
 pub fn derivation_fingerprint() -> String {
     format!(
         "sdist-build/2;toolchain:{}",
-        BUILD_TOOLCHAIN.iter().map(|t| t.4).collect::<Vec<_>>().join(",")
+        BUILD_TOOLCHAIN
+            .iter()
+            .map(|t| t.4)
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -81,7 +85,10 @@ pub fn build_sdist_wheel(
     python_version: &str,
 ) -> io::Result<PathBuf> {
     let pin = crate::python::lookup(python_version).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("no pinned CPython {python_version}"))
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no pinned CPython {python_version}"),
+        )
     })?;
     let identity = Identity {
         kind: "sdist-build".into(),
@@ -90,7 +97,10 @@ pub fn build_sdist_wheel(
         inputs: BTreeMap::from([
             ("schema".to_string(), "sdist-build/2".to_string()),
             ("sdist_sha256".to_string(), pkg.sha256.clone()),
-            ("python".to_string(), format!("{}:{}", pin.version, pin.sha256)),
+            (
+                "python".to_string(),
+                format!("{}:{}", pin.version, pin.sha256),
+            ),
             ("platform".to_string(), "aarch64-apple-darwin".to_string()),
             (
                 "toolchain".to_string(),
@@ -104,6 +114,7 @@ pub fn build_sdist_wheel(
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return find_wheel(&store.object_path(&id));
     }
 
@@ -148,7 +159,8 @@ pub fn build_sdist_wheel(
             "wheel",
             "--no-deps",
             "--no-build-isolation",
-            "--no-index",            "-w",
+            "--no-index",
+            "-w",
             outdir.to_str().unwrap(),
             sdist_named.to_str().unwrap(),
         ],
@@ -188,7 +200,7 @@ pub fn build_sdist_wheel(
     let staged = store.stage()?;
     fs::copy(&built, staged.join(built.file_name().unwrap()))?;
     let _ = fs::remove_dir_all(&work);
-    let obj = store.commit(&identity, &staged)?;
+    let (obj, _) = store.commit(&identity, &staged, &[])?;
     find_wheel(&obj)
 }
 

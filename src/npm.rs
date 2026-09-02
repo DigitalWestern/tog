@@ -6,9 +6,8 @@
 //! exactly that tree as an immutable store object; projection is one
 //! node_modules symlink.
 //!
-//! v0 limits: registry tarballs only (no git/file/workspace links), and
-//! lifecycle scripts are NOT run — packages requiring postinstall (native
-//! addons) will not work until the sandboxed-build story extends to npm.
+//! v0 limits: registry tarballs only (no git/file/workspace links). Lifecycle
+//! scripts run in the sandbox; failures are retained as exceptions by default.
 //!
 //! Trust model: the lockfile is a TRUSTED input. Integrity pins every
 //! tarball's bytes, but `resolved` URLs choose where the GET goes, so a
@@ -30,15 +29,16 @@ fn err(msg: impl Into<String>) -> io::Error {
 
 /// Read the string-valued scripts from a package.json.
 pub fn package_scripts(package_json: &str) -> io::Result<BTreeMap<String, String>> {
-    let package: serde_json::Value = serde_json::from_str(package_json).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
-    })?;
+    let package: serde_json::Value = serde_json::from_str(package_json)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}")))?;
     Ok(package["scripts"]
         .as_object()
         .into_iter()
         .flat_map(|scripts| scripts.iter())
         .filter_map(|(name, command)| {
-            command.as_str().map(|command| (name.clone(), command.to_string()))
+            command
+                .as_str()
+                .map(|command| (name.clone(), command.to_string()))
         })
         .collect())
 }
@@ -50,9 +50,8 @@ pub fn script_commands_from_package(
     name: &str,
     args: &[String],
 ) -> io::Result<Option<Vec<(String, String)>>> {
-    let package: serde_json::Value = serde_json::from_str(package_json).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
-    })?;
+    let package: serde_json::Value = serde_json::from_str(package_json)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}")))?;
     let Some(scripts) = package["scripts"].as_object() else {
         return Ok(None);
     };
@@ -60,12 +59,16 @@ pub fn script_commands_from_package(
         return Ok(None);
     };
     if command.as_str().is_none() {
-        return Err(err(format!("package.json script {name:?} must be a string")));
+        return Err(err(format!(
+            "package.json script {name:?} must be a string"
+        )));
     }
     let scripts = scripts
         .iter()
         .filter_map(|(name, command)| {
-            command.as_str().map(|command| (name.clone(), command.to_string()))
+            command
+                .as_str()
+                .map(|command| (name.clone(), command.to_string()))
         })
         .collect();
     Ok(script_commands(&scripts, name, args))
@@ -127,6 +130,7 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = crate::fetch::download_verified(store, NODE.url, NODE.sha256)?;
@@ -143,7 +147,8 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
         return Err(err("node tarball extraction failed"));
     }
     store
-        .commit(&identity, &staged)
+        .commit(&identity, &staged, &[])
+        .map(|(path, _)| path)
         .map_err(|e| err(format!("commit node object: {e}")))
 }
 
@@ -156,8 +161,8 @@ pub struct NpmPackage {
     pub url: String,
     pub integrity: String, // SRI string
     pub bin: Vec<(String, String)>,
-    /// npm semantics: an optional package whose install script fails is
-    /// kept but non-fatal; a required package's failure aborts.
+    /// Install-script failures are kept by default; strict policy makes them
+    /// fatal for both optional and required packages.
     pub optional: bool,
 }
 
@@ -195,9 +200,8 @@ fn validate_lock_path(path: &str) -> io::Result<()> {
             && s != ".."
             && s != "node_modules"
             && !s.starts_with('.')
-            && s.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+')
-            })
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
     };
     let mut comps = path.split('/').peekable();
     while comps.peek().is_some() {
@@ -309,12 +313,9 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
             match entry[field].as_array() {
                 None => true,
                 Some(list) => {
-                    let allowed: Vec<&str> =
-                        list.iter().filter_map(|v| v.as_str()).collect();
-                    let negated: Vec<&str> = allowed
-                        .iter()
-                        .filter_map(|s| s.strip_prefix('!'))
-                        .collect();
+                    let allowed: Vec<&str> = list.iter().filter_map(|v| v.as_str()).collect();
+                    let negated: Vec<&str> =
+                        allowed.iter().filter_map(|s| s.strip_prefix('!')).collect();
                     if !negated.is_empty() {
                         !negated.contains(&ours)
                     } else {
@@ -334,7 +335,9 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
             )));
         }
         let resolved = entry["resolved"].as_str().ok_or_else(|| {
-            err(format!("{path}: missing 'resolved' URL (regenerate the lockfile)"))
+            err(format!(
+                "{path}: missing 'resolved' URL (regenerate the lockfile)"
+            ))
         })?;
         if !resolved.starts_with("https://") {
             return Err(err(format!(
@@ -342,9 +345,22 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
             )));
         }
         let integrity = entry["integrity"].as_str().ok_or_else(|| {
-            err(format!("{path}: missing 'integrity' (regenerate the lockfile)"))
+            err(format!(
+                "{path}: missing 'integrity' (regenerate the lockfile)"
+            ))
         })?;
-        Digest::from_sri(integrity)?; // validate early
+        let digest = Digest::from_sri(integrity)?; // validate early
+        if digest.algo() == "sha1" {
+            if let Err(policy_error) = crate::policy::record(
+                crate::policy::WEAK_INTEGRITY,
+                path,
+                "sha1 integrity accepted and verified, but is cryptographically weak",
+            ) {
+                return Err(err(format!(
+                    "unsupported integrity algorithm: sha1 ({policy_error})"
+                )));
+            }
+        }
         let name = entry["name"]
             .as_str()
             .map(str::to_string)
@@ -425,8 +441,7 @@ pub fn realize_node_env(
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
         // bin mappings change the realized tree, so they are identity inputs.
-        let mut bins: Vec<String> =
-            p.bin.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let mut bins: Vec<String> = p.bin.iter().map(|(k, v)| format!("{k}={v}")).collect();
         bins.sort();
         if inputs
             .insert(
@@ -463,6 +478,7 @@ pub fn realize_node_env(
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -481,8 +497,7 @@ pub fn realize_node_env(
     // already holds after sort, since "a/node_modules/b" sorts after "a").
     for (p, tarball) in &tarballs {
         let dest = staged.join(&p.path);
-        fs::create_dir_all(&dest)
-            .map_err(|e| err(format!("{}: create dir: {e}", p.path)))?;
+        fs::create_dir_all(&dest).map_err(|e| err(format!("{}: create dir: {e}", p.path)))?;
         let status = Command::new("/usr/bin/tar")
             .arg("-xzf")
             .arg(tarball)
@@ -493,13 +508,15 @@ pub fn realize_node_env(
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
-        normalize_modes(&dest)
-            .map_err(|e| err(format!("{}: normalize modes: {e}", p.path)))?;
+        normalize_modes(&dest).map_err(|e| err(format!("{}: normalize modes: {e}", p.path)))?;
         // ponytail: post-extraction size cap (1 GiB/package) — catches
         // decompression bombs after the fact; a streaming extractor with
         // preflight limits is the M5 upgrade. Lockfiles are trusted inputs.
         if dir_size(&dest).map_err(|e| err(format!("{}: size walk: {e}", p.path)))? > 1 << 30 {
-            return Err(err(format!("{}: package expands past 1 GiB; refusing", p.path)));
+            return Err(err(format!(
+                "{}: package expands past 1 GiB; refusing",
+                p.path
+            )));
         }
     }
 
@@ -576,9 +593,16 @@ pub fn realize_node_env(
 
     run_install_scripts(store, &staged, &node_obj, plan, artifacts)?;
 
-    store
-        .commit(&identity, &staged)
-        .map_err(|e| err(format!("commit env: {e}")))
+    let candidate = crate::policy::object_exceptions();
+    let (object, applied) = store
+        .commit(&identity, &staged, &candidate)
+        .map_err(|e| err(format!("commit env: {e}")))?;
+    for exception in applied {
+        if !candidate.contains(&exception) {
+            crate::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+        }
+    }
+    Ok(object)
 }
 
 /// npm lifecycle install scripts, run hermetically: network denied, writes
@@ -590,11 +614,10 @@ pub fn realize_node_env(
 ///
 /// npm semantics mirrored: preinstall/install/postinstall in that order;
 /// packages with a binding.gyp and no install script get the default
-/// `node-gyp rebuild`. ANY script failure aborts the realization — a
-/// half-built package must never enter an immutable, forever-cache-hit
-/// object (Sol review 3). Isolation per package: a fresh scratch HOME
-/// each, tool shims in a directory scripts cannot write, declared
-/// artifacts planted per consuming HOME.
+/// `node-gyp rebuild`. A failure is an exception by default, while strict
+/// policy preserves the fail-closed behavior. Isolation per package: a fresh
+/// scratch HOME each, tool shims in a directory scripts cannot write,
+/// declared artifacts planted per consuming HOME.
 fn run_install_scripts(
     store: &Store,
     staged: &Path,
@@ -625,9 +648,8 @@ fn run_install_scripts(
         };
         let scripts = &manifest["scripts"];
         let has = |k: &str| scripts[k].as_str().is_some();
-        let default_gyp = !has("install")
-            && !has("preinstall")
-            && pkg_dir.join("binding.gyp").exists();
+        let default_gyp =
+            !has("install") && !has("preinstall") && pkg_dir.join("binding.gyp").exists();
         if !has("preinstall") && !has("install") && !has("postinstall") && !default_gyp {
             continue;
         }
@@ -641,8 +663,8 @@ fn run_install_scripts(
                 // node-gyp shim: npm normally injects this into PATH.
                 let bin = t.join("bin");
                 fs::create_dir_all(&bin)?;
-                let gyp_js = node_obj
-                    .join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js");
+                let gyp_js =
+                    node_obj.join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js");
                 fs::write(
                     bin.join("node-gyp"),
                     format!(
@@ -674,16 +696,22 @@ fn run_install_scripts(
 
         let phases: Vec<(&str, String)> = ["preinstall", "install", "postinstall"]
             .iter()
-            .filter_map(|ph| {
-                match scripts[*ph].as_str() {
-                    Some(s) => Some((*ph, s.to_string())),
-                    None if *ph == "install" && default_gyp => {
-                        Some((*ph, "node-gyp rebuild".to_string()))
-                    }
-                    None => None,
+            .filter_map(|ph| match scripts[*ph].as_str() {
+                Some(s) => Some((*ph, s.to_string())),
+                None if *ph == "install" && default_gyp => {
+                    Some((*ph, "node-gyp rebuild".to_string()))
                 }
+                None => None,
             })
             .collect();
+
+        // Snapshot lives in its own stage dir: neither readable nor writable
+        // inside the sandbox, so a failing script cannot tamper with what
+        // gets restored (Sol, item 3 round 2).
+        let snapshot_root = store.stage()?;
+        cleanup.push(snapshot_root.clone());
+        let snapshot = snapshot_root.join("package");
+        crate::project::clone_tree(&pkg_dir, &snapshot)?;
 
         let python = match &python_obj {
             Some(p) => p.clone(),
@@ -748,28 +776,51 @@ fn run_install_scripts(
                 &envs_phase,
             );
             if let Err(e) = result {
-                // Sol (review 3, blocker 1): a failed script — optional or
-                // not — must never leave a half-built package in an
-                // immutable, forever-cache-hit object. Fail the whole
-                // realization; true npm optional parity means REMOVING the
-                // package subtree + updating identity, which is future work.
-                for t in &cleanup {
-                    let _ = crate::store::remove_tree(t);
+                let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
+                            \"blanket\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
+                            placed where the package's downloader caches them (see README).";
+                let error = e.to_string();
+                let detail = format!(
+                    "{phase}: {}. {hint}",
+                    error.chars().take(300).collect::<String>()
+                );
+                if let Err(policy_error) =
+                    crate::policy::record(crate::policy::INSTALL_SCRIPT_FAILED, &p.path, &detail)
+                {
+                    for t in &cleanup {
+                        let _ = crate::store::remove_tree(t);
+                    }
+                    return Err(err(format!(
+                        "{}: {phase} script failed under the network-denied build \
+                         sandbox: {e}. {hint} ({policy_error})",
+                        p.path
+                    )));
                 }
-                return Err(err(format!(
-                    "{}: {phase} script failed under the network-denied build \
-                     sandbox: {e}. If this package downloads files at install \
-                     time, declare them as verified inputs in package.json — \
-                     \"blanket\": {{\"artifacts\": [{{\"url\", \"sha256\", \
-                     \"path\"}}]}} — placed where the package's downloader \
-                     caches them (see README).",
-                    p.path
-                )));
+                crate::store::remove_tree(&pkg_dir)?;
+                fs::rename(&snapshot, &pkg_dir)?;
+                remove_dangling_bin_links(staged)?;
+                break;
             }
         }
     }
     for t in cleanup {
         let _ = crate::store::remove_tree(&t);
+    }
+    Ok(())
+}
+
+fn remove_dangling_bin_links(staged: &Path) -> io::Result<()> {
+    let bin_dir = staged.join("node_modules/.bin");
+    let entries = match fs::read_dir(&bin_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if fs::symlink_metadata(&path)?.file_type().is_symlink() && !path.exists() {
+            fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
@@ -799,8 +850,8 @@ pub struct BlanketConfig {
 /// Unknown keys and malformed values are hard errors: this config weakens
 /// or extends the trust boundary, so typos must not be silently ignored.
 pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
-    let v: serde_json::Value = serde_json::from_str(pkg_json)
-        .map_err(|e| err(format!("package.json: {e}")))?;
+    let v: serde_json::Value =
+        serde_json::from_str(pkg_json).map_err(|e| err(format!("package.json: {e}")))?;
     let cfg = match v.get("blanket") {
         None => return Ok(BlanketConfig::default()),
         Some(c) => c
@@ -842,12 +893,18 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
             let sha256 = item["sha256"].as_str().unwrap_or_default();
             let path = item["path"].as_str().unwrap_or_default();
             if !url.starts_with("https://") {
-                return Err(err(format!("blanket.artifacts: url must be https ({url:?})")));
+                return Err(err(format!(
+                    "blanket.artifacts: url must be https ({url:?})"
+                )));
             }
             if sha256.len() != 64
-                || !sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                || !sha256
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
             {
-                return Err(err("blanket.artifacts: sha256 must be 64 lowercase hex chars"));
+                return Err(err(
+                    "blanket.artifacts: sha256 must be 64 lowercase hex chars",
+                ));
             }
             let path_ok = !path.is_empty()
                 && !path.starts_with('/')
@@ -887,6 +944,13 @@ pub fn project_node_env(
     mutable: &[String],
     fresh: bool,
 ) -> io::Result<()> {
+    if !mutable.is_empty() {
+        crate::policy::record(
+            crate::policy::UNATTESTED_MUTABLE_STATE,
+            &mutable.join(", "),
+            "mutable package projection is unattested",
+        )?;
+    }
     let nm = project_dir.join("node_modules");
     // A real (npm-made) node_modules is moved aside automatically so
     // pointing blanket at an existing project is one command.
@@ -901,7 +965,11 @@ pub fn project_node_env(
         .map(|l| format!("{}={};", l.path, l.target))
         .collect();
     let proj_id = hex::encode(Sha256::digest(
-        format!("node-forest/1\x00{env_name}\x00{}\x00{link_key}", mutable.join(",")).as_bytes(),
+        format!(
+            "node-forest/1\x00{env_name}\x00{}\x00{link_key}",
+            mutable.join(",")
+        )
+        .as_bytes(),
     ))[..32]
         .to_string();
 
@@ -1106,9 +1174,7 @@ mod tests {
     use super::*;
 
     fn lock(packages: &str) -> String {
-        format!(
-            r#"{{"name":"x","lockfileVersion":3,"packages":{{"":{{"name":"x"}},{packages}}}}}"#
-        )
+        format!(r#"{{"name":"x","lockfileVersion":3,"packages":{{"":{{"name":"x"}},{packages}}}}}"#)
     }
 
     #[test]
@@ -1169,10 +1235,9 @@ mod tests {
     fn blanket_config_parsing() {
         let empty = parse_blanket_config(r#"{"name":"x"}"#).unwrap();
         assert!(empty.mutable_packages.is_empty() && empty.artifacts.is_empty());
-        let ok = parse_blanket_config(
-            r#"{"blanket":{"mutablePackages":["b","@prisma/engines","b"]}}"#,
-        )
-        .unwrap();
+        let ok =
+            parse_blanket_config(r#"{"blanket":{"mutablePackages":["b","@prisma/engines","b"]}}"#)
+                .unwrap();
         assert_eq!(
             ok.mutable_packages,
             vec!["@prisma/engines".to_string(), "b".to_string()]
@@ -1223,8 +1288,8 @@ mod tests {
 
     #[test]
     fn non_string_script_is_rejected() {
-        let error = script_commands_from_package(r#"{"scripts":{"test":1}}"#, "test", &[])
-            .unwrap_err();
+        let error =
+            script_commands_from_package(r#"{"scripts":{"test":1}}"#, "test", &[]).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("test"));
     }

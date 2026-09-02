@@ -1,0 +1,345 @@
+use crate::store::Store;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+/// A requirement was skipped because it is project-local or a direct reference.
+pub const REQUIREMENT_SKIPPED: &str = "requirement-skipped";
+/// Two wheels shipped the same path; the later wheel won.
+pub const FILE_COLLISION: &str = "file-collision";
+/// An install lifecycle script failed but its extracted package was retained.
+pub const INSTALL_SCRIPT_FAILED: &str = "install-script-failed";
+/// A legacy SHA-1 lock integrity was accepted and verified.
+pub const WEAK_INTEGRITY: &str = "weak-integrity";
+/// A mutable projection was created without attesting its runtime contents.
+pub const UNATTESTED_MUTABLE_STATE: &str = "unattested-mutable-state";
+/// A requested toolchain component is not available in the pinned toolchain.
+pub const TOOLCHAIN_COMPONENT_UNAVAILABLE: &str = "toolchain-component-unavailable";
+/// A future git dependency was accepted without registry provenance.
+pub const GIT_DEPENDENCY: &str = "git-dependency";
+
+pub const KINDS: &[&str] = &[
+    REQUIREMENT_SKIPPED,
+    FILE_COLLISION,
+    INSTALL_SCRIPT_FAILED,
+    WEAK_INTEGRITY,
+    UNATTESTED_MUTABLE_STATE,
+    TOOLCHAIN_COMPONENT_UNAVAILABLE,
+    GIT_DEPENDENCY,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exception {
+    pub kind: String,
+    pub subject: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    #[serde(default)]
+    pub strict: bool,
+    #[serde(default)]
+    pub deny: BTreeSet<String>,
+}
+
+static POLICY: OnceLock<Policy> = OnceLock::new();
+// ponytail: a global queue is fine here; the realize functions are deep and
+// threading policy through seven tailors is not worth the complexity.
+static RECORDED: OnceLock<Mutex<Vec<Exception>>> = OnceLock::new();
+
+fn recorded() -> &'static Mutex<Vec<Exception>> {
+    RECORDED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
+    let policy: Policy = toml::from_str(text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse {}: {e}", path.display()),
+        )
+    })?;
+    let unknown: Vec<&str> = policy
+        .deny
+        .iter()
+        .map(String::as_str)
+        .filter(|kind| !KINDS.contains(kind))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: unknown deny kind(s): {}; valid kinds: {}",
+                path.display(),
+                unknown.join(", "),
+                KINDS.join(", ")
+            ),
+        ));
+    }
+    Ok(policy)
+}
+
+fn merge_file(policy: &mut Policy, path: &Path, required: bool) -> io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(()),
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("read {}: {e}", path.display()),
+            ))
+        }
+    };
+    let other = parse_file(path, &text)?;
+    policy.strict |= other.strict;
+    policy.deny.extend(other.deny);
+    Ok(())
+}
+
+/// Load the user and project policies once, unioning all deny entries.
+pub fn load(project_dir: &Path, cli_strict: bool) -> io::Result<Policy> {
+    let mut policy = Policy::default();
+    if let Some(path) = std::env::var_os("BLANKET_POLICY") {
+        merge_file(&mut policy, Path::new(&path), true)?;
+    } else if let Some(home) = std::env::var_os("HOME") {
+        merge_file(
+            &mut policy,
+            &Path::new(&home).join(".blanket/policy.toml"),
+            false,
+        )?;
+    }
+    // Every ancestor's project policy applies (union only tightens), so a
+    // workspace-root policy governs builds started in a member directory
+    // without blanket having to know each ecosystem's rooting rule.
+    for dir in project_dir.ancestors() {
+        merge_file(&mut policy, &dir.join(".blanket/policy.toml"), false)?;
+    }
+    policy.strict |= cli_strict || std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
+    Ok(policy)
+}
+
+/// Initialize the process policy. Repeated calls keep the first loaded policy.
+pub fn init(project_dir: &Path, cli_strict: bool) -> io::Result<()> {
+    if POLICY.get().is_none() {
+        let _ = POLICY.set(load(project_dir, cli_strict)?);
+    }
+    Ok(())
+}
+
+fn current() -> &'static Policy {
+    POLICY.get_or_init(Policy::default)
+}
+
+fn denied(policy: &Policy, kind: &str) -> bool {
+    policy.strict || policy.deny.contains(kind)
+}
+
+pub fn record_with(
+    policy: &Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+) -> io::Result<()> {
+    if denied(policy, kind) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "policy denies {kind}: {subject}: {detail} (see .blanket/policy.toml / BLANKET_STRICT)"
+            ),
+        ));
+    }
+    eprintln!("blanket: exception {kind}: {subject}: {detail}");
+    recorded()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Exception {
+            kind: kind.into(),
+            subject: subject.into(),
+            detail: detail.into(),
+        });
+    Ok(())
+}
+
+pub fn record(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
+    record_with(current(), kind, subject, detail)
+}
+
+/// Return and clear all exceptions recorded by this process.
+pub fn drain() -> Vec<Exception> {
+    std::mem::take(&mut *recorded().lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+pub fn pending() -> Vec<Exception> {
+    recorded()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub fn clear() {
+    recorded()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// Exceptions that change the bytes of the object being built.
+pub fn object_exceptions() -> Vec<Exception> {
+    recorded()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                FILE_COLLISION | INSTALL_SCRIPT_FAILED | GIT_DEPENDENCY
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Refuse a cached object when its recorded exceptions are denied now.
+pub fn check_cached(store: &Store, id: &str) -> io::Result<()> {
+    let exceptions = store.exceptions(id)?;
+    check_exception_set(id, &exceptions)?;
+    for exception in &exceptions {
+        record(
+            &exception.kind,
+            &exception.subject,
+            &exception.detail,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Result<()> {
+    if exceptions.is_empty() {
+        return Ok(());
+    }
+    let denied_kinds: Vec<&str> = exceptions
+        .iter()
+        .filter(|e| denied(current(), &e.kind))
+        .map(|e| e.kind.as_str())
+        .collect();
+    if denied_kinds.is_empty() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "cached object {id} carries exception(s): {}; blanket sync --fresh will not help; rebuild the object under a permissive policy or fix the cause",
+            denied_kinds.join(", ")
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_policy_and_rejects_unknown_keys() {
+        let policy = toml::from_str::<Policy>(
+            r#"strict = true
+deny = ["git-dependency"]"#,
+        )
+        .unwrap();
+        assert!(policy.strict);
+        assert!(policy.deny.contains("git-dependency"));
+        assert!(toml::from_str::<Policy>("wat = true").is_err());
+        let error = parse_file(Path::new("policy.toml"), "deny = [\"typo\"]").unwrap_err();
+        assert!(error.to_string().contains("valid kinds:"));
+    }
+
+    #[test]
+    fn union_semantics_adds_all_deny_entries() {
+        let mut merged = Policy::default();
+        for text in [r#"deny = ["x"]"#, r#"deny = ["y"]"#] {
+            let other = toml::from_str::<Policy>(text).unwrap();
+            merged.strict |= other.strict;
+            merged.deny.extend(other.deny);
+        }
+        assert!(denied(&merged, "x"));
+        assert!(denied(&merged, "y"));
+    }
+
+    #[test]
+    fn record_denied_and_allowed() {
+        let _ = drain();
+        assert!(record_with(
+            &Policy {
+                strict: true,
+                deny: BTreeSet::new()
+            },
+            "x",
+            "s",
+            "d"
+        )
+        .is_err());
+        record_with(&Policy::default(), "x", "s", "d").unwrap();
+        assert_eq!(drain().len(), 1);
+    }
+
+    #[test]
+    fn drain_clears() {
+        let _ = drain();
+        record_with(&Policy::default(), "x", "s", "d").unwrap();
+        assert_eq!(drain().len(), 1);
+        assert!(drain().is_empty());
+    }
+
+    #[test]
+    fn loads_user_and_project_policy_union_from_files() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        fs::create_dir_all(home.join(".blanket")).unwrap();
+        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::write(
+            home.join(".blanket/policy.toml"),
+            "deny = [\"git-dependency\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".blanket/policy.toml"),
+            "strict = true\ndeny = [\"file-collision\"]\n",
+        )
+        .unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_policy = std::env::var_os("BLANKET_POLICY");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("BLANKET_POLICY");
+        let loaded = load(&project, false).unwrap();
+        // Ancestor rule: a workspace member inherits the root's policy.
+        let member = project.join("crates/member");
+        fs::create_dir_all(&member).unwrap();
+        let from_member = load(&member, false).unwrap();
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_policy {
+            Some(value) => std::env::set_var("BLANKET_POLICY", value),
+            None => std::env::remove_var("BLANKET_POLICY"),
+        }
+        assert!(loaded.strict);
+        assert!(loaded.deny.contains(FILE_COLLISION));
+        assert!(loaded.deny.contains(GIT_DEPENDENCY));
+        let _ = fs::remove_dir_all(root);
+        assert!(from_member.strict);
+        assert!(from_member.deny.contains("file-collision"));
+        assert!(from_member.deny.contains("git-dependency"));
+    }
+}

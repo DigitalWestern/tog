@@ -45,10 +45,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Parse pip/uv `--generate-hashes` format. Only exact `==` pins with at
-/// least one sha256 hash are accepted; see doc for rejection rules.
-pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
-    // Fold physical lines into logical lines (trailing backslash joins).
+fn logical_lines(text: &str) -> Vec<String> {
     let mut logical: Vec<String> = Vec::new();
     let mut current = String::new();
     for raw in text.lines() {
@@ -69,15 +66,56 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
     if !current.trim().is_empty() {
         logical.push(current);
     }
+    logical
+}
 
+/// Return project-local/direct specs without recording policy exceptions.
+pub fn skippable_specs(text: &str) -> Vec<String> {
+    logical_lines(text)
+        .into_iter()
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|token| !token.starts_with("--hash="))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|spec| is_skippable_spec(spec))
+        .collect()
+}
+
+/// Whether a requirement is project-local or a direct reference that blanket
+/// cannot turn into a verified registry package.
+pub fn is_skippable_spec(spec: &str) -> bool {
+    let spec = spec.trim();
+    let is_local = |p: &str| {
+        p == "." || p.starts_with("./") || p.starts_with("../") || p.starts_with('/')
+            || p.starts_with("file:")
+    };
+    let is_url = |r: &str| {
+        r.starts_with("https://") || r.starts_with("http://") || r.starts_with("git+")
+            || r.starts_with("file:")
+    };
+    if is_local(spec) || is_url(spec) {
+        return true;
+    }
+    for flag in ["-e ", "--editable ", "-e=", "--editable="] {
+        if let Some(target) = spec.strip_prefix(flag) {
+            return is_local(target.trim()) || is_url(target.trim());
+        }
+    }
+    spec.split_once('@')
+        .map(|(name, reference)| !name.trim().is_empty() && is_url(reference.trim()))
+        .unwrap_or(false)
+}
+
+/// Parse pip/uv `--generate-hashes` format. Only exact `==` pins with at
+/// least one sha256 hash are accepted; see doc for rejection rules.
+pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
     let mut reqs = Vec::new();
-    for line in logical {
+    for line in logical_lines(text) {
         let mut spec = String::new();
         let mut hashes: Vec<String> = Vec::new();
         for tok in line.split_whitespace() {
-            if tok == "-e" || tok == "--editable" {
-                return Err(err("editable requirements are not supported"));
-            }
             if let Some(h) = tok.strip_prefix("--hash=") {
                 let Some(hex) = h.strip_prefix("sha256:") else {
                     return Err(err(format!("only sha256 hashes are supported, got: {tok}")));
@@ -86,14 +124,26 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
                     return Err(err(format!("malformed sha256 hash: {hex}")));
                 }
                 hashes.push(hex.to_ascii_lowercase());
-            } else if tok.starts_with('-') {
-                return Err(err(format!("unsupported option in requirements: {tok}")));
             } else {
+                if !spec.is_empty() {
+                    spec.push(' ');
+                }
                 spec.push_str(tok);
             }
         }
         if spec.is_empty() {
             continue;
+        }
+        if is_skippable_spec(&spec) {
+            continue;
+        }
+        for tok in spec.split_whitespace() {
+            if tok == "-e" || tok == "--editable" {
+                return Err(err("editable requirements are not supported"));
+            }
+            if tok.starts_with('-') {
+                return Err(err(format!("unsupported option in requirements: {tok}")));
+            }
         }
         if spec.contains(';') {
             return Err(err(format!(
@@ -104,13 +154,16 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
             return Err(err(format!("extras are not supported (v0): {spec}")));
         }
         let Some((name, version)) = spec.split_once("==") else {
-            return Err(err(format!(
-                "only exact '==' pins are supported: {spec}"
-            )));
+            return Err(err(format!("only exact '==' pins are supported: {spec}")));
         };
-        if version.contains('=') || version.contains('<') || version.contains('>')
-            || name.contains('<') || name.contains('>') || name.contains('~')
-            || name.contains('!') || version.contains('*')
+        if version.contains('=')
+            || version.contains('<')
+            || version.contains('>')
+            || name.contains('<')
+            || name.contains('>')
+            || name.contains('~')
+            || name.contains('!')
+            || version.contains('*')
         {
             return Err(err(format!("only exact '==' pins are supported: {spec}")));
         }
@@ -270,8 +323,8 @@ fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>>
         .map_err(|e| err(format!("PyPI lookup failed for {name}=={version}: {e}")))?
         .into_string()
         .map_err(|e| err(format!("PyPI response for {name}: {e}")))?;
-    let v: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| err(format!("PyPI JSON for {name}: {e}")))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| err(format!("PyPI JSON for {name}: {e}")))?;
     let urls = v["urls"]
         .as_array()
         .ok_or_else(|| err(format!("PyPI JSON for {name} has no urls array")))?;
@@ -410,11 +463,34 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             "six==1.0",                    // no hash
             "six[extra]==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
             "six==1.0; python_version<'3' --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
-            "-e ./local",
+            "-e sixpkg",                  // editable that is neither local nor a URL
             "six==1.0 --hash=md5:abc",
             "-r other.txt",
         ] {
             assert!(parse_requirements(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn identifies_project_and_direct_requirements() {
+        for spec in [
+            ".",
+            "-e ./local",
+            "-e ../local",
+            "--editable ./local",
+            "-e .",
+            "./local",
+            "/abs/path/pkg",
+            "file:./wheel.whl",
+            "pkg @ file:///path/pkg.whl",
+            "https://example.test/pkg.whl",
+            "gradio@https://example.test/gradio.whl",
+            "pkg @ git+https://example.test/pkg.git@deadbeef",
+        ] {
+            assert!(is_skippable_spec(spec), "should skip: {spec}");
+        }
+        for spec in ["gradio@not-a-url", "six==1.0", "-r other.txt", "six"] {
+            assert!(!is_skippable_spec(spec), "should not skip: {spec}");
         }
     }
 

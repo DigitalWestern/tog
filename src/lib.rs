@@ -6,6 +6,7 @@ pub mod elixir;
 pub mod fetch;
 pub mod golang;
 pub mod npm;
+pub mod policy;
 pub mod project;
 pub mod pypi;
 pub mod ruby;

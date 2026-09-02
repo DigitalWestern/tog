@@ -52,6 +52,7 @@ pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_digest(store, SDK_URL, &Digest::sha512(SDK_SHA512)?)?;
@@ -65,7 +66,7 @@ pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
     if !st.success() || !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 /// global.json gate (Sol): exact pin, rollForward disable, no redirection.
@@ -476,13 +477,13 @@ fn validate_lock_shape(path: &Path) -> io::Result<()> {
                 Some("Direct") | Some("Transitive") => {}
                 Some("Project") => {
                     return Err(err(format!(
-                        "{id}: Project lock entries are not supported; use package dependencies only"
-                    )))
+                    "{id}: Project lock entries are not supported; use package dependencies only"
+                )))
                 }
                 Some(kind) => {
                     return Err(err(format!(
-                        "{id}: unsupported lock dependency type {kind}; expected Direct or Transitive"
-                    )))
+                    "{id}: unsupported lock dependency type {kind}; expected Direct or Transitive"
+                )))
                 }
                 None => {
                     return Err(err(format!(
@@ -615,9 +616,11 @@ pub fn plan_dotnet(
         for (id, e) in entries {
             match e["type"].as_str() {
                 Some("Direct") | Some("Transitive") => {}
-                Some("Project") => return Err(err(format!(
+                Some("Project") => {
+                    return Err(err(format!(
                     "{id}: Project lock entries are not supported; use package dependencies only"
-                ))),
+                )))
+                }
                 other => {
                     return Err(err(format!(
                         "{id}: unsupported lock dependency type {other:?} (v0)"
@@ -840,6 +843,7 @@ pub fn realize_packages(
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         let _ = crate::store::remove_tree(&scratch);
         return Ok(store.object_path(&id));
     }
@@ -856,9 +860,7 @@ pub fn realize_packages(
             .ok_or_else(|| err("plan has no target framework"))?,
     )?;
     if plan.targets.len() > 1 {
-        eprintln!(
-            "blanket: synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}"
-        );
+        eprintln!("blanket: synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}");
     }
     fs::write(
         verifier.join("blanket-verifier.csproj"),
@@ -899,9 +901,7 @@ pub fn realize_packages(
     if let Err(e) = result {
         let _ = crate::store::remove_tree(&scratch);
         let _ = crate::store::remove_tree(&staged);
-        return Err(err(format!(
-            "locked-mode package verification failed: {e}"
-        )));
+        return Err(err(format!("locked-mode package verification failed: {e}")));
     }
     // Every locked package must have materialized with its completion
     // marker; anything missing means the lock and feed disagree.
@@ -924,7 +924,7 @@ pub fn realize_packages(
         }
     }
     let _ = crate::store::remove_tree(&scratch);
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 pub fn project_dotnet_env(
@@ -1011,10 +1011,7 @@ fn validate_build_args(args: &[String]) -> io::Result<()> {
             lower.as_str(),
             "-c" | "--configuration" | "-v" | "--verbosity" | "-f" | "--framework"
         ) {
-            if i + 1 == args.len()
-                || args[i + 1].starts_with('-')
-                || args[i + 1].starts_with('@')
-            {
+            if i + 1 == args.len() || args[i + 1].starts_with('-') || args[i + 1].starts_with('@') {
                 return Err(err(format!("{}: missing option value", args[i])));
             }
             i += 2;
@@ -1071,14 +1068,8 @@ fn publish_output(staged: &Path, project_dir: &Path, fingerprint: &str) -> io::R
     let bin = output
         .parent()
         .ok_or_else(|| err("output directory has no bin parent"))?;
-    let new = bin.join(format!(
-        ".blanket-{fingerprint}.new.{}",
-        std::process::id()
-    ));
-    let old = bin.join(format!(
-        ".blanket-{fingerprint}.old.{}",
-        std::process::id()
-    ));
+    let new = bin.join(format!(".blanket-{fingerprint}.new.{}", std::process::id()));
+    let old = bin.join(format!(".blanket-{fingerprint}.old.{}", std::process::id()));
     for path in [&new, &old] {
         if fs::symlink_metadata(path).is_ok() {
             return Err(err(format!(
@@ -1295,7 +1286,10 @@ mod tests {
         })
         .unwrap_err()
         .to_string();
-        assert!(error.contains("multi-targeted locks are unsupported in v0"), "{error}");
+        assert!(
+            error.contains("multi-targeted locks are unsupported in v0"),
+            "{error}"
+        );
         let same_tfm_rids = DotnetPlan {
             targets: vec!["net9.0".into(), "net9.0/osx-arm64".into()],
             ..ok.clone()
@@ -1436,11 +1430,7 @@ mod tests {
 
         let central_transitive = base.join("central-transitive");
         fs::create_dir(&central_transitive).unwrap();
-        fs::write(
-            central_transitive.join("project.csproj"),
-            minimal_csproj(),
-        )
-        .unwrap();
+        fs::write(central_transitive.join("project.csproj"), minimal_csproj()).unwrap();
         fs::write(
             central_transitive.join("packages.lock.json"),
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"CentralTransitive","resolved":"1.0.0","contentHash":"A"}}}}"#,
@@ -1484,7 +1474,11 @@ mod tests {
         let bypass = base.join("bypass");
         fs::create_dir(&bypass).unwrap();
         let cr_sdk = bypass.join("cr.csproj");
-        fs::write(&cr_sdk, "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk\rName=\"X\"/></Project>").unwrap();
+        fs::write(
+            &cr_sdk,
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Sdk\rName=\"X\"/></Project>",
+        )
+        .unwrap();
         assert!(validate_csproj(&cr_sdk).is_err());
         let projector = bypass.join("projector.csproj");
         fs::write(&projector, "<Projector/>").unwrap();

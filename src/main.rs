@@ -1,4 +1,6 @@
-use blanket::{cargo, dotnet, elixir, golang, npm, project, pypi, python, ruby, sbom, store, types};
+use blanket::{
+    cargo, dotnet, elixir, golang, npm, policy, project, pypi, python, ruby, sbom, store, types,
+};
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,7 +10,7 @@ const USAGE: &str = "\
 blanket — universal realization & environment kernel (python + node + cargo)
 
 USAGE:
-  blanket sync [--fresh]  realize + project env(s) from lockfiles
+  blanket sync [--fresh] [--strict]  realize + project env(s) from lockfiles
                           (--fresh rebuilds the projection, dropping caches)
   blanket plan            print the locked plan(s) as JSON
   blanket build [eco] [args...]  sandboxed, network-denied build (cargo | go;
@@ -20,7 +22,8 @@ USAGE:
   blanket store path      print the store root
 
 Project inputs (either or both):
-  requirements.txt        python deps; ranged files are auto-locked via uv
+  requirements.txt or pyproject.toml
+                          python deps; ranged files are auto-locked via uv
                           into requirements.lock.txt (hash-pinned)
   .python-version         optional; e.g. 3.12 (default: 3.12)
   package-lock.json       npm lockfile v2/v3 (npm install --package-lock-only)
@@ -34,7 +37,10 @@ Project inputs (either or both):
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        Some("sync") => run_sync(args.iter().any(|a| a == "--fresh")),
+        Some("sync") => run_sync(
+            args.iter().any(|a| a == "--fresh"),
+            args.iter().any(|a| a == "--strict"),
+        ),
         Some("plan") => run_plan(),
         Some("build") => run_build(&args[1..]),
         Some("run") => run_run(&args[1..]),
@@ -99,7 +105,13 @@ struct CargoInputs {
 /// unrelated outer lock when independent packages nest (Sol review, repro'd).
 fn locate_cargo_root(rust_obj: &Path, cwd: &Path) -> io::Result<PathBuf> {
     let out = std::process::Command::new(rust_obj.join("bin/cargo"))
-        .args(["locate-project", "--workspace", "--message-format", "plain", "--offline"])
+        .args([
+            "locate-project",
+            "--workspace",
+            "--message-format",
+            "plain",
+            "--offline",
+        ])
         .current_dir(cwd)
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN")
@@ -169,9 +181,34 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
 /// lock replans offline and instantly.
 fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     let req_path = dir.join("requirements.txt");
-    let source = std::fs::read_to_string(&req_path).map_err(|e| {
-        io::Error::new(e.kind(), format!("{}: {e}", req_path.display()))
-    })?;
+    let (input, source) = if req_path.is_file() {
+        (
+            "requirements.txt".to_string(),
+            std::fs::read_to_string(&req_path)
+                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", req_path.display())))?,
+        )
+    } else {
+        let pyproject = dir.join("pyproject.toml");
+        let source = std::fs::read_to_string(&pyproject)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", pyproject.display())))?;
+        let value: toml::Value = toml::from_str(&source).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {e}", pyproject.display()),
+            )
+        })?;
+        let has_dependencies = value
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("dependencies"))
+            .and_then(toml::Value::as_array)
+            .is_some();
+        if !has_dependencies {
+            return Err(no_inputs());
+        }
+        ("pyproject.toml".to_string(), source)
+    };
+    record_skippable_specs(&input, &source)?;
     let pyver = std::fs::read_to_string(dir.join(".python-version"))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "3.12".into());
@@ -182,26 +219,22 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
         )
     })?;
 
-    // Real projects mostly carry ranged requirements, not hash-pinned ones.
-    // Resolution is delegated to the ecosystem's own resolver (uv) — blanket
-    // owns realization, not solving. The generated requirements.lock.txt is
-    // regenerated whenever requirements.txt changes. A file that IS pinned
-    // but uses features the direct parser rejects (environment markers,
-    // extras — e.g. `uv pip compile --universal` output) is re-locked for
-    // this platform the same way rather than hard-failing.
-    let text = if is_fully_pinned(&source) {
+    let text = if input == "pyproject.toml" {
+        locked_requirements(dir, &input, &source, pin.version)?
+    } else if is_fully_pinned(&source) {
         match pypi::parse_requirements(&source) {
             Ok(_) => source,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) => {
                 eprintln!(
                     "blanket: requirements.txt is pinned but not directly \
                      consumable ({e}); re-locking for this platform with uv..."
                 );
-                locked_requirements(dir, &source, pin.version)?
+                locked_requirements(dir, &input, &source, pin.version)?
             }
         }
     } else {
-        locked_requirements(dir, &source, pin.version)?
+        locked_requirements(dir, &input, &source, pin.version)?
     };
 
     use sha2::{Digest, Sha256};
@@ -233,6 +266,46 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     Ok(plan)
 }
 
+fn record_skippable_specs(input: &str, source: &str) -> io::Result<()> {
+    record_skippable_specs_with(input, source, policy::record)
+}
+
+fn record_skippable_specs_with<F>(
+    input: &str,
+    source: &str,
+    mut record: F,
+) -> io::Result<()>
+where
+    F: FnMut(&str, &str, &str) -> io::Result<()>,
+{
+    let specs: Vec<String> = if input == "requirements.txt" {
+        pypi::skippable_specs(source)
+    } else {
+        let value: toml::Value = toml::from_str(source).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("pyproject.toml: {e}"))
+        })?;
+        value
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("dependencies"))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .filter(|spec| pypi::is_skippable_spec(spec))
+            .map(str::to_string)
+            .collect()
+    };
+    for spec in specs {
+        record(
+            policy::REQUIREMENT_SKIPPED,
+            &spec,
+            "project-local or direct reference is not a locked registry package",
+        )?;
+    }
+    Ok(())
+}
+
 /// Every non-comment logical line (after backslash continuations) carries a
 /// --hash= option. That is the shape `uv pip compile --generate-hashes`
 /// emits and the only shape the planner accepts directly.
@@ -252,6 +325,15 @@ fn is_fully_pinned(text: &str) -> bool {
         };
         if !line.is_empty() && !line.starts_with('#') {
             any = true;
+            let spec = line
+                .split_whitespace()
+                .filter(|token| !token.starts_with("--hash="))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if pypi::is_skippable_spec(&spec) {
+                logical.clear();
+                continue;
+            }
             if !line.contains("--hash=") {
                 return false;
             }
@@ -262,12 +344,11 @@ fn is_fully_pinned(text: &str) -> bool {
 }
 
 /// Resolve ranged requirements to a hash-pinned lock via uv, cached in
-/// requirements.lock.txt and regenerated when requirements.txt changes.
-fn locked_requirements(dir: &Path, source: &str, pyver: &str) -> io::Result<String> {
-    use sha2::{Digest, Sha256};
+/// requirements.lock.txt and regenerated when the source input changes.
+fn locked_requirements(dir: &Path, input: &str, source: &str, pyver: &str) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
     let stamp_path = dir.join(".blanket/lock-source.hash");
-    let source_hash = hex::encode(Sha256::digest(format!("{pyver}\x00{source}").as_bytes()));
+    let source_hash = lock_source_hash(pyver, source);
     if let (Ok(stamp), Ok(lock)) = (
         std::fs::read_to_string(&stamp_path),
         std::fs::read_to_string(&lock_path),
@@ -276,18 +357,16 @@ fn locked_requirements(dir: &Path, source: &str, pyver: &str) -> io::Result<Stri
             return Ok(lock);
         }
     }
-    eprintln!("blanket: requirements.txt is not hash-pinned; resolving with the store uv...");
+    eprintln!("blanket: {input} is not hash-pinned; resolving with the store uv...");
     // Store-pinned uv, not host uv: a bare machine needs only blanket.
     let uv = python::ensure_uv(&store::Store::open()?)?.join("uv");
     let status = std::process::Command::new(&uv)
-        .args(["pip", "compile", "requirements.txt", "--generate-hashes", "--quiet"])
+        .args(["pip", "compile", input, "--generate-hashes", "--quiet"])
         .args(["--python-version", pyver])
         .args(["-o", "requirements.lock.txt"])
         .current_dir(dir)
         .status()
-        .map_err(|e| {
-            io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
-        })?;
+        .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
     }
@@ -296,11 +375,17 @@ fn locked_requirements(dir: &Path, source: &str, pyver: &str) -> io::Result<Stri
     std::fs::read_to_string(&lock_path)
 }
 
+fn lock_source_hash(pyver: &str, source: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(format!("{pyver}\x00{source}").as_bytes()))
+}
+
 fn run_plan() -> io::Result<()> {
     let dir = project_dir();
+    policy::init(&dir, false)?;
     ensure_npm_lock(&dir)?;
     let mut any = false;
-    if dir.join("requirements.txt").exists() {
+    if has_python_input(&dir)? {
         let plan = read_plan(&dir)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
@@ -368,8 +453,31 @@ fn run_plan() -> io::Result<()> {
 fn no_inputs() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
-        "nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)",
+        "nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)",
     )
+}
+
+fn has_python_input(dir: &Path) -> io::Result<bool> {
+    if dir.join("requirements.txt").is_file() {
+        return Ok(true);
+    }
+    let path = dir.join("pyproject.toml");
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(&path)?;
+    let value: toml::Value = toml::from_str(&text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {e}", path.display()),
+        )
+    })?;
+    Ok(value
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .and_then(|project| project.get("dependencies"))
+        .and_then(toml::Value::as_array)
+        .is_some())
 }
 
 struct GoInputs {
@@ -416,12 +524,20 @@ fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
         std::env::var("PATH").unwrap_or_default()
     );
     let status = std::process::Command::new(node.join("bin/npm"))
-        .args(["install", "--package-lock-only", "--ignore-scripts", "--silent"])
+        .args([
+            "install",
+            "--package-lock-only",
+            "--ignore-scripts",
+            "--silent",
+        ])
         .current_dir(dir)
         .env("PATH", path)
         .status()
         .map_err(|e| {
-            io::Error::new(e.kind(), format!("run store npm ({}/bin/npm): {e}", node.display()))
+            io::Error::new(
+                e.kind(),
+                format!("run store npm ({}/bin/npm): {e}", node.display()),
+            )
         })?;
     if !status.success() {
         return Err(io::Error::other("npm install --package-lock-only failed"));
@@ -429,12 +545,13 @@ fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn run_sync(fresh: bool) -> io::Result<()> {
+fn run_sync(fresh: bool, strict: bool) -> io::Result<()> {
     let dir = project_dir();
+    policy::init(&dir, strict)?;
     let store = store::Store::open()?;
     ensure_npm_lock(&dir)?;
     let mut any = false;
-    if dir.join("requirements.txt").exists() {
+    if has_python_input(&dir)? {
         let plan = read_plan(&dir)?;
         let env = project::realize_env(&store, &plan)?;
         project::project_env(&dir, &env, &plan)?;
@@ -457,7 +574,13 @@ fn run_sync(fresh: bool) -> io::Result<()> {
     if dir.join("go.mod").is_file() {
         let inputs = load_go_inputs(&dir, &store)?;
         let modcache = golang::realize_modcache(&store, &inputs.plan, &inputs.go_obj)?;
-        golang::project_go_env(&dir, &inputs.go_obj, &modcache, &inputs.plan, &inputs.gosum_sha256)?;
+        golang::project_go_env(
+            &dir,
+            &inputs.go_obj,
+            &modcache,
+            &inputs.plan,
+            &inputs.gosum_sha256,
+        )?;
         eprintln!("synced: go modcache -> {}", modcache.display());
         any = true;
     }
@@ -473,7 +596,8 @@ fn run_sync(fresh: bool) -> io::Result<()> {
         let beam = elixir::ensure_beam(&store)?;
         let (plan, lock_sha256) = elixir::plan_elixir(&store, &dir, &beam)?;
         let deps = elixir::realize_deps(&store, &plan, &beam)?;
-        let projection = elixir::project_elixir_env(&dir, &beam, &deps, &plan, &lock_sha256, fresh)?;
+        let projection =
+            elixir::project_elixir_env(&dir, &beam, &deps, &plan, &lock_sha256, fresh)?;
         eprintln!("synced: hex deps -> {}", projection.display());
         any = true;
     }
@@ -508,6 +632,35 @@ fn run_sync(fresh: bool) -> io::Result<()> {
     }
     if !any {
         return Err(no_inputs());
+    }
+    print_exception_summary(&dir)?;
+    Ok(())
+}
+
+fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
+    let dir = project_dir.join(".blanket/closures");
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().ends_with(".json") {
+                continue;
+            }
+            let text = match std::fs::read_to_string(entry.path()) {
+                Ok(text) => text,
+                Err(_) => continue,
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            total += value["body"]["exceptions"].as_array().map_or(0, Vec::len);
+        }
+    }
+    if total > 0 {
+        eprintln!(
+            "blanket: {total} exception(s) recorded in .blanket/closures/*.json — \
+             `blanket sync --strict` to refuse them"
+        );
     }
     Ok(())
 }
@@ -556,6 +709,25 @@ fn run_build(args: &[String]) -> io::Result<()> {
             }
         }
     };
+    let root = match eco {
+        "cargo" => cwd
+            .ancestors()
+            .find(|dir| dir.join("Cargo.toml").is_file())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no Cargo.toml found from here upward"))?
+            .to_path_buf(),
+        "go" => cwd
+            .ancestors()
+            .find(|dir| dir.join("go.mod").is_file())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no go.mod found from here upward"))?
+            .to_path_buf(),
+        "elixir" => cwd
+            .ancestors()
+            .find(|dir| dir.join("mix.exs").is_file())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no mix.exs found from here upward"))?
+            .to_path_buf(),
+        _ => cwd.clone(),
+    };
+    policy::init(&root, false)?;
     let store = store::Store::open()?;
     match eco {
         "cargo" => {
@@ -580,7 +752,13 @@ fn run_build(args: &[String]) -> io::Result<()> {
                 .to_path_buf();
             let inputs = load_go_inputs(&root, &store)?;
             let modcache = golang::realize_modcache(&store, &inputs.plan, &inputs.go_obj)?;
-            golang::project_go_env(&root, &inputs.go_obj, &modcache, &inputs.plan, &inputs.gosum_sha256)?;
+            golang::project_go_env(
+                &root,
+                &inputs.go_obj,
+                &modcache,
+                &inputs.plan,
+                &inputs.gosum_sha256,
+            )?;
             golang::build_sandboxed(&root, &inputs.go_obj, &modcache, rest)
         }
         "elixir" => {
@@ -626,7 +804,10 @@ fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool
 
 fn run_run(cmd: &[String]) -> io::Result<()> {
     if cmd.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "run: no command given"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run: no command given",
+        ));
     }
     // Walk up from cwd to the nearest projected root, so `blanket run`
     // works from workspace subdirectories like npm run does.
@@ -743,8 +924,8 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         // forests, dot-dot tricks, and symlinked dirs).
         let projection = elixir::expected_projection(&store, &dir, &deps_obj)?;
         let recorded = closure["deps_projection"].as_str().map(PathBuf::from);
-        if recorded.as_deref().and_then(|p| p.canonicalize().ok())
-            != Some(projection.clone()) || !projection.is_dir()
+        if recorded.as_deref().and_then(|p| p.canonicalize().ok()) != Some(projection.clone())
+            || !projection.is_dir()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -859,7 +1040,10 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "blanket-main-test-{}-{}",
                 std::process::id(),
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
             ));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -936,5 +1120,46 @@ mod tests {
         let outside = t.0.join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
         assert_eq!(projected_root(&outside), outside);
+    }
+
+    #[test]
+    fn pyproject_lock_stamp_tracks_only_pyproject_bytes() {
+        let temp = TempDir::new();
+        let pyproject = temp.0.join("pyproject.toml");
+        std::fs::write(&pyproject, "[project]\ndependencies = []\n").unwrap();
+        let first = lock_source_hash("3.12", &std::fs::read_to_string(&pyproject).unwrap());
+        std::fs::write(temp.0.join("README.md"), "changed").unwrap();
+        assert_eq!(
+            first,
+            lock_source_hash("3.12", &std::fs::read_to_string(&pyproject).unwrap())
+        );
+        std::fs::write(&pyproject, "[project]\ndependencies = [\"six\"]\n").unwrap();
+        assert_ne!(
+            first,
+            lock_source_hash("3.12", &std::fs::read_to_string(&pyproject).unwrap())
+        );
+    }
+
+    #[test]
+    fn plan_skipped_requirement_is_strict_or_recorded_once() {
+        let source = ".\n";
+        let strict = policy::Policy {
+            strict: true,
+            ..policy::Policy::default()
+        };
+        let error = record_skippable_specs_with("requirements.txt", source, |kind, subject, detail| {
+            policy::record_with(&strict, kind, subject, detail)
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        let mut recorded = Vec::new();
+        record_skippable_specs_with("requirements.txt", source, |kind, subject, detail| {
+            recorded.push((kind.to_string(), subject.to_string(), detail.to_string()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(pypi::parse_requirements(source).unwrap().is_empty());
     }
 }

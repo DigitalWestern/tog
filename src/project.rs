@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 pub fn write_closure(
     project_dir: &Path,
     ecosystem: &str,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
 ) -> io::Result<()> {
     let project_dir = project_dir.canonicalize()?;
     let dir = project_dir.join(".blanket/closures");
@@ -35,6 +35,10 @@ pub fn write_closure(
             dir.display()
         )));
     }
+    let pending = crate::policy::pending();
+    if let Some(body) = body.as_object_mut() {
+        body.insert("exceptions".into(), serde_json::to_value(&pending)?);
+    }
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
@@ -43,12 +47,11 @@ pub fn write_closure(
         "body": body,
     });
     let dest = dir.join(format!("{ecosystem}.json"));
-    let tmp = dir.join(format!(
-        ".{ecosystem}.json.tmp.{}",
-        std::process::id()
-    ));
+    let tmp = dir.join(format!(".{ecosystem}.json.tmp.{}", std::process::id()));
     fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
-    fs::rename(&tmp, &dest)
+    fs::rename(&tmp, &dest)?;
+    crate::policy::clear();
+    Ok(())
 }
 
 /// Read a tailor's closure body back (for `blanket run` and friends).
@@ -84,12 +87,20 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 /// objects (npm mutablePackages, elixir deps trees).
 pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
     use std::process::Command;
-    let clone = Command::new("/bin/cp").args(["-Rc"]).arg(src).arg(dest).status()?;
+    let clone = Command::new("/bin/cp")
+        .args(["-Rc"])
+        .arg(src)
+        .arg(dest)
+        .status()?;
     if !clone.success() {
         if dest.exists() {
             crate::store::remove_tree(dest)?;
         }
-        let plain = Command::new("/bin/cp").arg("-R").arg(src).arg(dest).status()?;
+        let plain = Command::new("/bin/cp")
+            .arg("-R")
+            .arg(src)
+            .arg(dest)
+            .status()?;
         if !plain.success() {
             return Err(io::Error::other("cloning projected tree failed"));
         }
@@ -132,7 +143,9 @@ pub fn closure_object(
             format!("closure {key}: {msg}; run `blanket sync` first"),
         )
     };
-    let id = closure[key]["id"].as_str().ok_or_else(|| bad("missing id"))?;
+    let id = closure[key]["id"]
+        .as_str()
+        .ok_or_else(|| bad("missing id"))?;
     if id.is_empty()
         || !id
             .bytes()
@@ -194,7 +207,11 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
     );
     inputs.insert(
         "cpython".to_string(),
-        python_obj.file_name().unwrap().to_string_lossy().into_owned(),
+        python_obj
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
     );
     for p in &packages {
         let value = match p.kind {
@@ -218,6 +235,7 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -232,12 +250,7 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
         artifacts.push((p, wheel_file));
     }
 
-    let minor = pin
-        .version
-        .split('.')
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(".");
+    let minor = pin.version.split('.').take(2).collect::<Vec<_>>().join(".");
     let staged = store.stage()?;
     let bin = staged.join("bin");
     let site = staged.join(format!("lib/python{minor}/site-packages"));
@@ -261,11 +274,19 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
 
     // The env's python path — as it will exist after commit — for shebangs.
     let final_python = store.object_path(&id).join("bin/python");
+    let mut installed = BTreeMap::new();
     for (_p, wheel_file) in &artifacts {
-        wheel::install_wheel(wheel_file, &site, &bin, &final_python)?;
+        wheel::install_wheel(wheel_file, &site, &bin, &final_python, &mut installed)?;
     }
 
-    store.commit(&identity, &staged)
+    let candidate = crate::policy::object_exceptions();
+    let (object, applied) = store.commit(&identity, &staged, &candidate)?;
+    for exception in applied {
+        if !candidate.contains(&exception) {
+            crate::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+        }
+    }
+    Ok(object)
 }
 
 /// If `path` is a real directory (a pre-blanket install), move it out of the

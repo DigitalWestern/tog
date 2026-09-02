@@ -81,6 +81,7 @@ pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let otp_tar = download_verified(store, OTP_URL, OTP_SHA256)?;
@@ -126,7 +127,7 @@ pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(staged.join("rebar3"), fs::Permissions::from_mode(0o755))?;
     }
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 /// The forced environment for every blanket-controlled mix/elixir run
@@ -146,8 +147,14 @@ fn forced_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(St
             "MIX_REBAR3".to_string(),
             beam_obj.join("rebar3").display().to_string(),
         ),
-        ("MIX_HOME".to_string(), scratch_home.join("mix").display().to_string()),
-        ("HEX_HOME".to_string(), scratch_home.join("hex").display().to_string()),
+        (
+            "MIX_HOME".to_string(),
+            scratch_home.join("mix").display().to_string(),
+        ),
+        (
+            "HEX_HOME".to_string(),
+            scratch_home.join("hex").display().to_string(),
+        ),
         ("HEX_OFFLINE".to_string(), "1".to_string()),
         ("MIX_TARGET".to_string(), "host".to_string()),
     ]
@@ -168,8 +175,14 @@ pub fn run_env(
     ));
     // Host HOME/XDG config would let rebar3 global plugins back in.
     set.push(("HOME".to_string(), scratch_home.display().to_string()));
-    set.push(("XDG_CONFIG_HOME".to_string(), scratch_home.join("xdg").display().to_string()));
-    set.push(("XDG_CACHE_HOME".to_string(), scratch_home.join("xdg-cache").display().to_string()));
+    set.push((
+        "XDG_CONFIG_HOME".to_string(),
+        scratch_home.join("xdg").display().to_string(),
+    ));
+    set.push((
+        "XDG_CACHE_HOME".to_string(),
+        scratch_home.join("xdg-cache").display().to_string(),
+    ));
     if let Ok(env) = std::env::var("MIX_ENV") {
         // Strict: nonempty, bounded, loud on garbage — never silently dev.
         if env.is_empty()
@@ -310,8 +323,12 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
     let name_ok = |s: &str| {
         !s.is_empty()
             && s.len() <= 128
-            && s.bytes().next().map(|b| b.is_ascii_lowercase()).unwrap_or(false)
-            && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            && s.bytes()
+                .next()
+                .map(|b| b.is_ascii_lowercase())
+                .unwrap_or(false)
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
     };
     let hex_ok = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
     let mut seen = std::collections::BTreeSet::new();
@@ -320,7 +337,10 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
             return Err(err(format!("invalid dep name in plan: {d:?}")));
         }
         if d.version.is_empty()
-            || !d.version.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+            || !d
+                .version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
         {
             return Err(err(format!("{}: invalid version", d.app)));
         }
@@ -396,7 +416,9 @@ pub fn plan_elixir(
         true,
         &[
             "elixir",
-            helper.to_str().ok_or_else(|| err("helper path not UTF-8"))?,
+            helper
+                .to_str()
+                .ok_or_else(|| err("helper path not UTF-8"))?,
             "lock",
             lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
         ],
@@ -446,7 +468,9 @@ fn check_dep_tree(dep_dir: &Path, app: &str) -> io::Result<()> {
                     .map(|p| p.join(&target))
                     .and_then(|t| t.canonicalize().ok());
                 let root_canon = root.canonicalize()?;
-                let ok = resolved.map(|c| c.starts_with(&root_canon)).unwrap_or(false);
+                let ok = resolved
+                    .map(|c| c.starts_with(&root_canon))
+                    .unwrap_or(false);
                 if !ok {
                     return Err(err(format!("{app}: symlink escapes the package")));
                 }
@@ -495,6 +519,7 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -503,7 +528,10 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
     fs::write(&helper, HELPER)?;
     let staged = store.stage()?;
     for d in &plan.deps {
-        let url = format!("https://repo.hex.pm/tarballs/{}-{}.tar", d.package, d.version);
+        let url = format!(
+            "https://repo.hex.pm/tarballs/{}-{}.tar",
+            d.package, d.version
+        );
         let tar = download_verified(store, &url, &d.outer_sha256)
             .map_err(|e| err(format!("{}: {e}", d.app)))?;
         // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz,
@@ -575,16 +603,17 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
         // Metadata cross-check: the app/version inside metadata.config must
         // agree with the lock coordinates.
         let meta = fs::read_to_string(outer_dir.join("metadata.config"))?;
-        let has_kv = |k: &str, v: &str| {
-            meta.contains(&format!("{{<<\"{k}\">>,<<\"{v}\">>}}"))
-        };
+        let has_kv = |k: &str, v: &str| meta.contains(&format!("{{<<\"{k}\">>,<<\"{v}\">>}}"));
         if !has_kv("app", &d.app) || !has_kv("version", &d.version) {
             return Err(err(format!(
                 "{}: hex metadata disagrees with the lock (app/version)",
                 d.app
             )));
         }
-        fs::copy(outer_dir.join("metadata.config"), dep_dir.join("hex_metadata.config"))?;
+        fs::copy(
+            outer_dir.join("metadata.config"),
+            dep_dir.join("hex_metadata.config"),
+        )?;
         // .hex marker via the pinned toolchain (ETF binary).
         let out = run_mix(
             beam_obj,
@@ -612,7 +641,7 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
         }
     }
     let _ = crate::store::remove_tree(&scratch);
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 /// The ONE forest path a project's deps projection may live at: derived
@@ -627,9 +656,8 @@ pub fn expected_projection(
         .root
         .parent()
         .ok_or_else(|| err("cannot locate blanket home"))?;
-    let key = hex::encode(&Sha256::digest(
-        project_dir.canonicalize()?.to_string_lossy().as_bytes(),
-    )[..8]);
+    let key =
+        hex::encode(&Sha256::digest(project_dir.canonicalize()?.to_string_lossy().as_bytes())[..8]);
     let obj_id = deps_obj
         .file_name()
         .and_then(|n| n.to_str())
@@ -782,7 +810,11 @@ mod tests {
                 _ => bad.outer_sha256 = value.into(),
             }
             assert!(
-                validate_plan(&ElixirPlan { deps: vec![bad], ..ok.clone() }).is_err(),
+                validate_plan(&ElixirPlan {
+                    deps: vec![bad],
+                    ..ok.clone()
+                })
+                .is_err(),
                 "{field}={value}"
             );
         }
@@ -800,7 +832,13 @@ mod tests {
         }
         let env = forced_env(Path::new("/b"), Path::new("/d"), Path::new("/s"));
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        for k in ["MIX_DEPS_PATH", "MIX_ARCHIVES", "MIX_REBAR3", "HEX_OFFLINE", "MIX_TARGET"] {
+        for k in [
+            "MIX_DEPS_PATH",
+            "MIX_ARCHIVES",
+            "MIX_REBAR3",
+            "HEX_OFFLINE",
+            "MIX_TARGET",
+        ] {
             assert!(keys.contains(&k), "{k}");
         }
     }

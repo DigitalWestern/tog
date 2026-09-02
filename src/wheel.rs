@@ -2,6 +2,7 @@
 //!
 //! IMPLEMENTATION CONTRACT (see install_wheel below) — being implemented.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::io::Read;
@@ -12,7 +13,7 @@ use zip::ZipArchive;
 /// Install one wheel into an environment being assembled (PEP 427,
 /// pragmatic subset). Routes `{name}.data/{purelib,platlib,scripts,data}`,
 /// rewrites `#!python` shebangs, generates console/gui-script launchers,
-/// guards against zip-slip/symlinks, and errors on file collisions.
+/// guards against zip-slip/symlinks, and lets a later wheel win collisions.
 /// Known v0 gaps: RECORD is left as shipped (not verified or rewritten);
 /// `headers` .data scheme is rejected rather than implemented.
 pub fn install_wheel(
@@ -20,6 +21,7 @@ pub fn install_wheel(
     site_packages: &Path,
     bin_dir: &Path,
     python_exe: &Path,
+    installed: &mut BTreeMap<std::path::PathBuf, String>,
 ) -> io::Result<()> {
     let file = fs::File::open(wheel_path)?;
     let mut archive = ZipArchive::new(file).map_err(zip_error)?;
@@ -57,6 +59,12 @@ pub fn install_wheel(
     let data_prefix = dist_info
         .as_deref()
         .map(|name| format!("{}.data/", name.strip_suffix(".dist-info").unwrap_or(name)));
+    let distribution_id = dist_info.clone().unwrap();
+    let distribution_name = distribution_id
+        .strip_suffix(".dist-info")
+        .and_then(|name| name.rsplit_once('-').map(|(name, _)| name))
+        .unwrap_or(&distribution_id)
+        .replace('_', "-");
     let entry_points = dist_info.as_deref().and_then(|name| {
         archive
             .by_name(&format!("{name}/entry_points.txt"))
@@ -118,10 +126,31 @@ pub fn install_wheel(
         }
 
         if destination.symlink_metadata().is_ok() {
-            return Err(invalid_data(format!(
-                "file collision: {} already exists (from an earlier wheel or entry)",
-                destination.display()
-            )));
+            if let Some(previous) = installed.get(&destination) {
+                if previous == &distribution_id {
+                    return Err(invalid_data(format!(
+                        "file collision: {} already exists in wheel {}",
+                        destination.display(),
+                        distribution_id
+                    )));
+                }
+                let subject = destination
+                    .strip_prefix(env_root)
+                    .unwrap_or(&destination)
+                    .display()
+                    .to_string();
+                crate::policy::record(
+                    crate::policy::FILE_COLLISION,
+                    &subject,
+                    &format!("{previous} and {distribution_name}"),
+                )?;
+                fs::remove_file(&destination)?;
+            } else {
+                return Err(invalid_data(format!(
+                    "file collision: {} already exists (from an earlier wheel or entry)",
+                    destination.display()
+                )));
+            }
         }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
@@ -152,6 +181,7 @@ pub fn install_wheel(
         if let Some(mode) = mode {
             set_mode(&destination, mode)?;
         }
+        installed.insert(destination, distribution_id.clone());
     }
 
     for (directory, mode) in directory_modes {
@@ -178,14 +208,35 @@ pub fn install_wheel(
             );
             let destination = bin_dir.join(name);
             if destination.symlink_metadata().is_ok() {
-                return Err(invalid_data(format!(
-                    "console-script collision: {}",
-                    destination.display()
-                )));
+                if let Some(previous) = installed.get(&destination) {
+                    if previous == &distribution_id {
+                        return Err(invalid_data(format!(
+                            "console-script collision: {}",
+                            destination.display()
+                        )));
+                    }
+                    let subject = destination
+                        .strip_prefix(env_root)
+                        .unwrap_or(&destination)
+                        .display()
+                        .to_string();
+                    crate::policy::record(
+                        crate::policy::FILE_COLLISION,
+                        &subject,
+                        &format!("{previous} and {distribution_name}"),
+                    )?;
+                    fs::remove_file(&destination)?;
+                } else {
+                    return Err(invalid_data(format!(
+                        "console-script collision: {}",
+                        destination.display()
+                    )));
+                }
             }
             fs::create_dir_all(bin_dir)?;
             fs::write(&destination, launcher)?;
             set_mode(&destination, 0o755)?;
+            installed.insert(destination, distribution_id.clone());
         }
     }
 
@@ -347,7 +398,7 @@ mod tests {
             ],
         );
 
-        install_wheel(&wheel, &site, &bin, &python).unwrap();
+        install_wheel(&wheel, &site, &bin, &python, &mut BTreeMap::new()).unwrap();
 
         assert_eq!(
             fs::read(site.join("demo/__init__.py")).unwrap(),
@@ -419,8 +470,43 @@ mod tests {
         let wheel = temp.path().join("bad.whl");
         write_wheel(&wheel, &[("../escaped.txt", b"nope")]);
 
-        let error = install_wheel(&wheel, &site, &bin, &bin.join("python")).unwrap_err();
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("../escaped.txt"));
         assert!(!temp.path().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn later_wheel_in_sorted_order_wins_collision() {
+        let temp = TempDir::new();
+        let site = temp.path().join("site");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let first = temp.path().join("a-1.0.whl");
+        let second = temp.path().join("b-1.0.whl");
+        write_wheel(
+            &first,
+            &[("shared.py", b"first\n"), ("a-1.0.dist-info/RECORD", b"")],
+        );
+        write_wheel(
+            &second,
+            &[("shared.py", b"second\n"), ("b-1.0.dist-info/RECORD", b"")],
+        );
+        let mut wheels = vec![second, first];
+        wheels.sort();
+        let _ = crate::policy::drain();
+        let mut installed = BTreeMap::new();
+        for wheel in wheels {
+            install_wheel(&wheel, &site, &bin, &bin.join("python"), &mut installed).unwrap();
+        }
+        assert_eq!(fs::read_to_string(site.join("shared.py")).unwrap(), "second\n");
+        assert_eq!(crate::policy::drain().len(), 1);
     }
 }

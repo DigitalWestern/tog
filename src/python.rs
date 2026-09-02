@@ -31,9 +31,9 @@ pub const PYTHONS: &[PinnedPython] = &[
 
 pub fn lookup(version: &str) -> Option<&'static PinnedPython> {
     // Accept "3.12" as a prefix match on "3.12.".
-    PYTHONS.iter().find(|p| {
-        p.version == version || p.version.starts_with(&format!("{version}."))
-    })
+    PYTHONS
+        .iter()
+        .find(|p| p.version == version || p.version.starts_with(&format!("{version}.")))
 }
 
 /// Pinned uv (resolver delegation target). Single static binary; realized
@@ -56,6 +56,7 @@ pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified(store, UV_URL, UV_SHA256)?;
@@ -71,7 +72,7 @@ pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
     if !status.success() || !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 /// Ensure the given CPython is realized in the store. Returns the object path
@@ -88,6 +89,7 @@ pub fn ensure_python(store: &Store, pin: &PinnedPython) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -102,7 +104,10 @@ pub fn ensure_python(store: &Store, pin: &PinnedPython) -> io::Result<PathBuf> {
         .args(["--strip-components", "1"])
         .status()?;
     if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "tar extraction failed"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "tar extraction failed",
+        ));
     }
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }

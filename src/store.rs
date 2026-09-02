@@ -1,3 +1,4 @@
+use crate::policy::Exception;
 use crate::types::Identity;
 use std::fs;
 use std::io;
@@ -110,14 +111,19 @@ impl Store {
     }
 
     /// Atomically move a staged dir into the store under `identity`, write
-    /// metadata, and mark the tree read-only. Returns the object path.
+    /// metadata, and mark the tree read-only. Returns the object path and the
+    /// exceptions stored with the object.
     /// If the object already exists the staged dir is discarded (cache hit).
-    pub fn commit(&self, identity: &Identity, staged: &Path) -> io::Result<PathBuf> {
+    pub fn commit(
+        &self,
+        identity: &Identity,
+        staged: &Path,
+        exceptions: &[Exception],
+    ) -> io::Result<(PathBuf, Vec<Exception>)> {
         let id = identity.object_id();
         let dest = self.object_path(&id);
         if self.has(&id) {
-            let _ = remove_tree(staged);
-            return Ok(dest);
+            return self.cache_hit(&id, &dest, staged, exceptions);
         }
         // Read-only BEFORE publication (contents; APFS can't rename a
         // read-only dir, so the root is locked right after the rename —
@@ -129,8 +135,7 @@ impl Store {
         // mistakes the rename->chmod->meta window for a crashed object.
         let _lock = self.publish_lock()?;
         if self.is_complete(&id) == Some(true) {
-            let _ = remove_tree(staged);
-            return Ok(dest);
+            return self.cache_hit(&id, &dest, staged, exceptions);
         }
         // Under the lock, anything at dest is a crashed leftover (a live
         // publication can't be mid-window, and a complete object returned
@@ -150,6 +155,7 @@ impl Store {
             "id": id,
             "identity": identity,
             "created": unix_secs(),
+            "exceptions": exceptions,
         });
         // Meta is the completion marker: write via tmp + atomic rename so a
         // crash mid-write can never leave a partial file that has() would
@@ -157,7 +163,47 @@ impl Store {
         let meta_tmp = self.root.join("tmp").join(format!("meta-{id}.json"));
         fs::write(&meta_tmp, serde_json::to_vec_pretty(&meta)?)?;
         fs::rename(&meta_tmp, self.root.join("meta").join(format!("{id}.json")))?;
-        Ok(dest)
+        Ok((dest, exceptions.to_vec()))
+    }
+
+    fn cache_hit(
+        &self,
+        id: &str,
+        dest: &Path,
+        staged: &Path,
+        candidate: &[Exception],
+    ) -> io::Result<(PathBuf, Vec<Exception>)> {
+        let winner = self.exceptions(id)?;
+        let result = crate::policy::check_exception_set(id, &winner).and_then(|_| {
+            if winner != candidate {
+                return Err(io::Error::other(format!(
+                    "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run sync"
+                )));
+            }
+            Ok((dest.to_path_buf(), winner))
+        });
+        let _ = remove_tree(staged);
+        result
+    }
+
+    pub fn exceptions(&self, id: &str) -> io::Result<Vec<Exception>> {
+        let path = self.root.join("meta").join(format!("{id}.json"));
+        let meta: serde_json::Value =
+            serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("parse {}: {e}", path.display()),
+                )
+            })?;
+        match meta.get("exceptions") {
+            None => Ok(Vec::new()),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("parse exceptions in {}: {e}", path.display()),
+                )
+            }),
+        }
     }
 
     pub fn cache_path(&self, algo: &str, hex: &str) -> PathBuf {
@@ -214,6 +260,132 @@ fn nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::process::Command;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blanket-store-test-{}-{}",
+                std::process::id(),
+                nanos()
+            ));
+            for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+                fs::create_dir_all(path.join(sub)).unwrap();
+            }
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = remove_tree(&self.0);
+        }
+    }
+
+    fn identity() -> Identity {
+        Identity {
+            kind: "test".into(),
+            name: "object".into(),
+            version: "1".into(),
+            inputs: BTreeMap::new(),
+        }
+    }
+
+    fn staged(store: &Store) -> PathBuf {
+        let path = store.stage().unwrap();
+        fs::write(path.join("content"), b"content").unwrap();
+        path
+    }
+
+    #[test]
+    fn commit_reconciles_cached_exceptions() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let identity = identity();
+        let exception = Exception {
+            kind: crate::policy::FILE_COLLISION.into(),
+            subject: "content".into(),
+            detail: "first and second".into(),
+        };
+        let (object, applied) = store
+            .commit(&identity, &staged(&store), std::slice::from_ref(&exception))
+            .unwrap();
+        assert_eq!(object, store.object_path(&identity.object_id()));
+        assert_eq!(applied, vec![exception.clone()]);
+
+        let error = store
+            .commit(&identity, &staged(&store), &[])
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("was published concurrently with different exceptions"));
+        assert!(error.to_string().contains("winner:"));
+        assert!(error.to_string().contains("staged: []"));
+
+        let (same_object, applied) = store
+            .commit(&identity, &staged(&store), std::slice::from_ref(&exception))
+            .unwrap();
+        assert_eq!(same_object, object);
+        assert_eq!(applied, vec![exception]);
+    }
+
+    #[test]
+    fn strict_policy_rejects_cached_exceptions() {
+        if std::env::var_os("BLANKET_STORE_STRICT_CHILD").is_some() {
+            let store = Store::open().unwrap();
+            crate::policy::init(&store.root, false).unwrap();
+            let error = store
+                .commit(&identity(), &staged(&store), &[])
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            return;
+        }
+
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let exception = Exception {
+            kind: crate::policy::FILE_COLLISION.into(),
+            subject: "content".into(),
+            detail: "first and second".into(),
+        };
+        store
+            .commit(
+                &identity(),
+                &staged(&store),
+                std::slice::from_ref(&exception),
+            )
+            .unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::strict_policy_rejects_cached_exceptions",
+                "--nocapture",
+            ])
+            .env("BLANKET_STORE", &store.root)
+            .env("BLANKET_STORE_STRICT_CHILD", "1")
+            .env("BLANKET_STRICT", "1")
+            .env_remove("BLANKET_POLICY")
+            .env("HOME", &temp.0)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "strict child failed: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
 }
 
 fn unix_secs() -> u64 {

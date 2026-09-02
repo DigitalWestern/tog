@@ -46,6 +46,7 @@ pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified(store, RUBY_URL, RUBY_SHA256)?;
@@ -59,15 +60,24 @@ pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
         .args(["--strip-components", "2"])
         .status()?;
     if !status.success() || !staged.join("bin/ruby").is_file() {
-        return Err(err("portable-ruby extraction failed or has unexpected layout"));
+        return Err(err(
+            "portable-ruby extraction failed or has unexpected layout",
+        ));
     }
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 /// The forced environment for EVERY blanket-controlled ruby/bundler run.
 /// Removal lists close the .bundle/config and preload side doors.
 const ENV_REMOVE_PREFIXES: &[&str] = &["BUNDLE_", "BUNDLER_"];
-const ENV_REMOVE: &[&str] = &["RUBYOPT", "RUBYLIB", "RUBYGEMS_GEMDEPS", "GEM_SPEC_CACHE", "GEM_HOME", "GEM_PATH"];
+const ENV_REMOVE: &[&str] = &[
+    "RUBYOPT",
+    "RUBYLIB",
+    "RUBYGEMS_GEMDEPS",
+    "GEM_SPEC_CACHE",
+    "GEM_HOME",
+    "GEM_PATH",
+];
 
 fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
     vec![
@@ -81,7 +91,10 @@ fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
         ("BUNDLE_FROZEN".to_string(), "true".to_string()),
         ("BUNDLE_DISABLE_SHARED_GEMS".to_string(), "true".to_string()),
         ("BUNDLE_AUTO_INSTALL".to_string(), "false".to_string()),
-        ("BUNDLE_DISABLE_VERSION_CHECK".to_string(), "true".to_string()),
+        (
+            "BUNDLE_DISABLE_VERSION_CHECK".to_string(),
+            "true".to_string(),
+        ),
         // Unsetting GEMRC would re-enable ~/.gemrc; point it at an empty
         // config instead (system /etc/gemrc remains a documented impurity).
         ("GEMRC".to_string(), "/dev/null".to_string()),
@@ -89,7 +102,10 @@ fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
 }
 
 /// Env applied by `blanket run` for a projected ruby environment.
-pub fn run_env(project_dir: &Path, gems_obj: &Path) -> (Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>) {
+pub fn run_env(
+    project_dir: &Path,
+    gems_obj: &Path,
+) -> (Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>) {
     (
         ENV_REMOVE_PREFIXES.to_vec(),
         ENV_REMOVE.to_vec(),
@@ -112,7 +128,12 @@ fn run_ruby(
         std::env::var("PATH").unwrap_or_default()
     );
     cmd.env("PATH", path);
-    force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &forced_env(cwd, gem_home));
+    force_env(
+        &mut cmd,
+        ENV_REMOVE_PREFIXES,
+        ENV_REMOVE,
+        &forced_env(cwd, gem_home),
+    );
     cmd.stdin(std::process::Stdio::null());
     cmd.output()
         .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
@@ -292,7 +313,8 @@ fn valid_component(s: &str) -> bool {
 fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for g in &plan.gems {
-        if !valid_component(&g.name) || !valid_component(&g.version)
+        if !valid_component(&g.name)
+            || !valid_component(&g.version)
             || !(g.platform == "ruby" || valid_component(&g.platform))
             || !valid_component(&g.full_name)
         {
@@ -340,7 +362,9 @@ pub fn plan_ruby(
     let scratch = store.stage()?;
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
-    let helper_path = helper.to_str().ok_or_else(|| err("helper path not UTF-8"))?;
+    let helper_path = helper
+        .to_str()
+        .ok_or_else(|| err("helper path not UTF-8"))?;
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
     let out = run_ruby(
@@ -351,7 +375,10 @@ pub fn plan_ruby(
             "ruby",
             helper_path,
             "check",
-            project_dir.join("Gemfile").to_str().ok_or_else(|| err("path not UTF-8"))?,
+            project_dir
+                .join("Gemfile")
+                .to_str()
+                .ok_or_else(|| err("path not UTF-8"))?,
             lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
         ],
     )?;
@@ -396,8 +423,8 @@ pub fn plan_ruby(
         bundler: String,
         gems: Vec<HelperGem>,
     }
-    let parsed: HelperOut = serde_json::from_slice(&out.stdout)
-        .map_err(|e| err(format!("helper output: {e}")))?;
+    let parsed: HelperOut =
+        serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
 
     let mut gems = Vec::new();
     for g in parsed.gems {
@@ -451,7 +478,9 @@ pub fn plan_ruby(
     // digest provenance will record (Go precedent).
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
-        return Err(err("Gemfile.lock changed while planning; re-run blanket sync"));
+        return Err(err(
+            "Gemfile.lock changed while planning; re-run blanket sync",
+        ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }
@@ -481,6 +510,7 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
     };
     let id = identity.object_id();
     if store.has(&id) {
+        crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -584,7 +614,7 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
         })?;
     }
     let _ = crate::store::remove_tree(&scratch);
-    store.commit(&identity, &staged)
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
 /// Project provenance (closure envelope); enforcement is env, set at run.
@@ -636,10 +666,18 @@ mod tests {
         assert!(validate_plan(&ok).is_ok());
         let mut evil = base.clone();
         evil.full_name = "../escape".into();
-        assert!(validate_plan(&RubyPlan { gems: vec![evil], ..ok.clone() }).is_err());
+        assert!(validate_plan(&RubyPlan {
+            gems: vec![evil],
+            ..ok.clone()
+        })
+        .is_err());
         let mut bad = base.clone();
         bad.sha256 = "zz".into();
-        assert!(validate_plan(&RubyPlan { gems: vec![bad], ..ok.clone() }).is_err());
+        assert!(validate_plan(&RubyPlan {
+            gems: vec![bad],
+            ..ok.clone()
+        })
+        .is_err());
         let dup = RubyPlan {
             gems: vec![base.clone(), base.clone()],
             ..ok.clone()

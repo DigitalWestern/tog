@@ -36,10 +36,24 @@ blanket store path              # where the store lives
 blanket sync --fresh            # rebuild the projection (drops caches)
 ```
 
+Policy is permissive by default; `.blanket/policy.toml` can tighten it:
+
+```toml
+# .blanket/policy.toml
+strict = false
+deny = [
+  "install-script-failed",
+  "git-dependency",
+]
+```
+
+Use `blanket sync --strict` or `BLANKET_STRICT=1` to deny every exception.
+
 `blanket run dev` / `blanket run test` runs the `package.json` script inside the projected env; the script wins over a same-named PATH executable.
 
-`sync` meets projects where they are: a ranged `requirements.txt` is
-locked via uv (`requirements.lock.txt`, hash-pinned, auto-refreshed); a
+`sync` meets projects where they are: a ranged `requirements.txt` or
+`pyproject.toml` project dependency table is locked via uv
+(`requirements.lock.txt`, hash-pinned, auto-refreshed); a
 `package.json` without `package-lock.json` (bun/yarn projects) gets one
 via npm; an existing real `node_modules`/`.venv` is moved aside to
 `~/.blanket/backups/`. Resolution belongs to the ecosystem's tools —
@@ -80,8 +94,8 @@ each one against real PyPI):
 - lock switches and rollbacks are atomic symlink swaps
 - store objects are read-only; nothing can mutate an environment in place
 - sdists AND npm install scripts build hermetically (sandbox-exec,
-  network denied); a build or install script that attempts undeclared
-  network access fails closed
+  network denied); a script that cannot complete is retained with an
+  `install-script-failed` exception (strict mode refuses it)
 - node_modules projects as a writable forest over immutable store
   packages: tool caches (vite) work, package contents can't be mutated
 - polyglot projects sync both ecosystems in one command

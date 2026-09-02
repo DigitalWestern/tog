@@ -43,8 +43,22 @@ fn serial_number() -> io::Result<String> {
     let h: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
     Ok(format!(
         "urn:uuid:{}{}{}{}-{}{}-{}{}-{}{}-{}{}{}{}{}{}",
-        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13],
-        h[14], h[15]
+        h[0],
+        h[1],
+        h[2],
+        h[3],
+        h[4],
+        h[5],
+        h[6],
+        h[7],
+        h[8],
+        h[9],
+        h[10],
+        h[11],
+        h[12],
+        h[13],
+        h[14],
+        h[15]
     ))
 }
 
@@ -210,7 +224,11 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 let mut c = component(
                     &path,
                     &ver,
-                    format!("pkg:golang/{}@{}", purl_encode_path(&path), purl_encode(&ver)),
+                    format!(
+                        "pkg:golang/{}@{}",
+                        purl_encode_path(&path),
+                        purl_encode(&ver)
+                    ),
                     eco,
                 );
                 push_hash(&mut c, "SHA-256", &required(&p, "zip_sha256")?);
@@ -239,7 +257,12 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 let mut c = component(
                     &name,
                     &ver,
-                    format!("pkg:gem/{}@{}{}", purl_encode(&name), purl_encode(&ver), qualifier),
+                    format!(
+                        "pkg:gem/{}@{}{}",
+                        purl_encode(&name),
+                        purl_encode(&ver),
+                        qualifier
+                    ),
                     eco,
                 );
                 push_hash(&mut c, "SHA-256", &required(&p, "sha256")?);
@@ -258,7 +281,11 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 let mut c = component(
                     &name,
                     &ver,
-                    format!("pkg:hex/{}@{}", purl_encode(&name.to_ascii_lowercase()), purl_encode(&ver)),
+                    format!(
+                        "pkg:hex/{}@{}",
+                        purl_encode(&name.to_ascii_lowercase()),
+                        purl_encode(&ver)
+                    ),
                     eco,
                 );
                 push_hash(&mut c, "SHA-256", &required(&p, "outer_sha256")?);
@@ -274,7 +301,12 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 version_of(plan, "otp_version")?,
                 version_of(plan, "elixir_version")?,
             );
-            out.push(toolchain_component(body, "beam_object", "beam", &beam_version)?);
+            out.push(toolchain_component(
+                body,
+                "beam_object",
+                "beam",
+                &beam_version,
+            )?);
         }
         "dotnet" => {
             for p in list("packages")? {
@@ -325,8 +357,29 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
         return Err(err("no closures found; run `blanket sync` first"));
     }
     let mut components = Vec::new();
+    let mut exception_properties = Vec::new();
     for eco in &entries {
         let body = crate::project::read_closure(project_dir, eco)?;
+        if let Some(exceptions) = body.get("exceptions").and_then(Value::as_array) {
+            for exception in exceptions {
+                let kind = exception
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| err(format!("{eco} closure: exception missing 'kind'")))?;
+                let subject = exception
+                    .get("subject")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| err(format!("{eco} closure: exception missing 'subject'")))?;
+                let detail = exception
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| err(format!("{eco} closure: exception missing 'detail'")))?;
+                exception_properties.push(json!({
+                    "name": format!("blanket:exception:{kind}"),
+                    "value": format!("{subject}: {detail}"),
+                }));
+            }
+        }
         eco_components(eco, &body, &mut components)?;
     }
     Ok(json!({
@@ -340,6 +393,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
                 "name": "blanket",
                 "version": env!("CARGO_PKG_VERSION"),
             }],
+            "properties": exception_properties,
         },
         "components": components,
     }))
@@ -383,6 +437,11 @@ mod tests {
                         {"name": "Flask_Login", "version": "0.6.3", "sha256": "aa".repeat(32)},
                     ],
                 },
+                "exceptions": [{
+                    "kind": "requirement-skipped",
+                    "subject": ".",
+                    "detail": "project-local requirement",
+                }],
             }),
         );
         write(
@@ -394,19 +453,26 @@ mod tests {
                     {"path": "node_modules/@types/node", "version": "22.0.0",
                      "integrity": "sha512-xyz"},
                     {"path": "node_modules/a/node_modules/b", "version": "1.0.0",
-                     "integrity": "sha512-abc"},
+                    "integrity": "sha512-abc"},
                 ],
+                "exceptions": [{
+                    "kind": "install-script-failed",
+                    "subject": "node_modules/a",
+                    "detail": "postinstall: network-denied",
+                }],
             }),
         );
         let doc = generate(&dir).unwrap();
         assert_eq!(doc["bomFormat"], "CycloneDX");
         assert_eq!(doc["specVersion"], "1.5");
-        assert!(doc["serialNumber"].as_str().unwrap().starts_with("urn:uuid:"));
+        assert!(doc["serialNumber"]
+            .as_str()
+            .unwrap()
+            .starts_with("urn:uuid:"));
         let comps = doc["components"].as_array().unwrap();
         // 1 pypi env + 2 npm + 2 dependency environments
         assert_eq!(comps.len(), 5);
-        let purls: Vec<&str> =
-            comps.iter().filter_map(|c| c["purl"].as_str()).collect();
+        let purls: Vec<&str> = comps.iter().filter_map(|c| c["purl"].as_str()).collect();
         assert!(purls.contains(&"pkg:pypi/flask-login@0.6.3"));
         assert!(purls.contains(&"pkg:npm/%40types/node@22.0.0"));
         assert!(purls.contains(&"pkg:npm/b@1.0.0"));
@@ -425,6 +491,15 @@ mod tests {
             .filter_map(|c| c["name"].as_str())
             .collect();
         assert_eq!(env_names, ["node-env", "python-env"]);
+        let properties = doc["metadata"]["properties"].as_array().unwrap();
+        assert!(properties.iter().any(|p| {
+            p["name"] == "blanket:exception:requirement-skipped"
+                && p["value"] == ".: project-local requirement"
+        }));
+        assert!(properties.iter().any(|p| {
+            p["name"] == "blanket:exception:install-script-failed"
+                && p["value"] == "node_modules/a: postinstall: network-denied"
+        }));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -447,10 +522,7 @@ mod tests {
 
     #[test]
     fn no_closures_is_a_loud_error() {
-        let dir = std::env::temp_dir().join(format!(
-            "blanket-sbom-empty-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("blanket-sbom-empty-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         assert!(generate(&dir).is_err());
         fs::remove_dir_all(&dir).unwrap();

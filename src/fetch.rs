@@ -1,4 +1,5 @@
 use crate::store::Store;
+use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha512};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -6,6 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Algo {
+    Sha1,
     Sha256,
     Sha512,
 }
@@ -23,6 +25,7 @@ pub struct Digest {
 impl Digest {
     fn validated(algo: Algo, hex: &str) -> io::Result<Digest> {
         let want = match algo {
+            Algo::Sha1 => 40,
             Algo::Sha256 => 64,
             Algo::Sha512 => 128,
         };
@@ -38,6 +41,9 @@ impl Digest {
     pub fn sha256(hex: &str) -> io::Result<Digest> {
         Digest::validated(Algo::Sha256, hex)
     }
+    pub fn sha1(hex: &str) -> io::Result<Digest> {
+        Digest::validated(Algo::Sha1, hex)
+    }
     pub fn sha512(hex: &str) -> io::Result<Digest> {
         Digest::validated(Algo::Sha512, hex)
     }
@@ -47,16 +53,24 @@ impl Digest {
     pub fn hex(&self) -> &str {
         &self.hex
     }
-    /// Parse an npm SRI string like "sha512-<base64>" or "sha256-<base64>".
+    /// Parse an npm SRI string like "sha512-<base64>", "sha256-<base64>", or
+    /// the legacy "sha1-<base64>" form.
     pub fn from_sri(sri: &str) -> io::Result<Digest> {
         let (algo, b64) = sri.split_once('-').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("malformed integrity: {sri}"))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed integrity: {sri}"),
+            )
         })?;
         let bytes = base64_decode(b64).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("bad base64 in integrity: {sri}"))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bad base64 in integrity: {sri}"),
+            )
         })?;
         let hex = hex::encode(bytes);
         match algo {
+            "sha1" => Digest::sha1(&hex),
             "sha256" => Digest::sha256(&hex),
             "sha512" => Digest::sha512(&hex),
             other => Err(io::Error::new(
@@ -94,17 +108,20 @@ fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     let mut buf = [0u8; 65536];
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
+    let mut h1 = Sha1::new();
     loop {
         let n = f.read(&mut buf)?;
         if n == 0 {
             break;
         }
         match algo {
+            Algo::Sha1 => h1.update(&buf[..n]),
             Algo::Sha256 => h256.update(&buf[..n]),
             Algo::Sha512 => h512.update(&buf[..n]),
         }
     }
     Ok(match algo {
+        Algo::Sha1 => hex::encode(h1.finalize()),
         Algo::Sha256 => hex::encode(h256.finalize()),
         Algo::Sha512 => hex::encode(h512.finalize()),
     })
@@ -112,6 +129,7 @@ fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
 
 fn algo_name(a: Algo) -> &'static str {
     match a {
+        Algo::Sha1 => "sha1",
         Algo::Sha256 => "sha256",
         Algo::Sha512 => "sha512",
     }
@@ -235,15 +253,17 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
     ));
 
     let mut reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
-        Box::new(fs::File::open(path).map_err(|e| {
-            io::Error::new(e.kind(), format!("open {path}: {e}"))
-        })?)
+        Box::new(
+            fs::File::open(path)
+                .map_err(|e| io::Error::new(e.kind(), format!("open {path}: {e}")))?,
+        )
     } else {
         // https_only holds across redirects too — no downgrade-to-http.
         let agent = ureq::AgentBuilder::new().https_only(true).build();
-        let resp = agent.get(url).call().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}"))
-        })?;
+        let resp = agent
+            .get(url)
+            .call()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}")))?;
         Box::new(resp.into_reader())
     };
 
@@ -254,6 +274,7 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
         .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?;
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
+    let mut h1 = Sha1::new();
     let mut buf = [0u8; 65536];
     let mut total: u64 = 0;
     let stream_result: io::Result<()> = loop {
@@ -270,6 +291,7 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
             )));
         }
         match digest.algo {
+            Algo::Sha1 => h1.update(&buf[..n]),
             Algo::Sha256 => h256.update(&buf[..n]),
             Algo::Sha512 => h512.update(&buf[..n]),
         }
@@ -285,6 +307,7 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
     drop(file);
 
     let got = match digest.algo {
+        Algo::Sha1 => hex::encode(h1.finalize()),
         Algo::Sha256 => hex::encode(h256.finalize()),
         Algo::Sha512 => hex::encode(h512.finalize()),
     };
@@ -339,5 +362,33 @@ mod tests {
         assert!(d.hex().starts_with("9b71d224bd62f378"));
         assert!(Digest::from_sri("md5-abc").is_err());
         assert!(Digest::from_sri("nodash").is_err());
+    }
+
+    #[test]
+    fn sha1_integrity_accepts_and_rejects_at_verification() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-fetch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for sub in ["objects", "meta", "cache/sha256", "cache/sha1", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let input = root.join("artifact");
+        fs::write(&input, b"hello").unwrap();
+        let expected = Digest::from_sri("sha1-qvTGHdzF6KLavt4PO0gs2a6pQ00=").unwrap();
+        let url = format!("file://{}", input.display());
+        assert!(download_verified_digest(&store, &url, &expected).is_ok());
+
+        let wrong = Digest::from_sri("sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let error = download_verified_digest(&store, &url, &wrong).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(root);
     }
 }
