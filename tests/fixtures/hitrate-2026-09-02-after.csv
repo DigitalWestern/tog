@@ -1,0 +1,28 @@
+lang,repo,stars,status,class,seconds,inputs,error
+python,yt-dlp/yt-dlp,0,ok,ok,2,pyproject.toml,
+python,ytdl-org/youtube-dl,0,fail,no_inputs,0,setup.py,"blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)"
+python,github/spec-kit,0,ok,ok,2,pyproject.toml,
+python,Comfy-Org/ComfyUI,0,ok,ok,29,"requirements.txt,pyproject.toml",
+python,Graphify-Labs/graphify,0,ok,ok,5,pyproject.toml,
+python,browser-use/browser-use,0,ok,ok,16,pyproject.toml,
+python,TauricResearch/TradingAgents,0,ok,ok,0,"requirements.txt,pyproject.toml",
+python,fastapi/fastapi,0,fail,other,0,pyproject.toml,blanket: error: no pinned CPython matching '3.11'
+python,karpathy/autoresearch,0,fail,other,0,pyproject.toml,blanket: error: no pinned CPython matching '3.10'
+python,sherlock-project/sherlock,0,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)"
+python,vllm-project/vllm,0,fail,no_inputs,0,"pyproject.toml,setup.py","blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)"
+python,django/django,0,ok,ok,32,"pyproject.toml,package.json",
+python,odysseus-dev/odysseus,0,ok,ok,17,"requirements.txt,pyproject.toml,setup.py,package.json,package-lock.json",
+python,unclecode/crawl4ai,0,fail,other,16,"requirements.txt,pyproject.toml,setup.py",blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/greenlet.h
+python,Z4nzu/hackingtool,0,ok,ok,1,pyproject.toml,
+python,opendatalab/MinerU,0,ok,ok,14,pyproject.toml,
+python,D4Vinci/Scrapling,0,ok,ok,1,pyproject.toml,
+python,Panniantong/Agent-Reach,0,ok,ok,3,pyproject.toml,
+python,unslothai/unsloth,0,ok,ok,5,pyproject.toml,
+python,hiyouga/LlamaFactory,0,ok,ok,30,pyproject.toml,
+python,pallets/flask,0,ok,ok,1,pyproject.toml,
+python,binary-husky/gpt_academic,0,fail,other,40,requirements.txt,blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/greenlet.h
+python,headroomlabs-ai/headroom,0,fail,other,12,pyproject.toml,"blanket: error: /private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8219-0025685820ea/scratchpad/hitrate/repo/rust-toolchain.toml: unsupported Rust toolchain ""1.95.0""; pinned versions available: 1.96.1"
+npm,clash-verge-rev/clash-verge-rev,0,fail,other,21,"package.json,pnpm-lock.yaml","blanket: error: node_modules/tauri-plugin-mihomo-api: only https registry tarballs supported (v0), got git+ssh://git@github.com/clash-verge-rev/tauri-plugin-mihomo.git#8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e"
+npm,DietrichGebert/ponytail,0,ok,ok,0,package.json,
+npm,react/create-react-app,0,ok,ok,238,"package.json,package-lock.json",
+npm,earendil-works/pi,0,ok,ok,74,"package.json,package-lock.json",

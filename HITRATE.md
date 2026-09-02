@@ -110,3 +110,39 @@ Binary: release build at commit bf7014c (before this session's fixes).
 | coder/code-server | ok | 46 | package.json,package-lock.json |  |
 | typicode/json-server | ok | 13 | package.json,pnpm-lock.yaml |  |
 | Eugeny/tabby | npm_resolve_failed | 5 | package.json,yarn.lock | npm install --package-lock-only failed |
+
+## After item 3 (commit 3a3d96c) — re-run of the 28 fixable misses
+
+Raw data: `tests/fixtures/hitrate-2026-09-02-after.csv`. The 4 sdist/uv-resolve
+failures were not re-run (unchanged by item 3); `louislam/uptime-kuma` (npm)
+was still running when this was written and is counted as its old result.
+
+| lang | before | after |
+|---|---|---|
+| python | 3/30 (10%) | 18/30 (60%) |
+| npm | 17/30 (56%) | 20/30 (66%) |
+
+Remaining misses after item 3:
+
+- python AUTOMATIC1111/stable-diffusion-webui: py_sdist_build_failed — blanket: error: sandboxed build of tokenizers==0.13.3 failed: sandboxed command failed (exit status: 1): ["/pr
+- python ytdl-org/youtube-dl: no_inputs — blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, packa
+- python fastapi/fastapi: other — blanket: error: no pinned CPython matching '3.11'
+- python hacksider/Deep-Live-Cam: py_sdist_build_failed — blanket: error: sandboxed build of insightface==0.7.3 failed: sandboxed command failed (exit status: 1): ["/pr
+- python karpathy/autoresearch: other — blanket: error: no pinned CPython matching '3.10'
+- python 3b1b/manim: py_sdist_build_failed — blanket: error: sandboxed build of wgpu==0.32.0 failed: sandboxed command failed (exit status: 2): ["/private/
+- python sherlock-project/sherlock: no_inputs — blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, packa
+- python vllm-project/vllm: no_inputs — blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, packa
+- python unclecode/crawl4ai: other — blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/greenlet.h
+- python binary-husky/gpt_academic: other — blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/greenlet.h
+- python FoundationAgents/MetaGPT: py_uv_resolve_failed — blanket: error: uv pip compile failed
+- python headroomlabs-ai/headroom: other — blanket: error: /private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8
+- npm vuejs/vue: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm deepseek-ai/deepseek-harness: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm clash-verge-rev/clash-verge-rev: other — blanket: error: node_modules/tauri-plugin-mihomo-api: only https registry tarballs supported (v0), got git+ssh
+- npm shadcn-ui/ui: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm tailwindlabs/tailwindcss: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm louislam/uptime-kuma: npm_script_failed — blanket: error: node_modules/@louislam/sqlite3: install script failed under the network-denied build sandbox: 
+- npm sveltejs/svelte: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm vitejs/vite: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm hoppscotch/hoppscotch: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+- npm Eugeny/tabby: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
