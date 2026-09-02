@@ -34,7 +34,7 @@ command inside the projected environment. Roughly an afternoon. This is
 the single most-typed command in JavaScript development; without it
 nobody survives the first five minutes. (Roadmap: task runner v0.)
 
-## 3. Permissive by default, strict as a switch — IN PROGRESS
+## 3. Permissive by default, strict as a switch — DONE (commit 3a3d96c)
 
 Go through every fail-closed item in LIMITATIONS.md and ask: can blanket
 install this anyway and record in the closure that it could not verify
