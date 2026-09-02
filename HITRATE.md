@@ -114,13 +114,12 @@ Binary: release build at commit bf7014c (before this session's fixes).
 ## After item 3 (commit 3a3d96c) — re-run of the 28 fixable misses
 
 Raw data: `tests/fixtures/hitrate-2026-09-02-after.csv`. The 4 sdist/uv-resolve
-failures were not re-run (unchanged by item 3); `louislam/uptime-kuma` (npm)
-was still running when this was written and is counted as its old result.
+failures were not re-run (unchanged by item 3).
 
 | lang | before | after |
 |---|---|---|
 | python | 3/30 (10%) | 18/30 (60%) |
-| npm | 17/30 (56%) | 20/30 (66%) |
+| npm | 17/30 (56%) | 21/30 (70%) |
 
 Remaining misses after item 3:
 
@@ -141,7 +140,6 @@ Remaining misses after item 3:
 - npm clash-verge-rev/clash-verge-rev: other — blanket: error: node_modules/tauri-plugin-mihomo-api: only https registry tarballs supported (v0), got git+ssh
 - npm shadcn-ui/ui: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
 - npm tailwindlabs/tailwindcss: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
-- npm louislam/uptime-kuma: npm_script_failed — blanket: error: node_modules/@louislam/sqlite3: install script failed under the network-denied build sandbox: 
 - npm sveltejs/svelte: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
 - npm vitejs/vite: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
 - npm hoppscotch/hoppscotch: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
