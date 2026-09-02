@@ -7,11 +7,14 @@ by working on nearly every project first and being strict never; Nix was
 strict first and nobody came. Blanket should be permissive by default
 with strictness as a company-controlled switch.*
 
-## 1. Measure the hit rate (do this first) — IN PROGRESS (2026-09-02)
+## 1. Measure the hit rate (do this first) — DONE (2026-09-02)
 
 Harness: `python3 tests/hitrate.py` (top-starred GitHub repos with a
 manifest, shallow clone, `blanket sync` with a throwaway store, 600s cap,
-failure class per miss). Results land in `HITRATE.md` when the run ends.
+failure class per miss). Result: **Python 3/30 (10%), npm 17/30 (56%)** — see `HITRATE.md` for
+the per-repo table and what it reorders: pyproject.toml input (Python's
+#1 miss) folded into item 3; pnpm/yarn monorepos (npm's #1 miss) added
+as item 7.
 
 Pull 30 popular real repos each for Python and npm off GitHub. Run
 `blanket sync` on each with zero config. Count successes. Record the
@@ -64,6 +67,14 @@ downloads and verifies before running the script with network denied.
 Same bytes at the same moment as npm would download; the only change is
 who does it. A few dozen entries cover the famous cases; users should
 never write these themselves.
+
+## 7. pnpm-lock.yaml (and yarn.lock) importer — added from the data
+
+7 of 13 npm misses were pnpm workspaces whose `workspace:`/`catalog:`
+protocols npm cannot re-resolve. pnpm lockfile v9 carries integrity per
+package; import it directly (registry tarball URLs are derivable) instead
+of re-resolving through npm. yarn berry similar. Not on the original list;
+the measurement put it there.
 
 ## Later, but before anyone runs it for a year
 

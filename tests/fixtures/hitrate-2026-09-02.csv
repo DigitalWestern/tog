@@ -1,0 +1,61 @@
+lang,repo,stars,status,class,seconds,inputs,error
+python,yt-dlp/yt-dlp,188422,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,AUTOMATIC1111/stable-diffusion-webui,164769,fail,py_sdist_build_failed,24,"requirements.txt,pyproject.toml,package.json","blanket: error: sandboxed build of tokenizers==0.13.3 failed: sandboxed command failed (exit status: 1): [""/private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8219-0025685820ea/scratchpad/hitrate/store/objects/e4fe345238000788d69ccf1737e4707293d99f45-env-3.12.14/bin/python"", ""-m"", ""pip"", ""wheel"", ""--no-deps"", ""--no-build-isolation"", ""--no-index"", ""-w"", ""/pr"
+python,ytdl-org/youtube-dl,141082,fail,no_inputs,0,setup.py,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,github/spec-kit,132951,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,Comfy-Org/ComfyUI,131107,fail,other,1,"requirements.txt,pyproject.toml","blanket: error: comfy-angle==0.1.1: no file compatible with cp312 on macOS arm64 among hash-matched files: comfy_angle-0.1.1-py3-none-macosx_11_0_arm64.whl, comfy_angle-0.1.1-py3-none-manylinux_2_28_aarch64.whl, comfy_angle-0.1.1-py3-none-manylinux_2_28_x86_64.whl, comfy_angle-0.1.1-py3-none-win_amd64.whl, comfy_angle-0.1.1-py3-none-win_arm64.whl"
+python,Graphify-Labs/graphify,113639,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,browser-use/browser-use,112004,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,openai/whisper,108296,ok,ok,8,"requirements.txt,pyproject.toml",
+python,TauricResearch/TradingAgents,102238,fail,other,0,"requirements.txt,pyproject.toml",blanket: error: only exact '==' pins are supported: .
+python,fastapi/fastapi,102010,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,nvbn/thefuck,97762,ok,ok,5,"requirements.txt,setup.py",
+python,hacksider/Deep-Live-Cam,96418,fail,py_sdist_build_failed,7,"requirements.txt,pyproject.toml","blanket: error: sandboxed build of insightface==0.7.3 failed: sandboxed command failed (exit status: 1): [""/private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8219-0025685820ea/scratchpad/hitrate/store/objects/e4fe345238000788d69ccf1737e4707293d99f45-env-3.12.14/bin/python"", ""-m"", ""pip"", ""wheel"", ""--no-deps"", ""--no-build-isolation"", ""--no-index"", ""-w"", ""/pr"
+python,karpathy/autoresearch,95080,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,3b1b/manim,92672,fail,py_sdist_build_failed,10,"requirements.txt,pyproject.toml,setup.py","blanket: error: sandboxed build of wgpu==0.32.0 failed: sandboxed command failed (exit status: 2): [""/private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8219-0025685820ea/scratchpad/hitrate/store/objects/e4fe345238000788d69ccf1737e4707293d99f45-env-3.12.14/bin/python"", ""-m"", ""pip"", ""wheel"", ""--no-deps"", ""--no-build-isolation"", ""--no-index"", ""-w"", ""/private/"
+python,sherlock-project/sherlock,90814,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,vllm-project/vllm,90735,fail,no_inputs,0,"pyproject.toml,setup.py","blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,django/django,89565,fail,npm_script_failed,24,"pyproject.toml,package.json","blanket: error: node_modules/puppeteer: postinstall script failed under the network-denied build sandbox: sandboxed command failed (exit status: 1): [""/bin/sh"", ""-c"", ""node install.mjs""]. If this package downloads files at install time, declare them as verified inputs in package.json — ""blanket"": {""artifacts"": [{""url"", ""sha256"", ""path""}]} — placed where the package's downloader caches them (see RE"
+python,odysseus-dev/odysseus,86703,fail,other,15,"requirements.txt,pyproject.toml,setup.py,package.json,package-lock.json",blanket: error: file collision: /private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8219-0025685820ea/scratchpad/hitrate/store/tmp/stage-20070-1788329119924324000-0/lib/python3.12/site-packages/urllib3/__init__.py already exists (from an earlier wheel or entry)
+python,unclecode/crawl4ai,80955,fail,other,3,"requirements.txt,pyproject.toml,setup.py","blanket: error: patchright==1.62.2: no file compatible with cp312 on macOS arm64 among hash-matched files: patchright-1.62.2-py3-none-macosx_10_13_x86_64.whl, patchright-1.62.2-py3-none-macosx_11_0_arm64.whl, patchright-1.62.2-py3-none-macosx_11_0_universal2.whl, patchright-1.62.2-py3-none-manylinux1_x86_64.whl, patchright-1.62.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl, patchrigh"
+python,Z4nzu/hackingtool,79258,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,opendatalab/MinerU,78987,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,D4Vinci/Scrapling,77842,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,Panniantong/Agent-Reach,77437,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,unslothai/unsloth,75449,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,hiyouga/LlamaFactory,74512,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,pallets/flask,72168,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, package-lock.json, Cargo.toml, or go.mod)"
+python,binary-husky/gpt_academic,71279,fail,other,7,requirements.txt,blanket: error: only exact '==' pins are supported: gradio@https://public.agent-matrix.com/publish/gradio-3.32.15-py3-none-any.whl
+python,ansible/ansible,70535,ok,ok,1,"requirements.txt,pyproject.toml",
+python,FoundationAgents/MetaGPT,70159,fail,py_uv_resolve_failed,0,"requirements.txt,setup.py",blanket: error: uv pip compile failed
+python,headroomlabs-ai/headroom,68360,fail,other,0,pyproject.toml,"blanket: error: /private/tmp/claude-501/-Users-ethanabbate-Desktop-System-package-manager/7bbf35c4-b384-4d1f-8219-0025685820ea/scratchpad/hitrate/repo/rust-toolchain.toml: component ""rustfmt"" is unsupported; only rustc, cargo, and rust-std are available"
+npm,affaan-m/ECC,245854,ok,ok,24,"pyproject.toml,package.json,package-lock.json,yarn.lock",
+npm,vuejs/vue,211266,fail,npm_resolve_failed,0,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,deepseek-ai/deepseek-harness,208488,fail,npm_resolve_failed,9,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,airbnb/javascript,148143,ok,ok,7,package.json,
+npm,clash-verge-rev/clash-verge-rev,141645,fail,other,18,"package.json,pnpm-lock.yaml","blanket: error: node_modules/tauri-plugin-mihomo-api: only https registry tarballs supported (v0), got git+ssh://git@github.com/clash-verge-rev/tauri-plugin-mihomo.git#8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e"
+npm,garrytan/gstack,131035,ok,ok,31,"package.json,bun.lock",
+npm,excalidraw/excalidraw,130965,ok,ok,152,"package.json,yarn.lock",
+npm,shadcn-ui/ui,122754,fail,npm_resolve_failed,7,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,DietrichGebert/ponytail,120277,fail,other,0,package.json,blanket: error: No such file or directory (os error 2)
+npm,axios/axios,109199,ok,ok,59,"package.json,package-lock.json",
+npm,google-gemini/gemini-cli,106762,ok,ok,131,"package.json,package-lock.json",
+npm,react/create-react-app,103275,fail,other,0,"package.json,package-lock.json",blanket: error: unsupported integrity algorithm: sha1
+npm,earendil-works/pi,100670,fail,npm_script_failed,35,"package.json,package-lock.json","blanket: error: node_modules/canvas: install script failed under the network-denied build sandbox: sandboxed command failed (exit status: 1): [""/bin/sh"", ""-c"", ""prebuild-install -r napi || node-gyp rebuild""]. If this package downloads files at install time, declare them as verified inputs in package.json — ""blanket"": {""artifacts"": [{""url"", ""sha256"", ""path""}]} — placed where the package's downloade"
+npm,ant-design/ant-design,99352,ok,ok,416,package.json,
+npm,tailwindlabs/tailwindcss,97422,fail,npm_resolve_failed,1,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,microsoft/playwright,95509,ok,ok,62,"package.json,package-lock.json",
+npm,louislam/uptime-kuma,90865,fail,npm_script_failed,122,"package.json,package-lock.json","blanket: error: node_modules/@louislam/sqlite3: install script failed under the network-denied build sandbox: sandboxed command failed (exit status: 1): [""/bin/sh"", ""-c"", ""node-pre-gyp install --fallback-to-build""]. If this package downloads files at install time, declare them as verified inputs in package.json — ""blanket"": {""artifacts"": [{""url"", ""sha256"", ""path""}]} — placed where the package's do"
+npm,mermaid-js/mermaid,90036,ok,ok,162,"package.json,pnpm-lock.yaml",
+npm,modelcontextprotocol/servers,90017,ok,ok,27,"package.json,package-lock.json",
+npm,ChatGPTNextWeb/NextChat,88684,ok,ok,351,"package.json,yarn.lock",
+npm,sveltejs/svelte,88041,fail,npm_resolve_failed,2,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,koala73/worldmonitor,85352,ok,ok,185,"package.json,package-lock.json",
+npm,vitejs/vite,82647,fail,npm_resolve_failed,3,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,Egonex-AI/Understand-Anything,81282,ok,ok,19,"package.json,pnpm-lock.yaml",
+npm,hoppscotch/hoppscotch,80146,fail,npm_resolve_failed,11,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed
+npm,paperclipai/paperclip,79848,ok,ok,10,"package.json,pnpm-lock.yaml",
+npm,anuraghazra/github-readme-stats,79837,ok,ok,55,"package.json,package-lock.json",
+npm,coder/code-server,79158,ok,ok,46,"package.json,package-lock.json",
+npm,typicode/json-server,75694,ok,ok,13,"package.json,pnpm-lock.yaml",
+npm,Eugeny/tabby,74279,fail,npm_resolve_failed,5,"package.json,yarn.lock",blanket: error: npm install --package-lock-only failed
