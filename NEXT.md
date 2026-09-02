@@ -1,5 +1,16 @@
 # Blanket — next actions (2026-09-02)
 
+**Status for a fresh agent (2026-09-02):** blanket is a Rust package-manager
+kernel (read ARCHITECTURE.md). Items 1–3 below are done: hit rate measured
+(python 3/30, npm 17/30, HITRATE.md), `blanket run <script>` exists,
+permissive-by-default with a strict switch landed (3a3d96c). Items 4–7 are
+not started. The Python miss is dominated by (a) pyproject-only repos,
+now handled by item 3 and being re-measured, and (b) sdist builds that need
+Rust/numpy/cython at build time — an unsolved wall not on this list.
+The npm miss is dominated by pnpm/yarn monorepos (item 7). Delegation:
+Codex Luna implements, Sol reviews; unit tests `cargo test`, e2e
+`cargo test -- --ignored`. Ordering below is a preference, not a rule.
+
 *From a conversation about whether the product works yet. Thesis: the
 reason blanket exists is that people are lazy. Every "fail closed, loud"
 in LIMITATIONS.md is correct engineering and a lost user. Bun and uv won
