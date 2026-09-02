@@ -14,6 +14,8 @@ USAGE:
   blanket build [eco] [args...]  sandboxed, network-denied build (cargo | go;
                           inferred when only one is present)
   blanket run <cmd...>    run a command inside the projected environment(s)
+  blanket run dev/test    run the package.json script inside the projected env
+                          (script wins over a same-named PATH executable)
   blanket sbom [--output <file>]  CycloneDX 1.5 SBOM from the synced closures
   blanket store path      print the store root
 
@@ -606,6 +608,22 @@ fn run_build(args: &[String]) -> io::Result<()> {
     }
 }
 
+/// Nearest ancestor that is a blanket projection: every tailor writes
+/// `.blanket/closures/<eco>.json`, so that directory is the proof. A plain
+/// `node_modules` or `.venv` in a subdirectory (a docs site, a vendored
+/// tool) is NOT a projection and must not stop the walk-up (Sol, task
+/// runner review).
+fn projected_root(cwd: &Path) -> PathBuf {
+    cwd.ancestors()
+        .find(|d| d.join(".blanket/closures").is_dir())
+        .unwrap_or(cwd)
+        .to_path_buf()
+}
+
+fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool {
+    has_dotnet_closure && script_resolved
+}
+
 fn run_run(cmd: &[String]) -> io::Result<()> {
     if cmd.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "run: no command given"));
@@ -613,22 +631,53 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
     // Walk up from cwd to the nearest projected root, so `blanket run`
     // works from workspace subdirectories like npm run does.
     let cwd = project_dir();
-    let dir = cwd
-        .ancestors()
-        .find(|d| {
-            d.join(".venv").exists()
-                || d.join("node_modules").exists()
-                || d.join(".blanket/cargo-home").exists()
-                || d.join(".blanket/closures/go.json").exists()
-                || d.join(".blanket/closures/ruby.json").exists()
-                || d.join(".blanket/closures/elixir.json").exists()
-                || d.join(".blanket/closures/dotnet.json").exists()
-        })
-        .unwrap_or(&cwd)
-        .to_path_buf();
+    let dir = projected_root(&cwd);
     let venv = dir.join(".venv");
     let nm = dir.join("node_modules");
     let cargo_home = dir.join(".blanket/cargo-home");
+    let node_projected = std::fs::symlink_metadata(&nm)
+        .map(|md| md.file_type().is_symlink())
+        .unwrap_or(false)
+        && std::fs::symlink_metadata(dir.join(".blanket/closures/node.json")).is_ok();
+    let package_json = if node_projected {
+        project::read_closure(&dir, "node")?;
+        let path = dir.join("package.json");
+        if std::fs::symlink_metadata(&path).is_ok() {
+            Some((path.canonicalize()?, std::fs::read_to_string(path)?))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let script_steps = package_json
+        .as_ref()
+        .map(|(_, json)| npm::script_commands_from_package(json, &cmd[0], &cmd[1..]))
+        .transpose()?
+        .flatten();
+    let package_metadata = if script_steps.is_some() {
+        let (_, json) = package_json
+            .as_ref()
+            .expect("script steps require package.json");
+        let package: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
+        })?;
+        Some((
+            package["name"].as_str().map(str::to_string),
+            package["version"].as_str().map(str::to_string),
+        ))
+    } else {
+        None
+    };
+    if refuse_dotnet_script(
+        std::fs::symlink_metadata(dir.join(".blanket/closures/dotnet.json")).is_ok(),
+        script_steps.is_some(),
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "package.json scripts are not run under a .NET projection (MSBuild belongs in the sandbox: use `blanket build dotnet`)",
+        ));
+    }
     let mut prefix: Vec<String> = Vec::new();
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
@@ -737,8 +786,64 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
     }
     let path = std::env::var("PATH").unwrap_or_default();
     prefix.push(path);
+    command.env("PATH", prefix.join(":"));
+    if let Some(steps) = script_steps {
+        let ((package_json_path, _), (package_name, package_version)) = package_json
+            .as_ref()
+            .zip(package_metadata)
+            .expect("script steps require package metadata");
+        let envs: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|value| value.to_os_string())))
+            .collect();
+        let npm_envs: Vec<_> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .chain(envs.iter().map(|(key, _)| key.clone()))
+            .filter(|key| key.to_string_lossy().starts_with("npm_"))
+            .collect();
+        for (event, script) in steps {
+            eprintln!("blanket: > {event}: {script}");
+            let mut step = std::process::Command::new("/bin/sh");
+            step.arg("-c").arg(script).current_dir(&dir);
+            for (key, value) in &envs {
+                match value {
+                    Some(value) => {
+                        step.env(key, value);
+                    }
+                    None => {
+                        step.env_remove(key);
+                    }
+                }
+            }
+            for key in &npm_envs {
+                step.env_remove(key);
+            }
+            step.env("npm_lifecycle_event", &event);
+            if let Some(name) = &package_name {
+                step.env("npm_package_name", name);
+            }
+            if let Some(version) = &package_version {
+                step.env("npm_package_version", version);
+            }
+            step.env("npm_package_json", package_json_path);
+            step.env("INIT_CWD", &cwd);
+            let status = step
+                .status()
+                .map_err(|e| io::Error::new(e.kind(), format!("run npm script {event}: {e}")))?;
+            if !status.success() {
+                use std::os::unix::process::ExitStatusExt;
+                exit(
+                    status
+                        .code()
+                        .or_else(|| status.signal().map(|signal| 128 + signal))
+                        .unwrap_or(1),
+                );
+            }
+        }
+        return Ok(());
+    }
     use std::os::unix::process::CommandExt;
-    let err = command.env("PATH", prefix.join(":")).exec(); // only returns on failure
+    let err = command.exec(); // only returns on failure
     Err(err)
 }
 
@@ -810,5 +915,26 @@ mod tests {
                 .collect::<Vec<_>>()
         )
         .is_none());
+    }
+
+    #[test]
+    fn dotnet_projection_refuses_resolved_package_scripts() {
+        assert!(refuse_dotnet_script(true, true));
+        assert!(!refuse_dotnet_script(true, false));
+        assert!(!refuse_dotnet_script(false, true));
+    }
+
+    #[test]
+    fn projected_root_skips_plain_node_modules() {
+        let t = TempDir::new();
+        let root = t.0.join("proj");
+        std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        let sub = root.join("docs");
+        std::fs::create_dir_all(sub.join("node_modules")).unwrap();
+        assert_eq!(projected_root(&sub), root);
+        assert_eq!(projected_root(&root), root);
+        let outside = t.0.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(projected_root(&outside), outside);
     }
 }

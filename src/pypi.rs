@@ -213,8 +213,14 @@ fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
     });
     let pure = py_ok && none_abi;
 
+    // A pure wheel may still carry a platform tag (py3-none-macosx_11_0_arm64:
+    // ships a prebuilt binary but no Python ABI dependence). Ranked just
+    // behind the exact-ABI wheel for the same platform.
     if arm64 && exact {
         return Some((0, 0));
+    }
+    if arm64 && pure {
+        return Some((0, 1));
     }
     if arm64 {
         if let Some(n) = abi3_best {
@@ -223,6 +229,9 @@ fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
     }
     if universal2 && exact {
         return Some((2, 0));
+    }
+    if universal2 && pure {
+        return Some((2, 1));
     }
     if universal2 {
         if let Some(n) = abi3_best {
@@ -461,6 +470,19 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         ];
         let (best5, _) = select_file(&files5, "cp312").unwrap();
         assert!(best5.filename.contains("universal2"));
+
+        // Pure wheel with a platform tag (comfy-angle, patchright: hit-rate
+        // run 2026-09-02) — compatible, beats the pure any-platform wheel.
+        let files_plat = vec![
+            fc("pkg-1.0-py3-none-any.whl"),
+            fc("pkg-1.0-py3-none-macosx_11_0_arm64.whl"),
+            fc("pkg-1.0-py3-none-manylinux_2_28_aarch64.whl"),
+            fc("pkg-1.0-py3-none-win_amd64.whl"),
+        ];
+        let (best_plat, _) = select_file(&files_plat, "cp312").unwrap();
+        assert_eq!(best_plat.filename, "pkg-1.0-py3-none-macosx_11_0_arm64.whl");
+        let files_plat2 = vec![fc("pkg-1.0-py3-none-macosx_10_13_x86_64.whl")];
+        assert!(select_file(&files_plat2, "cp312").is_none());
 
         let files6 = vec![fc("pkg-1.0.tar.gz"), fc("pkg-1.0-py2.py3-none-any.whl")];
         let (best6, kind6) = select_file(&files6, "cp312").unwrap();

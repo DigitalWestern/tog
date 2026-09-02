@@ -36,6 +36,8 @@ blanket store path              # where the store lives
 blanket sync --fresh            # rebuild the projection (drops caches)
 ```
 
+`blanket run dev` / `blanket run test` runs the `package.json` script inside the projected env; the script wins over a same-named PATH executable.
+
 `sync` meets projects where they are: a ranged `requirements.txt` is
 locked via uv (`requirements.lock.txt`, hash-pinned, auto-refreshed); a
 `package.json` without `package-lock.json` (bun/yarn projects) gets one

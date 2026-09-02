@@ -28,6 +28,79 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
+/// Read the string-valued scripts from a package.json.
+pub fn package_scripts(package_json: &str) -> io::Result<BTreeMap<String, String>> {
+    let package: serde_json::Value = serde_json::from_str(package_json).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
+    })?;
+    Ok(package["scripts"]
+        .as_object()
+        .into_iter()
+        .flat_map(|scripts| scripts.iter())
+        .filter_map(|(name, command)| {
+            command.as_str().map(|command| (name.clone(), command.to_string()))
+        })
+        .collect())
+}
+
+/// Resolve one requested package script, rejecting only that script when its
+/// package.json value is not a string.
+pub fn script_commands_from_package(
+    package_json: &str,
+    name: &str,
+    args: &[String],
+) -> io::Result<Option<Vec<(String, String)>>> {
+    let package: serde_json::Value = serde_json::from_str(package_json).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}"))
+    })?;
+    let Some(scripts) = package["scripts"].as_object() else {
+        return Ok(None);
+    };
+    let Some(command) = scripts.get(name) else {
+        return Ok(None);
+    };
+    if command.as_str().is_none() {
+        return Err(err(format!("package.json script {name:?} must be a string")));
+    }
+    let scripts = scripts
+        .iter()
+        .filter_map(|(name, command)| {
+            command.as_str().map(|command| (name.clone(), command.to_string()))
+        })
+        .collect();
+    Ok(script_commands(&scripts, name, args))
+}
+
+/// Build npm's pre/name/post script order, appending quoted arguments only
+/// to the requested script. Returns None when the requested name is absent.
+pub fn script_commands(
+    scripts: &BTreeMap<String, String>,
+    name: &str,
+    args: &[String],
+) -> Option<Vec<(String, String)>> {
+    let script = scripts.get(name)?;
+    let mut commands = Vec::new();
+    if let Some(command) = scripts.get(&format!("pre{name}")) {
+        commands.push((format!("pre{name}"), command.clone()));
+    }
+    let mut command = script.clone();
+    if !args.is_empty() {
+        command.push(' ');
+        command.push_str(
+            &args
+                .iter()
+                .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    commands.push((name.to_string(), command));
+    if let Some(command) = scripts.get(&format!("post{name}")) {
+        commands.push((format!("post{name}"), command.clone()));
+    }
+    Some(commands)
+}
+
 /// Pinned Node.js toolchain (nodejs.org, checksum from SHASUMS256.txt).
 pub struct PinnedNode {
     pub version: &'static str,
@@ -104,6 +177,12 @@ pub struct NpmPlan {
     pub node_version: String,
     pub packages: Vec<NpmPackage>,
     pub links: Vec<NpmLink>,
+}
+
+fn add_node_env_layout_input(inputs: &mut BTreeMap<String, String>, packages: &[NpmPackage]) {
+    if packages.is_empty() {
+        inputs.insert("layout".into(), "empty-node_modules".into());
+    }
 }
 
 /// Validate a lockfile "packages" key as a safe, well-formed npm path:
@@ -342,6 +421,7 @@ pub fn realize_node_env(
         "nodejs".to_string(),
         node_obj.file_name().unwrap().to_string_lossy().into_owned(),
     );
+    add_node_env_layout_input(&mut inputs, &plan.packages);
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
         // bin mappings change the realized tree, so they are identity inputs.
@@ -396,6 +476,7 @@ pub fn realize_node_env(
     }
 
     let staged = store.stage()?;
+    fs::create_dir_all(staged.join("node_modules"))?;
     // Parents before children (path depth = lexicographic prefix ordering
     // already holds after sort, since "a/node_modules/b" sorts after "a").
     for (p, tarball) in &tarballs {
@@ -1116,5 +1197,69 @@ mod tests {
             r#"{"blanket":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn package_scripts_and_command_order() {
+        let scripts = package_scripts(
+            r#"{"scripts":{"build":"echo build","pretest":"echo pre","test":"echo test","posttest":"echo post"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            script_commands(&scripts, "build", &[]),
+            Some(vec![("build".into(), "echo build".into())])
+        );
+        assert_eq!(
+            script_commands(&scripts, "test", &["a'b".into(), "two words".into()]),
+            Some(vec![
+                ("pretest".into(), "echo pre".into()),
+                ("test".into(), "echo test 'a'\\''b' 'two words'".into()),
+                ("posttest".into(), "echo post".into()),
+            ])
+        );
+        assert_eq!(script_commands(&scripts, "missing", &[]), None);
+        assert!(package_scripts("{").is_err());
+    }
+
+    #[test]
+    fn non_string_script_is_rejected() {
+        let error = script_commands_from_package(r#"{"scripts":{"test":1}}"#, "test", &[])
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("test"));
+    }
+
+    #[test]
+    fn script_arguments_are_shell_quoted_literally() {
+        let scripts = package_scripts(r#"{"scripts":{"test":"echo test"}}"#).unwrap();
+        let args = vec!["$HOME".into(), "`whoami`".into(), "line\nbreak".into()];
+        assert_eq!(
+            script_commands(&scripts, "test", &args),
+            Some(vec![(
+                "test".into(),
+                "echo test '$HOME' '`whoami`' 'line\nbreak'".into()
+            )])
+        );
+    }
+
+    #[test]
+    fn empty_node_env_layout_changes_identity() {
+        let mut with_layout = BTreeMap::new();
+        let empty: &[NpmPackage] = &[];
+        add_node_env_layout_input(&mut with_layout, empty);
+        assert_eq!(
+            with_layout.get("layout").map(String::as_str),
+            Some("empty-node_modules")
+        );
+        let identity = |inputs| Identity {
+            kind: "node-env".into(),
+            name: "env".into(),
+            version: NODE.version.into(),
+            inputs,
+        };
+        assert_ne!(
+            identity(with_layout).object_id(),
+            identity(BTreeMap::new()).object_id()
+        );
     }
 }
