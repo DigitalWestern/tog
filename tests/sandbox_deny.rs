@@ -4,7 +4,7 @@
 //! tests/acceptance.sh runs it with a shared BLANKET_STORE:
 //!     cargo test --test sandbox_deny -- --ignored
 
-use blanket::{build, store::Store, types::*};
+use blanket::{build, platform::Platform, store::Store, types::*};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
@@ -26,7 +26,12 @@ fn network_access_during_build_fails() {
         kind: ArtifactKind::Sdist,
     };
 
-    let result = build::build_sdist_wheel(&store, &pkg, "3.12.14");
+    let result = build::build_sdist_wheel(
+        &store,
+        Platform::host().unwrap(),
+        &pkg,
+        "3.12.14",
+    );
     let err = result.expect_err("build reaching the network must fail");
     let msg = err.to_string();
     assert!(

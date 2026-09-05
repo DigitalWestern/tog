@@ -11,7 +11,8 @@
 //! build re-restores offline into scratch and builds --no-restore.
 
 use crate::fetch::{cache_insert, download_verified_digest, Digest};
-use crate::sandbox::{force_env, run_build_spec, BuildSpec};
+use crate::platform::{no_pin, Platform};
+use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
 use crate::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -26,36 +27,62 @@ use std::process::Command;
 const SDK_VERSION: &str = "9.0.317";
 // Official Microsoft release-metadata checksum channel (HTTPS; hashes
 // published, not cryptographically signed — honest wording per Sol).
-const SDK_URL: &str =
-    "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz";
-const SDK_SHA512: &str = "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a";
-
-fn err(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+struct SdkPin {
+    platform: Platform,
+    url: &'static str,
+    sha512: &'static str,
 }
 
-pub fn sdk_fingerprint() -> String {
-    hex::encode(&Sha256::digest(SDK_SHA512.as_bytes())[..8])
+const SDK_PINS: &[SdkPin] = &[SdkPin {
+    platform: Platform::Aarch64AppleDarwin,
+    url: "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz",
+    sha512: "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a",
+}];
+
+fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
+    SDK_PINS
+        .iter()
+        .find(|pin| pin.platform == platform)
+        .ok_or_else(|| no_pin("dotnet-sdk", platform, "stage 4"))
 }
 
-/// Ensure the pinned .NET SDK is realized (muxer at <obj>/dotnet).
-pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
-    let identity = Identity {
+fn sdk_identity(pin: &SdkPin) -> Identity {
+    Identity {
         kind: "dotnet-sdk".into(),
         name: "dotnet-sdk".into(),
         version: SDK_VERSION.into(),
         inputs: BTreeMap::from([
             ("schema".to_string(), "dotnet-sdk/1".to_string()),
-            ("artifact_sha512".to_string(), SDK_SHA512.to_string()),
-            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
+            ("artifact_sha512".to_string(), pin.sha512.to_string()),
+            ("platform".to_string(), pin.platform.triple().to_string()),
         ]),
-    };
+    }
+}
+
+fn err(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+pub fn sdk_fingerprint(platform: Platform) -> io::Result<String> {
+    Ok(hex::encode(
+        &Sha256::digest(sdk_pin(platform)?.sha512.as_bytes())[..8],
+    ))
+}
+
+/// Ensure the pinned .NET SDK is realized (muxer at <obj>/dotnet).
+pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
+    ensure_sdk_for(store, Platform::host()?)
+}
+
+pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    let pin = sdk_pin(platform)?;
+    let identity = sdk_identity(pin);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_digest(store, SDK_URL, &Digest::sha512(SDK_SHA512)?)?;
+    let tarball = download_verified_digest(store, pin.url, &Digest::sha512(pin.sha512)?)?;
     let staged = store.stage()?;
     let st = Command::new("/usr/bin/tar")
         .args(["-xzf"])
@@ -781,10 +808,12 @@ fn rewrite_metadata_source(path: &Path) -> io::Result<()> {
 /// precedent). Network denied at install: the feed is local.
 pub fn realize_packages(
     store: &Store,
+    platform: Platform,
     plan: &DotnetPlan,
     sdk_obj: &Path,
     project_dir: &Path,
 ) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, ".NET packages", "stage 4")?;
     let _ = preflight(project_dir)?;
     validate_plan(plan)?;
     let sdk_obj = sdk_obj.canonicalize()?;
@@ -880,7 +909,7 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = run_build_spec(&BuildSpec {
+    let result = crate::sandbox::run_build_spec_on(platform, &BuildSpec {
         argv: vec![
             sdk_obj.join("dotnet").display().to_string(),
             "restore".to_string(),
@@ -894,14 +923,17 @@ pub fn realize_packages(
         cwd: verifier.clone(),
         env: forced_env(&sdk_obj, &staged, &scratch),
         read: vec![sdk_obj.to_path_buf(), feed.clone(), verifier.clone()],
-        write: vec![staged.clone(), ensure_dotnet_tmp()?],
+        write: vec![staged.clone(), ensure_dotnet_tmp(platform)?],
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     });
     if let Err(e) = result {
         let _ = crate::store::remove_tree(&scratch);
         let _ = crate::store::remove_tree(&staged);
-        return Err(err(format!("locked-mode package verification failed: {e}")));
+        return Err(io::Error::new(
+            e.kind(),
+            format!("locked-mode package verification failed: {e}"),
+        ));
     }
     // Every locked package must have materialized with its completion
     // marker; anything missing means the lock and feed disagree.
@@ -953,8 +985,12 @@ pub fn project_dotnet_env(
     )
 }
 
-fn ensure_dotnet_tmp() -> io::Result<PathBuf> {
-    let path = PathBuf::from("/private/tmp/.dotnet");
+fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
+    let path = if platform.is_macos() {
+        PathBuf::from("/private/tmp/.dotnet")
+    } else {
+        PathBuf::from("/tmp/.dotnet")
+    };
     let created = match fs::symlink_metadata(&path) {
         Ok(md) => {
             if md.file_type().is_symlink() || !md.is_dir() {
@@ -1063,7 +1099,12 @@ fn checked_output_dir(project_dir: &Path, fingerprint: &str) -> io::Result<PathB
     Ok(output)
 }
 
-fn publish_output(staged: &Path, project_dir: &Path, fingerprint: &str) -> io::Result<PathBuf> {
+fn publish_output(
+    staged: &Path,
+    project_dir: &Path,
+    platform: Platform,
+    fingerprint: &str,
+) -> io::Result<PathBuf> {
     let output = checked_output_dir(project_dir, fingerprint)?;
     let bin = output
         .parent()
@@ -1081,7 +1122,7 @@ fn publish_output(staged: &Path, project_dir: &Path, fingerprint: &str) -> io::R
     match fs::rename(staged, &new) {
         Ok(()) => {}
         Err(e) if e.raw_os_error() == Some(18) => {
-            if let Err(clone_error) = crate::project::clone_tree(staged, &new) {
+            if let Err(clone_error) = crate::project::clone_tree_for(staged, &new, platform) {
                 let _ = crate::store::remove_tree(&new);
                 return Err(io::Error::new(
                     clone_error.kind(),
@@ -1142,6 +1183,7 @@ fn publish_output(staged: &Path, project_dir: &Path, fingerprint: &str) -> io::R
 /// Sandboxed build: fresh offline locked restore into scratch obj, attest
 /// assets, then build --no-restore. Project obj/ is never authority (Sol).
 pub fn build_sandboxed(
+    platform: Platform,
     project_dir: &Path,
     sdk_obj: &Path,
     packages_obj: &Path,
@@ -1172,9 +1214,8 @@ pub fn build_sandboxed(
             csproj.display().to_string(),
         ]
     };
-    // CoreCLR named mutexes live hardcoded at /tmp/.dotnet — a bounded,
-    // local-only write root (no data flows out through it).
-    let shm = ensure_dotnet_tmp()?;
+    // CoreCLR named mutexes use the platform-selected local write root.
+    let shm = ensure_dotnet_tmp(platform)?;
     let env: Vec<(String, String)> = forced_env(&sdk_obj, &packages_obj, &scratch);
     let mut restore = common("restore");
     restore.extend([
@@ -1198,8 +1239,8 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    run_build_spec(&spec).map_err(|e| {
-        err(format!(
+    crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+        io::Error::new(e.kind(), format!(
             "offline locked restore failed: {e}; network is denied — \
                      packages outside the lock, framework packs, or workloads \
                      are unsupported in v0"
@@ -1232,9 +1273,9 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    if let Err(e) = run_build_spec(&spec) {
+    if let Err(e) = crate::sandbox::run_build_spec_on(platform, &spec) {
         let _ = crate::store::remove_tree(&scratch);
-        return Err(err(format!(
+        return Err(io::Error::new(e.kind(), format!(
             "dotnet build failed: {e}\n(network is denied during builds)"
         )));
     }
@@ -1245,7 +1286,12 @@ pub fn build_sandboxed(
             "project.assets.json changed during build; refusing to publish output",
         ));
     }
-    let output = match publish_output(&output_scratch, &project_dir, &sdk_fingerprint()) {
+    let output = match publish_output(
+        &output_scratch,
+        &project_dir,
+        platform,
+        &sdk_fingerprint(platform)?,
+    ) {
         Ok(output) => output,
         Err(e) => {
             let _ = crate::store::remove_tree(&scratch);
@@ -1261,6 +1307,21 @@ pub fn build_sandboxed(
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        let platform = Platform::Aarch64AppleDarwin;
+        let pin = sdk_pin(platform).unwrap();
+        let identity = sdk_identity(pin);
+        assert_eq!(
+            identity.object_id(),
+            "aebf0bc6741c81b414dfe7825ed9115ccc60f085-dotnet-sdk-9.0.317"
+        );
+        assert_eq!(
+            sdk_fingerprint(platform).unwrap(),
+            "3a532efac27c3140"
+        );
+    }
 
     fn minimal_csproj() -> &'static str {
         "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>"
@@ -1522,13 +1583,25 @@ mod tests {
         let staged_old = base.join("staged-old");
         fs::create_dir(&staged_old).unwrap();
         fs::write(staged_old.join("artifact"), "old").unwrap();
-        let output = publish_output(&staged_old, &publish_project, "fp").unwrap();
+        let output = publish_output(
+            &staged_old,
+            &publish_project,
+            Platform::Aarch64AppleDarwin,
+            "fp",
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "old");
 
         let staged_new = base.join("staged-new");
         fs::create_dir(&staged_new).unwrap();
         fs::write(staged_new.join("artifact"), "new").unwrap();
-        publish_output(&staged_new, &publish_project, "fp").unwrap();
+        publish_output(
+            &staged_new,
+            &publish_project,
+            Platform::Aarch64AppleDarwin,
+            "fp",
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "new");
         assert!(!publish_project
             .join(format!(".blanket-fp.new.{}", std::process::id()))

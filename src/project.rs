@@ -6,6 +6,7 @@
 //! different objects and coexist. Projection into a project is one symlink.
 
 use crate::fetch::download_verified;
+use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::{ArtifactKind, Identity, Plan};
 use crate::{python, wheel};
@@ -86,12 +87,24 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 /// as read-only from the store. Used for writable projections of immutable
 /// objects (npm mutablePackages, elixir deps trees).
 pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    clone_tree_for(src, dest, Platform::host()?)
+}
+
+pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io::Result<()> {
     use std::process::Command;
-    let clone = Command::new("/bin/cp")
-        .args(["-Rc"])
-        .arg(src)
-        .arg(dest)
-        .status()?;
+    let clone = if platform.is_macos() {
+        Command::new("/bin/cp")
+            .args(["-Rc"])
+            .arg(src)
+            .arg(dest)
+            .status()?
+    } else {
+        Command::new("/bin/cp")
+            .args(["-a", "--reflink=auto"])
+            .arg(src)
+            .arg(dest)
+            .status()?
+    };
     if !clone.success() {
         if dest.exists() {
             crate::store::remove_tree(dest)?;
@@ -169,22 +182,11 @@ pub fn closure_object(
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
-pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
-    let pin = python::lookup(&plan.python_version).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "no pinned CPython {} (available: {})",
-                plan.python_version,
-                python::PYTHONS
-                    .iter()
-                    .map(|p| p.version)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
-    })?;
-    let python_obj = python::ensure_python(store, pin)?;
+pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Python environment", "stage 2")?;
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let python_obj = python::ensure_python_for(store, pin, platform)?;
 
     // Canonical package order + duplicate rejection: identity must commit
     // to exactly one artifact per name, installed in a deterministic order.
@@ -245,7 +247,9 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
         let wheel_file = match p.kind {
             ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
             // sdist -> wheel via sandboxed derivation (network denied).
-            ArtifactKind::Sdist => crate::build::build_sdist_wheel(store, p, &pin.version)?,
+            ArtifactKind::Sdist => {
+                crate::build::build_sdist_wheel(store, platform, p, &pin.version)?
+            }
         };
         artifacts.push((p, wheel_file));
     }
@@ -321,7 +325,7 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
         .as_secs();
     let dest = backups.join(format!("{project}-{dirname}-{secs}"));
     fs::rename(path, &dest).map_err(|e| {
-        io::Error::other(format!(
+        io::Error::new(e.kind(), format!(
             "could not move existing {} aside to {}: {e}",
             path.display(),
             dest.display()

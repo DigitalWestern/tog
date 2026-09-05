@@ -7,7 +7,7 @@
 
 use blanket::npm::{self, NpmPackage, NpmPlan};
 use blanket::store::Store;
-use blanket::{policy, project};
+use blanket::{platform::Platform, policy, project};
 use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 use std::process::Command;
@@ -96,12 +96,18 @@ fn store_at(dir: &std::path::Path) -> Store {
 #[test]
 #[ignore]
 fn network_access_during_install_script_fails() {
+    let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("BLANKET_NPM_STRICT_CHILD") {
         policy::init(std::path::Path::new(&dir), false).unwrap();
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let result = npm::realize_node_env(&store, &plan_for(&tarball, &sri), &[]);
+        let result = npm::realize_node_env(
+            &store,
+            platform,
+            &plan_for(&tarball, &sri),
+            &[],
+        );
         let err = result.expect_err("install script reaching the network must fail");
         assert!(
             err.to_string().contains("network-denied"),
@@ -144,12 +150,18 @@ fn network_access_during_install_script_fails() {
 #[test]
 #[ignore]
 fn permissive_install_script_is_cached_but_rejected_strict() {
+    let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("BLANKET_NPM_CACHED_CHILD") {
         policy::init(std::path::Path::new(&dir), false).unwrap();
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let err = npm::realize_node_env(&store, &plan_for(&tarball, &sri), &[])
+        let err = npm::realize_node_env(
+            &store,
+            platform,
+            &plan_for(&tarball, &sri),
+            &[],
+        )
             .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
         assert!(err
@@ -168,12 +180,26 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let store = store_at(&dir);
     policy::init(&dir, false).unwrap();
     let plan = plan_for(&tarball, &sri);
-    let env = npm::realize_node_env(&store, &plan, &[]).expect("permissive realize");
+    let env = npm::realize_node_env(
+        &store,
+        platform,
+        &plan,
+        &[],
+    )
+    .expect("permissive realize");
     let package_dir = env.join("node_modules/fixture-pkg");
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    npm::project_node_env(&dir, &env, &plan, &[], false).expect("project");
+    npm::project_node_env(
+        &dir,
+        &env,
+        platform,
+        &plan,
+        &[],
+        false,
+    )
+    .expect("project");
     let closure = project::read_closure(&dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
     assert_eq!(exceptions.len(), 1);
@@ -205,6 +231,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
 #[test]
 #[ignore]
 fn benign_install_script_runs_and_output_is_captured() {
+    let platform = Platform::host().expect("host platform");
     let dir = std::env::temp_dir().join(format!("blanket-good-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -213,7 +240,13 @@ fn benign_install_script_runs_and_output_is_captured() {
         "node -e \"require('fs').writeFileSync('built.txt','ok')\"",
     );
     let store = store_at(&dir);
-    let env = npm::realize_node_env(&store, &plan_for(&tarball, &sri), &[]).expect("realize");
+    let env = npm::realize_node_env(
+        &store,
+        platform,
+        &plan_for(&tarball, &sri),
+        &[],
+    )
+    .expect("realize");
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
     let _ = std::fs::remove_dir_all(&dir);

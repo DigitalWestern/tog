@@ -10,7 +10,8 @@
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
 use crate::fetch::download_verified;
-use crate::sandbox::{force_env, run_build_spec, BuildSpec};
+use crate::platform::{no_pin, Platform};
+use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
 use crate::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,59 @@ const RUBY_VERSION: &str = "3.4.6";
 // Homebrew portable-ruby: relocatable, bundler included; the ruby Homebrew
 // itself ships on. Newest PORTABLE artifact (ruby-lang 3.4.x source may be
 // newer; documented gap until a newer portable build exists).
-const RUBY_URL: &str = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.arm64_big_sur.bottle.tar.gz";
-const RUBY_SHA256: &str = "62fe925f284cc38aac68b9a42b02cd90de753f8832e8866be3fd60558dd70f67";
+struct RubyPin {
+    platform: Platform,
+    url: &'static str,
+    sha256: &'static str,
+}
+
+const RUBY_PINS: &[RubyPin] = &[RubyPin {
+    platform: Platform::Aarch64AppleDarwin,
+    url: "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.arm64_big_sur.bottle.tar.gz",
+    sha256: "62fe925f284cc38aac68b9a42b02cd90de753f8832e8866be3fd60558dd70f67",
+}];
+
+fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
+    RUBY_PINS
+        .iter()
+        .find(|pin| pin.platform == platform)
+        .ok_or_else(|| no_pin("ruby", platform, "stage 4"))
+}
+
+fn ruby_identity(pin: &RubyPin) -> Identity {
+    Identity {
+        kind: "ruby".into(),
+        name: "ruby".into(),
+        version: RUBY_VERSION.into(),
+        inputs: BTreeMap::from([
+            ("schema".to_string(), "ruby-toolchain/1".to_string()),
+            ("artifact_sha256".to_string(), pin.sha256.to_string()),
+            ("platform".to_string(), pin.platform.triple().to_string()),
+        ]),
+    }
+}
+
+fn ruby_gems_identity(pin: &RubyPin, plan: &RubyPlan) -> Identity {
+    let mut inputs = BTreeMap::from([
+        ("schema".to_string(), "ruby-gems/1".to_string()),
+        // Installer recipe AND wrapper-byte provenance: generated binstubs
+        // embed interpreter paths.
+        (
+            "installer".to_string(),
+            format!("ruby{}:{}", RUBY_VERSION, pin.sha256),
+        ),
+        ("ruby_platform".to_string(), plan.ruby_platform.clone()),
+    ]);
+    for g in &plan.gems {
+        inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
+    }
+    Identity {
+        kind: "ruby-gems".into(),
+        name: "gems".into(),
+        version: plan.gems.len().to_string(),
+        inputs,
+    }
+}
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -34,22 +86,18 @@ fn err(msg: impl Into<String>) -> io::Error {
 
 /// Ensure the pinned portable Ruby is realized (interpreter at <obj>/bin/ruby).
 pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
-    let identity = Identity {
-        kind: "ruby".into(),
-        name: "ruby".into(),
-        version: RUBY_VERSION.into(),
-        inputs: BTreeMap::from([
-            ("schema".to_string(), "ruby-toolchain/1".to_string()),
-            ("artifact_sha256".to_string(), RUBY_SHA256.to_string()),
-            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
-        ]),
-    };
+    ensure_ruby_for(store, Platform::host()?)
+}
+
+pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    let pin = ruby_pin(platform)?;
+    let identity = ruby_identity(pin);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified(store, RUBY_URL, RUBY_SHA256)?;
+    let tarball = download_verified(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     // Bottle layout: portable-ruby/3.4.6/<tree> — strip 2.
     let status = Command::new("/usr/bin/tar")
@@ -487,27 +535,16 @@ pub fn plan_ruby(
 
 /// Realize the immutable GEM_HOME object: dependency-first sandboxed
 /// installs (native extensions compile here, network denied).
-pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Result<PathBuf> {
+pub fn realize_gems(
+    store: &Store,
+    platform: Platform,
+    plan: &RubyPlan,
+    ruby_obj: &Path,
+) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Ruby gems", "stage 4")?;
+    let pin = ruby_pin(platform)?;
     validate_plan(plan)?;
-    let mut inputs = BTreeMap::from([
-        ("schema".to_string(), "ruby-gems/1".to_string()),
-        // Installer recipe AND wrapper-byte provenance: generated binstubs
-        // embed interpreter paths.
-        (
-            "installer".to_string(),
-            format!("ruby{RUBY_VERSION}:{RUBY_SHA256}"),
-        ),
-        ("ruby_platform".to_string(), plan.ruby_platform.clone()),
-    ]);
-    for g in &plan.gems {
-        inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
-    }
-    let identity = Identity {
-        kind: "ruby-gems".into(),
-        name: "gems".into(),
-        version: plan.gems.len().to_string(),
-        inputs,
-    };
+    let identity = ruby_gems_identity(pin, plan);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -522,8 +559,9 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
         let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let file = download_verified(store, &url, &g.sha256)
-            .map_err(|e| err(format!("{}: {e}", g.full_name)))?;
+        let file = download_verified(store, &url, &g.sha256).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: {e}", g.full_name))
+        })?;
         let out = run_ruby(
             ruby_obj,
             &scratch,
@@ -604,8 +642,8 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
         };
-        run_build_spec(&spec).map_err(|e| {
-            err(format!(
+        crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+            io::Error::new(e.kind(), format!(
                 "{}: sandboxed gem install failed: {e}\n(network is denied; \
                  gems whose installers need network or missing host \
                  libraries are unsupported in v0)",
@@ -647,6 +685,39 @@ pub fn project_ruby_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        let platform = Platform::Aarch64AppleDarwin;
+        let pin = ruby_pin(platform).unwrap();
+        let identity = ruby_identity(pin);
+        assert_eq!(
+            identity.object_id(),
+            "c4c2411b7540521f48dcdd8cff25786e261ed1ee-ruby-3.4.6"
+        );
+    }
+
+    #[test]
+    fn darwin_ruby_gems_identity_unchanged() {
+        let pin = ruby_pin(Platform::Aarch64AppleDarwin).unwrap();
+        let plan = RubyPlan {
+            ruby_version: RUBY_VERSION.into(),
+            ruby_platform: "arm64-darwin20".into(),
+            bundler_version: "2.6.9".into(),
+            gems: vec![RubyGem {
+                name: "rake".into(),
+                version: "13.2.1".into(),
+                platform: "ruby".into(),
+                full_name: "rake-13.2.1".into(),
+                sha256: "a".repeat(64),
+            }],
+        };
+        let identity = ruby_gems_identity(pin, &plan);
+        assert_eq!(
+            identity.object_id(),
+            "c017bc4da37483c7d35d1997df4c541d35e4a751-gems-1"
+        );
+    }
 
     #[test]
     fn plan_validation_rejects_hostile_fields() {

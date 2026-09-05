@@ -1,4 +1,4 @@
-//! Hermetic build sandbox for macOS via sandbox-exec (Seatbelt).
+//! Hermetic build sandbox (macOS backend: sandbox-exec/Seatbelt; Linux backend: LINUX_PORT.md stage 3).
 //!
 //! Deny-by-default profile: no network, reads limited to declared inputs
 //! (store + system runtime), writes limited to the build's private
@@ -6,6 +6,7 @@
 //! hostile code (Sol's framing) — it makes "undeclared network access
 //! fails" true, which is what the kernel needs.
 
+use crate::platform::Platform;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,6 +50,10 @@ pub fn force_env(
 }
 
 pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
+    run_build_spec_on(Platform::host()?, spec)
+}
+
+pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Result<()> {
     let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
     let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
     write.push(&spec.scratch);
@@ -56,7 +61,7 @@ pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
         read: spec.read.iter().map(PathBuf::as_path).collect(),
         write,
     };
-    sandbox.run_in(&argv, &spec.path, &spec.scratch, &spec.cwd, &spec.env)
+    sandbox.run_in_on(platform, &argv, &spec.path, &spec.scratch, &spec.cwd, &spec.env)
 }
 
 pub struct Sandbox<'a> {
@@ -121,6 +126,27 @@ impl Sandbox<'_> {
         cwd: &Path,
         envs: &[(String, String)],
     ) -> io::Result<()> {
+        self.run_in_on(Platform::host()?, cmd, env_path, tmp, cwd, envs)
+    }
+
+    pub(crate) fn run_in_on(
+        &self,
+        platform: Platform,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+    ) -> io::Result<()> {
+        if !platform.is_macos() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "build sandbox unavailable on {}: the Linux backend lands in LINUX_PORT.md stage 3; refusing to run the build unsandboxed",
+                    platform.triple()
+                ),
+            ));
+        }
         let profile = self.profile();
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command

@@ -2,6 +2,7 @@
 //! requirement to one exact PyPI artifact (wheel preferred, sdist
 //! fallback), cutting the pattern (Plan) the kernel realizes.
 
+use crate::platform::Platform;
 use crate::types::{ArtifactKind, LockedPackage, Plan};
 use std::io;
 
@@ -206,12 +207,14 @@ pub struct FileCandidate {
     pub sha256: String,
 }
 
-/// Wheel-or-sdist choice for macOS arm64 given python tag like "cp312".
+/// Wheel-or-sdist choice for macOS arm64 (LINUX_PORT.md stage 2:
+/// selector is macOS-arm64-only) given python tag like "cp312".
 /// Returns (band, tiebreak); lower wins. None = incompatible.
 /// Bands: 0 native exact, 1 native abi3, 2 universal2 exact,
 /// 3 universal2 abi3, 4 pure, 6 sdist. abi3 tiebreak prefers the
 /// highest compatible cp tag.
 fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
+    // LINUX_PORT.md stage 2: selector is macOS-arm64-only.
     let ours: u32 = python_tag.strip_prefix("cp")?.parse().ok()?;
     if filename.ends_with(".tar.gz") || filename.ends_with(".zip") {
         return Some((6, 0));
@@ -341,7 +344,20 @@ fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>>
 }
 
 /// Lock every requirement against PyPI, honoring the hash pins.
-pub fn lock_requirements(reqs: &[Requirement], python_tag: &str) -> io::Result<Vec<LockedPackage>> {
+pub fn lock_requirements(
+    platform: Platform,
+    reqs: &[Requirement],
+    python_tag: &str,
+) -> io::Result<Vec<LockedPackage>> {
+    if !platform.is_macos() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "wheel selection for {} lands in LINUX_PORT.md stage 2",
+                platform.triple()
+            ),
+        ));
+    }
     let mut out = Vec::new();
     for r in reqs {
         let all = fetch_candidates(&r.name, &r.version)?;
@@ -364,10 +380,11 @@ pub fn lock_requirements(reqs: &[Requirement], python_tag: &str) -> io::Result<V
         }
         let Some((chosen, kind)) = select_file(&matching, python_tag) else {
             return Err(err(format!(
-                "{}=={}: no file compatible with {python_tag} on macOS arm64 \
+                "{}=={}: no file compatible with {python_tag} on {} \
                  among hash-matched files: {}",
                 r.name,
                 r.version,
+                platform.triple(),
                 matching
                     .iter()
                     .map(|f| f.filename.as_str())
@@ -388,7 +405,11 @@ pub fn lock_requirements(reqs: &[Requirement], python_tag: &str) -> io::Result<V
 }
 
 /// End-to-end planner: text -> Plan.
-pub fn plan_python(requirements_text: &str, python_version: &str) -> io::Result<Plan> {
+pub fn plan_python(
+    platform: Platform,
+    requirements_text: &str,
+    python_version: &str,
+) -> io::Result<Plan> {
     let reqs = parse_requirements(requirements_text)?;
     let minor = python_version
         .split('.')
@@ -396,7 +417,7 @@ pub fn plan_python(requirements_text: &str, python_version: &str) -> io::Result<
         .collect::<Vec<_>>()
         .join("");
     let tag = format!("cp{minor}");
-    let packages = lock_requirements(&reqs, &tag)?;
+    let packages = lock_requirements(platform, &reqs, &tag)?;
     Ok(Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
@@ -577,5 +598,19 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         )];
         let (best, _) = select_file(&files, "cp312").unwrap();
         assert!(best.filename.contains("abi3"));
+    }
+
+    #[test]
+    fn linux_selector_guard_is_unsupported_before_fetch() {
+        let reqs = parse_requirements(
+            "blanket-stage1-fetch-sentinel==0.0.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+        )
+        .unwrap();
+        let error = lock_requirements(Platform::X86_64UnknownLinuxGnu, &reqs, "cp312")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error
+            .to_string()
+            .contains("wheel selection for x86_64-unknown-linux-gnu lands in LINUX_PORT.md stage 2"));
     }
 }

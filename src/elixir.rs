@@ -11,7 +11,8 @@
 //! deps projection is a writable clonefile copy, recorded unattested.
 
 use crate::fetch::{download_verified, download_verified_digest, Digest};
-use crate::sandbox::{force_env, run_build_spec, BuildSpec};
+use crate::platform::{no_pin, Platform};
+use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
 use crate::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,44 @@ use std::process::Command;
 const OTP_VERSION: &str = "29.0.5";
 // Community-maintained builds from erlef/otp_builds (relocatable by
 // construction: their Install step runs pre-packaging).
-const OTP_URL: &str = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz";
-const OTP_SHA256: &str = "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d";
+struct OtpPin {
+    platform: Platform,
+    url: &'static str,
+    sha256: &'static str,
+}
+
+const OTP_PINS: &[OtpPin] = &[OtpPin {
+    platform: Platform::Aarch64AppleDarwin,
+    url: "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz",
+    sha256: "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d",
+}];
+
+fn otp_pin(platform: Platform) -> io::Result<&'static OtpPin> {
+    OTP_PINS
+        .iter()
+        .find(|pin| pin.platform == platform)
+        .ok_or_else(|| no_pin("beam/otp", platform, "stage 4"))
+}
+
+fn beam_identity(pin: &OtpPin) -> Identity {
+    Identity {
+        kind: "beam".into(),
+        name: "beam".into(),
+        version: format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"),
+        inputs: BTreeMap::from([
+            ("schema".to_string(), "beam-toolchain/1".to_string()),
+            ("otp_sha256".to_string(), pin.sha256.to_string()),
+            ("elixir_sha256".to_string(), ELIXIR_SHA256.to_string()),
+            ("hex_sha512".to_string(), HEX_SHA512.to_string()),
+            ("rebar3_sha512".to_string(), REBAR3_SHA512.to_string()),
+            (
+                "versions".to_string(),
+                format!("hex{HEX_VERSION}:rebar{REBAR3_VERSION}"),
+            ),
+            ("platform".to_string(), pin.platform.triple().to_string()),
+        ]),
+    }
+}
 
 const ELIXIR_VERSION: &str = "1.20.4";
 // Platform-neutral BEAM code, keyed to the OTP major.
@@ -53,38 +90,28 @@ fn err(msg: impl Into<String>) -> io::Error {
 
 /// A short fingerprint of the whole BEAM toolchain, used to qualify build
 /// paths and identities (stale _build across toolchains is a real hazard).
-pub fn beam_fingerprint() -> String {
-    let joined = format!("{OTP_SHA256}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}");
-    hex::encode(&Sha256::digest(joined.as_bytes())[..8])
+pub fn beam_fingerprint(platform: Platform) -> io::Result<String> {
+    let pin = otp_pin(platform)?;
+    let joined = format!("{}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}", pin.sha256);
+    Ok(hex::encode(&Sha256::digest(joined.as_bytes())[..8]))
 }
 
 /// Ensure the composite BEAM toolchain object: otp/ + elixir/ (separate
 /// roots, per Sol — never merge their trees) + archives/ (unpacked Hex) +
 /// rebar3 escript.
 pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
-    let identity = Identity {
-        kind: "beam".into(),
-        name: "beam".into(),
-        version: format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"),
-        inputs: BTreeMap::from([
-            ("schema".to_string(), "beam-toolchain/1".to_string()),
-            ("otp_sha256".to_string(), OTP_SHA256.to_string()),
-            ("elixir_sha256".to_string(), ELIXIR_SHA256.to_string()),
-            ("hex_sha512".to_string(), HEX_SHA512.to_string()),
-            ("rebar3_sha512".to_string(), REBAR3_SHA512.to_string()),
-            (
-                "versions".to_string(),
-                format!("hex{HEX_VERSION}:rebar{REBAR3_VERSION}"),
-            ),
-            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
-        ]),
-    };
+    ensure_beam_for(store, Platform::host()?)
+}
+
+pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    let pin = otp_pin(platform)?;
+    let identity = beam_identity(pin);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let otp_tar = download_verified(store, OTP_URL, OTP_SHA256)?;
+    let otp_tar = download_verified(store, pin.url, pin.sha256)?;
     let elixir_zip = download_verified(store, ELIXIR_URL, ELIXIR_SHA256)?;
     let hex_ez = download_verified_digest(store, HEX_URL, &Digest::sha512(HEX_SHA512)?)?;
     let rebar3 = download_verified_digest(store, REBAR3_URL, &Digest::sha512(REBAR3_SHA512)?)?;
@@ -488,13 +515,19 @@ fn check_dep_tree(dep_dir: &Path, app: &str) -> io::Result<()> {
 /// Realize the immutable deps-source object (kind "hex-deps"): every
 /// tarball dual-checksum-verified by blanket (outer = sha256 of the .tar,
 /// inner = sha256(VERSION ++ metadata.config ++ contents.tar.gz)).
-pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Result<PathBuf> {
+pub fn realize_deps(
+    store: &Store,
+    platform: Platform,
+    plan: &ElixirPlan,
+    beam_obj: &Path,
+) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Hex dependencies", "stage 4")?;
     validate_plan(plan)?;
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "hex-deps/1".to_string()),
         // .hex markers are generated under the pinned toolchain; their
         // bytes live in the object.
-        ("beam".to_string(), beam_fingerprint()),
+        ("beam".to_string(), beam_fingerprint(platform)?),
     ]);
     for d in &plan.deps {
         inputs.insert(
@@ -532,8 +565,9 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
             "https://repo.hex.pm/tarballs/{}-{}.tar",
             d.package, d.version
         );
-        let tar = download_verified(store, &url, &d.outer_sha256)
-            .map_err(|e| err(format!("{}: {e}", d.app)))?;
+        let tar = download_verified(store, &url, &d.outer_sha256).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: {e}", d.app))
+        })?;
         // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz,
         // CHECKSUM) into scratch.
         let outer_dir = scratch.join(format!("outer-{}", d.app));
@@ -552,7 +586,12 @@ pub fn realize_deps(store: &Store, plan: &ElixirPlan, beam_obj: &Path) -> io::Re
         for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
             let p = outer_dir.join(part);
             let md = fs::symlink_metadata(&p)
-                .map_err(|e| err(format!("{}: missing {part} in tarball: {e}", d.app)))?;
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("{}: missing {part} in tarball: {e}", d.app),
+                    )
+                })?;
             if !md.file_type().is_file() {
                 return Err(err(format!("{}: {part} is not a regular file", d.app)));
             }
@@ -669,6 +708,7 @@ pub fn expected_projection(
 /// (native builds write into their source dirs — npm mutablePackages
 /// precedent; recorded unattested) + closure envelope.
 pub fn project_elixir_env(
+    platform: Platform,
     project_dir: &Path,
     beam_obj: &Path,
     deps_obj: &Path,
@@ -692,7 +732,7 @@ pub fn project_elixir_env(
         if tmp.exists() {
             crate::store::remove_tree(&tmp)?;
         }
-        crate::project::clone_tree(&deps_obj, &tmp)?;
+        crate::project::clone_tree_for(&deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
@@ -711,7 +751,7 @@ pub fn project_elixir_env(
             "deps_projection": proj_dir.display().to_string(),
             "mutable_state": "unattested",
             "mix_lock_sha256": lock_sha256,
-            "beam_fingerprint": beam_fingerprint(),
+            "beam_fingerprint": beam_fingerprint(platform)?,
             "plan": plan,
         }),
     )?;
@@ -720,13 +760,17 @@ pub fn project_elixir_env(
 
 /// Build root, qualified by the toolchain fingerprint (stale BEAM/native
 /// artifacts across OTP/Elixir upgrades are a real hazard — Sol).
-pub fn build_root(project_dir: &Path) -> PathBuf {
-    project_dir.join(format!("_build/blanket-{}", beam_fingerprint()))
+pub fn build_root(platform: Platform, project_dir: &Path) -> io::Result<PathBuf> {
+    Ok(project_dir.join(format!(
+        "_build/blanket-{}",
+        beam_fingerprint(platform)?
+    )))
 }
 
 /// Sandboxed `mix compile`: network denied, writes only the qualified
 /// build root, the deps projection (native builds write in-tree), scratch.
 pub fn build_sandboxed(
+    platform: Platform,
     project_dir: &Path,
     beam_obj: &Path,
     deps_projection: &Path,
@@ -743,7 +787,7 @@ pub fn build_sandboxed(
     let deps_projection = deps_projection.canonicalize()?;
     let store = Store::open()?;
     let scratch = store.stage()?;
-    let build = build_root(&project_dir);
+    let build = build_root(platform, &project_dir)?;
     fs::create_dir_all(&build)?;
     let build = build.canonicalize()?;
     let mut argv = vec![
@@ -766,8 +810,8 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: beam_path(&beam_obj),
     };
-    let result = run_build_spec(&spec).map_err(|e| {
-        err(format!(
+    let result = crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+        io::Error::new(e.kind(), format!(
             "mix compile failed: {e}\n(network is denied during builds; deps \
              needing network at compile time or absent host libraries are \
              unsupported in v0)"
@@ -780,6 +824,18 @@ pub fn build_sandboxed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        let platform = Platform::Aarch64AppleDarwin;
+        let pin = otp_pin(platform).unwrap();
+        let identity = beam_identity(pin);
+        assert_eq!(
+            identity.object_id(),
+            "7859ae4c9aa35b6c24bd08c2ad7989ab13313a8b-beam-29.0.5-elixir1.20.4"
+        );
+        assert_eq!(beam_fingerprint(platform).unwrap(), "c35290f692496d51");
+    }
 
     #[test]
     fn plan_validation_rejects_hostile_fields() {
@@ -845,8 +901,10 @@ mod tests {
 
     #[test]
     fn build_root_is_beam_qualified() {
-        let root = build_root(Path::new("/p"));
+        let root = build_root(Platform::Aarch64AppleDarwin, Path::new("/p")).unwrap();
         assert!(root.display().to_string().contains("_build/blanket-"));
-        assert_eq!(beam_fingerprint().len(), 16);
+        assert_eq!(beam_fingerprint(Platform::Aarch64AppleDarwin)
+            .unwrap()
+            .len(), 16);
     }
 }

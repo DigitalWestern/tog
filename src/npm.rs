@@ -15,6 +15,7 @@
 //! M5 control for that.
 
 use crate::fetch::{download_verified_digest, Digest};
+use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
 use std::collections::BTreeMap;
@@ -106,35 +107,55 @@ pub fn script_commands(
 
 /// Pinned Node.js toolchain (nodejs.org, checksum from SHASUMS256.txt).
 pub struct PinnedNode {
+    pub platform: Platform,
     pub version: &'static str,
     pub url: &'static str,
     pub sha256: &'static str,
 }
 
-pub const NODE: PinnedNode = PinnedNode {
+pub const NODE_PINS: &[PinnedNode] = &[PinnedNode {
+    platform: Platform::Aarch64AppleDarwin,
     version: "24.20.0",
     url: "https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz",
     sha256: "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8",
-};
+}];
+
+pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
+    NODE_PINS
+        .iter()
+        .find(|pin| pin.platform == platform)
+        .ok_or_else(|| no_pin("nodejs", platform, "stage 2"))
+}
+
+fn node_identity(node: &PinnedNode) -> Identity {
+    Identity {
+        kind: "nodejs".into(),
+        name: "nodejs".into(),
+        version: node.version.into(),
+        inputs: BTreeMap::from([
+            ("artifact_sha256".to_string(), node.sha256.to_string()),
+            ("platform".to_string(), node.platform.triple().to_string()),
+        ]),
+    }
+}
 
 /// Ensure Node.js is realized in the store (interpreter at <obj>/bin/node).
 pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
-    let identity = Identity {
-        kind: "nodejs".into(),
-        name: "nodejs".into(),
-        version: NODE.version.into(),
-        inputs: BTreeMap::from([
-            ("artifact_sha256".to_string(), NODE.sha256.to_string()),
-            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
-        ]),
-    };
+    ensure_node_for(store, Platform::host()?)
+}
+
+pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    let node = node_pin(platform)?;
+    let identity = node_identity(node);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = crate::fetch::download_verified(store, NODE.url, NODE.sha256)?;
-    let staged = store.stage().map_err(|e| err(format!("stage: {e}")))?;
+    let tarball = crate::fetch::download_verified(store, node.url, node.sha256)?;
+    let staged = store
+        .stage()
+        .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
     let status = Command::new("/usr/bin/tar")
         .arg("-xzf")
         .arg(&tarball)
@@ -142,14 +163,14 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
         .arg(&staged)
         .args(["--strip-components", "1"])
         .status()
-        .map_err(|e| err(format!("spawn tar: {e}")))?;
+        .map_err(|e| io::Error::new(e.kind(), format!("spawn tar: {e}")))?;
     if !status.success() {
         return Err(err("node tarball extraction failed"));
     }
     store
         .commit(&identity, &staged, &[])
         .map(|(path, _)| path)
-        .map_err(|e| err(format!("commit node object: {e}")))
+        .map_err(|e| io::Error::new(e.kind(), format!("commit node object: {e}")))
 }
 
 #[derive(Debug, Clone)]
@@ -235,7 +256,8 @@ fn name_from_path(path: &str) -> String {
 
 /// Parse package-lock.json (lockfileVersion 2 or 3) into a plan.
 /// Pure parsing: no network. Deterministic (sorted by path).
-pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
+pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
+    let node = node_pin(platform)?;
     let v: serde_json::Value =
         serde_json::from_str(lock_json).map_err(|e| err(format!("package-lock.json: {e}")))?;
     let lockfile_version = v["lockfileVersion"].as_u64().unwrap_or(0);
@@ -324,14 +346,17 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
                 }
             }
         };
-        let compatible = platform_ok("os", "darwin") && platform_ok("cpu", "arm64");
+        let compatible = platform_ok("os", platform.npm_os())
+            && platform_ok("cpu", platform.npm_cpu());
         if !compatible {
             if entry["optional"].as_bool() == Some(true) {
                 skipped.push(format!("{path}/"));
                 continue;
             }
             return Err(err(format!(
-                "{path}: required dependency does not support darwin/arm64"
+                "{path}: required dependency does not support {}/{}",
+                platform.npm_os(),
+                platform.npm_cpu()
             )));
         }
         let resolved = entry["resolved"].as_str().ok_or_else(|| {
@@ -387,7 +412,7 @@ pub fn plan_npm(lock_json: &str) -> io::Result<NpmPlan> {
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(NpmPlan {
-        node_version: NODE.version.to_string(),
+        node_version: node.version.to_string(),
         packages: out,
         links,
     })
@@ -418,10 +443,14 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
 /// Object content root contains exactly `node_modules/`.
 pub fn realize_node_env(
     store: &Store,
+    platform: Platform,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
-    let node_obj = ensure_node(store).map_err(|e| err(format!("ensure node: {e}")))?;
+    crate::platform::require_host(platform, "node environment", "stage 2")?;
+    let node_obj = ensure_node_for(store, platform).map_err(|e| {
+        io::Error::new(e.kind(), format!("ensure node: {e}"))
+    })?;
 
     let mut inputs = BTreeMap::new();
     // /3: install scripts run sandboxed; name@version joined the per-pkg
@@ -486,8 +515,9 @@ pub fn realize_node_env(
     let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
-        let t = download_verified_digest(store, &p.url, &digest)
-            .map_err(|e| err(format!("{}: fetch {}: {e}", p.path, p.url)))?;
+        let t = download_verified_digest(store, &p.url, &digest).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+        })?;
         tarballs.push((p, t));
     }
 
@@ -497,7 +527,9 @@ pub fn realize_node_env(
     // already holds after sort, since "a/node_modules/b" sorts after "a").
     for (p, tarball) in &tarballs {
         let dest = staged.join(&p.path);
-        fs::create_dir_all(&dest).map_err(|e| err(format!("{}: create dir: {e}", p.path)))?;
+        fs::create_dir_all(&dest).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path))
+        })?;
         let status = Command::new("/usr/bin/tar")
             .arg("-xzf")
             .arg(tarball)
@@ -508,11 +540,16 @@ pub fn realize_node_env(
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
-        normalize_modes(&dest).map_err(|e| err(format!("{}: normalize modes: {e}", p.path)))?;
+        normalize_modes(&dest).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path))
+        })?;
         // ponytail: post-extraction size cap (1 GiB/package) — catches
         // decompression bombs after the fact; a streaming extractor with
         // preflight limits is the M5 upgrade. Lockfiles are trusted inputs.
-        if dir_size(&dest).map_err(|e| err(format!("{}: size walk: {e}", p.path)))? > 1 << 30 {
+        if dir_size(&dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: size walk: {e}", p.path)))?
+            > 1 << 30
+        {
             return Err(err(format!(
                 "{}: package expands past 1 GiB; refusing",
                 p.path
@@ -591,12 +628,12 @@ pub fn realize_node_env(
         }
     }
 
-    run_install_scripts(store, &staged, &node_obj, plan, artifacts)?;
+    run_install_scripts(store, platform, &staged, &node_obj, plan, artifacts)?;
 
     let candidate = crate::policy::object_exceptions();
     let (object, applied) = store
         .commit(&identity, &staged, &candidate)
-        .map_err(|e| err(format!("commit env: {e}")))?;
+        .map_err(|e| io::Error::new(e.kind(), format!("commit env: {e}")))?;
     for exception in applied {
         if !candidate.contains(&exception) {
             crate::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
@@ -620,6 +657,7 @@ pub fn realize_node_env(
 /// declared artifacts planted per consuming HOME.
 fn run_install_scripts(
     store: &Store,
+    platform: Platform,
     staged: &Path,
     node_obj: &Path,
     plan: &NpmPlan,
@@ -687,11 +725,11 @@ fn run_install_scripts(
         // (paths are HOME-relative; HOME is this scratch dir).
         for a in artifacts {
             let src = crate::fetch::download_verified(store, &a.url, &a.sha256)
-                .map_err(|e| err(format!("declared artifact {}: {e}", a.url)))?;
+                .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
             let dest = tmp.join(&a.path);
             fs::create_dir_all(dest.parent().unwrap())?;
             fs::copy(&src, &dest)
-                .map_err(|e| err(format!("placing declared artifact {}: {e}", a.path)))?;
+                .map_err(|e| io::Error::new(e.kind(), format!("placing declared artifact {}: {e}", a.path)))?;
         }
 
         let phases: Vec<(&str, String)> = ["preinstall", "install", "postinstall"]
@@ -711,15 +749,18 @@ fn run_install_scripts(
         let snapshot_root = store.stage()?;
         cleanup.push(snapshot_root.clone());
         let snapshot = snapshot_root.join("package");
-        crate::project::clone_tree(&pkg_dir, &snapshot)?;
+        crate::project::clone_tree_for(&pkg_dir, &snapshot, platform)?;
 
         let python = match &python_obj {
             Some(p) => p.clone(),
             None => {
-                let pin = crate::python::lookup("3.12")
-                    .ok_or_else(|| err("no pinned CPython for node-gyp"))?;
-                let p = crate::python::ensure_python(store, pin)
-                    .map_err(|e| err(format!("ensure python for node-gyp: {e}")))?;
+                let pin = crate::python::lookup(platform, "3.12").ok_or_else(|| {
+                    crate::platform::no_pin("cpython 3.12", platform, "stage 2")
+                })?;
+                let p = crate::python::ensure_python_for(store, pin, platform)
+                    .map_err(|e| {
+                        io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}"))
+                    })?;
                 python_obj.insert(p).clone()
             }
         };
@@ -768,7 +809,8 @@ fn run_install_scripts(
                 .cloned()
                 .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
                 .collect();
-            let result = sandbox.run_in(
+            let result = sandbox.run_in_on(
+                platform,
                 &["/bin/sh", "-c", script],
                 &path_env,
                 &tmp,
@@ -776,6 +818,12 @@ fn run_install_scripts(
                 &envs_phase,
             );
             if let Err(e) = result {
+                if e.kind() == io::ErrorKind::Unsupported {
+                    for t in &cleanup {
+                        let _ = crate::store::remove_tree(t);
+                    }
+                    return Err(e);
+                }
                 let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
                             \"blanket\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
                             placed where the package's downloader caches them (see README).";
@@ -836,7 +884,7 @@ pub struct DeclaredArtifact {
     pub url: String,
     pub sha256: String,
     /// Where the file must appear, relative to the sandbox HOME
-    /// (e.g. ".npm/_libvips/libvips-8.14.5-darwin-arm64v8.tar.br").
+    /// (e.g. ".npm/_libvips/libvips-8.14.5-darwin-arm64v8.tar.br"; LINUX_PORT.md stage 1).
     pub path: String,
 }
 
@@ -940,6 +988,7 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
 pub fn project_node_env(
     project_dir: &Path,
     env_obj: &Path,
+    platform: Platform,
     plan: &NpmPlan,
     mutable: &[String],
     fresh: bool,
@@ -1005,7 +1054,7 @@ pub fn project_node_env(
         if mutable.is_empty() {
             build_forest(&src, &tmp.join("node_modules"))?;
         } else {
-            crate::project::clone_tree(&src, &tmp.join("node_modules"))?;
+            crate::project::clone_tree_for(&src, &tmp.join("node_modules"), platform)?;
         }
         fs::rename(&tmp, &proj_dir)?;
     }
@@ -1173,6 +1222,58 @@ fn dir_size(path: &Path) -> io::Result<u64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn darwin_identity_unchanged() {
+        let node = node_pin(Platform::Aarch64AppleDarwin).unwrap();
+        let identity = node_identity(node);
+        assert_eq!(
+            identity.object_id(),
+            "174e755a9fcb532c2addfefb93562ba28874abdc-nodejs-24.20.0"
+        );
+    }
+
+    #[test]
+    fn realize_node_env_preserves_unsupported_kind() {
+        let store = Store {
+            root: PathBuf::from("/nonexistent/blanket-test-store"),
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: Vec::new(),
+            links: Vec::new(),
+        };
+        let error = realize_node_env(
+            &store,
+            Platform::X86_64UnknownLinuxGnu,
+            &plan,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("ensure node"));
+    }
+
+    #[test]
+    fn realize_node_env_rejects_foreign_platform_before_store_access() {
+        let store = Store {
+            root: PathBuf::from("/nonexistent/blanket-test-store"),
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: Vec::new(),
+            links: Vec::new(),
+        };
+        let error = realize_node_env(
+            &store,
+            Platform::Aarch64AppleDarwin,
+            &plan,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("aarch64-apple-darwin"));
+    }
+
     fn lock(packages: &str) -> String {
         format!(r#"{{"name":"x","lockfileVersion":3,"packages":{{"":{{"name":"x"}},{packages}}}}}"#)
     }
@@ -1183,7 +1284,7 @@ mod tests {
             r#""node_modules/@s/a":{"version":"1.0.0","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
                "node_modules/b/node_modules/c":{"version":"2.0.0","resolved":"https://r/c.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
         );
-        let plan = plan_npm(&l).unwrap();
+        let plan = plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap();
         assert_eq!(plan.packages.len(), 2);
         assert_eq!(plan.packages[0].name, "@s/a");
         assert_eq!(plan.packages[1].name, "c");
@@ -1195,23 +1296,23 @@ mod tests {
     #[test]
     fn rejections() {
         // v1 lockfile
-        assert!(plan_npm(r#"{"lockfileVersion":1,"packages":{}}"#).is_err());
+        assert!(plan_npm(Platform::Aarch64AppleDarwin, r#"{"lockfileVersion":1,"packages":{}}"#).is_err());
         // link entry
         let l = lock(r#""node_modules/a":{"link":true,"resolved":"https://r/a.tgz"}"#);
-        assert!(plan_npm(&l).is_err());
+        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
         // missing integrity
         let l = lock(r#""node_modules/a":{"version":"1.0.0","resolved":"https://r/a.tgz"}"#);
-        assert!(plan_npm(&l).is_err());
+        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
         // path traversal
         let l = lock(
             r#""node_modules/../evil":{"version":"1","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
         );
-        assert!(plan_npm(&l).is_err());
+        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
         // git URL
         let l = lock(
             r#""node_modules/a":{"version":"1","resolved":"git+ssh://git@x/a.git","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="}"#,
         );
-        assert!(plan_npm(&l).is_err());
+        assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
     }
 
     #[test]
@@ -1221,14 +1322,14 @@ mod tests {
             r#""node_modules/a":{"version":"1","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
                "node_modules/a/node_modules/b":{"version":"1","inBundle":true}"#,
         );
-        assert_eq!(plan_npm(&l).unwrap().packages.len(), 1);
+        assert_eq!(plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap().packages.len(), 1);
         // descendants of a platform-skipped optional package are dropped
         // even without their own os/cpu/resolved fields.
         let l = lock(
             r#""node_modules/w":{"version":"1","optional":true,"cpu":["wasm32"],"resolved":"https://r/w.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
                "node_modules/w/node_modules/c":{"version":"1"}"#,
         );
-        assert_eq!(plan_npm(&l).unwrap().packages.len(), 0);
+        assert_eq!(plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap().packages.len(), 0);
     }
 
     #[test]
@@ -1319,7 +1420,9 @@ mod tests {
         let identity = |inputs| Identity {
             kind: "node-env".into(),
             name: "env".into(),
-            version: NODE.version.into(),
+            version: node_pin(Platform::Aarch64AppleDarwin).unwrap()
+                .version
+                .into(),
             inputs,
         };
         assert_ne!(

@@ -1,10 +1,13 @@
 use blanket::{
-    cargo, dotnet, elixir, golang, npm, policy, project, pypi, python, ruby, sbom, store, types,
+    cargo, dotnet, elixir, golang, npm, platform::Platform, policy, project, pypi, python, ruby,
+    sbom, store, types,
 };
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+
+const PLANNER_SCHEMA: &str = "python-planner/2";
 
 const USAGE: &str = "\
 blanket — universal realization & environment kernel (python + node + cargo)
@@ -34,16 +37,47 @@ Project inputs (either or both):
   *.csproj + packages.lock.json  .NET NuGet deps (lock made mandatory)
 ";
 
+fn planner_input_hash(platform: Platform, python_version: &str, text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(
+        format!(
+            "{PLANNER_SCHEMA}\x00{python_version}\x00{text}\x00{}",
+            platform.triple()
+        )
+        .as_bytes(),
+    ))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(command) = args.first().map(String::as_str) else {
+        eprint!("{USAGE}");
+        exit(2);
+    };
+    let supported = matches!(command, "sync" | "plan" | "build" | "run" | "sbom")
+        || (command == "store" && args.get(1).map(String::as_str) == Some("path"));
+    if !supported {
+        eprint!("{USAGE}");
+        exit(2);
+    }
+    // Help and usage return above without host validation; real subcommands
+    // validate once before any store-touching work.
+    let platform = match Platform::host() {
+        Ok(platform) => platform,
+        Err(error) => {
+            eprintln!("blanket: error: {error}");
+            exit(1);
+        }
+    };
     let code = match args.first().map(String::as_str) {
         Some("sync") => run_sync(
+            platform,
             args.iter().any(|a| a == "--fresh"),
             args.iter().any(|a| a == "--strict"),
         ),
-        Some("plan") => run_plan(),
-        Some("build") => run_build(&args[1..]),
-        Some("run") => run_run(&args[1..]),
+        Some("plan") => run_plan(platform),
+        Some("build") => run_build(platform, &args[1..]),
+        Some("run") => run_run(platform, &args[1..]),
         Some("sbom") => run_sbom(&args[1..]),
         Some("store") if args.get(1).map(String::as_str) == Some("path") => {
             store::Store::open().map(|s| println!("{}", s.root.display()))
@@ -130,9 +164,13 @@ fn locate_cargo_root(rust_obj: &Path, cwd: &Path) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("cargo locate-project returned no manifest path"))
 }
 
-fn load_cargo_inputs(cwd: &Path, store: &store::Store) -> io::Result<CargoInputs> {
-    let rust_version = cargo::resolve_toolchain(cwd)?;
-    let rust_obj = cargo::ensure_rust(store, rust_version)?;
+fn load_cargo_inputs(
+    platform: Platform,
+    cwd: &Path,
+    store: &store::Store,
+) -> io::Result<CargoInputs> {
+    let rust_version = cargo::resolve_toolchain(platform, cwd)?;
+    let rust_obj = cargo::ensure_rust_for(store, platform, rust_version)?;
     let root = locate_cargo_root(&rust_obj, cwd)?;
     if !root.join("Cargo.lock").is_file() {
         ensure_cargo_lock(&root, &rust_obj)?;
@@ -179,7 +217,7 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
 /// Plan from project inputs. Planning hits PyPI, so successful plans are
 /// cached in .blanket/plan.json keyed by a hash of the inputs; an unchanged
 /// lock replans offline and instantly.
-fn read_plan(dir: &Path) -> io::Result<types::Plan> {
+fn read_plan(platform: Platform, dir: &Path) -> io::Result<types::Plan> {
     let req_path = dir.join("requirements.txt");
     let (input, source) = if req_path.is_file() {
         (
@@ -212,15 +250,12 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
     let pyver = std::fs::read_to_string(dir.join(".python-version"))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "3.12".into());
-    let pin = python::lookup(&pyver).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no pinned CPython matching '{pyver}'"),
-        )
+    let pin = python::lookup(platform, &pyver).ok_or_else(|| {
+        blanket::platform::no_pin(&format!("cpython {pyver}"), platform, "stage 2")
     })?;
 
     let text = if input == "pyproject.toml" {
-        locked_requirements(dir, &input, &source, pin.version)?
+        locked_requirements(platform, dir, &input, &source, pin.version)?
     } else if is_fully_pinned(&source) {
         match pypi::parse_requirements(&source) {
             Ok(_) => source,
@@ -230,19 +265,16 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
                     "blanket: requirements.txt is pinned but not directly \
                      consumable ({e}); re-locking for this platform with uv..."
                 );
-                locked_requirements(dir, &input, &source, pin.version)?
+                locked_requirements(platform, dir, &input, &source, pin.version)?
             }
         }
     } else {
-        locked_requirements(dir, &input, &source, pin.version)?
+        locked_requirements(platform, dir, &input, &source, pin.version)?
     };
 
-    use sha2::{Digest, Sha256};
-    // PLANNER_SCHEMA busts stale caches when planner semantics change.
-    const PLANNER_SCHEMA: &str = "python-planner/2";
-    let input_hash = hex::encode(Sha256::digest(
-        format!("{PLANNER_SCHEMA}\x00{}\x00{}", pin.version, text).as_bytes(),
-    ));
+    // These are project-local .blanket caches, not store identities; one
+    // re-plan after moving a project between platforms is acceptable.
+    let input_hash = planner_input_hash(platform, pin.version, &text);
     let cache_path = dir.join(".blanket/plan.json");
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
@@ -254,7 +286,7 @@ fn read_plan(dir: &Path) -> io::Result<types::Plan> {
         }
     }
 
-    let plan = pypi::plan_python(&text, pin.version)?;
+    let plan = pypi::plan_python(platform, &text, pin.version)?;
     std::fs::create_dir_all(dir.join(".blanket"))?;
     std::fs::write(
         &cache_path,
@@ -345,10 +377,16 @@ fn is_fully_pinned(text: &str) -> bool {
 
 /// Resolve ranged requirements to a hash-pinned lock via uv, cached in
 /// requirements.lock.txt and regenerated when the source input changes.
-fn locked_requirements(dir: &Path, input: &str, source: &str, pyver: &str) -> io::Result<String> {
+fn locked_requirements(
+    platform: Platform,
+    dir: &Path,
+    input: &str,
+    source: &str,
+    pyver: &str,
+) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
     let stamp_path = dir.join(".blanket/lock-source.hash");
-    let source_hash = lock_source_hash(pyver, source);
+    let source_hash = lock_source_hash(platform, pyver, source);
     if let (Ok(stamp), Ok(lock)) = (
         std::fs::read_to_string(&stamp_path),
         std::fs::read_to_string(&lock_path),
@@ -359,7 +397,7 @@ fn locked_requirements(dir: &Path, input: &str, source: &str, pyver: &str) -> io
     }
     eprintln!("blanket: {input} is not hash-pinned; resolving with the store uv...");
     // Store-pinned uv, not host uv: a bare machine needs only blanket.
-    let uv = python::ensure_uv(&store::Store::open()?)?.join("uv");
+    let uv = python::ensure_uv_for(&store::Store::open()?, platform)?.join("uv");
     let status = std::process::Command::new(&uv)
         .args(["pip", "compile", input, "--generate-hashes", "--quiet"])
         .args(["--python-version", pyver])
@@ -375,23 +413,28 @@ fn locked_requirements(dir: &Path, input: &str, source: &str, pyver: &str) -> io
     std::fs::read_to_string(&lock_path)
 }
 
-fn lock_source_hash(pyver: &str, source: &str) -> String {
+fn lock_source_hash(platform: Platform, pyver: &str, source: &str) -> String {
     use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(format!("{pyver}\x00{source}").as_bytes()))
+    hex::encode(Sha256::digest(
+        format!("{pyver}\x00{source}\x00{}", platform.triple()).as_bytes(),
+    ))
 }
 
-fn run_plan() -> io::Result<()> {
+fn run_plan(platform: Platform) -> io::Result<()> {
     let dir = project_dir();
     policy::init(&dir, false)?;
-    ensure_npm_lock(&dir)?;
+    ensure_npm_lock(platform, &dir)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let plan = read_plan(&dir)?;
+        let plan = read_plan(platform, &dir)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
     if dir.join("package-lock.json").exists() {
-        let plan = npm::plan_npm(&std::fs::read_to_string(dir.join("package-lock.json"))?)?;
+        let plan = npm::plan_npm(
+            platform,
+            &std::fs::read_to_string(dir.join("package-lock.json"))?,
+        )?;
         let v: Vec<_> = plan
             .packages
             .iter()
@@ -410,26 +453,26 @@ fn run_plan() -> io::Result<()> {
     }
     if is_cargo_here(&dir) {
         let store = store::Store::open()?;
-        let inputs = load_cargo_inputs(&dir, &store)?;
+        let inputs = load_cargo_inputs(platform, &dir, &store)?;
         println!("{}", serde_json::to_string_pretty(&inputs.plan)?);
         any = true;
     }
     if dir.join("go.mod").is_file() {
         let store = store::Store::open()?;
-        let inputs = load_go_inputs(&dir, &store)?;
+        let inputs = load_go_inputs(platform, &dir, &store)?;
         println!("{}", serde_json::to_string_pretty(&inputs.plan)?);
         any = true;
     }
     if dir.join("Gemfile").is_file() {
         let store = store::Store::open()?;
-        let ruby_obj = ruby::ensure_ruby(&store)?;
+        let ruby_obj = ruby::ensure_ruby_for(&store, platform)?;
         let (plan, _) = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
     if dir.join("mix.exs").is_file() {
         let store = store::Store::open()?;
-        let beam = elixir::ensure_beam(&store)?;
+        let beam = elixir::ensure_beam_for(&store, platform)?;
         let (plan, _) = elixir::plan_elixir(&store, &dir, &beam)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
@@ -439,7 +482,7 @@ fn run_plan() -> io::Result<()> {
         // loudly here, not after a toolchain download.
         dotnet::preflight(&dir)?;
         let store = store::Store::open()?;
-        let sdk = dotnet::ensure_sdk(&store)?;
+        let sdk = dotnet::ensure_sdk_for(&store, platform)?;
         let (plan, _) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
@@ -486,9 +529,13 @@ struct GoInputs {
     gosum_sha256: String,
 }
 
-fn load_go_inputs(dir: &Path, store: &store::Store) -> io::Result<GoInputs> {
-    let go_obj = golang::ensure_go(store)?;
-    let plan = golang::plan_go(store, dir, &go_obj)?;
+fn load_go_inputs(
+    platform: Platform,
+    dir: &Path,
+    store: &store::Store,
+) -> io::Result<GoInputs> {
+    let go_obj = golang::ensure_go_for(store, platform)?;
+    let plan = golang::plan_go(store, platform, dir, &go_obj)?;
     let gosum = std::fs::read_to_string(dir.join("go.sum")).unwrap_or_default();
     use sha2::{Digest, Sha256};
     Ok(GoInputs {
@@ -501,7 +548,7 @@ fn load_go_inputs(dir: &Path, store: &store::Store) -> io::Result<GoInputs> {
 /// A package.json without a package-lock.json (bun/yarn/pnpm projects):
 /// delegate lock generation to npm, mirroring the uv flow for Python.
 /// Resolution is the ecosystem's job; realization is blanket's.
-fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
+fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
     if !dir.join("package.json").exists() || dir.join("package-lock.json").exists() {
         return Ok(());
     }
@@ -517,7 +564,7 @@ fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
     eprintln!("blanket: no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
     // blanket. npm-cli's shebang is `env node`, so the store bin leads PATH.
-    let node = npm::ensure_node(&store::Store::open()?)?;
+    let node = npm::ensure_node_for(&store::Store::open()?, platform)?;
     let path = format!(
         "{}:{}",
         node.join("bin").display(),
@@ -545,15 +592,15 @@ fn ensure_npm_lock(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn run_sync(fresh: bool, strict: bool) -> io::Result<()> {
+fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = project_dir();
     policy::init(&dir, strict)?;
     let store = store::Store::open()?;
-    ensure_npm_lock(&dir)?;
+    ensure_npm_lock(platform, &dir)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let plan = read_plan(&dir)?;
-        let env = project::realize_env(&store, &plan)?;
+        let plan = read_plan(platform, &dir)?;
+        let env = project::realize_env(&store, platform, &plan)?;
         project::project_env(&dir, &env, &plan)?;
         eprintln!("synced: .venv -> {}", env.display());
         any = true;
@@ -565,15 +612,15 @@ fn run_sync(fresh: bool, strict: bool) -> io::Result<()> {
             npm::check_lock_freshness(&pkg, &lock)?;
             config = npm::parse_blanket_config(&pkg)?;
         }
-        let plan = npm::plan_npm(&lock)?;
-        let env = npm::realize_node_env(&store, &plan, &config.artifacts)?;
-        npm::project_node_env(&dir, &env, &plan, &config.mutable_packages, fresh)?;
+        let plan = npm::plan_npm(platform, &lock)?;
+        let env = npm::realize_node_env(&store, platform, &plan, &config.artifacts)?;
+        npm::project_node_env(&dir, &env, platform, &plan, &config.mutable_packages, fresh)?;
         eprintln!("synced: node_modules -> {}", env.display());
         any = true;
     }
     if dir.join("go.mod").is_file() {
-        let inputs = load_go_inputs(&dir, &store)?;
-        let modcache = golang::realize_modcache(&store, &inputs.plan, &inputs.go_obj)?;
+        let inputs = load_go_inputs(platform, &dir, &store)?;
+        let modcache = golang::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
         golang::project_go_env(
             &dir,
             &inputs.go_obj,
@@ -585,33 +632,33 @@ fn run_sync(fresh: bool, strict: bool) -> io::Result<()> {
         any = true;
     }
     if dir.join("Gemfile").is_file() {
-        let ruby_obj = ruby::ensure_ruby(&store)?;
+        let ruby_obj = ruby::ensure_ruby_for(&store, platform)?;
         let (plan, lock_sha256) = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
-        let gems = ruby::realize_gems(&store, &plan, &ruby_obj)?;
+        let gems = ruby::realize_gems(&store, platform, &plan, &ruby_obj)?;
         ruby::project_ruby_env(&dir, &ruby_obj, &gems, &plan, &lock_sha256)?;
         eprintln!("synced: gems -> {}", gems.display());
         any = true;
     }
     if dir.join("mix.exs").is_file() {
-        let beam = elixir::ensure_beam(&store)?;
+        let beam = elixir::ensure_beam_for(&store, platform)?;
         let (plan, lock_sha256) = elixir::plan_elixir(&store, &dir, &beam)?;
-        let deps = elixir::realize_deps(&store, &plan, &beam)?;
+        let deps = elixir::realize_deps(&store, platform, &plan, &beam)?;
         let projection =
-            elixir::project_elixir_env(&dir, &beam, &deps, &plan, &lock_sha256, fresh)?;
+            elixir::project_elixir_env(platform, &dir, &beam, &deps, &plan, &lock_sha256, fresh)?;
         eprintln!("synced: hex deps -> {}", projection.display());
         any = true;
     }
     if dotnet::has_marker(&dir)? {
         dotnet::preflight(&dir)?;
-        let sdk = dotnet::ensure_sdk(&store)?;
+        let sdk = dotnet::ensure_sdk_for(&store, platform)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
-        let packages = dotnet::realize_packages(&store, &plan, &sdk, &dir)?;
+        let packages = dotnet::realize_packages(&store, platform, &plan, &sdk, &dir)?;
         dotnet::project_dotnet_env(&dir, &sdk, &packages, &plan, &lock_sha256)?;
         eprintln!("synced: nuget packages -> {}", packages.display());
         any = true;
     }
     if is_cargo_here(&dir) {
-        let inputs = load_cargo_inputs(&dir, &store)?;
+        let inputs = load_cargo_inputs(platform, &dir, &store)?;
         let rust_obj = &inputs.rust_obj;
         let vendor_obj = cargo::realize_vendor(&store, &inputs.plan)?;
         if fresh {
@@ -667,7 +714,7 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
 
 /// `blanket build [ecosystem] [args...]`: explicit ecosystem, or inferred
 /// when exactly one build-capable ecosystem is present (Sol review 4).
-fn run_build(args: &[String]) -> io::Result<()> {
+fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
     let cwd = project_dir();
     let (eco, rest): (&str, &[String]) = match args.first().map(String::as_str) {
         Some("cargo") => ("cargo", &args[1..]),
@@ -731,7 +778,7 @@ fn run_build(args: &[String]) -> io::Result<()> {
     let store = store::Store::open()?;
     match eco {
         "cargo" => {
-            let inputs = load_cargo_inputs(&cwd, &store)?;
+            let inputs = load_cargo_inputs(platform, &cwd, &store)?;
             let vendor_obj = cargo::realize_vendor(&store, &inputs.plan)?;
             cargo::project_cargo_env(
                 &inputs.root,
@@ -740,7 +787,13 @@ fn run_build(args: &[String]) -> io::Result<()> {
                 &inputs.plan,
                 &inputs.lock_digest,
             )?;
-            cargo::build_sandboxed(&inputs.root, &inputs.rust_obj, &vendor_obj, rest)
+            cargo::build_sandboxed(
+                platform,
+                &inputs.root,
+                &inputs.rust_obj,
+                &vendor_obj,
+                rest,
+            )
         }
         "go" => {
             let root = cwd
@@ -750,8 +803,8 @@ fn run_build(args: &[String]) -> io::Result<()> {
                     io::Error::new(io::ErrorKind::NotFound, "no go.mod found from here upward")
                 })?
                 .to_path_buf();
-            let inputs = load_go_inputs(&root, &store)?;
-            let modcache = golang::realize_modcache(&store, &inputs.plan, &inputs.go_obj)?;
+            let inputs = load_go_inputs(platform, &root, &store)?;
+            let modcache = golang::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
             golang::project_go_env(
                 &root,
                 &inputs.go_obj,
@@ -759,7 +812,7 @@ fn run_build(args: &[String]) -> io::Result<()> {
                 &inputs.plan,
                 &inputs.gosum_sha256,
             )?;
-            golang::build_sandboxed(&root, &inputs.go_obj, &modcache, rest)
+            golang::build_sandboxed(platform, &root, &inputs.go_obj, &modcache, rest)
         }
         "elixir" => {
             let root = cwd
@@ -769,19 +822,19 @@ fn run_build(args: &[String]) -> io::Result<()> {
                     io::Error::new(io::ErrorKind::NotFound, "no mix.exs found from here upward")
                 })?
                 .to_path_buf();
-            let beam = elixir::ensure_beam(&store)?;
+            let beam = elixir::ensure_beam_for(&store, platform)?;
             let (plan, lock_sha256) = elixir::plan_elixir(&store, &root, &beam)?;
-            let deps = elixir::realize_deps(&store, &plan, &beam)?;
+            let deps = elixir::realize_deps(&store, platform, &plan, &beam)?;
             let projection =
-                elixir::project_elixir_env(&root, &beam, &deps, &plan, &lock_sha256, false)?;
-            elixir::build_sandboxed(&root, &beam, &projection, rest)
+                elixir::project_elixir_env(platform, &root, &beam, &deps, &plan, &lock_sha256, false)?;
+            elixir::build_sandboxed(platform, &root, &beam, &projection, rest)
         }
         _ => {
-            let sdk = dotnet::ensure_sdk(&store)?;
+            let sdk = dotnet::ensure_sdk_for(&store, platform)?;
             let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &cwd, &sdk)?;
-            let packages = dotnet::realize_packages(&store, &plan, &sdk, &cwd)?;
+            let packages = dotnet::realize_packages(&store, platform, &plan, &sdk, &cwd)?;
             dotnet::project_dotnet_env(&cwd, &sdk, &packages, &plan, &lock_sha256)?;
-            dotnet::build_sandboxed(&cwd, &sdk, &packages, rest)
+            dotnet::build_sandboxed(platform, &cwd, &sdk, &packages, rest)
         }
     }
 }
@@ -802,7 +855,7 @@ fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool
     has_dotnet_closure && script_resolved
 }
 
-fn run_run(cmd: &[String]) -> io::Result<()> {
+fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
     if cmd.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -871,7 +924,7 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         prefix.push(nm.join(".bin").to_string_lossy().into_owned());
         // Node toolchain from the store (cache hit after sync).
         let store = store::Store::open()?;
-        let node = npm::ensure_node(&store)?;
+        let node = npm::ensure_node_for(&store, platform)?;
         prefix.push(node.join("bin").to_string_lossy().into_owned());
     }
     if cargo_home.exists() {
@@ -938,7 +991,12 @@ fn run_run(cmd: &[String]) -> io::Result<()> {
         let scratch = std::env::temp_dir().join(format!("blanket-mix-run-{}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
         let (prefixes, remove, set) =
-            elixir::run_env(&beam, &projection, &elixir::build_root(&dir), &scratch)?;
+            elixir::run_env(
+                &beam,
+                &projection,
+                &elixir::build_root(platform, &dir)?,
+                &scratch,
+            )?;
         blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if dir.join(".blanket/closures/dotnet.json").exists() {
@@ -1123,20 +1181,42 @@ mod tests {
     }
 
     #[test]
-    fn pyproject_lock_stamp_tracks_only_pyproject_bytes() {
-        let temp = TempDir::new();
-        let pyproject = temp.0.join("pyproject.toml");
-        std::fs::write(&pyproject, "[project]\ndependencies = []\n").unwrap();
-        let first = lock_source_hash("3.12", &std::fs::read_to_string(&pyproject).unwrap());
-        std::fs::write(temp.0.join("README.md"), "changed").unwrap();
-        assert_eq!(
-            first,
-            lock_source_hash("3.12", &std::fs::read_to_string(&pyproject).unwrap())
+    fn cache_key_builders_track_independent_inputs() {
+        let source = "six==1.17.0\n";
+        let darwin_plan = planner_input_hash(Platform::Aarch64AppleDarwin, "3.12.14", source);
+        let linux_plan = planner_input_hash(Platform::X86_64UnknownLinuxGnu, "3.12.14", source);
+        let changed_plan = planner_input_hash(
+            Platform::Aarch64AppleDarwin,
+            "3.12.14",
+            "six==1.17.0\n# changed",
         );
-        std::fs::write(&pyproject, "[project]\ndependencies = [\"six\"]\n").unwrap();
-        assert_ne!(
-            first,
-            lock_source_hash("3.12", &std::fs::read_to_string(&pyproject).unwrap())
+        assert_ne!(darwin_plan, changed_plan); // source only
+        assert_ne!(darwin_plan, linux_plan); // platform only
+        assert_eq!(
+            darwin_plan,
+            planner_input_hash(Platform::Aarch64AppleDarwin, "3.12.14", source)
+        ); // neither
+        assert_eq!(
+            darwin_plan,
+            "196eb83d1099e3f5e68b163da8e1c8bca31b511ff4df0547663ff930f82ed83d"
+        );
+
+        let darwin_lock = lock_source_hash(Platform::Aarch64AppleDarwin, "3.12", source);
+        let linux_lock = lock_source_hash(Platform::X86_64UnknownLinuxGnu, "3.12", source);
+        let changed_lock = lock_source_hash(
+            Platform::Aarch64AppleDarwin,
+            "3.12",
+            "six==1.17.0\n# changed",
+        );
+        assert_ne!(darwin_lock, changed_lock); // source only
+        assert_ne!(darwin_lock, linux_lock); // platform only
+        assert_eq!(
+            darwin_lock,
+            lock_source_hash(Platform::Aarch64AppleDarwin, "3.12", source)
+        ); // neither
+        assert_eq!(
+            darwin_lock,
+            "416cfad5b520d8042cac0eb2325a79211dec71064188a0e801992376260a8063"
         );
     }
 
