@@ -45,6 +45,11 @@ fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
         .ok_or_else(|| no_pin("ruby", platform, "stage 4"))
 }
 
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Ruby", "stage 4")?;
+    ruby_pin(platform).map(|_| ())
+}
+
 fn ruby_identity(pin: &RubyPin) -> Identity {
     Identity {
         kind: "ruby".into(),
@@ -90,6 +95,7 @@ pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Ruby", "stage 4")?;
     let pin = ruby_pin(platform)?;
     let identity = ruby_identity(pin);
     let id = identity.object_id();

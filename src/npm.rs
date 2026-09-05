@@ -28,6 +28,10 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
+fn wrap_ensure_node_error(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("ensure node: {error}"))
+}
+
 /// Read the string-valued scripts from a package.json.
 pub fn package_scripts(package_json: &str) -> io::Result<BTreeMap<String, String>> {
     let package: serde_json::Value = serde_json::from_str(package_json)
@@ -127,6 +131,11 @@ pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
         .ok_or_else(|| no_pin("nodejs", platform, "stage 2"))
 }
 
+pub fn preflight(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Node.js", "stage 2")?;
+    node_pin(platform).map(|_| ())
+}
+
 fn node_identity(node: &PinnedNode) -> Identity {
     Identity {
         kind: "nodejs".into(),
@@ -145,6 +154,7 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Node.js", "stage 2")?;
     let node = node_pin(platform)?;
     let identity = node_identity(node);
     let id = identity.object_id();
@@ -448,9 +458,7 @@ pub fn realize_node_env(
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "node environment", "stage 2")?;
-    let node_obj = ensure_node_for(store, platform).map_err(|e| {
-        io::Error::new(e.kind(), format!("ensure node: {e}"))
-    })?;
+    let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
 
     let mut inputs = BTreeMap::new();
     // /3: install scripts run sandboxed; name@version joined the per-pkg
@@ -1234,21 +1242,10 @@ mod tests {
 
     #[test]
     fn realize_node_env_preserves_unsupported_kind() {
-        let store = Store {
-            root: PathBuf::from("/nonexistent/blanket-test-store"),
-        };
-        let plan = NpmPlan {
-            node_version: "24.20.0".into(),
-            packages: Vec::new(),
-            links: Vec::new(),
-        };
-        let error = realize_node_env(
-            &store,
-            Platform::X86_64UnknownLinuxGnu,
-            &plan,
-            &[],
-        )
-        .unwrap_err();
+        let error = wrap_ensure_node_error(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "injected sandbox boundary failure",
+        ));
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("ensure node"));
     }
@@ -1263,15 +1260,11 @@ mod tests {
             packages: Vec::new(),
             links: Vec::new(),
         };
-        let error = realize_node_env(
-            &store,
-            Platform::Aarch64AppleDarwin,
-            &plan,
-            &[],
-        )
-        .unwrap_err();
+        let host = Platform::host().unwrap();
+        let foreign = *Platform::ALL.iter().find(|platform| **platform != host).unwrap();
+        let error = realize_node_env(&store, foreign, &plan, &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("aarch64-apple-darwin"));
+        assert!(error.to_string().contains(foreign.triple()));
     }
 
     fn lock(packages: &str) -> String {

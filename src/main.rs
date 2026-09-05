@@ -592,9 +592,38 @@ fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
+    if dir.join("package.json").is_file() || dir.join("package-lock.json").is_file() {
+        npm::preflight(platform)?;
+    }
+    if has_python_input(dir)? {
+        let pyver = std::fs::read_to_string(dir.join(".python-version"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "3.12".into());
+        python::preflight(platform, &pyver)?;
+    }
+    if dir.join("go.mod").is_file() {
+        golang::preflight_platform(platform)?;
+    }
+    if dir.join("Gemfile").is_file() {
+        ruby::preflight_platform(platform)?;
+    }
+    if dir.join("mix.exs").is_file() {
+        elixir::preflight_platform(platform)?;
+    }
+    if dotnet::has_marker(dir)? {
+        dotnet::preflight_platform(platform)?;
+    }
+    if is_cargo_here(dir) {
+        cargo::preflight_platform(platform)?;
+    }
+    Ok(())
+}
+
 fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = project_dir();
     policy::init(&dir, strict)?;
+    preflight_sync(platform, &dir)?;
     let store = store::Store::open()?;
     ensure_npm_lock(platform, &dir)?;
     let mut any = false;

@@ -43,6 +43,11 @@ fn go_pin(platform: Platform) -> io::Result<&'static GoPin> {
         .ok_or_else(|| no_pin("go", platform, "stage 4"))
 }
 
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    go_pin(platform).map(|_| ())
+}
+
 fn go_identity(pin: &GoPin) -> Identity {
     Identity {
         kind: "go".into(),
@@ -80,6 +85,7 @@ pub fn ensure_go(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_go_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
     let pin = go_pin(platform)?;
     let identity = go_identity(pin);
     let id = identity.object_id();

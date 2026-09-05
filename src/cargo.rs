@@ -61,6 +61,11 @@ fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>
     Ok(components)
 }
 
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    rust_components(platform).map(|_| ())
+}
+
 fn rust_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
     let mut pins: Vec<_> = rust_components(platform)?
         .into_iter()
@@ -125,6 +130,7 @@ pub fn ensure_rust_for(
     platform: Platform,
     version: &str,
 ) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
     let components = rust_components(platform)?;
     if version != RUST_VERSION {
         return Err(err(format!(
@@ -445,6 +451,11 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 
 /// Realize the registry closure as a Cargo directory source.
 pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
+    preflight_platform(Platform::host()?)?;
+    realize_vendor_inner(store, plan)
+}
+
+fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     let mut crates = plan.crates.clone();
     crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
 
@@ -1147,7 +1158,7 @@ checksum = "{hash_b}"
                 }],
                 members: vec![],
             };
-            let object = realize_vendor(store, &plan).unwrap();
+            let object = realize_vendor_inner(store, &plan).unwrap();
             let crate_dir = object.join("tiny-1.0.0");
             assert_eq!(
                 fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -1181,7 +1192,7 @@ checksum = "{hash_b}"
                 }],
                 members: vec![],
             };
-            let error = realize_vendor(store, &plan).unwrap_err().to_string();
+            let error = realize_vendor_inner(store, &plan).unwrap_err().to_string();
             assert!(error.contains("tiny@1.0.0"));
             assert!(error.contains("symlink"));
         });

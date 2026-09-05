@@ -45,6 +45,11 @@ fn otp_pin(platform: Platform) -> io::Result<&'static OtpPin> {
         .ok_or_else(|| no_pin("beam/otp", platform, "stage 4"))
 }
 
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
+    otp_pin(platform).map(|_| ())
+}
+
 fn beam_identity(pin: &OtpPin) -> Identity {
     Identity {
         kind: "beam".into(),
@@ -104,6 +109,7 @@ pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
     let pin = otp_pin(platform)?;
     let identity = beam_identity(pin);
     let id = identity.object_id();
@@ -522,6 +528,7 @@ pub fn realize_deps(
     beam_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Hex dependencies", "stage 4")?;
+    let _ = otp_pin(platform)?;
     validate_plan(plan)?;
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "hex-deps/1".to_string()),

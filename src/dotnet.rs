@@ -46,6 +46,11 @@ fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
         .ok_or_else(|| no_pin("dotnet-sdk", platform, "stage 4"))
 }
 
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, ".NET SDK", "stage 4")?;
+    sdk_pin(platform).map(|_| ())
+}
+
 fn sdk_identity(pin: &SdkPin) -> Identity {
     Identity {
         kind: "dotnet-sdk".into(),
@@ -75,6 +80,7 @@ pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, ".NET SDK", "stage 4")?;
     let pin = sdk_pin(platform)?;
     let identity = sdk_identity(pin);
     let id = identity.object_id();
@@ -814,6 +820,7 @@ pub fn realize_packages(
     project_dir: &Path,
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, ".NET packages", "stage 4")?;
+    let _ = sdk_pin(platform)?;
     let _ = preflight(project_dir)?;
     validate_plan(plan)?;
     let sdk_obj = sdk_obj.canonicalize()?;

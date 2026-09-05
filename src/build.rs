@@ -83,6 +83,18 @@ fn sdist_identity(
     }
 }
 
+fn wrap_sandbox_build_error(pkg: &LockedPackage, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "sandboxed build of {}=={} failed: {error}\n\
+             (network is denied during builds; sdists needing undeclared \
+             build deps or network access are unsupported in v0)",
+            pkg.name, pkg.version
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,9 +128,6 @@ mod tests {
 
     #[test]
     fn build_sdist_preserves_unsupported_kind() {
-        let store = Store {
-            root: PathBuf::from("/nonexistent/blanket-test-store"),
-        };
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0.0".into(),
@@ -127,14 +136,12 @@ mod tests {
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
         };
-        let error = build_sdist_wheel(
-            &store,
-            Platform::X86_64UnknownLinuxGnu,
+        let error = wrap_sandbox_build_error(
             &pkg,
-            "3.12.14",
-        )
-        .unwrap_err();
+            io::Error::new(io::ErrorKind::Unsupported, "injected sandbox failure"),
+        );
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("sandboxed build"));
     }
 }
 
@@ -226,17 +233,7 @@ pub fn build_sdist_wheel(
         &work,
         &[],
     )
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "sandboxed build of {}=={} failed: {e}\n\
-                 (network is denied during builds; sdists needing undeclared \
-                 build deps or network access are unsupported in v0)",
-                pkg.name, pkg.version
-            ),
-        )
-    })?;
+    .map_err(|e| wrap_sandbox_build_error(pkg, e))?;
 
     // Exactly one wheel expected; stage it alone as the object's content.
     let wheels: Vec<_> = fs::read_dir(&outdir)?

@@ -43,6 +43,13 @@ pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython
         })
 }
 
+pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
+    crate::platform::require_host(platform, "CPython", "stage 2")?;
+    lookup(platform, version)
+        .map(|_| ())
+        .ok_or_else(|| no_pin(&format!("cpython {version}"), platform, "stage 2"))
+}
+
 /// Pinned uv (resolver delegation target). Single static binary per platform;
 /// realized like any toolchain so a bare machine needs nothing besides
 /// blanket.
@@ -89,6 +96,7 @@ pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "uv", "stage 2")?;
     let pin = UV
         .iter()
         .find(|pin| pin.platform == platform)
@@ -126,6 +134,7 @@ pub(crate) fn ensure_python_for(
     pin: &PinnedPython,
     platform: Platform,
 ) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "CPython", "stage 2")?;
     if pin.platform != platform {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
