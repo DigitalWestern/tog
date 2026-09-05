@@ -1,6 +1,7 @@
 //! End-to-end Cargo tailor test. Heavy: downloads the pinned Rust toolchain
 //! and crates.io closure on first run.
 
+use blanket::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -58,6 +59,34 @@ fn assert_ok(output: Output, label: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
+    let closure: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(".blanket/closures/cargo.json")).unwrap(),
+    )
+    .unwrap();
+    let objects = store.canonicalize().unwrap().join("objects");
+    let object_path = |key: &str| {
+        let path = PathBuf::from(closure[key]["path"].as_str().unwrap());
+        let canonical = path.canonicalize().unwrap();
+        assert!(
+            canonical.starts_with(&objects),
+            "{key} closure path escaped the fresh store: {}",
+            canonical.display()
+        );
+        assert!(canonical.is_dir(), "{key} closure object is not a directory");
+        canonical
+    };
+    let rust = object_path("rust_object");
+    let vendor = object_path("vendor_object");
+    let rustlib = rust.join("lib/rustlib").join(Platform::host().unwrap().triple());
+    assert!(
+        rustlib.is_dir(),
+        "Rust object is missing the host rustlib tree: {}",
+        rustlib.display()
+    );
+    (rust, vendor)
+}
+
 #[test]
 #[ignore]
 fn cargo_sync_build_and_run_again_offline() {
@@ -71,8 +100,21 @@ fn cargo_sync_build_and_run_again_offline() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
     assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    let (rust_obj, vendor_obj) = assert_cargo_closure(&project, &store);
+    let rustc = assert_ok(
+        blanket(&binary, &project, &store, &["run", "rustc", "-vV"]),
+        "rustc -vV",
+    );
+    assert!(rustc.contains("1.96.1"), "unexpected rustc version:\n{rustc}");
+    assert!(
+        rustc.lines().any(|line| {
+            line.trim() == format!("host: {}", Platform::host().unwrap().triple())
+        }),
+        "rustc reported the wrong host:\n{rustc}"
+    );
     assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
-    assert!(project.join("target/debug/cargo-hello").is_file());
+    let executable = project.join("target/debug/cargo-hello");
+    assert!(executable.is_file());
     let output = assert_ok(
         blanket(
             &binary,
@@ -84,10 +126,37 @@ fn cargo_sync_build_and_run_again_offline() {
     );
     assert_eq!(output.trim(), "hello 128");
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&rust_obj).unwrap().permissions().mode() & 0o222,
+            0
+        );
+        assert_eq!(
+            std::fs::metadata(&vendor_obj).unwrap().permissions().mode() & 0o222,
+            0
+        );
+    }
+
     // Rebuild from a clean target: everything must come from the store
     // (network denial is already enforced by `blanket build` itself — the
     // seatbelt sandbox cannot nest, so no outer sandbox-exec wrapper here).
     std::fs::remove_dir_all(project.join("target")).unwrap();
+    assert!(!executable.exists(), "the first build result was not removed");
     assert_ok(blanket(&binary, &project, &store, &["build"]), "rebuild");
-    assert!(project.join("target/debug/cargo-hello").is_file());
+    assert!(executable.is_file());
+    let (rebuilt_rust_obj, rebuilt_vendor_obj) = assert_cargo_closure(&project, &store);
+    assert_eq!(rebuilt_rust_obj, rust_obj);
+    assert_eq!(rebuilt_vendor_obj, vendor_obj);
+    let output = assert_ok(
+        blanket(
+            &binary,
+            &project,
+            &store,
+            &["run", "target/debug/cargo-hello"],
+        ),
+        "run after rebuild",
+    );
+    assert_eq!(output.trim(), "hello 128");
 }

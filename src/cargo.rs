@@ -44,6 +44,27 @@ const RUST_COMPONENTS: &[RustComponent] = &[
         url: "https://static.rust-lang.org/dist/cargo-1.96.1-aarch64-apple-darwin.tar.xz",
         sha256: "2f43d75e9ad3febae5022c6f295cf93b74131cfdb1293a83e291f878ea9585a0",
     },
+    RustComponent {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        component: "rustc",
+        version: RUST_VERSION,
+        url: "https://static.rust-lang.org/dist/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923",
+    },
+    RustComponent {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        component: "rust-std",
+        version: RUST_VERSION,
+        url: "https://static.rust-lang.org/dist/rust-std-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae",
+    },
+    RustComponent {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        component: "cargo",
+        version: RUST_VERSION,
+        url: "https://static.rust-lang.org/dist/cargo-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e",
+    },
 ];
 
 fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>> {
@@ -150,12 +171,29 @@ pub fn ensure_rust_for(
     }
 
     let staged = store.stage()?;
+    extract_rust_components(&staged, platform, &components, &tarballs)?;
+
+    store
+        .commit(&identity, &staged, &[])
+        .map(|(path, _)| path)
+        .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
+}
+
+fn extract_rust_components(
+    staged: &Path,
+    platform: Platform,
+    components: &[&RustComponent],
+    tarballs: &[PathBuf],
+) -> io::Result<()> {
+    if components.len() != tarballs.len() {
+        return Err(err("Rust component/archive count mismatch"));
+    }
     for (component, tarball) in components.iter().zip(tarballs) {
         let status = Command::new("/usr/bin/tar")
             .args(["-xJf"])
             .arg(tarball)
             .args(["-C"])
-            .arg(&staged)
+            .arg(staged)
             .args(["--strip-components", "2"])
             .status()
             .map_err(|e| {
@@ -168,7 +206,10 @@ pub fn ensure_rust_for(
             return Err(err(format!("{} tarball extraction failed", component.component)));
         }
     }
+    validate_rust_layout(staged, platform)
+}
 
+fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
     if !staged.join("bin/rustc").is_file()
         || !staged.join("bin/cargo").is_file()
         || !staged
@@ -179,11 +220,7 @@ pub fn ensure_rust_for(
             "Rust toolchain extraction has an unexpected layout; refusing to commit",
         ));
     }
-
-    store
-        .commit(&identity, &staged, &[])
-        .map(|(path, _)| path)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -909,6 +946,7 @@ fn shell_double_quote(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn darwin_identity_unchanged() {
@@ -918,6 +956,74 @@ mod tests {
         assert_eq!(
             identity.object_id(),
             "b8418440835c4ec1f591381a17ae60ab12d1c727-rust-1.96.1"
+        );
+    }
+
+    #[test]
+    fn rust_component_sets_are_complete_unique_and_pinned() {
+        let expected_names = BTreeSet::from(["cargo", "rust-std", "rustc"]);
+        for platform in Platform::ALL {
+            let components = rust_components(*platform).unwrap();
+            assert_eq!(components.len(), 3);
+            assert_eq!(
+                components
+                    .iter()
+                    .map(|component| component.component)
+                    .collect::<BTreeSet<_>>(),
+                expected_names
+            );
+            assert!(components
+                .iter()
+                .all(|component| component.version == RUST_VERSION));
+            assert!(components
+                .iter()
+                .all(|component| component.platform == *platform));
+        }
+    }
+
+    #[test]
+    fn linux_rust_component_urls_and_digests_are_exact() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let expected = [
+            (
+                "rustc",
+                "https://static.rust-lang.org/dist/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+                "3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923",
+            ),
+            (
+                "rust-std",
+                "https://static.rust-lang.org/dist/rust-std-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+                "1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae",
+            ),
+            (
+                "cargo",
+                "https://static.rust-lang.org/dist/cargo-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+                "ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e",
+            ),
+        ];
+        let components = rust_components(platform).unwrap();
+        for (name, url, sha256) in expected {
+            let component = components
+                .iter()
+                .find(|component| component.component == name)
+                .unwrap();
+            assert_eq!(component.url, url);
+            assert_eq!(component.sha256, sha256);
+            assert!(component.url.contains("x86_64-unknown-linux-gnu"));
+        }
+        assert!(rust_components(Platform::Aarch64AppleDarwin)
+            .unwrap()
+            .iter()
+            .all(|component| component.url.contains("aarch64-apple-darwin")));
+    }
+
+    #[test]
+    fn rust_identity_is_platform_specific() {
+        let darwin = rust_components(Platform::Aarch64AppleDarwin).unwrap();
+        let linux = rust_components(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_ne!(
+            rust_identity(Platform::Aarch64AppleDarwin, &darwin).object_id(),
+            rust_identity(Platform::X86_64UnknownLinuxGnu, &linux).object_id()
         );
     }
     use std::env;
@@ -1117,6 +1223,167 @@ checksum = "{hash_b}"
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
         assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+    }
+
+    #[test]
+    fn resolves_linux_toolchain_files_targets_and_policy() {
+        let temp = TempDir::new("blanket-cargo-linux-toolchain");
+        let project = temp.path().join("project/child");
+        fs::create_dir_all(&project).unwrap();
+        let root = project.parent().unwrap();
+
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        for channel in ["stable", "1.96", "1.96.1"] {
+            fs::write(root.join("rust-toolchain"), format!("{channel}\n")).unwrap();
+            assert_eq!(
+                resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+                "1.96.1"
+            );
+        }
+
+        fs::write(root.join("rust-toolchain"), "beta\n").unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+        fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        for target in ["aarch64-apple-darwin", "wasm32-unknown-unknown"] {
+            fs::write(
+                root.join("rust-toolchain"),
+                format!("[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"{target}\"]\n"),
+            )
+            .unwrap();
+            assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+        }
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
+        )
+        .unwrap();
+        crate::policy::clear();
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        assert!(crate::policy::pending()
+            .iter()
+            .any(|exception| exception.kind == crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE));
+        crate::policy::clear();
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"aarch64-apple-darwin\"]\n",
+        )
+        .unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+    }
+
+    fn make_component_archives(
+        dir: &Path,
+        components: &[&RustComponent],
+        platform: Platform,
+        rustlib_target: Option<&str>,
+    ) -> Vec<PathBuf> {
+        components
+            .iter()
+            .map(|component| {
+                let root_name = format!(
+                    "{}-{}-{}",
+                    component.component, RUST_VERSION, platform.triple()
+                );
+                let root = dir.join(&root_name);
+                let package = match component.component {
+                    "rust-std" => root.join(format!("rust-std-{}", platform.triple())),
+                    name => root.join(name),
+                };
+                fs::create_dir_all(&package).unwrap();
+                match component.component {
+                    "rustc" | "cargo" => {
+                        fs::create_dir_all(package.join("bin")).unwrap();
+                        fs::write(
+                            package.join("bin").join(component.component),
+                            component.component,
+                        )
+                        .unwrap();
+                    }
+                    "rust-std" => {
+                        if let Some(target) = rustlib_target {
+                            let rustlib = package.join("lib/rustlib").join(target);
+                            fs::create_dir_all(&rustlib).unwrap();
+                            fs::write(rustlib.join("marker"), b"synthetic").unwrap();
+                        }
+                    }
+                    other => panic!("unexpected component {other}"),
+                }
+                let archive = dir.join(format!("{root_name}.tar.xz"));
+                let status = std::process::Command::new("/usr/bin/tar")
+                    .args(["-cJf"])
+                    .arg(&archive)
+                    .args(["-C"])
+                    .arg(dir)
+                    .arg(&root_name)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                archive
+            })
+            .collect()
+    }
+
+    #[test]
+    fn component_layout_is_validated_before_publication() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let components = rust_components(platform).unwrap();
+
+        let correct = TempDir::new("blanket-rust-layout-correct");
+        let archives = make_component_archives(
+            correct.path(),
+            &components,
+            platform,
+            Some(platform.triple()),
+        );
+        let staged = correct.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        extract_rust_components(&staged, platform, &components, &archives).unwrap();
+        assert!(staged.join("bin/rustc").is_file());
+        assert!(staged.join("bin/cargo").is_file());
+        assert!(staged
+            .join(format!("lib/rustlib/{}", platform.triple()))
+            .is_dir());
+
+        let missing = TempDir::new("blanket-rust-layout-missing");
+        let archives = make_component_archives(
+            missing.path(),
+            &components,
+            platform,
+            None,
+        );
+        let staged = missing.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
+
+        let wrong = TempDir::new("blanket-rust-layout-wrong");
+        let archives = make_component_archives(
+            wrong.path(),
+            &components,
+            platform,
+            Some(Platform::Aarch64AppleDarwin.triple()),
+        );
+        let staged = wrong.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
     }
 
     fn make_crate(dir: &Path, name: &str, version: &str, symlink: bool) -> (PathBuf, String) {
