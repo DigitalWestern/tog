@@ -34,6 +34,11 @@ const GO_PIN_ROWS: &[GoPin] = &[GoPin {
     version: GO_VERSION,
     url: "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz",
     sha256: "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e",
+}, GoPin {
+    platform: Platform::X86_64UnknownLinuxGnu,
+    version: GO_VERSION,
+    url: "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
+    sha256: "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
 }];
 
 fn go_pin(platform: Platform) -> io::Result<&'static GoPin> {
@@ -79,6 +84,55 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
+/// Extract a provider Go archive into its store staging directory. Go's
+/// release archives have exactly one `go/` root; strip that one level while
+/// retaining the complete toolchain tree below it.
+fn extract_go_toolchain(archive: &Path, staged: &Path) -> io::Result<()> {
+    let listing = Command::new("/usr/bin/tar")
+        .args(["-tzf"])
+        .arg(archive)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("list Go archive: {e}")))?;
+    if !listing.status.success() {
+        return Err(err(format!(
+            "could not inspect Go archive layout: {}",
+            String::from_utf8_lossy(&listing.stderr).trim()
+        )));
+    }
+    let mut saw_entry = false;
+    for raw in String::from_utf8_lossy(&listing.stdout).lines() {
+        let entry = raw.trim_end_matches('/');
+        if entry.is_empty() {
+            continue;
+        }
+        let mut components = entry.split('/');
+        if components.next() != Some("go")
+            || components.any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return Err(err(format!(
+                "go archive has unexpected layout entry {raw:?}; expected a single top-level go/ root"
+            )));
+        }
+        saw_entry = true;
+    }
+    if !saw_entry {
+        return Err(err("go archive has unexpected empty layout"));
+    }
+
+    let status = Command::new("/usr/bin/tar")
+        .args(["-xzf"])
+        .arg(archive)
+        .args(["-C"])
+        .arg(staged)
+        .args(["--strip-components", "1"])
+        .status()
+        .map_err(|e| io::Error::new(e.kind(), format!("extract Go archive: {e}")))?;
+    if !status.success() || !staged.join("bin/go").is_file() {
+        return Err(err("go tarball extraction failed or has unexpected layout"));
+    }
+    Ok(())
+}
+
 /// Ensure the pinned Go toolchain is realized in the store.
 pub fn ensure_go(store: &Store) -> io::Result<PathBuf> {
     ensure_go_for(store, Platform::host()?)
@@ -95,16 +149,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     }
     let tarball = download_verified(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    let status = Command::new("/usr/bin/tar")
-        .args(["-xzf"])
-        .arg(&tarball)
-        .args(["-C"])
-        .arg(&staged)
-        .args(["--strip-components", "1"])
-        .status()?;
-    if !status.success() || !staged.join("bin/go").is_file() {
-        return Err(err("go tarball extraction failed or has unexpected layout"));
-    }
+    extract_go_toolchain(&tarball, &staged)?;
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
@@ -717,17 +762,9 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
     Ok(())
 }
 
-/// Realize the immutable GOMODCACHE object: verified skeleton + extraction
-/// delegated to the store Go offline (full x/mod/zip validation), whose
-/// recipe is part of the identity.
-pub fn realize_modcache(
-    store: &Store,
-    platform: Platform,
-    plan: &GoPlan,
-    go_obj: &Path,
-) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Go module cache", "stage 4")?;
-    let pin = go_pin(platform)?;
+/// Identity of the immutable GOMODCACHE object. Shared by production and the
+/// darwin golden test so the extractor input cannot drift unobserved.
+fn modcache_identity(pin: &GoPin, plan: &GoPlan) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "go-modcache/1".to_string()),
         (
@@ -755,6 +792,22 @@ pub fn realize_modcache(
         version: plan.modules.len().to_string(),
         inputs,
     };
+    identity
+}
+
+/// Realize the immutable GOMODCACHE object: verified skeleton + extraction
+/// delegated to the store Go offline (full x/mod/zip validation), whose
+/// recipe is part of the identity.
+pub fn realize_modcache(
+    store: &Store,
+    platform: Platform,
+    plan: &GoPlan,
+    go_obj: &Path,
+) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Go module cache", "stage 4")?;
+    let pin = go_pin(platform)?;
+    let identity = modcache_identity(pin, plan);
+
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -940,6 +993,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_unique_pin_per_supported_platform() {
+        assert_eq!(GO_PIN_ROWS.len(), Platform::ALL.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for pin in GO_PIN_ROWS {
+            assert!(seen.insert(pin.platform.triple()), "duplicate pin platform");
+        }
+        for platform in Platform::ALL {
+            assert_eq!(
+                GO_PIN_ROWS
+                    .iter()
+                    .filter(|pin| pin.platform == *platform)
+                    .count(),
+                1,
+                "expected one Go pin for {}",
+                platform.triple()
+            );
+        }
+
+        let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_eq!(linux.version, "1.27.0");
+        assert_eq!(
+            linux.url,
+            "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            linux.sha256,
+            "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
+        );
+    }
+
+    #[test]
+    fn production_toolchain_identities_are_platform_distinct() {
+        let darwin = go_identity(go_pin(Platform::Aarch64AppleDarwin).unwrap());
+        let linux = go_identity(go_pin(Platform::X86_64UnknownLinuxGnu).unwrap());
+        assert_ne!(darwin.object_id(), linux.object_id());
+        assert_eq!(
+            darwin.inputs.get("platform").map(String::as_str),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(
+            linux.inputs.get("platform").map(String::as_str),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
     fn darwin_identity_unchanged() {
         let platform = Platform::Aarch64AppleDarwin;
         let pin = go_pin(platform).unwrap();
@@ -948,9 +1047,21 @@ mod tests {
             identity.object_id(),
             "d2d13392a210fa6589345911feb433fbf3bc06ae-go-1.27.0"
         );
+        let empty = GoPlan { go_version: "1.27.0".into(), module: "example.com/x".into(), modules: vec![] };
+        let modcache = modcache_identity(pin, &empty);
         assert_eq!(
-            format!("go{}:{}", pin.version, pin.sha256),
+            modcache.inputs["extractor"],
             "go1.27.0:90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"
+        );
+        assert_eq!(modcache.inputs["schema"], "go-modcache/1");
+        let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_ne!(
+            modcache_identity(linux, &empty).object_id(),
+            modcache.object_id()
+        );
+        assert_eq!(
+            pin.url,
+            "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz"
         );
     }
 
@@ -972,6 +1083,132 @@ mod tests {
         assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.99\n").is_err());
         // Prerelease -> fail with instructions.
         assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27rc1\n").is_err());
+    }
+
+    #[test]
+    fn linux_toolchain_selection_rules() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        for directive in ["go 1.21", "go 1.27", "go 1.27.0"] {
+            assert_eq!(
+                resolve_toolchain(platform, &format!("module m\n\n{directive}\n")).unwrap(),
+                "1.27.0",
+                "directive {directive}"
+            );
+        }
+        assert_eq!(
+            resolve_toolchain(
+                platform,
+                "module m\n\ngo 1.21\n\ntoolchain go1.27.0\n"
+            )
+            .unwrap(),
+            "1.27.0"
+        );
+        assert_eq!(
+            resolve_toolchain(platform, "module m\n\ngo 1.21\n\ntoolchain default\n").unwrap(),
+            "1.27.0"
+        );
+        assert!(resolve_toolchain(platform, "module m\n\ngo 1.28\n").is_err());
+        assert!(resolve_toolchain(
+            platform,
+            "module m\n\ngo 1.27\n\ntoolchain go1.28\n"
+        )
+        .is_err());
+        assert!(resolve_toolchain(platform, "module m\n\ngo 1.27rc1\n").is_err());
+        assert!(resolve_toolchain(
+            platform,
+            "module m\n\ngo 1.27\n\ntoolchain go1.27rc1\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn go_environment_policy_is_forced_and_pinned() {
+        let go_obj = Path::new("/store/objects/linux-go");
+        let modcache = Path::new("/store/objects/modcache");
+        fn value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+            env.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        }
+
+        let offline = go_env(go_obj, modcache, true);
+        assert_eq!(value(&offline, "GOTOOLCHAIN"), Some("local"));
+        assert_eq!(value(&offline, "GOROOT"), Some("/store/objects/linux-go"));
+        assert_eq!(value(&offline, "GOENV"), Some("off"));
+        assert_eq!(value(&offline, "GOWORK"), Some("off"));
+        assert_eq!(value(&offline, "GOMODCACHE"), Some("/store/objects/modcache"));
+        assert_eq!(value(&offline, "GOPROXY"), Some("off"));
+        assert_eq!(value(&offline, "GOSUMDB"), Some("off"));
+        assert!(value(&offline, "GOVCS").is_none());
+
+        let online = go_env(go_obj, modcache, false);
+        assert_eq!(value(&online, "GOPROXY"), Some("https://proxy.golang.org"));
+        assert_eq!(value(&online, "GOSUMDB"), Some("sum.golang.org"));
+        assert_eq!(value(&online, "GOVCS"), Some("*:off"));
+        assert_ne!(value(&online, "GOPROXY"), Some("file:///host/cache"));
+    }
+
+    #[test]
+    fn go_archive_layout_strips_only_the_go_root() {
+        let temp = std::env::temp_dir().join(format!(
+            "blanket-go-layout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = temp.join("source");
+        std::fs::create_dir_all(source.join("go/bin")).unwrap();
+        std::fs::create_dir_all(source.join("go/src")).unwrap();
+        std::fs::create_dir_all(source.join("go/pkg")).unwrap();
+        std::fs::write(source.join("go/bin/go"), b"go").unwrap();
+        std::fs::write(source.join("go/bin/gofmt"), b"gofmt").unwrap();
+        std::fs::write(source.join("go/src/README"), b"src").unwrap();
+        std::fs::write(source.join("go/pkg/README"), b"pkg").unwrap();
+        let archive = temp.join("go.tar.gz");
+        std::fs::create_dir_all(&source).unwrap();
+        assert!(
+            Command::new("/usr/bin/tar")
+                .args(["-czf"])
+                .arg(&archive)
+                .args(["-C"])
+                .arg(&source)
+                .arg("go")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let staged = temp.join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        extract_go_toolchain(&archive, &staged).unwrap();
+        assert!(staged.join("bin/go").is_file());
+        assert!(staged.join("bin/gofmt").is_file());
+        assert!(staged.join("src/README").is_file());
+        assert!(staged.join("pkg/README").is_file());
+
+        let nested_source = temp.join("nested-source");
+        std::fs::create_dir_all(nested_source.join("outer/go/bin")).unwrap();
+        std::fs::write(nested_source.join("outer/go/bin/go"), b"go").unwrap();
+        let nested_archive = temp.join("nested.tar.gz");
+        assert!(
+            Command::new("/usr/bin/tar")
+                .args(["-czf"])
+                .arg(&nested_archive)
+                .args(["-C"])
+                .arg(&nested_source)
+                .arg("outer")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let nested_staged = temp.join("nested-staged");
+        std::fs::create_dir_all(&nested_staged).unwrap();
+        let error = extract_go_toolchain(&nested_archive, &nested_staged).unwrap_err();
+        assert!(error.to_string().contains("unexpected layout"));
+        assert!(!nested_staged.join("go").exists());
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
