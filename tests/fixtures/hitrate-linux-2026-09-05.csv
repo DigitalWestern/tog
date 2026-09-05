@@ -1,0 +1,62 @@
+# platform=Linux x86_64 blanket_commit=5cc9f90
+lang,repo,stars,status,class,seconds,inputs,error,exceptions,exception_kinds,platform,blanket_commit
+python,yt-dlp/yt-dlp,0,ok,ok,5,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,AUTOMATIC1111/stable-diffusion-webui,0,fail,py_sdist_build_failed,122,"requirements.txt,pyproject.toml,package.json","blanket: error: sandboxed build of tokenizers==0.13.3 failed: sandboxed command failed (exit status: 1): [""/home/ethan/scratch/hitrate/work/store/objects/c557750a198176636ecb7f300f0631a7574b55f5-env-3.12.14/bin/python"", ""-m"", ""pip"", ""wheel"", ""--no-deps"", ""--no-build-isolation"", ""--no-index"", ""-w"", ""/home/ethan/scratch/hitrate/work/store/tmp/stage-224236-1788634666903438738-6/out"", ""/home/ethan/scr",0,,Linux x86_64,5cc9f90
+python,ytdl-org/youtube-dl,0,fail,no_inputs,0,setup.py,"blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)",0,,Linux x86_64,5cc9f90
+python,github/spec-kit,0,ok,ok,3,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,Comfy-Org/ComfyUI,0,fail,other,145,"requirements.txt,pyproject.toml",blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/,0,,Linux x86_64,5cc9f90
+python,Graphify-Labs/graphify,0,ok,ok,5,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,browser-use/browser-use,0,ok,ok,13,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,openai/whisper,0,ok,ok,116,"requirements.txt,pyproject.toml",,0,,Linux x86_64,5cc9f90
+python,TauricResearch/TradingAgents,0,ok,ok,0,"requirements.txt,pyproject.toml",,1,requirement-skipped,Linux x86_64,5cc9f90
+python,fastapi/fastapi,0,fail,platform_unsupported,0,pyproject.toml,blanket: error: no cpython 3.11 pinned for x86_64-unknown-linux-gnu (LINUX_PORT.md stage 2),0,,x86_64-unknown-linux-gnu,5cc9f90
+python,nvbn/thefuck,0,ok,ok,5,"requirements.txt,setup.py",,0,,Linux x86_64,5cc9f90
+python,hacksider/Deep-Live-Cam,0,fail,py_sdist_build_failed,11,"requirements.txt,pyproject.toml","blanket: error: sandboxed build of insightface==0.7.3 failed: sandboxed command failed (exit status: 1): [""/home/ethan/scratch/hitrate/work/store/objects/c557750a198176636ecb7f300f0631a7574b55f5-env-3.12.14/bin/python"", ""-m"", ""pip"", ""wheel"", ""--no-deps"", ""--no-build-isolation"", ""--no-index"", ""-w"", ""/home/ethan/scratch/hitrate/work/store/tmp/stage-227474-1788634980034540701-1/out"", ""/home/ethan/scr",0,,Linux x86_64,5cc9f90
+python,karpathy/autoresearch,0,fail,platform_unsupported,0,pyproject.toml,blanket: error: no cpython 3.10 pinned for x86_64-unknown-linux-gnu (LINUX_PORT.md stage 2),0,,x86_64-unknown-linux-gnu,5cc9f90
+python,3b1b/manim,0,fail,py_sdist_build_failed,6,"requirements.txt,pyproject.toml,setup.py","blanket: error: sandboxed build of manimpango==0.6.1 failed: sandboxed command failed (exit status: 1): [""/home/ethan/scratch/hitrate/work/store/objects/c557750a198176636ecb7f300f0631a7574b55f5-env-3.12.14/bin/python"", ""-m"", ""pip"", ""wheel"", ""--no-deps"", ""--no-build-isolation"", ""--no-index"", ""-w"", ""/home/ethan/scratch/hitrate/work/store/tmp/stage-227576-1788634986493488566-1/out"", ""/home/ethan/scra",0,,Linux x86_64,5cc9f90
+python,sherlock-project/sherlock,0,fail,no_inputs,0,pyproject.toml,"blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)",0,,Linux x86_64,5cc9f90
+python,vllm-project/vllm,0,fail,no_inputs,0,"pyproject.toml,setup.py","blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project].dependencies, package-lock.json, Cargo.toml, or go.mod)",0,,Linux x86_64,5cc9f90
+python,django/django,0,ok,ok,25,"pyproject.toml,package.json",,1,install-script-failed,Linux x86_64,5cc9f90
+python,odysseus-dev/odysseus,0,fail,other,14,"requirements.txt,pyproject.toml,setup.py,package.json,package-lock.json",blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/,0,,Linux x86_64,5cc9f90
+python,unclecode/crawl4ai,0,fail,other,18,"requirements.txt,pyproject.toml,setup.py",blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/,0,,Linux x86_64,5cc9f90
+python,Z4nzu/hackingtool,0,ok,ok,2,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,opendatalab/MinerU,0,ok,ok,17,pyproject.toml,,2,"file-collision,file-collision",Linux x86_64,5cc9f90
+python,D4Vinci/Scrapling,0,ok,ok,1,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,Panniantong/Agent-Reach,0,ok,ok,3,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,unslothai/unsloth,0,ok,ok,5,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,hiyouga/LlamaFactory,0,ok,ok,153,pyproject.toml,,2,"file-collision,file-collision",Linux x86_64,5cc9f90
+python,pallets/flask,0,ok,ok,1,pyproject.toml,,0,,Linux x86_64,5cc9f90
+python,binary-husky/gpt_academic,0,fail,other,32,requirements.txt,blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/,0,,Linux x86_64,5cc9f90
+python,ansible/ansible,0,ok,ok,1,"requirements.txt,pyproject.toml",,0,,Linux x86_64,5cc9f90
+python,FoundationAgents/MetaGPT,0,fail,py_uv_resolve_failed,3,"requirements.txt,setup.py",blanket: error: uv pip compile failed,0,,Linux x86_64,5cc9f90
+python,headroomlabs-ai/headroom,0,fail,other,12,pyproject.toml,"blanket: error: /home/ethan/scratch/hitrate/work/repo/rust-toolchain.toml: unsupported Rust toolchain ""1.95.0""; pinned versions available: 1.96.1",0,,Linux x86_64,5cc9f90
+npm,affaan-m/ECC,0,ok,ok,23,"pyproject.toml,package.json,package-lock.json,yarn.lock",,0,,Linux x86_64,5cc9f90
+npm,vuejs/vue,0,fail,npm_resolve_failed,0,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,deepseek-ai/deepseek-harness,0,fail,npm_resolve_failed,10,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,airbnb/javascript,0,ok,ok,7,package.json,,0,,Linux x86_64,5cc9f90
+npm,clash-verge-rev/clash-verge-rev,0,fail,other,23,"package.json,pnpm-lock.yaml","blanket: error: node_modules/tauri-plugin-mihomo-api: only https registry tarballs supported (v0), got git+ssh://git@github.com/clash-verge-rev/tauri-plugin-mihomo.git#8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e",0,,Linux x86_64,5cc9f90
+npm,garrytan/gstack,0,ok,ok,35,"package.json,bun.lock",,1,install-script-failed,Linux x86_64,5cc9f90
+npm,excalidraw/excalidraw,0,fail,other,153,"package.json,yarn.lock",blanket: error: node_modules/@excalidraw/random-username: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,shadcn-ui/ui,0,fail,npm_resolve_failed,7,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,DietrichGebert/ponytail,0,ok,ok,0,package.json,,0,,Linux x86_64,5cc9f90
+npm,axios/axios,0,fail,other,54,"package.json,package-lock.json",blanket: error: node_modules/pngjs: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,google-gemini/gemini-cli,0,ok,ok,113,"package.json,package-lock.json",,0,,Linux x86_64,5cc9f90
+npm,react/create-react-app,0,fail,other,196,"package.json,package-lock.json",blanket: error: node_modules/eta: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,earendil-works/pi,0,ok,ok,39,"package.json,package-lock.json",,1,install-script-failed,Linux x86_64,5cc9f90
+npm,ant-design/ant-design,0,fail,other,378,package.json,blanket: error: node_modules/pixelmatch/node_modules/pngjs: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,tailwindlabs/tailwindcss,0,fail,npm_resolve_failed,1,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,microsoft/playwright,0,fail,other,59,"package.json,package-lock.json",blanket: error: node_modules/pngjs: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,louislam/uptime-kuma,0,fail,other,110,"package.json,package-lock.json",blanket: error: node_modules/pngjs: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,mermaid-js/mermaid,0,ok,ok,155,"package.json,pnpm-lock.yaml",,0,,Linux x86_64,5cc9f90
+npm,modelcontextprotocol/servers,0,ok,ok,24,"package.json,package-lock.json",,0,,Linux x86_64,5cc9f90
+npm,ChatGPTNextWeb/NextChat,0,ok,ok,248,"package.json,yarn.lock",,0,,Linux x86_64,5cc9f90
+npm,sveltejs/svelte,0,fail,npm_resolve_failed,1,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,koala73/worldmonitor,0,fail,other,162,"package.json,package-lock.json",blanket: error: node_modules/@amcharts/amcharts5: tarball extraction failed,0,,Linux x86_64,5cc9f90
+npm,vitejs/vite,0,fail,npm_resolve_failed,4,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,Egonex-AI/Understand-Anything,0,ok,ok,19,"package.json,pnpm-lock.yaml",,0,,Linux x86_64,5cc9f90
+npm,hoppscotch/hoppscotch,0,fail,npm_resolve_failed,13,"package.json,pnpm-lock.yaml",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90
+npm,paperclipai/paperclip,0,ok,ok,10,"package.json,pnpm-lock.yaml",,0,,Linux x86_64,5cc9f90
+npm,anuraghazra/github-readme-stats,0,ok,ok,50,"package.json,package-lock.json",,0,,Linux x86_64,5cc9f90
+npm,coder/code-server,0,ok,ok,41,"package.json,package-lock.json",,0,,Linux x86_64,5cc9f90
+npm,typicode/json-server,0,ok,ok,12,"package.json,pnpm-lock.yaml",,0,,Linux x86_64,5cc9f90
+npm,Eugeny/tabby,0,fail,npm_resolve_failed,6,"package.json,yarn.lock",blanket: error: npm install --package-lock-only failed,0,,Linux x86_64,5cc9f90

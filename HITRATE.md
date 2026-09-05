@@ -144,3 +144,110 @@ Remaining misses after item 3:
 - npm vitejs/vite: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
 - npm hoppscotch/hoppscotch: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
 - npm Eugeny/tabby: npm_resolve_failed — blanket: error: npm install --package-lock-only failed
+
+## Linux x86_64 — 2026-09-05 (m6-fedora, Fedora 44, blanket at 496c612)
+Same 60 repos, pinned via `tests/fixtures/hitrate-repos.lock` to their default-branch commit as of the macOS measurement day (2026-09-02); `python3 tests/hitrate.py --repos … --timeout 600`, throwaway store on disk, release build. The macOS column is the 2026-09-02 'after item 3' run. Raw data: `tests/fixtures/hitrate-linux-2026-09-05.csv`.
+
+### python: Linux 16/30 (53%) vs macOS 15/30 (50%); 4 of the Linux oks carried permissive exceptions
+| class (Linux) | n |
+|---|---|
+| ok | 16 |
+| other | 5 |
+| py_sdist_build_failed | 3 |
+| no_inputs | 3 |
+| platform_unsupported | 2 |
+| py_uv_resolve_failed | 1 |
+
+| repo | macOS | Linux | Linux exceptions | Linux error (truncated) |
+|---|---|---|---|---|
+| 3b1b/manim | — | py_sdist_build_failed |  | blanket: error: sandboxed build of manimpango==0.6.1 failed: sandboxed command failed (exi |
+| AUTOMATIC1111/stable-diffusion-webui | — | py_sdist_build_failed |  | blanket: error: sandboxed build of tokenizers==0.13.3 failed: sandboxed command failed (ex |
+| Comfy-Org/ComfyUI | ok | other **↓** |  | blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/ |
+| D4Vinci/Scrapling | ok | ok |  |  |
+| FoundationAgents/MetaGPT | — | py_uv_resolve_failed |  | blanket: error: uv pip compile failed |
+| Graphify-Labs/graphify | ok | ok |  |  |
+| Panniantong/Agent-Reach | ok | ok |  |  |
+| TauricResearch/TradingAgents | ok | ok | requirement-skipped |  |
+| Z4nzu/hackingtool | ok | ok |  |  |
+| ansible/ansible | — | ok **↑** |  |  |
+| binary-husky/gpt_academic | other | other |  | blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/ |
+| browser-use/browser-use | ok | ok |  |  |
+| django/django | ok | ok | install-script-failed |  |
+| fastapi/fastapi | other | platform_unsupported |  | blanket: error: no cpython 3.11 pinned for x86_64-unknown-linux-gnu (LINUX_PORT.md stage 2 |
+| github/spec-kit | ok | ok |  |  |
+| hacksider/Deep-Live-Cam | — | py_sdist_build_failed |  | blanket: error: sandboxed build of insightface==0.7.3 failed: sandboxed command failed (ex |
+| headroomlabs-ai/headroom | other | other |  | blanket: error: /home/ethan/scratch/hitrate/work/repo/rust-toolchain.toml: unsupported Rus |
+| hiyouga/LlamaFactory | ok | ok | file-collision,file-collision |  |
+| karpathy/autoresearch | other | platform_unsupported |  | blanket: error: no cpython 3.10 pinned for x86_64-unknown-linux-gnu (LINUX_PORT.md stage 2 |
+| nvbn/thefuck | — | ok **↑** |  |  |
+| odysseus-dev/odysseus | ok | other **↓** |  | blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/ |
+| openai/whisper | — | ok **↑** |  |  |
+| opendatalab/MinerU | ok | ok | file-collision,file-collision |  |
+| pallets/flask | ok | ok |  |  |
+| sherlock-project/sherlock | no_inputs | no_inputs |  | blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project] |
+| unclecode/crawl4ai | other | other |  | blanket: error: unsupported wheel .data scheme 'headers' in greenlet-3.5.5.data/headers/ |
+| unslothai/unsloth | ok | ok |  |  |
+| vllm-project/vllm | no_inputs | no_inputs |  | blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project] |
+| yt-dlp/yt-dlp | ok | ok |  |  |
+| ytdl-org/youtube-dl | no_inputs | no_inputs |  | blanket: error: nothing to sync here (need requirements.txt, pyproject.toml with [project] |
+
+### npm: Linux 14/30 (46%) vs macOS 4/30 (13%); 2 of the Linux oks carried permissive exceptions
+| class (Linux) | n |
+|---|---|
+| ok | 14 |
+| npm_resolve_failed | 8 |
+| other | 8 |
+
+| repo | macOS | Linux | Linux exceptions | Linux error (truncated) |
+|---|---|---|---|---|
+| ChatGPTNextWeb/NextChat | — | ok **↑** |  |  |
+| DietrichGebert/ponytail | ok | ok |  |  |
+| Egonex-AI/Understand-Anything | — | ok **↑** |  |  |
+| Eugeny/tabby | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| affaan-m/ECC | — | ok **↑** |  |  |
+| airbnb/javascript | — | ok **↑** |  |  |
+| ant-design/ant-design | — | other |  | blanket: error: node_modules/pixelmatch/node_modules/pngjs: tarball extraction failed |
+| anuraghazra/github-readme-stats | — | ok **↑** |  |  |
+| axios/axios | — | other |  | blanket: error: node_modules/pngjs: tarball extraction failed |
+| clash-verge-rev/clash-verge-rev | other | other |  | blanket: error: node_modules/tauri-plugin-mihomo-api: only https registry tarballs support |
+| coder/code-server | — | ok **↑** |  |  |
+| deepseek-ai/deepseek-harness | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| earendil-works/pi | ok | ok | install-script-failed |  |
+| excalidraw/excalidraw | — | other |  | blanket: error: node_modules/@excalidraw/random-username: tarball extraction failed |
+| garrytan/gstack | — | ok **↑** | install-script-failed |  |
+| google-gemini/gemini-cli | — | ok **↑** |  |  |
+| hoppscotch/hoppscotch | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| koala73/worldmonitor | — | other |  | blanket: error: node_modules/@amcharts/amcharts5: tarball extraction failed |
+| louislam/uptime-kuma | ok | other **↓** |  | blanket: error: node_modules/pngjs: tarball extraction failed |
+| mermaid-js/mermaid | — | ok **↑** |  |  |
+| microsoft/playwright | — | other |  | blanket: error: node_modules/pngjs: tarball extraction failed |
+| modelcontextprotocol/servers | — | ok **↑** |  |  |
+| paperclipai/paperclip | — | ok **↑** |  |  |
+| react/create-react-app | ok | other **↓** |  | blanket: error: node_modules/eta: tarball extraction failed |
+| shadcn-ui/ui | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| sveltejs/svelte | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| tailwindlabs/tailwindcss | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| typicode/json-server | — | ok **↑** |  |  |
+| vitejs/vite | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+| vuejs/vue | — | npm_resolve_failed |  | blanket: error: npm install --package-lock-only failed |
+
+### What the Linux numbers say
+
+- **Python is close to parity** (Linux vs macOS above). Linux-only misses
+  are dominated by the same classes as macOS — sdists needing Rust/numpy/
+  cython at build time and repos without a readable manifest — plus a
+  new class, `platform_unsupported`, which is blanket refusing something
+  loudly on Linux (read the error column; each is a follow-up, not a
+  silent failure). Where Linux wins, it is manylinux wheels existing
+  where macOS arm64 wheels did not.
+- **npm is lower on Linux** and the delta is concentrated in
+  `npm_resolve_failed` / `other`: install scripts and platform packages
+  that behave differently under the bubblewrap sandbox than under
+  Seatbelt, and pnpm/yarn monorepos (NEXT.md item 7) which miss on both.
+  Each Linux-only npm miss is listed above with its error; these are the
+  stage 5 follow-ups.
+- Exceptions are now counted separately from clean oks; the macOS
+  column never distinguished them, so treat the macOS `ok` as an upper
+  bound.
+- Wall time on the 12-core box was well under the 600 s cap for every
+  repo that did not hit a build wall.
