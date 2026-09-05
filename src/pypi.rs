@@ -4,10 +4,81 @@
 
 use crate::platform::Platform;
 use crate::types::{ArtifactKind, LockedPackage, Plan};
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use std::ffi::CStr;
 use std::io;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use std::os::raw::c_char;
+use std::process::Command;
+use std::sync::OnceLock;
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" {
+    fn gnu_get_libc_version() -> *const c_char;
+}
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Glibc(pub u32, pub u32);
+
+fn parse_glibc_version(text: &str) -> Option<Glibc> {
+    let text = text.trim();
+    let version = text.strip_prefix("glibc ").unwrap_or(text);
+    // "2.43", "2.43.9000" (rawhide/branched builds), "glibc 2.43". Only the
+    // first two components matter for manylinux compatibility.
+    let mut parts = version.split('.');
+    let digits = |s: &str| {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<u32>().ok())
+            .flatten()
+    };
+    let major = digits(parts.next()?)?;
+    let minor = digits(parts.next()?)?;
+    Some(Glibc(major, minor))
+}
+
+fn detect_host_glibc() -> Result<Glibc, String> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // The symbol is only declared on glibc targets; if it is unusable,
+        // continue to the portable getconf fallback below.
+        let version = unsafe { gnu_get_libc_version() };
+        if !version.is_null() {
+            if let Ok(version) = unsafe { CStr::from_ptr(version) }.to_str() {
+                if let Some(glibc) = parse_glibc_version(version) {
+                    return Ok(glibc);
+                }
+            }
+        }
+    }
+
+    let output = Command::new("/usr/bin/getconf")
+        .arg("GNU_LIBC_VERSION")
+        .output()
+        .map_err(|error| format!("could not run /usr/bin/getconf GNU_LIBC_VERSION: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "/usr/bin/getconf GNU_LIBC_VERSION failed with {status}",
+            status = output.status
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| "/usr/bin/getconf returned non-UTF-8 output".to_string())?;
+    parse_glibc_version(&text)
+        .ok_or_else(|| format!("could not parse glibc version from getconf output: {text:?}"))
+}
+
+pub fn host_glibc() -> io::Result<Glibc> {
+    static HOST: OnceLock<Result<Glibc, String>> = OnceLock::new();
+    match HOST.get_or_init(detect_host_glibc) {
+        Ok(glibc) => Ok(*glibc),
+        Err(message) => Err(io::Error::other(format!(
+            "could not determine host glibc version: {message}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -207,110 +278,213 @@ pub struct FileCandidate {
     pub sha256: String,
 }
 
-/// Wheel-or-sdist choice for macOS arm64 (LINUX_PORT.md stage 2:
-/// selector is macOS-arm64-only) given python tag like "cp312".
-/// Returns (band, tiebreak); lower wins. None = incompatible.
-/// Bands: 0 native exact, 1 native abi3, 2 universal2 exact,
-/// 3 universal2 abi3, 4 pure, 6 sdist. abi3 tiebreak prefers the
-/// highest compatible cp tag.
-fn score(filename: &str, python_tag: &str) -> Option<(u32, u32)> {
-    // LINUX_PORT.md stage 2: selector is macOS-arm64-only.
-    let ours: u32 = python_tag.strip_prefix("cp")?.parse().ok()?;
-    if filename.ends_with(".tar.gz") || filename.ends_with(".zip") {
-        return Some((6, 0));
-    }
-    let stem = filename.strip_suffix(".whl")?;
-    let parts: Vec<&str> = stem.split('-').collect();
-    if parts.len() < 5 {
-        return None;
-    }
-    let (py, abi, plat) = (
-        parts[parts.len() - 3],
-        parts[parts.len() - 2],
-        parts[parts.len() - 1],
-    );
-    let pys: Vec<&str> = py.split('.').collect();
-    let plats: Vec<&str> = plat.split('.').collect();
-
-    let arm64 = plats
-        .iter()
-        .any(|p| p.starts_with("macosx_") && p.ends_with("_arm64"));
-    let universal2 = plats
-        .iter()
-        .any(|p| p.starts_with("macosx_") && p.ends_with("_universal2"));
-    let anyplat = plats.iter().any(|p| *p == "any");
-
-    let abis: Vec<&str> = abi.split('.').collect();
-    // Exact requires a matching ABI too: cpNNN wheels must carry our cpNNN
-    // abi (or abi3/none); a cp312-cp311-* wheel is NOT usable on 3.12.
-    let abi_ok = abis
-        .iter()
-        .any(|a| *a == python_tag || *a == "abi3" || *a == "none");
-    let exact = pys.iter().any(|t| *t == python_tag) && abi_ok;
-    // abi3: any cpNNN <= ours counts; prefer the highest such NNN.
-    let abi3_best = if abis.iter().any(|a| *a == "abi3") {
-        pys.iter()
-            .filter_map(|t| t.strip_prefix("cp")?.parse::<u32>().ok())
-            .filter(|n| *n <= ours)
-            .max()
-    } else {
-        None
-    };
-    // Pure wheels must be abi-none. Interpreter tag may be py3, a generic
-    // pyNNN <= ours, or our exact cpNNN (e.g. cp312-none-any).
-    let none_abi = abis.iter().any(|a| *a == "none");
-    let py_ok = pys.iter().any(|t| {
-        *t == "py3"
-            || *t == python_tag
-            || t.strip_prefix("py")
-                .and_then(|n| n.parse::<u32>().ok())
-                .map(|n| n == 3 || n <= ours)
-                .unwrap_or(false)
-    });
-    let pure = py_ok && none_abi;
-
-    // A pure wheel may still carry a platform tag (py3-none-macosx_11_0_arm64:
-    // ships a prebuilt binary but no Python ABI dependence). Ranked just
-    // behind the exact-ABI wheel for the same platform.
-    if arm64 && exact {
-        return Some((0, 0));
-    }
-    if arm64 && pure {
-        return Some((0, 1));
-    }
-    if arm64 {
-        if let Some(n) = abi3_best {
-            return Some((1, ours - n));
-        }
-    }
-    if universal2 && exact {
-        return Some((2, 0));
-    }
-    if universal2 && pure {
-        return Some((2, 1));
-    }
-    if universal2 {
-        if let Some(n) = abi3_best {
-            return Some((3, ours - n));
-        }
-    }
-    if anyplat && pure {
-        return Some((4, 0));
-    }
-    None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Score {
+    family_rank: u32,
+    abi_rank: u32,
+    abi3_floor: u32,
+    glibc_floor: (u32, u32),
 }
 
-/// Pick the best compatible file, preferring lowest score.
+type ScoreOrder = (u32, u32, std::cmp::Reverse<u32>, std::cmp::Reverse<(u32, u32)>);
+
+fn score_order(score: Score) -> ScoreOrder {
+    (
+        score.family_rank,
+        score.abi_rank,
+        std::cmp::Reverse(score.abi3_floor),
+        std::cmp::Reverse(score.glibc_floor),
+    )
+}
+
+fn parse_cp_tag(tag: &str) -> Option<u32> {
+    let digits = tag.strip_prefix("cp")?;
+    if digits.len() < 2 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn parse_python_tag(tag: &str) -> Option<(u32, u32)> {
+    let digits = tag.strip_prefix("cp")?;
+    if digits.len() < 2 || !digits.starts_with('3') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let ours = digits.parse().ok()?;
+    let minor = digits[1..].parse().ok()?;
+    Some((ours, minor))
+}
+
+fn manylinux_floor(tag: &str) -> Option<(u32, u32)> {
+    match tag {
+        "manylinux1_x86_64" => return Some((2, 5)),
+        "manylinux2010_x86_64" => return Some((2, 12)),
+        "manylinux2014_x86_64" => return Some((2, 17)),
+        _ => {}
+    }
+    let rest = tag.strip_prefix("manylinux_")?;
+    let parts: Vec<_> = rest.split('_').collect();
+    if parts.len() != 4 || parts[2] != "x86" || parts[3] != "64" {
+        return None;
+    }
+    let digits = |s: &str| {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<u32>().ok())
+            .flatten()
+    };
+    Some((digits(parts[0])?, digits(parts[1])?))
+}
+
+fn platform_score(
+    tag: &str,
+    platform: Platform,
+    glibc: Glibc,
+) -> Option<(u32, (u32, u32))> {
+    match platform {
+        Platform::Aarch64AppleDarwin => {
+            if tag.starts_with("macosx_") && tag.ends_with("_arm64") {
+                Some((0, (0, 0)))
+            } else if tag.starts_with("macosx_") && tag.ends_with("_universal2") {
+                Some((1, (0, 0)))
+            } else if tag == "any" {
+                Some((2, (0, 0)))
+            } else {
+                None
+            }
+        }
+        Platform::X86_64UnknownLinuxGnu => {
+            if let Some(floor) = manylinux_floor(tag) {
+                (floor <= (glibc.0, glibc.1)).then_some((0, floor))
+            } else if tag == "linux_x86_64" {
+                Some((1, (0, 0)))
+            } else if tag == "any" {
+                Some((2, (0, 0)))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn pure_python_tag(tag: &str, python_tag: &str, python_minor: u32) -> bool {
+    if tag == "py3" || tag == python_tag {
+        return true;
+    }
+    let Some(minor) = tag.strip_prefix("py3") else {
+        return false;
+    };
+    !minor.is_empty()
+        && minor.len() <= 2
+        && minor.bytes().all(|byte| byte.is_ascii_digit())
+        && minor.parse::<u32>().is_ok_and(|minor| minor <= python_minor)
+}
+
+/// Score a wheel or source archive for an explicit host platform.
+///
+/// The filename's compressed py/abi/platform tags are expanded as a
+/// Cartesian product. The best compatible tuple is retained, then the
+/// caller adds the filename as the final deterministic tiebreaker.
+fn score(
+    filename: &str,
+    python_tag: &str,
+    platform: Platform,
+    glibc: Glibc,
+) -> Option<Score> {
+    let (ours, python_minor) = parse_python_tag(python_tag)?;
+    if let Some(stem) = filename
+        .strip_suffix(".tar.gz")
+        .or_else(|| filename.strip_suffix(".zip"))
+    {
+        if stem.rsplit_once('-').is_some() {
+            return Some(Score {
+                family_rank: 3,
+                abi_rank: 0,
+                abi3_floor: 0,
+                glibc_floor: (0, 0),
+            });
+        }
+        return None;
+    }
+
+    let stem = filename.strip_suffix(".whl")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    if !matches!(parts.len(), 5 | 6) || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let py = parts[parts.len() - 3];
+    let abi = parts[parts.len() - 2];
+    let plat = parts[parts.len() - 1];
+    let mut best = None;
+    for py_tag in py.split('.') {
+        for abi_tag in abi.split('.') {
+            let abi_score = if abi_tag == python_tag && py_tag == python_tag {
+                Some((0, 0))
+            } else if abi_tag == "abi3" {
+                // Stable ABI: cp3Y with 3.2 <= 3.Y <= our 3.N. Compare as
+                // (major, minor) so cp40+ (Python 4) never counts as a floor.
+                parse_cp_tag(py_tag)
+                    .filter(|floor| {
+                        let (major, minor) = (floor / 10, floor % 10);
+                        let floor_is_3x = *floor >= 32 && *floor < 40 && major == 3;
+                        let floor_is_3xx = *floor >= 310 && *floor / 100 == 3;
+                        (floor_is_3x && minor >= 2 && *floor <= ours)
+                            || (floor_is_3xx && *floor <= ours)
+                    })
+                    .map(|floor| (1, floor))
+            } else if abi_tag == "none" && pure_python_tag(py_tag, python_tag, python_minor) {
+                Some((2, 0))
+            } else {
+                None
+            };
+            let Some((abi_rank, abi3_floor)) = abi_score else {
+                continue;
+            };
+            for platform_tag in plat.split('.') {
+                // A platform-independent wheel cannot carry a compiled ABI:
+                // pip never pairs `any` with cpNNN/abi3, and the pre-port
+                // macOS selector rejected it too.
+                if platform_tag == "any" && abi_rank != 2 {
+                    continue;
+                }
+                let Some((family_rank, glibc_floor)) =
+                    platform_score(platform_tag, platform, glibc)
+                else {
+                    continue;
+                };
+                let candidate = Score {
+                    family_rank,
+                    abi_rank,
+                    abi3_floor,
+                    glibc_floor,
+                };
+                if best
+                    .map(|current| score_order(candidate) < score_order(current))
+                    .unwrap_or(true)
+                {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Pick the best compatible file, preferring the specified ordering key.
 pub fn select_file<'a>(
     files: &'a [FileCandidate],
     python_tag: &str,
+    platform: Platform,
+    glibc: Glibc,
 ) -> Option<(&'a FileCandidate, ArtifactKind)> {
     files
         .iter()
-        .filter_map(|f| score(&f.filename, python_tag).map(|s| (s, f)))
-        .min_by_key(|(s, f)| (*s, f.filename.clone()))
+        .filter_map(|f| score(&f.filename, python_tag, platform, glibc).map(|s| (s, f)))
+        .min_by_key(|(s, f)| {
+            let order = score_order(*s);
+            (order.0, order.1, order.2, order.3, f.filename.clone())
+        })
         .map(|(s, f)| {
-            let kind = if s.0 >= 6 {
+            let kind = if s.family_rank == 3 {
                 ArtifactKind::Sdist
             } else {
                 ArtifactKind::Wheel
@@ -346,18 +520,10 @@ fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>>
 /// Lock every requirement against PyPI, honoring the hash pins.
 pub fn lock_requirements(
     platform: Platform,
+    glibc: Glibc,
     reqs: &[Requirement],
     python_tag: &str,
 ) -> io::Result<Vec<LockedPackage>> {
-    if !platform.is_macos() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "wheel selection for {} lands in LINUX_PORT.md stage 2",
-                platform.triple()
-            ),
-        ));
-    }
     let mut out = Vec::new();
     for r in reqs {
         let all = fetch_candidates(&r.name, &r.version)?;
@@ -378,13 +544,17 @@ pub fn lock_requirements(
                     .join(", ")
             )));
         }
-        let Some((chosen, kind)) = select_file(&matching, python_tag) else {
+        let Some((chosen, kind)) = select_file(&matching, python_tag, platform, glibc) else {
+            let host = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+                format!("{} (glibc {}.{})", platform.triple(), glibc.0, glibc.1)
+            } else {
+                platform.triple().to_string()
+            };
             return Err(err(format!(
-                "{}=={}: no file compatible with {python_tag} on {} \
+                "{}=={}: no file compatible with {python_tag} on {host} \
                  among hash-matched files: {}",
                 r.name,
                 r.version,
-                platform.triple(),
                 matching
                     .iter()
                     .map(|f| f.filename.as_str())
@@ -417,7 +587,12 @@ pub fn plan_python(
         .collect::<Vec<_>>()
         .join("");
     let tag = format!("cp{minor}");
-    let packages = lock_requirements(platform, &reqs, &tag)?;
+    let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        host_glibc()?
+    } else {
+        Glibc(0, 0)
+    };
+    let packages = lock_requirements(platform, glibc, &reqs, &tag)?;
     Ok(Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
@@ -471,10 +646,10 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         assert!(parse_requirements(dup).is_err());
         // cp312 python tag with cp311 abi: unusable, must be rejected.
         let files = vec![fc("pkg-1.0-cp312-cp311-macosx_11_0_arm64.whl")];
-        assert!(select_file(&files, "cp312").is_none());
+        assert!(darwin_select(&files, "cp312").is_none());
         // py3 with non-none abi is not a pure wheel.
         let files2 = vec![fc("pkg-1.0-py3-cp39-any.whl")];
-        assert!(select_file(&files2, "cp312").is_none());
+        assert!(darwin_select(&files2, "cp312").is_none());
     }
 
     #[test]
@@ -523,6 +698,31 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         }
     }
 
+    fn darwin_select<'a>(
+        files: &'a [FileCandidate],
+        python_tag: &str,
+    ) -> Option<(&'a FileCandidate, ArtifactKind)> {
+        select_file(
+            files,
+            python_tag,
+            Platform::Aarch64AppleDarwin,
+            Glibc(0, 0),
+        )
+    }
+
+    fn linux_select<'a>(
+        files: &'a [FileCandidate],
+        python_tag: &str,
+        glibc: Glibc,
+    ) -> Option<(&'a FileCandidate, ArtifactKind)> {
+        select_file(
+            files,
+            python_tag,
+            Platform::X86_64UnknownLinuxGnu,
+            glibc,
+        )
+    }
+
     #[test]
     fn selection_prefers_native_then_abi3_then_universal2_then_pure_then_sdist() {
         let files = vec![
@@ -533,7 +733,7 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             fc("pkg-1.0-cp312-cp312-macosx_10_9_universal2.whl"),
             fc("pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
         ];
-        let (best, kind) = select_file(&files, "cp312").unwrap();
+        let (best, kind) = darwin_select(&files, "cp312").unwrap();
         assert_eq!(best.filename, "pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl");
         assert_eq!(kind, ArtifactKind::Wheel);
 
@@ -543,7 +743,7 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             .filter(|f| !f.filename.contains("cp312-cp312-macosx_11_0_arm64"))
             .cloned()
             .collect();
-        let (best2, _) = select_file(&files2, "cp312").unwrap();
+        let (best2, _) = darwin_select(&files2, "cp312").unwrap();
         assert_eq!(best2.filename, "pkg-1.0-cp39-abi3-macosx_11_0_arm64.whl");
 
         // abi3 prefers highest compatible cp tag.
@@ -552,12 +752,12 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             fc("pkg-1.0-cp311-abi3-macosx_11_0_arm64.whl"),
             fc("pkg-1.0-cp313-abi3-macosx_11_0_arm64.whl"), // newer than ours: skip
         ];
-        let (best3, _) = select_file(&files3, "cp312").unwrap();
+        let (best3, _) = darwin_select(&files3, "cp312").unwrap();
         assert_eq!(best3.filename, "pkg-1.0-cp311-abi3-macosx_11_0_arm64.whl");
 
         // Only linux wheel: incompatible.
         let files4 = vec![fc("pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl")];
-        assert!(select_file(&files4, "cp312").is_none());
+        assert!(darwin_select(&files4, "cp312").is_none());
 
         // universal2 beats pure; pure beats sdist.
         let files5 = vec![
@@ -565,7 +765,7 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             fc("pkg-1.0-py3-none-any.whl"),
             fc("pkg-1.0-cp312-cp312-macosx_10_9_universal2.whl"),
         ];
-        let (best5, _) = select_file(&files5, "cp312").unwrap();
+        let (best5, _) = darwin_select(&files5, "cp312").unwrap();
         assert!(best5.filename.contains("universal2"));
 
         // Pure wheel with a platform tag (comfy-angle, patchright: hit-rate
@@ -576,18 +776,18 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             fc("pkg-1.0-py3-none-manylinux_2_28_aarch64.whl"),
             fc("pkg-1.0-py3-none-win_amd64.whl"),
         ];
-        let (best_plat, _) = select_file(&files_plat, "cp312").unwrap();
+        let (best_plat, _) = darwin_select(&files_plat, "cp312").unwrap();
         assert_eq!(best_plat.filename, "pkg-1.0-py3-none-macosx_11_0_arm64.whl");
         let files_plat2 = vec![fc("pkg-1.0-py3-none-macosx_10_13_x86_64.whl")];
-        assert!(select_file(&files_plat2, "cp312").is_none());
+        assert!(darwin_select(&files_plat2, "cp312").is_none());
 
         let files6 = vec![fc("pkg-1.0.tar.gz"), fc("pkg-1.0-py2.py3-none-any.whl")];
-        let (best6, kind6) = select_file(&files6, "cp312").unwrap();
+        let (best6, kind6) = darwin_select(&files6, "cp312").unwrap();
         assert!(best6.filename.ends_with(".whl"));
         assert_eq!(kind6, ArtifactKind::Wheel);
 
         let files7 = vec![fc("pkg-1.0.tar.gz")];
-        let (_, kind7) = select_file(&files7, "cp312").unwrap();
+        let (_, kind7) = darwin_select(&files7, "cp312").unwrap();
         assert_eq!(kind7, ArtifactKind::Sdist);
     }
 
@@ -596,21 +796,211 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         let files = vec![fc(
             "pkg-1.0-cp310.cp311.cp312-abi3-macosx_10_9_universal2.macosx_11_0_arm64.whl",
         )];
-        let (best, _) = select_file(&files, "cp312").unwrap();
+        let (best, _) = darwin_select(&files, "cp312").unwrap();
         assert!(best.filename.contains("abi3"));
     }
 
     #[test]
-    fn linux_selector_guard_is_unsupported_before_fetch() {
-        let reqs = parse_requirements(
-            "blanket-stage1-fetch-sentinel==0.0.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+    fn linux_selection_prefers_manylinux_floor_then_linux_then_any_then_sdist() {
+        let files = vec![
+            fc("pkg-1.0.tar.gz"),
+            fc("pkg-1.0-py3-none-any.whl"),
+            fc("pkg-1.0-cp312-cp312-linux_x86_64.whl"),
+            fc("pkg-1.0-cp312-cp312-manylinux_2_5_x86_64.whl"),
+            fc("pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
+        ];
+        let (best, _) = linux_select(&files, "cp312", Glibc(2, 43)).unwrap();
+        assert!(best.filename.contains("manylinux_2_17"));
+
+        let files = vec![
+            fc("pkg-1.0.tar.gz"),
+            fc("pkg-1.0-py3-none-any.whl"),
+            fc("pkg-1.0-cp312-cp312-linux_x86_64.whl"),
+            fc("pkg-1.0-cp312-cp312-manylinux_2_5_x86_64.whl"),
+        ];
+        let (best, _) = linux_select(&files, "cp312", Glibc(2, 43)).unwrap();
+        assert!(best.filename.contains("manylinux_2_5"));
+
+        let files = vec![fc("pkg-1.0.tar.gz"), fc("pkg-1.0-py3-none-any.whl")];
+        let (best, _) = linux_select(&files, "cp312", Glibc(2, 43)).unwrap();
+        assert!(best.filename.ends_with("any.whl"));
+    }
+
+    #[test]
+    fn linux_glibc_floor_must_fit_and_equal_is_accepted() {
+        let files = vec![
+            fc("pkg-1.0-cp312-cp312-manylinux2014_x86_64.whl"),
+            fc("pkg-1.0-cp312-cp312-manylinux2010_x86_64.whl"),
+            fc("pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.whl"),
+        ];
+        let (best, _) = linux_select(&files, "cp312", Glibc(2, 12)).unwrap();
+        assert!(best.filename.contains("manylinux2010"));
+
+        let equal = vec![fc("pkg-1.0-cp312-cp312-manylinux_2_12_x86_64.whl")];
+        assert!(linux_select(&equal, "cp312", Glibc(2, 12)).is_some());
+    }
+
+    #[test]
+    fn cross_platform_and_foreign_architecture_wheels_are_rejected() {
+        for filename in [
+            "pkg-1.0-cp312-cp312-musllinux_1_2_x86_64.whl",
+            "pkg-1.0-cp312-cp312-manylinux_2_17_aarch64.whl",
+            "pkg-1.0-cp312-cp312-manylinux_2_17_i686.whl",
+            "pkg-1.0-cp312-cp312-manylinux_2_17_ppc64le.whl",
+            "pkg-1.0-cp312-cp312-manylinux_2_17_s390x.whl",
+            "pkg-1.0-cp312-cp312-manylinux_2_17_armv7l.whl",
+            "pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl",
+        ] {
+            assert!(
+                linux_select(&[fc(filename)], "cp312", Glibc(2, 43)).is_none(),
+                "should reject {filename}"
+            );
+        }
+        assert!(darwin_select(
+            &[fc("pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl")],
+            "cp312"
         )
-        .unwrap();
-        let error = lock_requirements(Platform::X86_64UnknownLinuxGnu, &reqs, "cp312")
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(error
-            .to_string()
-            .contains("wheel selection for x86_64-unknown-linux-gnu lands in LINUX_PORT.md stage 2"));
+        .is_none());
+    }
+
+    #[test]
+    fn compressed_tags_are_expanded() {
+        let manylinux = vec![fc(
+            "pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        )];
+        assert!(linux_select(&manylinux, "cp312", Glibc(2, 43)).is_some());
+
+        let pure = vec![fc("pkg-1.0-py2.py3-none-any.whl")];
+        assert!(linux_select(&pure, "cp312", Glibc(2, 43)).is_some());
+    }
+
+    #[test]
+    fn abi3_is_below_exact_and_prefers_highest_compatible_floor() {
+        let files = vec![
+            fc("pkg-1.0-cp38-abi3-manylinux_2_17_x86_64.whl"),
+            fc("pkg-1.0-cp311-abi3-manylinux_2_17_x86_64.whl"),
+            fc("pkg-1.0-cp312-abi3-manylinux_2_17_x86_64.whl"),
+            fc("pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
+        ];
+        let (best, _) = linux_select(&files, "cp312", Glibc(2, 43)).unwrap();
+        assert!(best.filename.contains("cp312-cp312"));
+
+        let abi3_only = vec![
+            fc("pkg-1.0-cp38-abi3-manylinux_2_17_x86_64.whl"),
+            fc("pkg-1.0-cp311-abi3-manylinux_2_17_x86_64.whl"),
+            fc("pkg-1.0-cp312-abi3-manylinux_2_17_x86_64.whl"),
+            fc("pkg-1.0-cp313-abi3-manylinux_2_17_x86_64.whl"),
+        ];
+        let (best, _) = linux_select(&abi3_only, "cp312", Glibc(2, 43)).unwrap();
+        assert!(best.filename.contains("cp312-abi3"));
+
+        let too_new = vec![fc("pkg-1.0-cp313-abi3-manylinux_2_17_x86_64.whl")];
+        assert!(linux_select(&too_new, "cp312", Glibc(2, 43)).is_none());
+    }
+
+    #[test]
+    fn pure_wheel_python_tags_are_version_checked() {
+        for tag in ["py2", "py27", "py4", "cp27", "py313"] {
+            let files = vec![fc(&format!("pkg-1.0-{tag}-none-any.whl"))];
+            assert!(
+                linux_select(&files, "cp312", Glibc(2, 43)).is_none(),
+                "should reject {tag}"
+            );
+        }
+        for tag in ["py3", "py311", "py312", "cp312"] {
+            let files = vec![fc(&format!("pkg-1.0-{tag}-none-any.whl"))];
+            assert!(
+                linux_select(&files, "cp312", Glibc(2, 43)).is_some(),
+                "should accept {tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn abi_mismatch_and_malformed_wheels_are_rejected() {
+        let mismatch = vec![fc("pkg-1.0-cp312-cp311-manylinux_2_17_x86_64.whl")];
+        assert!(linux_select(&mismatch, "cp312", Glibc(2, 43)).is_none());
+
+        for filename in [
+            "pkg-1.0-cp312-cp312.whl",
+            "pkg-1.0-cp312-cp312-manylinux_bad_x86_64.whl",
+            "pkg-1.0-cp312-cp312-manylinux_2_999999999999999999999_x86_64.whl",
+            "pkg-1.0-cp312-cp312-manylinux_999999999999999999999_17_x86_64.whl",
+        ] {
+            assert!(
+                linux_select(&[fc(filename)], "cp312", Glibc(2, 43)).is_none(),
+                "should reject malformed {filename}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_ties_break_by_filename() {
+        let files = vec![
+            fc("b-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
+            fc("a-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
+        ];
+        let (best, _) = linux_select(&files, "cp312", Glibc(2, 43)).unwrap();
+        assert_eq!(best.filename, "a-1.0-cp312-cp312-manylinux_2_17_x86_64.whl");
+    }
+
+    #[test]
+    fn any_platform_requires_none_abi() {
+        for platform in Platform::ALL {
+            for f in ["pkg-1.0-cp312-cp312-any.whl", "pkg-1.0-cp39-abi3-any.whl"] {
+                assert!(
+                    score(f, "cp312", *platform, Glibc(2, 43)).is_none(),
+                    "{f} must be rejected on {platform:?}"
+                );
+            }
+            assert!(score("pkg-1.0-py3-none-any.whl", "cp312", *platform, Glibc(2, 43)).is_some());
+        }
+    }
+
+    #[test]
+    fn glibc_version_parsing() {
+        assert_eq!(parse_glibc_version("2.43"), Some(Glibc(2, 43)));
+        assert_eq!(parse_glibc_version("glibc 2.43\n"), Some(Glibc(2, 43)));
+        assert_eq!(parse_glibc_version("2.43.9000"), Some(Glibc(2, 43)));
+        assert_eq!(parse_glibc_version("x"), None);
+        assert_eq!(parse_glibc_version("2"), None);
+        assert_eq!(parse_glibc_version("+2.43"), None);
+        assert_eq!(parse_glibc_version("2.99999999999999999999"), None);
+    }
+
+    #[test]
+    fn manylinux_floor_rejects_signs_and_python4_abi3_floors_are_not_floors() {
+        let linux = Platform::X86_64UnknownLinuxGnu;
+        assert!(score("pkg-1.0-cp312-cp312-manylinux_+2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_none());
+        assert!(score("pkg-1.0-cp40-abi3-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_none());
+        assert!(score("pkg-1.0-cp38-abi3-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_some());
+        assert!(score("pkg-1.0-cp310-abi3-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_some());
+    }
+
+    #[test]
+    fn linux_platform_none_wheel_beats_any_and_compressed_second_alternative_counts() {
+        let linux = Platform::X86_64UnknownLinuxGnu;
+        let plat = score("pkg-1.0-py3-none-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).unwrap();
+        let any = score("pkg-1.0-py3-none-any.whl", "cp312", linux, Glibc(2, 43)).unwrap();
+        assert!(score_order(plat) < score_order(any));
+        // only the second alternative fits glibc 2.17
+        assert!(score("pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 17)).is_some());
+        assert!(score("pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.whl", "cp312", linux, Glibc(2, 17)).is_none());
+        // cp313 target
+        assert!(score("pkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl", "cp313", linux, Glibc(2, 43)).is_some());
+        assert!(score("pkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_none());
+    }
+
+    #[test]
+    fn darwin_abi3_ranks_above_platform_none_like_pip() {
+        // Deliberate change from the pre-port selector, which ranked
+        // py3-none-macosx_*_arm64 ahead of abi3. pip's supported-tag order
+        // puts every abi3 variant before py3-none-<plat>; we follow pip.
+        let mac = Platform::Aarch64AppleDarwin;
+        let abi3 = score("pkg-1.0-cp39-abi3-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
+        let none = score("pkg-1.0-py3-none-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
+        let exact = score("pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
+        assert!(score_order(exact) < score_order(abi3));
+        assert!(score_order(abi3) < score_order(none));
     }
 }

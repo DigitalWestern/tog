@@ -31,6 +31,18 @@ pub const PYTHONS: &[PinnedPython] = &[
         url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.13.15%2B20260825-aarch64-apple-darwin-install_only.tar.gz",
         sha256: "d681f7cebf4885637242cba807d22f476b9ea8555ac2dc7307172426dbf161e1",
     },
+    PinnedPython {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        version: "3.12.14",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.12.14%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        sha256: "cbdd2f0cf02f941bc5c81e546f377275e322733abffe805ac29d2b7e8a58f7e3",
+    },
+    PinnedPython {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        version: "3.13.15",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.13.15%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        sha256: "8a70011ae25276a9925f89304cdc086466cd269ee6cfe68a9506694ca5ff4f9c",
+    },
 ];
 
 pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython> {
@@ -60,11 +72,18 @@ struct PinnedUv {
     sha256: &'static str,
 }
 
-const UV: &[PinnedUv] = &[PinnedUv {
-    platform: Platform::Aarch64AppleDarwin,
-    url: "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz",
-    sha256: "127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3",
-}];
+const UV: &[PinnedUv] = &[
+    PinnedUv {
+        platform: Platform::Aarch64AppleDarwin,
+        url: "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz",
+        sha256: "127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3",
+    },
+    PinnedUv {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        url: "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz",
+        sha256: "788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21",
+    },
+];
 
 fn cpython_identity(pin: &PinnedPython) -> Identity {
     Identity {
@@ -175,6 +194,38 @@ pub(crate) fn ensure_python_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_tables_have_two_cpython_and_one_uv_row_per_platform() {
+        let mut python_keys = std::collections::HashSet::new();
+        let mut uv_keys = std::collections::HashSet::new();
+        for &platform in Platform::ALL {
+            let python_rows: Vec<_> = PYTHONS
+                .iter()
+                .filter(|pin| pin.platform == platform)
+                .collect();
+            assert_eq!(python_rows.len(), 2, "CPython rows for {platform:?}");
+            for pin in python_rows {
+                assert!(
+                    python_keys.insert((pin.platform, pin.version)),
+                    "duplicate CPython pin for {platform:?}: {}",
+                    pin.version
+                );
+            }
+
+            let uv_rows: Vec<_> = UV
+                .iter()
+                .filter(|pin| pin.platform == platform)
+                .collect();
+            assert_eq!(uv_rows.len(), 1, "uv rows for {platform:?}");
+            for pin in uv_rows {
+                assert!(
+                    uv_keys.insert((pin.platform, UV_VERSION)),
+                    "duplicate uv pin for {platform:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn darwin_identity_unchanged() {

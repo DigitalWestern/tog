@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-const PLANNER_SCHEMA: &str = "python-planner/2";
+const PLANNER_SCHEMA: &str = "python-planner/3";
 
 const USAGE: &str = "\
 blanket — universal realization & environment kernel (python + node + cargo)
@@ -37,12 +37,22 @@ Project inputs (either or both):
   *.csproj + packages.lock.json  .NET NuGet deps (lock made mandatory)
 ";
 
-fn planner_input_hash(platform: Platform, python_version: &str, text: &str) -> String {
+fn planner_input_hash(
+    platform: Platform,
+    python_version: &str,
+    text: &str,
+    glibc: pypi::Glibc,
+) -> String {
     use sha2::{Digest, Sha256};
+    let glibc_input = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        format!("\0{}.{}", glibc.0, glibc.1)
+    } else {
+        String::new()
+    };
     hex::encode(Sha256::digest(
         format!(
-            "{PLANNER_SCHEMA}\x00{python_version}\x00{text}\x00{}",
-            platform.triple()
+            "{PLANNER_SCHEMA}\x00{python_version}\x00{text}\x00{}{glibc_input}",
+            platform.triple(),
         )
         .as_bytes(),
     ))
@@ -274,7 +284,12 @@ fn read_plan(platform: Platform, dir: &Path) -> io::Result<types::Plan> {
 
     // These are project-local .blanket caches, not store identities; one
     // re-plan after moving a project between platforms is acceptable.
-    let input_hash = planner_input_hash(platform, pin.version, &text);
+    let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        pypi::host_glibc()?
+    } else {
+        pypi::Glibc(0, 0)
+    };
+    let input_hash = planner_input_hash(platform, pin.version, &text, glibc);
     let cache_path = dir.join(".blanket/plan.json");
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
@@ -1212,22 +1227,45 @@ mod tests {
     #[test]
     fn cache_key_builders_track_independent_inputs() {
         let source = "six==1.17.0\n";
-        let darwin_plan = planner_input_hash(Platform::Aarch64AppleDarwin, "3.12.14", source);
-        let linux_plan = planner_input_hash(Platform::X86_64UnknownLinuxGnu, "3.12.14", source);
+        let darwin_plan = planner_input_hash(
+            Platform::Aarch64AppleDarwin,
+            "3.12.14",
+            source,
+            pypi::Glibc(0, 0),
+        );
+        let linux_plan = planner_input_hash(
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            source,
+            pypi::Glibc(2, 43),
+        );
+        let linux_changed_glibc = planner_input_hash(
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            source,
+            pypi::Glibc(2, 42),
+        );
         let changed_plan = planner_input_hash(
             Platform::Aarch64AppleDarwin,
             "3.12.14",
             "six==1.17.0\n# changed",
+            pypi::Glibc(0, 0),
         );
         assert_ne!(darwin_plan, changed_plan); // source only
         assert_ne!(darwin_plan, linux_plan); // platform only
+        assert_ne!(linux_plan, linux_changed_glibc); // host glibc only
         assert_eq!(
             darwin_plan,
-            planner_input_hash(Platform::Aarch64AppleDarwin, "3.12.14", source)
+            planner_input_hash(
+                Platform::Aarch64AppleDarwin,
+                "3.12.14",
+                source,
+                pypi::Glibc(2, 43),
+            )
         ); // neither
         assert_eq!(
             darwin_plan,
-            "196eb83d1099e3f5e68b163da8e1c8bca31b511ff4df0547663ff930f82ed83d"
+            "dc181496c6681389a89b3191dba44abdfe8efef8044e540777e7b62c91166411"
         );
 
         let darwin_lock = lock_source_hash(Platform::Aarch64AppleDarwin, "3.12", source);
