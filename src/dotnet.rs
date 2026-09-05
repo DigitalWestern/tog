@@ -37,6 +37,10 @@ const SDK_PINS: &[SdkPin] = &[SdkPin {
     platform: Platform::Aarch64AppleDarwin,
     url: "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz",
     sha512: "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a",
+}, SdkPin {
+    platform: Platform::X86_64UnknownLinuxGnu,
+    url: "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-linux-x64.tar.gz",
+    sha512: "145bf69dcb88c4b905feb531cfdd7894a75fc875d2a030e958a13d1fb1131521c8cebd8a8a6e0fbd1a433ebae9cde86356b6adad07b1ad81efb92b36ff8a3333",
 }];
 
 fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
@@ -90,6 +94,11 @@ pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> 
     }
     let tarball = download_verified_digest(store, pin.url, &Digest::sha512(pin.sha512)?)?;
     let staged = store.stage()?;
+    extract_sdk_archive(&tarball, &staged)?;
+    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+}
+
+fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
     let st = Command::new("/usr/bin/tar")
         .args(["-xzf"])
         .arg(&tarball)
@@ -99,7 +108,7 @@ pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> 
     if !st.success() || !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    Ok(())
 }
 
 /// global.json gate (Sol): exact pin, rollForward disable, no redirection.
@@ -930,7 +939,7 @@ pub fn realize_packages(
         cwd: verifier.clone(),
         env: forced_env(&sdk_obj, &staged, &scratch),
         read: vec![sdk_obj.to_path_buf(), feed.clone(), verifier.clone()],
-        write: vec![staged.clone(), ensure_dotnet_tmp(platform)?],
+        write: dotnet_write_roots(platform, vec![staged.clone()])?,
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     });
@@ -992,12 +1001,24 @@ pub fn project_dotnet_env(
     )
 }
 
-fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
-    let path = if platform.is_macos() {
+fn dotnet_tmp_path(platform: Platform) -> PathBuf {
+    if platform.is_macos() {
         PathBuf::from("/private/tmp/.dotnet")
     } else {
         PathBuf::from("/tmp/.dotnet")
-    };
+    }
+}
+
+fn invoking_uid() -> io::Result<u32> {
+    let uid = Command::new("/usr/bin/id").arg("-u").output()?.stdout;
+    String::from_utf8(uid)
+        .map_err(|_| err("could not determine current uid"))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| err("could not determine current uid"))
+}
+
+fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32) -> io::Result<PathBuf> {
     let created = match fs::symlink_metadata(&path) {
         Ok(md) => {
             if md.file_type().is_symlink() || !md.is_dir() {
@@ -1024,17 +1045,11 @@ fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
             path.display()
         )));
     }
-    let uid = Command::new("/usr/bin/id").arg("-u").output()?.stdout;
-    let uid = String::from_utf8(uid)
-        .map_err(|_| err("could not determine current uid"))?
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| err("could not determine current uid"))?;
-    if md.uid() != uid {
+    if md.uid() != expected_uid {
         return Err(err(format!(
-            "{} is owned by uid {}, current uid is {uid}",
+            "{} is owned by uid {}, current uid is {expected_uid}",
             path.display(),
-            md.uid()
+            md.uid(),
         )));
     }
     if path.canonicalize()? != path {
@@ -1043,7 +1058,21 @@ fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
             path.display()
         )));
     }
-    Ok(path)
+    Ok(path.to_path_buf())
+}
+
+fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
+    let path = dotnet_tmp_path(platform);
+    ensure_dotnet_tmp_at(&path, invoking_uid()?)
+}
+
+fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Vec<PathBuf> {
+    roots.push(dotnet_tmp);
+    roots
+}
+
+fn dotnet_write_roots(platform: Platform, roots: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
+    Ok(add_dotnet_tmp_write_root(roots, ensure_dotnet_tmp(platform)?))
 }
 
 fn validate_build_args(args: &[String]) -> io::Result<()> {
@@ -1222,7 +1251,6 @@ pub fn build_sandboxed(
         ]
     };
     // CoreCLR named mutexes use the platform-selected local write root.
-    let shm = ensure_dotnet_tmp(platform)?;
     let env: Vec<(String, String)> = forced_env(&sdk_obj, &packages_obj, &scratch);
     let mut restore = common("restore");
     restore.extend([
@@ -1242,7 +1270,7 @@ pub fn build_sandboxed(
         cwd: project_dir.clone(),
         env: env.clone(),
         read: vec![project_dir.clone(), sdk_obj.clone(), packages_obj.clone()],
-        write: vec![objdir.clone(), shm.clone()],
+        write: dotnet_write_roots(platform, vec![objdir.clone()])?,
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
@@ -1276,7 +1304,7 @@ pub fn build_sandboxed(
         cwd: project_dir.clone(),
         env,
         read: vec![project_dir.clone(), sdk_obj.clone(), packages_obj.clone()],
-        write: vec![output_scratch.clone(), objdir.clone(), shm.clone()],
+        write: dotnet_write_roots(platform, vec![output_scratch.clone(), objdir.clone()])?,
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
@@ -1313,12 +1341,50 @@ pub fn build_sandboxed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn sdk_pins_cover_each_supported_platform() {
+        assert_eq!(SDK_PINS.len(), Platform::ALL.len());
+        for &platform in Platform::ALL {
+            assert_eq!(
+                SDK_PINS.iter().filter(|pin| pin.platform == platform).count(),
+                1
+            );
+        }
+
+        let linux = sdk_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_eq!(
+            linux.url,
+            "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-linux-x64.tar.gz"
+        );
+        assert_eq!(linux.sha512.len(), 128);
+        assert!(linux.sha512.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn sdk_identities_and_fingerprints_are_platform_specific() {
+        let darwin = sdk_pin(Platform::Aarch64AppleDarwin).unwrap();
+        let linux = sdk_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_ne!(sdk_identity(darwin).object_id(), sdk_identity(linux).object_id());
+        assert_ne!(
+            sdk_fingerprint(Platform::Aarch64AppleDarwin).unwrap(),
+            sdk_fingerprint(Platform::X86_64UnknownLinuxGnu).unwrap()
+        );
+    }
 
     #[test]
     fn darwin_identity_unchanged() {
         let platform = Platform::Aarch64AppleDarwin;
         let pin = sdk_pin(platform).unwrap();
+        assert_eq!(
+            pin.url,
+            "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz"
+        );
+        assert_eq!(
+            pin.sha512,
+            "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a"
+        );
         let identity = sdk_identity(pin);
         assert_eq!(
             identity.object_id(),
@@ -1328,6 +1394,84 @@ mod tests {
             sdk_fingerprint(platform).unwrap(),
             "3a532efac27c3140"
         );
+    }
+
+    #[test]
+    fn dotnet_tmp_paths_are_platform_specific() {
+        assert_eq!(
+            dotnet_tmp_path(Platform::Aarch64AppleDarwin),
+            PathBuf::from("/private/tmp/.dotnet")
+        );
+        assert_eq!(
+            dotnet_tmp_path(Platform::X86_64UnknownLinuxGnu),
+            PathBuf::from("/tmp/.dotnet")
+        );
+    }
+
+    #[test]
+    fn dotnet_tmp_validation_is_path_specific_and_testable() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-dn-tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let uid = invoking_uid().unwrap();
+
+        let safe = base.join("safe");
+        fs::create_dir(&safe).unwrap();
+        assert_eq!(ensure_dotnet_tmp_at(&safe, uid).unwrap(), safe);
+
+        let created = base.join("created");
+        assert_eq!(ensure_dotnet_tmp_at(&created, uid).unwrap(), created);
+        assert_eq!(
+            fs::metadata(&created).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+
+        let file = base.join("file");
+        fs::write(&file, b"not a directory").unwrap();
+        assert!(ensure_dotnet_tmp_at(&file, uid).is_err());
+
+        let link = base.join("link");
+        symlink(&safe, &link).unwrap();
+        assert!(ensure_dotnet_tmp_at(&link, uid).is_err());
+
+        let mismatch = base.join("mismatch");
+        fs::create_dir(&mismatch).unwrap();
+        let error = ensure_dotnet_tmp_at(&mismatch, uid ^ 1).unwrap_err().to_string();
+        assert!(error.contains("is owned by uid"), "{error}");
+
+        let _ = crate::store::remove_tree(&base);
+    }
+
+    #[test]
+    fn all_dotnet_sandbox_phases_add_only_the_selected_tmp_write_root() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-dn-spec-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = base.join("project");
+        let packages = base.join("packages");
+        let selected_tmp = base.join(".dotnet");
+        let phases = [
+            vec![base.join("staged-packages")],
+            vec![base.join("obj")],
+            vec![base.join("output"), base.join("obj")],
+        ];
+        for phase in phases {
+            let writes = add_dotnet_tmp_write_root(phase, selected_tmp.clone());
+            assert!(writes.iter().any(|path| path == &selected_tmp));
+            assert!(!writes.iter().any(|path| path == &project));
+            assert!(!writes.iter().any(|path| path == &packages));
+        }
     }
 
     fn minimal_csproj() -> &'static str {
@@ -1359,7 +1503,11 @@ mod tests {
             "{error}"
         );
         let same_tfm_rids = DotnetPlan {
-            targets: vec!["net9.0".into(), "net9.0/osx-arm64".into()],
+            targets: vec![
+                "net9.0".into(),
+                "net9.0/osx-arm64".into(),
+                "net9.0/linux-x64".into(),
+            ],
             ..ok.clone()
         };
         assert!(validate_plan(&same_tfm_rids).is_ok());
@@ -1551,6 +1699,59 @@ mod tests {
         let projector = bypass.join("projector.csproj");
         fs::write(&projector, "<Projector/>").unwrap();
         assert!(validate_csproj(&projector).is_err());
+
+        let _ = crate::store::remove_tree(&base);
+    }
+
+    #[test]
+    fn sdk_extraction_requires_muxer_at_object_root() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-dn-extract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+
+        let root = base.join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("dotnet"), b"muxer").unwrap();
+        let archive = base.join("root.tar.gz");
+        assert!(Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&root)
+            .arg("dotnet")
+            .status()
+            .unwrap()
+            .success());
+        let stage = base.join("stage");
+        fs::create_dir(&stage).unwrap();
+        extract_sdk_archive(&archive, &stage).unwrap();
+        assert!(stage.join("dotnet").is_file());
+
+        let nested_root = base.join("nested-root");
+        fs::create_dir_all(nested_root.join("nested")).unwrap();
+        fs::write(nested_root.join("nested/dotnet"), b"muxer").unwrap();
+        let nested_archive = base.join("nested.tar.gz");
+        assert!(Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&nested_archive)
+            .args(["-C"])
+            .arg(&nested_root)
+            .arg("nested")
+            .status()
+            .unwrap()
+            .success());
+        let nested_stage = base.join("nested-stage");
+        fs::create_dir(&nested_stage).unwrap();
+        let error = extract_sdk_archive(&nested_archive, &nested_stage)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected layout"), "{error}");
 
         let _ = crate::store::remove_tree(&base);
     }
