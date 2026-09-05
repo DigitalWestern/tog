@@ -57,6 +57,20 @@ fn build_toolchain_fingerprint() -> String {
         .join(",")
 }
 
+fn sdist_build_env(platform: Platform) -> Vec<(String, String)> {
+    if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        // python-build-standalone defaults sysconfig's compiler to clang,
+        // which is absent on the target host; see LINUX_PORT.md stage 3.
+        vec![
+            ("CC".into(), "gcc".into()),
+            ("CXX".into(), "g++".into()),
+            ("LDSHARED".into(), "gcc -shared".into()),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn derivation_fingerprint() -> String {
     format!("sdist-build/2;toolchain:{}", build_toolchain_fingerprint())
 }
@@ -143,6 +157,19 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("sandboxed build"));
     }
+
+    #[test]
+    fn linux_sdist_build_uses_host_compilers() {
+        assert_eq!(
+            sdist_build_env(Platform::X86_64UnknownLinuxGnu),
+            vec![
+                ("CC".into(), "gcc".into()),
+                ("CXX".into(), "g++".into()),
+                ("LDSHARED".into(), "gcc -shared".into()),
+            ]
+        );
+        assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
+    }
 }
 
 fn build_toolchain_plan(python_version: &str) -> Plan {
@@ -214,6 +241,7 @@ pub fn build_sdist_wheel(
         write: vec![&work],
     };
     let env_path = format!("{}:/usr/bin:/bin", build_env.join("bin").display());
+    let build_envs = sdist_build_env(platform);
     sb.run_in_on(
         platform,
         &[
@@ -231,7 +259,7 @@ pub fn build_sdist_wheel(
         &env_path,
         &work,
         &work,
-        &[],
+        &build_envs,
     )
     .map_err(|e| wrap_sandbox_build_error(pkg, e))?;
 
