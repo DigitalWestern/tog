@@ -1018,7 +1018,7 @@ fn invoking_uid() -> io::Result<u32> {
         .map_err(|_| err("could not determine current uid"))
 }
 
-fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32) -> io::Result<PathBuf> {
+fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32, precreate_shm: bool) -> io::Result<PathBuf> {
     let created = match fs::symlink_metadata(&path) {
         Ok(md) => {
             if md.file_type().is_symlink() || !md.is_dir() {
@@ -1030,8 +1030,14 @@ fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32) -> io::Result<PathBuf> {
             false
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&path)?;
-            true
+            // Two blanket processes may race here (concurrent syncs share
+            // this directory by design); losing the race is fine, the
+            // validation below still applies to whatever now exists.
+            match fs::create_dir(&path) {
+                Ok(()) => true,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+                Err(e) => return Err(e),
+            }
         }
         Err(e) => return Err(e),
     };
@@ -1058,12 +1064,37 @@ fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32) -> io::Result<PathBuf> {
             path.display()
         )));
     }
+    if precreate_shm {
+        // Linux only (LINUX_PORT.md stage 4): CoreCLR creates `shm` by
+        // mkdtemp()-ing in /tmp and rename()-ing into place. Inside the
+        // bwrap sandbox /tmp is a private tmpfs and this directory is a
+        // separate bind mount, so that rename fails with EXDEV and every
+        // NuGet/MSBuild named mutex ("NuGet-Migrations") errors out. Creating
+        // it here, owned by us, lets the runtime skip that path. Not needed
+        // on macOS (single filesystem) and deliberately not done there.
+        let shm = path.join("shm");
+        match fs::symlink_metadata(&shm) {
+            Ok(md) if md.file_type().is_symlink() || !md.is_dir() => {
+                return Err(err(format!(
+                    "{} must be a real directory, not a symlink or non-directory",
+                    shm.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(&shm) {
+                Ok(()) => fs::set_permissions(&shm, fs::Permissions::from_mode(0o700))?,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            },
+            Err(e) => return Err(e),
+        }
+    }
     Ok(path.to_path_buf())
 }
 
 fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
     let path = dotnet_tmp_path(platform);
-    ensure_dotnet_tmp_at(&path, invoking_uid()?)
+    ensure_dotnet_tmp_at(&path, invoking_uid()?, !platform.is_macos())
 }
 
 fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Vec<PathBuf> {
@@ -1423,10 +1454,10 @@ mod tests {
 
         let safe = base.join("safe");
         fs::create_dir(&safe).unwrap();
-        assert_eq!(ensure_dotnet_tmp_at(&safe, uid).unwrap(), safe);
+        assert_eq!(ensure_dotnet_tmp_at(&safe, uid, false).unwrap(), safe);
 
         let created = base.join("created");
-        assert_eq!(ensure_dotnet_tmp_at(&created, uid).unwrap(), created);
+        assert_eq!(ensure_dotnet_tmp_at(&created, uid, false).unwrap(), created);
         assert_eq!(
             fs::metadata(&created).unwrap().permissions().mode() & 0o7777,
             0o700
@@ -1434,18 +1465,35 @@ mod tests {
 
         let file = base.join("file");
         fs::write(&file, b"not a directory").unwrap();
-        assert!(ensure_dotnet_tmp_at(&file, uid).is_err());
+        assert!(ensure_dotnet_tmp_at(&file, uid, false).is_err());
 
         let link = base.join("link");
         symlink(&safe, &link).unwrap();
-        assert!(ensure_dotnet_tmp_at(&link, uid).is_err());
+        assert!(ensure_dotnet_tmp_at(&link, uid, false).is_err());
 
         let mismatch = base.join("mismatch");
         fs::create_dir(&mismatch).unwrap();
-        let error = ensure_dotnet_tmp_at(&mismatch, uid ^ 1).unwrap_err().to_string();
+        let error = ensure_dotnet_tmp_at(&mismatch, uid ^ 1, false).unwrap_err().to_string();
         assert!(error.contains("is owned by uid"), "{error}");
 
         let _ = crate::store::remove_tree(&base);
+    }
+
+    #[test]
+    fn linux_precreates_shm_under_the_dotnet_tmp_dir() {
+        let temp = std::env::temp_dir().join(format!("blanket-dotnet-shm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        let uid = invoking_uid().unwrap();
+        let dir = ensure_dotnet_tmp_at(&temp, uid, true).unwrap();
+        let shm = dir.join("shm");
+        assert!(shm.is_dir());
+        assert_eq!(fs::metadata(&shm).unwrap().permissions().mode() & 0o777, 0o700);
+        // idempotent, and a symlinked shm is refused
+        ensure_dotnet_tmp_at(&temp, uid, true).unwrap();
+        fs::remove_dir(&shm).unwrap();
+        std::os::unix::fs::symlink(&temp, &shm).unwrap();
+        assert!(ensure_dotnet_tmp_at(&temp, uid, true).is_err());
+        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]

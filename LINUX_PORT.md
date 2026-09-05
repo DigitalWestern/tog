@@ -123,6 +123,22 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
   re-downloaded and re-hashed after publishing. Built in 59 s inside the
   bwrap prototype with network denied; crypto/ssl probes pass.
 
+### 2026-09-05 (night) — Linux port functionally complete; all gates green
+
+- Sandbox (stream B), Python, npm, Rust, .NET, Go, Ruby, BEAM all merged
+  into `linux-port`. 143 offline unit tests (65 this morning). Every
+  ignored e2e gate passes on m6-fedora with `BLANKET_SANDBOX_TESTS=required`.
+- Gate debugging on the merged tree found: a 12 GB tmpfs `/tmp` that fills
+  when tests keep per-run stores under `TMPDIR` (run gates with `TMPDIR`
+  on disk); the CoreCLR shm/EXDEV bug (fixed in `dotnet.rs`); a directory
+  creation race when two syncs share `/tmp/.dotnet` (fixed); and three
+  test bugs (closure `body` wrapper, esbuild platform packages have no
+  entry point, nokogiri links host zlib).
+- Host prerequisites confirmed for native builds on Fedora 44:
+  `gcc gcc-c++ make binutils glibc-devel pkgconf-pkg-config patch
+  zlib-ng-compat-devel libxcrypt-devel` (installed today).
+- Stage 5 (hit rate on Linux) started with the pinned 60-repo lock.
+
 ---
 
 ## Surface inventory (what is actually macOS-specific)
@@ -282,28 +298,28 @@ that have a hit-rate number, without native builds (those need stage 3).
 
 Files: `npm.rs`, `python.rs`, `pypi.rs`, `tests/fixtures`.
 
-- [ ] Node 24.20.0 `linux-x64` pin; sha256 from
+- [x] Node 24.20.0 `linux-x64` pin; sha256 from
       `https://nodejs.org/dist/v24.20.0/SHASUMS256.txt`:
       `855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec`
       (fetched 2026-09-05; darwin line in the same file matched the
       existing pin `40e5607e…`).
-- [ ] CPython `x86_64-unknown-linux-gnu-install_only` pins from
+- [x] CPython `x86_64-unknown-linux-gnu-install_only` pins from
       python-build-standalone release 20260825. That release publishes no
       `.sha256` sidecars; the GitHub release-asset `digest` field is the
       source (darwin digests matched existing pins `62eef3fc…`/`d681f7ce…`):
       - 3.12.14: `cbdd2f0cf02f941bc5c81e546f377275e322733abffe805ac29d2b7e8a58f7e3`
       - 3.13.15: `8a70011ae25276a9925f89304cdc086466cd269ee6cfe68a9506694ca5ff4f9c`
-- [ ] uv 0.12.7 `x86_64-unknown-linux-gnu` pin:
+- [x] uv 0.12.7 `x86_64-unknown-linux-gnu` pin:
       `788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21`
       (`.sha256` sidecar and GitHub asset digest agree; darwin sidecar
       matched existing pin `127ebdda…`). Tarball root is
       `uv-x86_64-unknown-linux-gnu/`; the existing `--strip-components 1`
       handles it.
-- [ ] `npm.rs` lockfile platform check uses `npm_os()`/`npm_cpu()`.
+- [x] `npm.rs` lockfile platform check uses `npm_os()`/`npm_cpu()`.
       Optional deps for other platforms (e.g. `@esbuild/darwin-arm64`)
       must be skipped, and `@esbuild/linux-x64` must be selected. Add a
       fixture lockfile that carries both.
-- [ ] `pypi.rs::score` gets a platform parameter (and, on Linux, the host
+- [x] `pypi.rs::score` gets a platform parameter (and, on Linux, the host
       glibc version injected, so tests can vary it). Algorithm (reviewer-
       specified, 2026-09-05): expand compressed tag sets (`py3.cp312`,
       `manylinux_2_17_x86_64.manylinux2014_x86_64`) and pick the best
@@ -320,31 +336,39 @@ Files: `npm.rs`, `python.rs`, `pypi.rs`, `tests/fixtures`.
       `/usr/bin/getconf GNU_LIBC_VERSION`; failure is an error, never a
       guess. m6-fedora is glibc 2.43, so nearly every manylinux wheel on
       PyPI qualifies, but the comparison must exist for older hosts.
-- [ ] Three latent bugs in the current `score()` to fix while touching it,
+- [x] Three latent bugs in the current `score()` to fix while touching it,
       because on Linux they would silently pick wrong wheels: (1) ~line
       267 the pure-wheel check accepts `py2`/`py27`/`py4` via `n <= ours`;
       (2) ~line 248 a `cp312-abi3` wheel is promoted to "exact" instead
       of abi3; (3) ~line 235 the platform match is macOS-only regardless
       of host. Include the host glibc version and a selector schema
       string in the python planner cache key (`main.rs` ~264).
-- [ ] Unit tests for the Linux selector mirroring the existing macOS
+- [x] Unit tests for the Linux selector mirroring the existing macOS
       cases (exact > abi3 > pure; cross-platform wheel rejected; glibc
       too-new wheel rejected).
-- [ ] `tests/acceptance.sh` sections 1–4 (proj-a/proj-b: markupsafe +
+- [x] `tests/acceptance.sh` sections 1–4 (proj-a/proj-b: markupsafe +
       six; conflicting versions coexist; identical lock is a cache hit;
       offline reprojection) pass on Linux. markupsafe ships manylinux
       wheels, so this exercises native-wheel selection without a build.
-- [ ] npm smoke: the stage-0 one-dependency project syncs; `blanket run`
+- [x] npm smoke: the stage-0 one-dependency project syncs; `blanket run`
       of a package.json script works; a vite fixture builds (no native
       addons).
-- [ ] Python sdist path: confirm it fails with the stage-3 error, not a
+- [x] Python sdist path: confirm it fails with the stage-3 error, not a
       crash.
 
 Exit: pure/prebuilt projects sync on Linux. Record the object id of the
 Linux CPython object and confirm it differs from the Mac's (platform is
 in identity).
 
-**Landed:** _(date, commit, notes)_
+**Landed:** 2026-09-05, commits 5636721 (python) and 061a635 (npm), merged
+1be23c9 / 97cfd34. Reviewed (MERGE-WITH-FIXES, all applied). Verified on
+m6-fedora: acceptance.sh sections 1–8, 10, 10b pass; offline
+reprojection/reconstruction under `unshare -rn`; `tests/linux_python.rs`;
+all four `npm_scripts` gates incl. the Linux round-trip (esbuild 0.25.9
+selects only `@esbuild/linux-x64`; an N-API addon builds from source);
+better-sqlite3 11.10.0 compiles under the sandbox and runs. One
+deliberate macOS change: abi3 wheels now rank above `py3-none-<plat>`
+wheels, as pip does (pinned by a darwin test).
 
 ---
 
@@ -383,24 +407,24 @@ Profile mapping (Seatbelt → bwrap):
       supervisor; zero AVC denials in the audit log. The exact working
       argv is in the changelog notes and the prototype directory; the
       Rust implementation should reproduce it flag for flag.
-- [ ] `Sandbox::run_in` dispatches on the `Platform` it is given; bwrap
+- [x] `Sandbox::run_in` dispatches on the `Platform` it is given; bwrap
       argv built from the same `read`/`write` lists. Keep the profile
       string builder for Seatbelt untouched.
-- [ ] Preflight: `bwrap --version` and a trivial `--unshare-user true`
+- [x] Preflight: `bwrap --version` and a trivial `--unshare-user true`
       run at first use; failure message names the fix (`dnf install
       bubblewrap`, or the userns sysctl). Cache the result per process.
 - [x] SELinux: verified 2026-09-05 in enforcing mode, non-root, binds
       under `/home` and `/tmp`: no AVC denials. Nothing special needed.
-- [ ] Store paths under `/home` must be bind-mounted, not the whole of
+- [x] Store paths under `/home` must be bind-mounted, not the whole of
       `/home`. Confirm that a build cannot read `$HOME/.ssh` (add this
       to `sandbox_deny`).
-- [ ] `tests/sandbox_deny.rs` (`evil-0.1.tar.gz` reaching the network)
+- [x] `tests/sandbox_deny.rs` (`evil-0.1.tar.gz` reaching the network)
       passes on Linux with the same assertion.
-- [ ] Python sdist → wheel build works: pick a setuptools sdist with a C
+- [x] Python sdist → wheel build works: pick a setuptools sdist with a C
       extension (e.g. `markupsafe` sdist forced, or the existing
       `tests/sdist_build.rs` fixture) and confirm the built wheel object
       is created and imports.
-- [ ] npm native addon: `better-sqlite3` from source under the sandbox
+- [x] npm native addon: `better-sqlite3` from source under the sandbox
       (README lists it as proven on macOS). node-gyp needs the store
       CPython (already passed as a read root), `make`, `gcc`, `g++` from
       `/usr`. Known so far: stock Fedora 44 Server lacked `gcc-c++`
@@ -411,16 +435,23 @@ Profile mapping (Seatbelt → bwrap):
       sysconfig defaults `CC=clang`, so the sandbox env must set
       `CC=gcc CXX=g++` (or clang must be installed). Record the final
       list in README as the Linux equivalent of Xcode CLT.
-- [ ] `blanket build` for cargo (blanket building itself, as on macOS)
+- [x] `blanket build` for cargo (blanket building itself, as on macOS)
       works offline in the sandbox.
-- [ ] Unsandboxed-run guard in `main.rs` (`blanket run cargo build`
+- [x] Unsandboxed-run guard in `main.rs` (`blanket run cargo build`
       refusal) behaves identically.
 
 Exit: all `#[ignore]` e2e tests that exist for python and npm pass on
 Linux (`cargo test --test sandbox_deny --test sdist_build
 --test npm_scripts --test run_scripts -- --ignored`).
 
-**Landed:** _(date, commit, notes)_
+**Landed:** 2026-09-05, commit on `lp/sandbox` merged as 531c00a.
+Reviewer round 1: REWORK (fd inheritance, IPC namespace, host Unix
+sockets, cwd/mount order, vacuous tests, preflight); all nine closed.
+21 Linux sandbox unit tests + `bwrap_contract` pass with
+`BLANKET_SANDBOX_TESTS=required` on Fedora 44, SELinux enforcing,
+non-root. Seatbelt path byte-identical (profile golden). Accepted gap
+for LIMITATIONS.md: a Unix socket inside an immutable read root is not
+scanned (write roots, cwd, scratch are). Build stderr is relayed live.
 
 ---
 
@@ -430,21 +461,21 @@ Goal: cargo, go, ruby, elixir, dotnet tailors realize on Linux. Each is
 mostly a table row plus one verification run of its existing e2e test.
 Order by certainty.
 
-- [ ] **Rust 1.96.1** `x86_64-unknown-linux-gnu` (static.rust-lang.org
+- [x] **Rust 1.96.1** `x86_64-unknown-linux-gnu` (static.rust-lang.org
       `.sha256` sidecars, 2026-09-05): rustc `3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923`,
       rust-std `1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae`,
       cargo `ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e`.
       `tests/cargo_e2e.rs` passes.
-- [ ] **.NET SDK 9.0.317** `linux-x64` from the same
+- [x] **.NET SDK 9.0.317** `linux-x64` from the same
       `builds.dotnet.microsoft.com` path; sha512 from releases.json:
       `145bf69dcb88c4b905feb531cfdd7894a75fc875d2a030e958a13d1fb1131521c8cebd8a8a6e0fbd1a433ebae9cde86356b6adad07b1ad81efb92b36ff8a3333`.
       `tests/dotnet_e2e.rs` passes. Note `/tmp/.dotnet` mutex dir is a
       sandbox write allowance on Linux too (bind it, tmpfs is fine).
-- [ ] **Go 1.27.0** `linux-amd64` from go.dev; sha256 from
+- [x] **Go 1.27.0** `linux-amd64` from go.dev; sha256 from
       `https://go.dev/dl/?mode=json`:
       `675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685`. `tests/go_e2e.rs` passes. cgo uses
       host gcc (decision 7).
-- [ ] **Ruby 3.4.6** portable-ruby `x86_64_linux` bottle from
+- [x] **Ruby 3.4.6** portable-ruby `x86_64_linux` bottle from
       Homebrew/homebrew-portable-ruby releases (GitHub asset digest
       `40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259`).
       Portable Ruby is built to
@@ -455,7 +486,7 @@ Order by certainty.
       extend it. nokogiri needs `zlib-devel xz patch` for its vendored
       build, or `libxml2-devel libxslt-devel` for system-library mode;
       record whichever is chosen as a host prerequisite.
-- [ ] **Erlang/OTP 29.0.5** — bob builds FAILED the gate on Fedora (see
+- [x] **Erlang/OTP 29.0.5** — bob builds FAILED the gate on Fedora (see
       changelog: SM4 symbol missing from Fedora's OpenSSL). Decision:
       our own source build, published under the project's GitHub org with
       a provenance manifest. Source `otp_src_29.0.5.tar.gz` sha256
@@ -474,12 +505,24 @@ Order by certainty.
       artifact digests + a relocation-schema revision. Long-term (own
       roadmap item): static OpenSSL on an older-glibc baseline. Elixir
       zip / hex / rebar3 stay as-is. `tests/elixir_e2e.rs` passes.
-- [ ] Every new pin's platform row added alongside the macOS row, never
+- [x] Every new pin's platform row added alongside the macOS row, never
       replacing it.
 
 Exit: `bash tests/acceptance.sh` passes on Linux end to end.
 
-**Landed:** _(date, commit, notes)_
+**Landed:** 2026-09-05. Commits: cargo 3ee2e8c, dotnet ff4c033 (+ shm
+pre-create fix), go b56c8d9, ruby ef056b3, elixir on `lp/beam`; merged
+d5d9f72, 26b8c5d, 8e15efe, 2682894, f35cba2. Every stage 4 gate passes on
+m6-fedora with the Linux sandbox: `cargo_e2e` (sandboxed build + offline
+rebuild), `go_e2e` (incl. cgo), `dotnet_e2e` (locked restore + sandboxed
+build + run), `ruby_e2e` (nokogiri 1.18.10 compiled from source under
+the sandbox), `elixir_e2e` (mix compile sandboxed on our own OTP build).
+Three gate-test bugs and one real Linux bug were found on the merged
+tree: CoreCLR creates `/tmp/.dotnet/shm` via mkdtemp+rename, which fails
+with EXDEV across bwrap bind mounts; blanket now pre-creates it on Linux.
+Ruby open question 3 answered: portable-ruby relocates with no repair
+(static openssl/zlib; RbConfig and pkg-config follow the object path).
+`bash tests/acceptance.sh` passes through 10f on Linux.
 
 ---
 

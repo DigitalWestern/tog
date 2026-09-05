@@ -113,8 +113,15 @@ fn dotnet_sync_sandboxed_build_and_run() {
             blanket(&binary, &project, &store, &["run", "dotnet", "--info"]),
             "dotnet --info",
         );
-        assert!(info.contains("OS Platform: Linux"), "{info}");
-        assert!(info.contains("RID: linux-x64"), "{info}");
+        // `dotnet --info` pads with variable whitespace; compare fields.
+        let field = |name: &str| {
+            info.lines()
+                .filter_map(|line| line.trim().strip_prefix(name))
+                .map(|rest| rest.trim().to_string())
+                .next()
+        };
+        assert_eq!(field("OS Platform:").as_deref(), Some("Linux"), "{info}");
+        assert_eq!(field("RID:").as_deref(), Some("linux-x64"), "{info}");
         let base_path = sdk_object(&store).join("sdk/9.0.317");
         assert!(
             info.contains(&base_path.display().to_string()),
