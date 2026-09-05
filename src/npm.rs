@@ -646,13 +646,23 @@ pub fn realize_node_env(
         fs::create_dir_all(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path))
         })?;
-        let status = Command::new("/usr/bin/tar")
-            .arg("-xzf")
+        let mut tar = Command::new("/usr/bin/tar");
+        tar.arg("-xzf")
             .arg(tarball)
             .arg("-C")
             .arg(&dest)
-            .args(["--strip-components", "1"])
-            .status()?;
+            .args(["--strip-components", "1"]);
+        if !platform.is_macos() {
+            // Registry tarballs are packed by arbitrary publishers; some
+            // (pngjs, eta 1.x) carry directories with mode 0666. bsdtar
+            // (macOS) descends into them anyway; GNU tar creates the
+            // directory 0666 and then cannot open its children unless
+            // directory modes are applied after extraction. normalize_modes
+            // below rewrites every mode afterwards, so the store content is
+            // identical either way (LINUX_PORT.md, stage 5 follow-up).
+            tar.arg("--delay-directory-restore");
+        }
+        let status = tar.status()?;
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }

@@ -586,7 +586,17 @@ blanket: Mac by day, Linux server overnight.
 
 Exit: written proof that a mixed-platform store is safe, or a bug fixed.
 
-**Landed:** _(date, commit, notes)_
+**Landed (partially):** 2026-09-05, commit 496c612. Done on m6-fedora:
+`.blanket/closures/<eco>.json` now carries an envelope-level `platform`
+field (the projecting host triple); README gained "Working across
+machines"; identity separation is proven by the unit goldens (nine
+darwin object ids byte-identical to `main`, every Linux toolchain/env id
+differs because `Platform` is an identity input); `.venv`,
+`node_modules`, `.blanket/` were confirmed gitignored. **Still owed, and
+only possible with the Mac:** the live shared-store check (rsync a Mac
+store here, sync, confirm objects are added and never reused, and that
+`cache/sha256/` entries are shared). Do it after the branch is merged
+and before relying on one store from two hosts.
 
 ---
 
@@ -606,7 +616,13 @@ Exit: written proof that a mixed-platform store is safe, or a bug fixed.
 - [ ] NEXT.md: fold Linux-derived work into the ordering (most likely:
       pinned Linux C toolchain, aarch64-linux row).
 
-**Landed:** _(date, commit, notes)_
+**Landed:** 2026-09-05, commit 83c67f3 (LIMITATIONS ledger for two
+platforms, README status + Linux prerequisites, ARCHITECTURE platforms /
+sandbox / clone wording, ROADMAP tick, NEXT.md status, CLAUDE.md Linux
+notes). One ledger note still to add when the BEAM Install step is next
+touched: OTP's `Install -cross -minimal` relocation runs as a direct
+child, not through the sandbox (it only rewrites paths under the store
+object, but it is the one non-sandboxed step).
 
 ---
 
