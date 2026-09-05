@@ -508,8 +508,10 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 const esbuild = require('esbuild');
 const addon = require('fixture-addon');
 if (process.version !== 'v24.20.0' || process.platform !== 'linux' || process.arch !== 'x64') process.exit(10);
-if (!require.resolve('@esbuild/linux-x64').includes('@esbuild/linux-x64')) process.exit(11);
-try { require.resolve('@esbuild/darwin-arm64'); process.exit(12); } catch (_) {}
+// The platform packages ship only bin/ + package.json (no main), so resolve
+// the manifest rather than the package itself.
+if (!require.resolve('@esbuild/linux-x64/package.json').includes('@esbuild/linux-x64')) process.exit(11);
+try { require.resolve('@esbuild/darwin-arm64/package.json'); process.exit(12); } catch (_) {}
 if (addon.answer() !== 42) process.exit(13);
 esbuild.transformSync('const answer = 42', {loader: 'js'});
 console.log('linux-npm-roundtrip-ok');

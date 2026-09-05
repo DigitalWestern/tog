@@ -220,6 +220,11 @@ fn is_glibc_soname(soname: &str) -> bool {
         "libcrypt.so",
         "libutil.so",
         "ld-linux-x86-64.so",
+        // Not glibc, but a host library every source-built native gem may
+        // legitimately link: nokogiri's vendored libxml2 links the host zlib
+        // (zlib-ng-compat-devel on Fedora). Same trust class as the host C
+        // toolchain (LINUX_PORT.md decision 7).
+        "libz.so",
     ]
     .iter()
     .any(|prefix| soname.starts_with(prefix))

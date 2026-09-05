@@ -66,7 +66,7 @@ fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
     .unwrap();
     let objects = store.canonicalize().unwrap().join("objects");
     let object_path = |key: &str| {
-        let path = PathBuf::from(closure[key]["path"].as_str().unwrap());
+        let path = PathBuf::from(closure["body"][key]["path"].as_str().unwrap());
         let canonical = path.canonicalize().unwrap();
         assert!(
             canonical.starts_with(&objects),
