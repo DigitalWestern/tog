@@ -141,6 +141,32 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ---
 
+### 2026-09-05 (closeout) — stages 5–7 landed; port complete on m6-fedora
+
+- Stage 5: hit rate measured on the same 60 pinned repos. python 16/30
+  (macOS 18/30); npm 21/30 (macOS 21/30) after 53e384d fixed the one bug
+  behind all seven Linux-only npm misses (GNU tar vs 0666 directories in
+  registry tarballs). HITRATE.md carries the per-repo comparison; its
+  first draft had the macOS column built from the 28-repo re-run CSV
+  alone (showing 15/30 and 4/30) — regenerated from both macOS CSVs.
+- Stage 6 partially landed (496c612): closure envelope `platform` field,
+  README "Working across machines", identity separation proven by the
+  darwin goldens. The live shared-store check needs the Mac.
+- Stage 7 landed (83c67f3).
+- Final state of `linux-port`: `bash tests/acceptance.sh` passed=35
+  failed=0 on Fedora 44; every ignored e2e gate (cargo, go, dotnet, ruby,
+  elixir, npm_scripts, linux_python, sandbox_deny) green with
+  `BLANKET_SANDBOX_TESTS=required`; 158 offline unit tests (65 this
+  morning). Worktrees and `lp/*` branches removed after merge.
+- **What only Ethan can do before merging to `main`** (needs the Mac):
+  `cargo test` on macOS arm64 (the darwin goldens ran here in one binary
+  but the Seatbelt path itself has not executed since the refactor), a
+  `blanket sync` on an already-synced project to confirm the cache still
+  hits (planner schema bumped to `python-planner/3`, so expect exactly
+  one re-plan for python), and the stage 6 shared-store check.
+
+---
+
 ## Surface inventory (what is actually macOS-specific)
 
 Everything below hardcodes `aarch64-apple-darwin` or a Darwin-only
@@ -553,7 +579,19 @@ HITRATE.md (2026-09-02: python 18/30, npm 21/30 after NEXT.md item 3).
 
 Exit: two numbers in HITRATE.md, one per platform, from the same list.
 
-**Landed:** _(date, commit, notes)_
+**Landed:** 2026-09-05, commits 2b795cc (measurement) and 53e384d (fix +
+re-measure). Same 60 repos, pinned to their 2026-09-02 commits via
+`tests/fixtures/hitrate-repos.lock`. **python: Linux 16/30 vs macOS
+18/30. npm: Linux 21/30 vs macOS 21/30** (was 14/30 before 53e384d: all
+seven Linux-only npm misses were GNU tar refusing 0666 directories in
+registry tarballs; `--delay-directory-restore`, Linux only). Per-repo
+table with errors and exception counts in HITRATE.md; raw CSVs in
+`tests/fixtures/hitrate-linux-2026-09-05*.csv`. Follow-ups (the
+remaining Linux-only misses): wheel `.data/headers` scheme (greenlet
+3.5.5; also misses on macOS), and CPython 3.10/3.11 pins (miss on both,
+classed `platform_unsupported` here). Harness caveats from the reviewer
+were all applied (pinned commits, exceptions counted separately, Linux
+failure classes).
 
 ---
 
@@ -648,13 +686,17 @@ object, but it is the one non-sandboxed step).
 2. ~~Which OTP source for Linux: hex.pm bob builds or our own build?~~
    **Our own build** (2026-09-05): bob's Ubuntu build cannot load crypto
    on Fedora (SM4 symbol); details in the changelog and Stage 4.
-3. Does Homebrew portable-ruby `x86_64_linux` relocate correctly outside
-   `/home/linuxbrew`? Its pkg-config prefixes were already noted as a
-   non-contract on macOS.
+3. ~~Does Homebrew portable-ruby `x86_64_linux` relocate correctly outside
+   `/home/linuxbrew`?~~ **Yes** (2026-09-05): the ruby e2e gate realizes it
+   under the store and builds nokogiri; pkg-config prefixes remain a
+   non-contract on both platforms.
 4. Is the host toolchain as found on m6-fedora (gcc 16.2, make 4.4, no `gcc-c++`, no `libxml2-devel`) enough
    for node-gyp and setuptools C extensions, or is a `dnf install`
    prerequisite required? **Partly answered** (2026-09-05): `gcc-c++`
    was missing and is required for C++ (node-gyp); installed with
-   `glibc-devel pkgconf-pkg-config binutils`. Still to confirm under real
-   builds: whether `CC=gcc` must be forced for python-build-standalone's
-   clang-default sysconfig, and nokogiri's dev-header needs.
+   `glibc-devel pkgconf-pkg-config binutils`. **Answered** (2026-09-05, night):
+   `CC=gcc CXX=g++ LDSHARED="gcc -shared"` must be forced for sdist builds
+   (python-build-standalone's sysconfig defaults to clang; done in
+   `build.rs`); nokogiri builds from its vendored sources and only needs
+   host `libz.so.1` (allowlisted in the ruby gate); full prerequisite list
+   is in README.
