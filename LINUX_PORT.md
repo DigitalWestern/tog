@@ -86,6 +86,43 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
   components), Go, .NET SDK, portable-ruby `x86_64_linux`, all with darwin
   siblings matching the existing pins. Recorded under Stage 4.
 
+### 2026-09-05 (evening) — streams landed in parallel; Codex ran out; Claude took over
+
+- **Stage 1 follow-ups merged** (7464ca5), reviewer verdict MERGE.
+- **Stream H merged** (4ca4417): `hitrate.py` pins the 60 repos to their
+  default-branch commits as of 2026-09-02 (resolved via the GitHub API),
+  reports `ok` vs `ok_with_exceptions`, classifies Linux failures.
+- **Stream P (Python) implemented and gated on the host**: Linux CPython
+  3.12.14/3.13.15 + uv pins, manylinux selector with glibc banding,
+  `python-planner/3` key, `CC=gcc CXX=g++` for sdist builds. Real results
+  on m6-fedora: `tests/acceptance.sh` sections 1–3, 5–7, 9 pass; 4a/4b
+  (offline reprojection/reconstruction) pass under `unshare -rn` after the
+  harness got a portable network-deny wrapper (d55e5f1); section 8 (sdist)
+  and 9b (npm) fail only because the Linux sandbox and Node pin are on
+  other branches. First Linux `blanket sync` of a real Python lock
+  succeeded at 14:2x local time.
+- **Streams RUST / DOTNET / GO** implemented, reviewed, committed on
+  `lp/rust`, `lp/dotnet`, `lp/go`. Verified on Linux without the sandbox:
+  `rustc`/`cargo 1.96.1` and `go1.27.0 linux/amd64` run from store objects;
+  the .NET SDK object realizes and its muxer reports 9.0.317. Their
+  sandboxed build gates run once the sandbox lands.
+- **Stream B review (sandbox) came back REWORK** with three real blockers:
+  inherited fds ≥ 3 reach the build (bwrap preserves them), no
+  `--unshare-ipc`, and host Unix sockets inside bound roots are a channel
+  out; plus cwd/mount-order edge cases, vacuous tests, preflight gaps.
+  Fix round in progress. Until it lands, Linux native builds fail
+  `Unsupported`, by design.
+- **Codex hit its usage limit at ~14:30** (resets 2026-09-06 23:51).
+  Every in-flight Codex agent died: the sandbox fix round, npm, Ruby, and
+  BEAM streams mid-implementation, and the Python review. Partial work
+  was preserved in each worktree. Claude subagents resumed each stream
+  from the same briefs; the supervisor reviewed Rust/.NET/Go directly.
+- **OTP artifact published**: github.com/DigitalWestern/blanket-toolchains,
+  release `otp-29.0.5-x86_64-unknown-linux-gnu-fedora44`, sha256
+  `18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4`,
+  re-downloaded and re-hashed after publishing. Built in 59 s inside the
+  bwrap prototype with network denied; crypto/ssl probes pass.
+
 ---
 
 ## Surface inventory (what is actually macOS-specific)
