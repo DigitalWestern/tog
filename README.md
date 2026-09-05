@@ -15,11 +15,25 @@ realizes into a **comforter** (an immutable, shareable environment) kept
 in the **closet** (the store). Your `.venv` and `node_modules` are
 comforters.
 
-**Status: Python + Node ecosystems working on real projects, macOS arm64.**
+**Status: all seven ecosystems pass the acceptance checklist on macOS arm64 and Linux x86_64 (Fedora 44).** Linux landed 2026-09-05; see LINUX_PORT.md. Python + Node are proven on real projects; the others on the fixtures in `tests/`.
 Proven on: Next.js 15 (build + vitest), vite apps (build AND dev server),
 prisma (generate/query), native addons compiled hermetically
 (better-sqlite3 from source, sharp via declared artifacts), npm
 workspaces, FastAPI + pandas/lxml stacks.
+
+## Linux host prerequisites
+
+Blanket downloads every language toolchain itself, but native builds
+compile against the host C toolchain (like Xcode CLT on macOS) and the
+build sandbox uses bubblewrap. On Fedora:
+
+```sh
+sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel \
+  pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel
+```
+
+Unprivileged user namespaces must be enabled (`/proc/sys/user/max_user_namespaces` > 0;
+Fedora's default). SELinux enforcing is fine.
 
 ## Use
 

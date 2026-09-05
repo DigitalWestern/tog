@@ -13,3 +13,12 @@ design history in blanket-notes.md.
 - Pinned artifacts (CPython in src/python.rs, build toolchain in
   src/build.rs) carry sha256s verified at pin time; update the hash whenever
   you update a pin.
+- Platforms: macOS arm64 and Linux x86_64. `src/platform.rs` is the only
+  place that knows the host; pins are per-platform rows; helpers take an
+  explicit `Platform`. Darwin identity goldens must stay byte-identical.
+- Linux: sandbox is bubblewrap (`dnf install bubblewrap`); run e2e gates
+  with `BLANKET_SANDBOX_TESTS=required` and `TMPDIR` on a real disk (the
+  tests keep per-run stores under TMPDIR; a 12 GB tmpfs fills). The
+  offline checks in acceptance.sh use `unshare -rn` on Linux.
+- LINUX_PORT.md is the port's plan + changelog; append to it when you
+  change platform behavior.

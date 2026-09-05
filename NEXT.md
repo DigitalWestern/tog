@@ -1,7 +1,14 @@
-# Blanket — next actions (2026-09-02)
+# Blanket — next actions (2026-09-05)
 
-**Status for a fresh agent (2026-09-02):** blanket is a Rust package-manager
-kernel (read ARCHITECTURE.md). Items 1–3 below are done: hit rate measured
+**Status for a fresh agent (2026-09-05):** blanket is a Rust package-manager
+kernel (read ARCHITECTURE.md). **Linux x86_64 landed today** — all seven
+ecosystems pass `tests/acceptance.sh` (35/35) on Fedora 44 with a
+bubblewrap sandbox; see LINUX_PORT.md for the changelog, what is still owed
+(a macOS regression run on real hardware, the Linux hit-rate numbers into
+HITRATE.md, the shared-store check with a real Mac), and follow-ups
+(pinned Linux C toolchain, aarch64-linux rows, static-OpenSSL OTP). On
+Linux run e2e gates with `TMPDIR` on a real disk and
+`BLANKET_SANDBOX_TESTS=required`. Items 1–3 below are done: hit rate measured
 (python 3/30, npm 17/30, HITRATE.md), `blanket run <script>` exists,
 permissive-by-default with a strict switch landed (3a3d96c). Items 4–7 are
 not started. The Python miss is dominated by (a) pyproject-only repos,
