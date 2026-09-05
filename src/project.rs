@@ -40,9 +40,15 @@ pub fn write_closure(
     if let Some(body) = body.as_object_mut() {
         body.insert("exceptions".into(), serde_json::to_value(&pending)?);
     }
+    // Envelope-level platform (LINUX_PORT.md stage 6): a project synced on
+    // a Mac and then on a Linux box carries two different closures over
+    // time; readers must not assume the body's object ids are valid for
+    // the current host. Additive field, schema unchanged.
+    let platform = Platform::host()?.triple();
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
+        "platform": platform,
         "projected_at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
         "body": body,

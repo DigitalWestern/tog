@@ -120,3 +120,15 @@ each one against real PyPI):
 cargo test               # unit tests (no network)
 bash tests/acceptance.sh # end-to-end (network, real PyPI, throwaway store)
 ```
+
+## Working across machines
+
+A project can be synced on a Mac and on a Linux box in turn. Nothing
+platform-specific is committed: `.venv`, `node_modules`, `.blanket/` are
+ignored. Each host keeps its own store; toolchain and environment object
+ids include the platform triple, so a store shared between platforms (or
+rsynced) never reuses a Mac object on Linux — only the artifact cache
+(`cache/sha256/`) is common, because artifacts are content-addressed.
+`.blanket/closures/<eco>.json` records the `platform` it was projected on.
+After switching machines, run `blanket sync` once; it is a cache hit if
+that host has seen the lock before.
