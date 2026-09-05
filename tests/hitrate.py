@@ -117,9 +117,26 @@ def rm_rf(path):
             pass
         return
 
+    # Store objects are read-only trees (files AND directories); a
+    # per-file onerror chmod is not enough because unlink needs write
+    # permission on the parent directory. Make the whole tree writable
+    # first, without following symlinks.
+    for root, dirs, files in os.walk(path, topdown=True):
+        for name in dirs + files:
+            full = os.path.join(root, name)
+            if not os.path.islink(full):
+                try:
+                    os.chmod(full, stat.S_IRWXU)
+                except FileNotFoundError:
+                    pass
+    try:
+        os.chmod(path, stat.S_IRWXU)
+    except FileNotFoundError:
+        return
+
     def remove_readonly(func, name, _exc):
         try:
-            os.chmod(name, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            os.chmod(name, stat.S_IRWXU)
             func(name)
         except FileNotFoundError:
             pass
