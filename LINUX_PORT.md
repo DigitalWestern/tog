@@ -71,6 +71,20 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 - Second reviewer pass produced the parallel-stream table, the manylinux
   selector algorithm, and three latent bugs in the current `score()` that
   would misbehave on Linux if reused. Recorded under Stage 2.
+- **OTP on Fedora: no prebuilt Linux OTP works.** hex.pm bob's
+  `ubuntu-24.04/OTP-29.0.5` (sha256 verified against `builds.txt`)
+  relocates with `Install -minimal` and boots, but `crypto` fails to load:
+  `undefined symbol: EVP_sm4_cbc, version OPENSSL_3.0.0`. Fedora 44 builds
+  OpenSSL 3.5.8 without SM4 (`openssl list` shows none). erlef/otp_builds
+  publishes macOS only; bob only Ubuntu. Reviewer decision: **build OTP
+  from source once on this box (option b2), publish with provenance, pin
+  its sha256; scope it to glibc ≥ 2.43 hosts honestly; long-term move to a
+  static-OpenSSL build on an older-glibc baseline (b3).** Source build
+  started 2026-09-05 inside the bwrap prototype sandbox with network
+  denied; configure flags and provenance manifest recorded under Stage 4.
+- Stage 4 Linux checksums fetched from official sources for Rust (3
+  components), Go, .NET SDK, portable-ruby `x86_64_linux`, all with darwin
+  siblings matching the existing pins. Recorded under Stage 4.
 
 ---
 
@@ -186,33 +200,41 @@ Files: new `src/platform.rs`; edits in `python.rs`, `npm.rs`, `cargo.rs`,
 `golang.rs`, `ruby.rs`, `elixir.rs`, `dotnet.rs`, `build.rs`,
 `project.rs`, `lib.rs`.
 
-- [ ] `Platform` enum: `Aarch64AppleDarwin`, `X86_64UnknownLinuxGnu`.
+- [x] `Platform` enum: `Aarch64AppleDarwin`, `X86_64UnknownLinuxGnu`.
       `host() -> io::Result<Platform>` (error names the unsupported
       triple). `triple()`, `node_slug()` (`darwin-arm64` / `linux-x64`),
       `go_slug()`, `dotnet_rid()`, `npm_os()`, `npm_cpu()`.
-- [ ] Every pin struct gains a `platform: Platform` field; lookups filter
+- [x] Every pin struct gains a `platform: Platform` field; lookups filter
       by `Platform::host()`. Linux rows may be absent in this stage; a
       missing row fails loud ("no <toolchain> pinned for <triple>").
-- [ ] Every `("platform", "aarch64-apple-darwin")` identity input reads
+- [x] Every `("platform", "aarch64-apple-darwin")` identity input reads
       the host triple.
-- [ ] `cargo.rs` `PLATFORM` const (also used to validate
+- [x] `cargo.rs` `PLATFORM` const (also used to validate
       `rust-toolchain` targets and the `lib/rustlib/<triple>` check)
       becomes host-derived.
-- [ ] `project::clone_tree`: on Linux use `cp -a --reflink=auto`; keep
+- [x] `project::clone_tree`: on Linux use `cp -a --reflink=auto`; keep
       `cp -c` on macOS; same plain-copy fallback.
-- [ ] `sandbox.rs`: on non-macOS, `run_in` returns the loud stage-3 error
+- [x] `sandbox.rs`: on non-macOS, `run_in` returns the loud stage-3 error
       (decision 6).
-- [ ] Error strings: "macOS arm64" / "darwin/arm64" → host triple.
-- [ ] Unit test: `Platform::host()` on this box is
+- [x] Error strings: "macOS arm64" / "darwin/arm64" → host triple.
+- [x] Unit test: `Platform::host()` on this box is
       `X86_64UnknownLinuxGnu`; triple round-trips.
-- [ ] macOS regression: on the Mac, `cargo test` passes and a previously
+- [x] macOS regression: on the Mac, `cargo test` passes and a previously
       synced project resyncs as a cache hit (object ids unchanged).
 
 Exit: `cargo test` green on both machines. `blanket sync` on Linux now
 fails with "no nodejs pinned for x86_64-unknown-linux-gnu" instead of
 downloading the wrong binary.
 
-**Landed:** _(date, commit, notes)_
+**Landed:** 2026-09-05, commits 872b807 (implementation) and 7464ca5
+(follow-ups). 82 offline tests pass on Linux (65 before). Reviewer's
+final verdict MERGE: nine macOS toolchain object ids, the sdist-build and
+ruby-gems identities recomputed from `main` and byte-identical; Seatbelt
+path unchanged; on Linux all seven ecosystems fail `Unsupported` with a
+stage reference before the store is opened or anything is downloaded
+(verified with `BLANKET_STORE=/dev/null`). macOS regression run on real
+hardware still owed (next time the Mac pulls this branch: `cargo test`
+and a resync of an existing project must be a cache hit).
 
 ---
 
@@ -371,18 +393,24 @@ Goal: cargo, go, ruby, elixir, dotnet tailors realize on Linux. Each is
 mostly a table row plus one verification run of its existing e2e test.
 Order by certainty.
 
-- [ ] **Rust 1.96.1** `x86_64-unknown-linux-gnu`: `rustc`, `rust-std`,
-      `cargo` tarballs from `static.rust-lang.org/dist/`, sha256 from the
-      `.sha256` sidecars. `tests/cargo_e2e.rs` passes.
+- [ ] **Rust 1.96.1** `x86_64-unknown-linux-gnu` (static.rust-lang.org
+      `.sha256` sidecars, 2026-09-05): rustc `3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923`,
+      rust-std `1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae`,
+      cargo `ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e`.
+      `tests/cargo_e2e.rs` passes.
 - [ ] **.NET SDK 9.0.317** `linux-x64` from the same
-      `builds.dotnet.microsoft.com` path; sha512 from releases.json.
+      `builds.dotnet.microsoft.com` path; sha512 from releases.json:
+      `145bf69dcb88c4b905feb531cfdd7894a75fc875d2a030e958a13d1fb1131521c8cebd8a8a6e0fbd1a433ebae9cde86356b6adad07b1ad81efb92b36ff8a3333`.
       `tests/dotnet_e2e.rs` passes. Note `/tmp/.dotnet` mutex dir is a
       sandbox write allowance on Linux too (bind it, tmpfs is fine).
 - [ ] **Go 1.27.0** `linux-amd64` from go.dev; sha256 from
-      `https://go.dev/dl/?mode=json`. `tests/go_e2e.rs` passes. cgo uses
+      `https://go.dev/dl/?mode=json`:
+      `675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685`. `tests/go_e2e.rs` passes. cgo uses
       host gcc (decision 7).
 - [ ] **Ruby 3.4.6** portable-ruby `x86_64_linux` bottle from
-      Homebrew/homebrew-portable-ruby releases. Portable Ruby is built to
+      Homebrew/homebrew-portable-ruby releases (GitHub asset digest
+      `40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259`).
+      Portable Ruby is built to
       relocate, but validate 3.4.6 specifically: inspect the ELF
       interpreter and RPATH, `rbconfig` and pkg-config prefixes, then
       after commit `require 'openssl'`, `require 'zlib'`, and compile and
@@ -390,16 +418,25 @@ Order by certainty.
       extend it. nokogiri needs `zlib-devel xz patch` for its vendored
       build, or `libxml2-devel libxslt-devel` for system-library mode;
       record whichever is chosen as a host prerequisite.
-- [ ] **Erlang/OTP 29.0.5** — reviewer recommendation (2026-09-05):
-      prefer hex.pm bob builds at `builds.hex.pm/builds/otp/amd64/
-      ubuntu-24.04/OTP-29.0.5.tar.gz` with the published checksum. Unlike
-      the current erlef tarball, bob builds need one path level stripped
-      and an `Install -minimal <prefix>` step for final-prefix relocation
-      (setup-beam does the same). Gate: after commit, `crypto:hash/2`,
-      SSL start-up, and a Mix compile must succeed on Fedora's glibc/
-      openssl; if not, build OTP from source once in the sandbox and pin
-      our own artifact with provenance. Elixir zip / hex / rebar3 stay
-      as-is. `tests/elixir_e2e.rs` passes.
+- [ ] **Erlang/OTP 29.0.5** — bob builds FAILED the gate on Fedora (see
+      changelog: SM4 symbol missing from Fedora's OpenSSL). Decision:
+      our own source build, published under the project's GitHub org with
+      a provenance manifest. Source `otp_src_29.0.5.tar.gz` sha256
+      `86f6f40d4638852b0383235b02a70d8450184e441e83a06a108bf8e5bf1b2e04`
+      (GitHub release digest). Built inside the bwrap sandbox, network
+      denied, `SOURCE_DATE_EPOCH=315532800`, with
+      `--with-ssl=/usr --with-ssl-lib-subdir=lib64 --enable-dynamic-ssl-lib
+      --with-ssl-rpath=no --with-termcap --without-wx --without-javac
+      --without-odbc --disable-saved-compile-time`; packaged as a
+      `make release` tree (relocate with `Install -minimal <prefix>`, one
+      path level to strip). The provenance file records source hash,
+      flags, gcc/binutils/glibc/openssl/ncurses versions, ELF NEEDED and
+      GLIBC symbol-version floor, and the crypto/ssl probe result. The
+      artifact is honest about its floor (glibc 2.43, `libcrypto.so.3`
+      with Fedora's symbol subset). Identity keeps platform + all four
+      artifact digests + a relocation-schema revision. Long-term (own
+      roadmap item): static OpenSSL on an older-glibc baseline. Elixir
+      zip / hex / rebar3 stay as-is. `tests/elixir_e2e.rs` passes.
 - [ ] Every new pin's platform row added alongside the macOS row, never
       replacing it.
 
@@ -512,7 +549,9 @@ Exit: written proof that a mixed-platform store is safe, or a bug fixed.
 1. ~~Does bubblewrap run cleanly under Fedora's enforcing SELinux for a
    non-root user with binds under `/home`?~~ **Yes** (2026-09-05): 10/10
    prototype checks, zero AVC denials.
-2. Which OTP source for Linux: hex.pm bob builds or our own build?
+2. ~~Which OTP source for Linux: hex.pm bob builds or our own build?~~
+   **Our own build** (2026-09-05): bob's Ubuntu build cannot load crypto
+   on Fedora (SM4 symbol); details in the changelog and Stage 4.
 3. Does Homebrew portable-ruby `x86_64_linux` relocate correctly outside
    `/home/linuxbrew`? Its pkg-config prefixes were already noted as a
    non-contract on macOS.
