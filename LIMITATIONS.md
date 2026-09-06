@@ -138,6 +138,18 @@ sandbox, and uv fallback still delegates resolution.
   Declared-artifacts only covers downloads whose cache location matches the
   declaration (sharp-style). Electron-class packages need per-version
   artifact declarations.
+- **Skipped install-time downloads are not in the closure** (NEXT.md item 5):
+  packages with a documented switch (puppeteer, cypress) are installed without
+  their browser or binary and record `artifact_not_provisioned` naming the
+  command that fetches it. `blanket run` works; the missing artifact does not
+  appear until the user runs that command, and it is not verified by blanket
+  when they do. Loud, per package.
+- **Prebuilt binaries are compiled instead of downloaded** where the installer
+  supports it (prebuild-install, node-pre-gyp), recorded as
+  `built_from_source`. The result is built from the package's own sources in
+  the sandbox rather than the upstream binary, so it can differ from what npm
+  would have installed — and it fails if the compile needs headers the pinned
+  native library set does not carry.
 - **Wheels shipping the same file path** are permissive with exception
   `file-collision`; the later deterministic wheel wins. Strict via policy.
 - **SHA-1 npm integrity** is permissive with exception `weak-integrity`;
