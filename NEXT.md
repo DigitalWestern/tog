@@ -25,6 +25,14 @@ and gc could not run — Codex hit its usage limit (resets 2026-09-12) — so
 those last fixes were verified against the findings and the gate by the
 supervising agent, not independently.
 
+**CLI (2026-09-06, branch `cli/levels-1-2`, not merged):** the command
+surface was rebuilt per CLI.md levels one and two — validated grammar with
+help/version/-C/-q/-v, bare `blanket` = sync, `blanket <script>`, `status`,
+`ls`, `doctor`, `completions`, `add`/`remove`/`update` (evidence ladder +
+delegation table), and `x`. Offline tests pass; the delegating rows were
+smoke-tested on Linux only. Needs: review, the Mac run, and the ignored
+per-ecosystem e2e tests for `add` before merging.
+
 **Open:** item 4 (git dependencies) and item 5 (built-in artifacts list) are
 not started. The optional stage-6 live shared-store check still wants both
 machines. On Linux run e2e gates with `TMPDIR` on a real disk. Delegation:
