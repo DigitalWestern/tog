@@ -1,6 +1,6 @@
 //! The Cargo tailor: Cargo.lock importer and registry vendor realization.
 
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -176,7 +176,7 @@ pub fn ensure_rust_for(
 
     let mut tarballs = Vec::new();
     for component in &components {
-        tarballs.push(download_verified(store, component.url, component.sha256)?);
+        tarballs.push(download_verified_held(store, component.url, component.sha256)?);
     }
 
     let staged = store.stage()?;
@@ -192,15 +192,16 @@ fn extract_rust_components(
     staged: &Path,
     platform: Platform,
     components: &[&RustComponent],
-    tarballs: &[PathBuf],
+    tarballs: &[impl AsRef<Path>],
 ) -> io::Result<()> {
     if components.len() != tarballs.len() {
         return Err(err("Rust component/archive count mismatch"));
     }
     for (component, tarball) in components.iter().zip(tarballs) {
+        let tarball: &Path = tarball.as_ref();
         let status = Command::new("/usr/bin/tar")
             .args(["-xJf"])
-            .arg(tarball)
+            .arg(tarball.as_os_str())
             .args(["-C"])
             .arg(staged)
             .args(["--strip-components", "2"])
@@ -511,7 +512,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
 
     let mut archives = Vec::new();
     for krate in &crates {
-        let archive = download_verified(store, &krate.url, &krate.sha256).map_err(|e| {
+        let archive = download_verified_held(store, &krate.url, &krate.sha256).map_err(|e| {
             err(format!(
                 "{}@{}: fetch {}: {e}",
                 krate.name, krate.version, krate.url
@@ -531,7 +532,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         })?;
         let status = Command::new("/usr/bin/tar")
             .args(["-xzf"])
-            .arg(archive)
+            .arg(&*archive)
             .args(["-C"])
             .arg(&crate_dir)
             .args(["--strip-components", "1"])

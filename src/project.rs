@@ -5,7 +5,7 @@
 //! projects with identical locks share one env object; different locks get
 //! different objects and coexist. Projection into a project is one symlink.
 
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::{ArtifactKind, Identity, Plan};
@@ -45,6 +45,15 @@ pub fn write_closure(
     // time; readers must not assume the body's object ids are valid for
     // the current host. Additive field, schema unchanged.
     let platform = Platform::host()?.triple();
+    // All tailor closure bodies carry at least one canonical object path. Use
+    // it to register the exact store involved; this keeps unit tests that use
+    // synthetic stores from accidentally creating ~/.blanket/store. The
+    // fallback is for future tailor bodies that do not yet carry an object
+    // path.
+    let store = match store_from_closure_body(&body) {
+        Some(store) => store,
+        None => Store::open()?,
+    };
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
@@ -57,8 +66,32 @@ pub fn write_closure(
     let tmp = dir.join(format!(".{ecosystem}.json.tmp.{}", std::process::id()));
     fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
     fs::rename(&tmp, &dest)?;
+    store.register_root(&project_dir)?;
     crate::policy::clear();
     Ok(())
+}
+
+fn store_from_closure_body(body: &serde_json::Value) -> Option<Store> {
+    fn find(value: &serde_json::Value) -> Option<Store> {
+        match value {
+            serde_json::Value::String(text) if Path::new(text).is_absolute() => {
+                let path = Path::new(text);
+                for ancestor in path.ancestors() {
+                    if ancestor.file_name().and_then(|name| name.to_str()) == Some("objects") {
+                        let root = ancestor.parent()?.to_path_buf();
+                        if root.join("objects").is_dir() {
+                            return Some(Store { root });
+                        }
+                    }
+                }
+                None
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(find),
+            serde_json::Value::Object(values) => values.values().find_map(find),
+            _ => None,
+        }
+    }
+    find(body)
 }
 
 /// Read a tailor's closure body back (for `blanket run` and friends).
@@ -325,9 +358,16 @@ pub(crate) fn realize_env_at_depth(
 
     // Fetch everything first (all-or-nothing before assembly starts).
     let mut artifacts: Vec<(&crate::types::LockedPackage, PathBuf)> = Vec::new();
+    // Keep verified cache leases alive until every wheel has been extracted.
+    let mut _cache_leases = Vec::new();
     for &p in &packages {
         let wheel_file = match p.kind {
-            ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
+            ArtifactKind::Wheel => {
+                let lease = download_verified_held(store, &p.url, &p.sha256)?;
+                let path = lease.to_path_buf();
+                drop(lease);
+                path
+            }
             // sdist -> wheel via sandboxed derivation (network denied).
             ArtifactKind::Sdist => {
                 crate::build::build_sdist_wheel_at_depth(
@@ -341,6 +381,16 @@ pub(crate) fn realize_env_at_depth(
             }
         };
         artifacts.push((p, wheel_file));
+    }
+    // Sdist realization may recursively fetch toolchains. Re-verify all
+    // wheel inputs only after that work, then hold their leases through wheel
+    // extraction and publication.
+    for (p, path) in &mut artifacts {
+        if p.kind == ArtifactKind::Wheel {
+            let lease = download_verified_held(store, &p.url, &p.sha256)?;
+            *path = lease.to_path_buf();
+            _cache_leases.push(lease);
+        }
     }
 
     let minor = pin.version.split('.').take(2).collect::<Vec<_>>().join(".");

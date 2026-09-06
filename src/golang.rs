@@ -8,7 +8,7 @@
 //! the store — delegation computes, the kernel verifies.
 
 use crate::dirhash;
-use crate::fetch::{cache_insert, download_verified};
+use crate::fetch::{cache_insert, cache_verified_held, download_verified_held};
 use crate::platform::{no_pin, Platform};
 use crate::sandbox::BuildSpec;
 use crate::store::Store;
@@ -147,7 +147,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified(store, pin.url, pin.sha256)?;
+    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     extract_go_toolchain(&tarball, &staged)?;
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
@@ -742,7 +742,7 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
             // trusted (Sol: go skips extraction checks when zip+ziphash
             // already exist, so a poisoned cache byte would go straight
             // into the object).
-            let src = crate::fetch::cache_verified(store, hash)
+            let src = cache_verified_held(store, hash)
                 .map_err(|e| {
                     io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version))
                 })?;

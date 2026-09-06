@@ -14,7 +14,7 @@
 //! hostile lockfile is a network capability. A registry allowlist is the
 //! M5 control for that.
 
-use crate::fetch::{download_verified_digest, Digest};
+use crate::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -189,7 +189,7 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
         validate_node_layout(&store.object_path(&id))?;
         return Ok(store.object_path(&id));
     }
-    let tarball = crate::fetch::download_verified(store, node.url, node.sha256)?;
+    let tarball = download_verified_held(store, node.url, node.sha256)?;
     let staged = store
         .stage()
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
@@ -707,7 +707,7 @@ fn persisted_archive_classification(
 
 fn classify_downloaded_archives(
     store: &Store,
-    tarballs: &[(&NpmPackage, PathBuf)],
+    tarballs: &[(&NpmPackage, crate::fetch::CacheLease)],
 ) -> io::Result<bool> {
     let mut has_native = false;
     for (package, tarball) in tarballs {
@@ -724,12 +724,12 @@ fn classify_downloaded_archives(
 fn fetch_npm_tarballs<'a>(
     store: &Store,
     packages: &'a [NpmPackage],
-) -> io::Result<Vec<(&'a NpmPackage, PathBuf)>> {
+) -> io::Result<Vec<(&'a NpmPackage, crate::fetch::CacheLease)>> {
     packages
         .iter()
         .map(|p| {
             let digest = Digest::from_sri(&p.integrity)?;
-            let tarball = download_verified_digest(store, &p.url, &digest).map_err(|e| {
+            let tarball = download_verified_digest_held(store, &p.url, &digest).map_err(|e| {
                 io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
             })?;
             Ok((p, tarball))
@@ -838,15 +838,15 @@ fn realize_node_env_with_node_object(
     // native library set. The inspection result is persisted by archive
     // digest, so a warm environment can be identified before its tarballs are
     // fetched. Darwin deliberately does not mount this Linux-only set.
-    let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
+    let mut classification_tarballs: Vec<(&NpmPackage, crate::fetch::CacheLease)> = Vec::new();
     let native_libs_id = if platform.is_macos() {
         None
     } else {
         let has_native = match persisted_archive_classification(store, &plan.packages)? {
             Some(has_native) => has_native,
             None => {
-                tarballs = fetch_npm_tarballs(store, &plan.packages)?;
-                classify_downloaded_archives(store, &tarballs)?
+                classification_tarballs = fetch_npm_tarballs(store, &plan.packages)?;
+                classify_downloaded_archives(store, &classification_tarballs)?
             }
         };
         native_libs_identity_id(store, platform, has_native)?
@@ -858,16 +858,19 @@ fn realize_node_env_with_node_object(
         return Ok(store.object_path(&id));
     }
 
-    // On Darwin this is intentionally after the cache lookup. On Linux this
-    // is only reachable for an empty plan; non-empty plans were fetched and
-    // classified above when their persisted classifications were incomplete.
-    // Tarballs are still required for a cold realization, but never for a warm
-    // sync whose environment object already exists.
-    if tarballs.is_empty() && !plan.packages.is_empty() {
-        tarballs = fetch_npm_tarballs(store, &plan.packages)?;
-        if !platform.is_macos() {
-            classify_downloaded_archives(store, &tarballs)?;
-        }
+    // A warm sync returned at the cache lookup above, so reaching here means a
+    // cold realization: take a lease on every tarball for the extraction below
+    // so gc cannot collect the cached bytes mid-use. Anything fetched for
+    // classification is already in the cache, so this costs a verify, not a
+    // download.
+    drop(classification_tarballs);
+    let mut tarballs: Vec<(&NpmPackage, crate::fetch::CacheLease)> = Vec::new();
+    for p in &plan.packages {
+        let digest = Digest::from_sri(&p.integrity)?;
+        let t = download_verified_digest_held(store, &p.url, &digest).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+        })?;
+        tarballs.push((p, t));
     }
 
     let native_libs = if native_libs_id.is_some() {
@@ -993,6 +996,9 @@ fn realize_node_env_with_node_object(
         }
     }
 
+    // Lifecycle setup may fetch declared artifacts and a pinned Python for
+    // node-gyp; the package tarballs have already been fully extracted.
+    drop(tarballs);
     run_install_scripts(
         store,
         platform,
@@ -1142,7 +1148,7 @@ fn run_install_scripts_staged(
         // Plant declared artifacts where this package's installer looks
         // (paths are HOME-relative; HOME is this scratch dir).
         for a in artifacts {
-            let src = crate::fetch::download_verified(store, &a.url, &a.sha256)
+            let src = download_verified_held(store, &a.url, &a.sha256)
                 .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
             let dest = tmp.join(&a.path);
             fs::create_dir_all(dest.parent().unwrap())?;

@@ -2,7 +2,7 @@
 //! without execution and, when needed, realized as a separate Python env.
 
 use crate::build_requires::{self, ArchiveInfo};
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::project;
 use crate::sandbox::Sandbox;
@@ -209,7 +209,7 @@ pub(crate) fn plan_sdist_identity_input(
 ) -> io::Result<SdistIdentityPlan> {
     let pin = crate::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
-    let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
+    let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist(&sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
     let fast_sdist = fast_requirements
@@ -233,12 +233,17 @@ pub(crate) fn plan_sdist_identity_input(
             runtime_plan,
         )?
     };
+    // Planning the nested environment may inspect more sdists and acquire
+    // the same GC lock.
+    drop(sdist);
     let build_env_id = crate::project::planned_env_object_id(store, platform, &build_plan)?;
     let native_libs_id = native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
         let work = store.stage()?;
         let result: io::Result<Identity> = (|| {
+            let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
             let source = build_requires::extract_sdist(&sdist, &work.join("source"), &info)?;
+            drop(sdist);
             let rust = rust_plan_inputs(store, platform, &pkg.sha256, &source, &info, &work)?;
             Ok(isolated_sdist_identity_from_ids(
                 platform,
@@ -548,7 +553,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let pin = crate::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
 
-    let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
+    let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist(&sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
@@ -575,11 +580,17 @@ pub(crate) fn build_sdist_wheel_at_depth(
             runtime_plan,
         )?
     };
+    // The nested build environment may fetch its own artifacts. Do not hold
+    // this sdist's cache lease while it acquires the same GC lock.
+    drop(sdist);
     let build_env = project::realize_env_at_depth(store, platform, &build_plan, depth)?;
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
+    // Re-verify and reacquire the lease for the actual copy/extraction below,
+    // so gc cannot collect the cached artifact while it is being used.
+    let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
 
     let work = store.stage()?;
     let outdir = work.join("out");
@@ -606,6 +617,9 @@ pub(crate) fn build_sdist_wheel_at_depth(
     } else {
         None
     };
+    // The archive has been copied/extracted. Toolchain realization below can
+    // fetch more cache entries, so release this lease before it starts.
+    drop(sdist);
     let rust_inputs = if let Some(source) = &source {
         Some(rust_plan_inputs(
             store,

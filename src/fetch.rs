@@ -1,9 +1,12 @@
-use crate::store::Store;
+use crate::store::{self, Store};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha512};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::{ffi::OsStr, ops::Deref};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Algo {
@@ -20,6 +23,55 @@ enum Algo {
 pub struct Digest {
     algo: Algo,
     hex: String,
+}
+
+/// A verified cache path with the GC lock held until the caller drops it.
+/// Keeping this lease alive across extraction closes the verify-to-use race:
+/// GC cannot unlink the artifact while an extractor is still consuming it.
+pub(crate) struct CacheLease {
+    path: PathBuf,
+    _gc_lock: Arc<fs::File>,
+}
+
+fn acquire_gc_lock(store: &Store) -> io::Result<Arc<fs::File>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<fs::File>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(lock) = locks.get(&store.root).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    // Keep the process-local map locked while taking the OS lock. This makes
+    // another thread either share the held lock or wait here, while separate
+    // processes still coordinate through the filesystem lock.
+    let lock = Arc::new(store.gc_lock()?);
+    locks.insert(store.root.clone(), Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+impl CacheLease {
+    fn into_path(self) -> PathBuf {
+        self.path
+    }
+}
+
+impl Deref for CacheLease {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for CacheLease {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<OsStr> for CacheLease {
+    fn as_ref(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
 }
 
 impl Digest {
@@ -85,10 +137,21 @@ impl Digest {
 /// cache hit: read-only bits stop accidents, not same-user replacement).
 /// A poisoned entry is deleted and reported missing.
 pub fn cache_verified(store: &Store, sha256: &str) -> io::Result<PathBuf> {
+    cache_verified_held(store, sha256).map(CacheLease::into_path)
+}
+
+pub(crate) fn cache_verified_held(store: &Store, sha256: &str) -> io::Result<CacheLease> {
     let digest = Digest::sha256(sha256)?;
+    let gc_lock = acquire_gc_lock(store)?;
     let path = store.cache_path("sha256", digest.hex());
     match hash_file(&path, Algo::Sha256) {
-        Ok(h) if h == digest.hex() => Ok(path),
+        Ok(h) if h == digest.hex() => {
+            store::touch_path(&path)?;
+            Ok(CacheLease {
+                path,
+                _gc_lock: gc_lock,
+            })
+        }
         Ok(_) => {
             let _ = fs::remove_file(&path);
             Err(io::Error::new(
@@ -171,9 +234,18 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Back-compat convenience for sha256 hex callers.
+/// Back-compat convenience for sha256 hex callers. Internal extraction paths
+/// use `download_verified_held` so their lease lasts through consumption.
 pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<PathBuf> {
-    download_verified_digest(store, url, &Digest::sha256(sha256)?)
+    download_verified_held(store, url, sha256).map(CacheLease::into_path)
+}
+
+pub(crate) fn download_verified_held(
+    store: &Store,
+    url: &str,
+    sha256: &str,
+) -> io::Result<CacheLease> {
+    download_verified_digest_held(store, url, &Digest::sha256(sha256)?)
 }
 
 /// Insert a local file into the verified artifact cache by its computed
@@ -182,12 +254,16 @@ pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<P
 /// (sha256 hex, cache path). Publication mirrors download_verified.
 pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String, PathBuf)> {
     let hex = hash_file(src, Algo::Sha256)?;
+    let _gc_lock = acquire_gc_lock(store)?;
     let dest = store.cache_path("sha256", &hex);
     if dest.is_file() {
         // Re-verify on hit, like download_verified: a same-user replacement
         // must never ride an old address (poisoned -> drop and re-insert).
         match hash_file(&dest, Algo::Sha256) {
-            Ok(h) if h == hex => return Ok((hex, dest)),
+            Ok(h) if h == hex => {
+                store::touch_path(&dest)?;
+                return Ok((hex, dest));
+            }
             _ => {
                 let _ = fs::remove_file(&dest);
             }
@@ -215,6 +291,7 @@ pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String,
         }
         Err(e) => return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}"))),
     }
+    store::touch_path(&dest)?;
     Ok((hex, dest))
 }
 
@@ -222,6 +299,15 @@ pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String,
 /// cache (keyed by algo/hex). Idempotent; an existing entry short-circuits
 /// (offline reconstruction). file:// URLs read local files (mirrors, tests).
 pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io::Result<PathBuf> {
+    download_verified_digest_held(store, url, digest).map(CacheLease::into_path)
+}
+
+pub(crate) fn download_verified_digest_held(
+    store: &Store,
+    url: &str,
+    digest: &Digest,
+) -> io::Result<CacheLease> {
+    let gc_lock = acquire_gc_lock(store)?;
     let dest = store.cache_path(digest.algo(), digest.hex());
     if dest.is_file() {
         // Re-verify on every hit: read-only bits stop accidents, not disk
@@ -229,7 +315,13 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
         // replace/briefly unlink the entry, so a read race falls through
         // to a fresh download instead of failing.
         match hash_file(&dest, digest.algo) {
-            Ok(h) if h == digest.hex() => return Ok(dest),
+            Ok(h) if h == digest.hex() => {
+                store::touch_path(&dest)?;
+                return Ok(CacheLease {
+                    path: dest,
+                    _gc_lock: gc_lock,
+                });
+            }
             Ok(_) => {
                 let _ = fs::remove_file(&dest); // poisoned/corrupt: refetch
             }
@@ -344,12 +436,17 @@ pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io
             ))
         }
     }
-    Ok(dest)
+    store::touch_path(&dest)?;
+    Ok(CacheLease {
+        path: dest,
+        _gc_lock: gc_lock,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn sri_roundtrip() {
@@ -389,6 +486,56 @@ mod tests {
         let wrong = Digest::from_sri("sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
         let error = download_verified_digest(&store, &url, &wrong).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_lease_refreshes_mtime_and_blocks_gc() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-fetch-lease-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let input = root.join("artifact");
+        fs::write(&input, b"hello").unwrap();
+        let digest = hex::encode(Sha256::digest(b"hello"));
+        let cache = store.cache_path("sha256", &digest);
+        fs::write(&cache, b"hello").unwrap();
+        let old = SystemTime::now()
+            .checked_sub(Duration::from_secs(2 * 24 * 60 * 60))
+            .unwrap();
+        fs::File::open(&cache).unwrap().set_modified(old).unwrap();
+
+        let lease = download_verified_digest_held(
+            &store,
+            &format!("file://{}", input.display()),
+            &Digest::sha256(&digest).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            SystemTime::now()
+                .duration_since(fs::metadata(&cache).unwrap().modified().unwrap())
+                .unwrap()
+                < Duration::from_secs(60)
+        );
+
+        let probe = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(store.root.join("gc.lock"))
+            .unwrap();
+        assert!(probe.try_lock().is_err());
+        drop(lease);
+        probe.try_lock().unwrap();
         let _ = fs::remove_dir_all(root);
     }
 }

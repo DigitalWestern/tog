@@ -66,8 +66,6 @@ say what breaks, for whom, and how it fails (loud/silent).
 - **Project-side plan caches for go/python lack contained atomic writes**
   (ruby's was removed entirely); a symlinked .blanket could redirect a
   cache write outside the project.
-- **No GC** (`blanket gc` unbuilt): store, forests, backups, and the
-  planner-modcache grow forever.
 - **Reproducibility is asserted, not measured**: no rebuild-twice-and-
   compare checks (the last unimplemented item from Sol's original list).
 - **xcrun cache-write warnings** inside every sandboxed native build
