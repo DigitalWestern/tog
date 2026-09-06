@@ -240,7 +240,20 @@ fn read_plan(
     let mut selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
     if manifest.requires_setup() {
         let store = store::Store::open()?;
-        manifest.prepare_setup(platform, dir, &store, selection.pin.version)?;
+        let dynamic_dependencies = manifest.dynamic_dependencies;
+        if let Err(error) = manifest.prepare_setup(platform, dir, &store, selection.pin.version) {
+            if !dynamic_dependencies {
+                return Err(error);
+            }
+            let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
+                return Err(error);
+            };
+            eprintln!(
+                "blanket: setup.py metadata probe failed; using the requirements directory convention: {error}"
+            );
+            fallback.python = manifest.python.clone();
+            manifest = fallback;
+        }
         selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
     }
     if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
@@ -457,7 +470,7 @@ fn locked_requirements(
         std::fs::read_to_string(&stamp_path),
         std::fs::read_to_string(&lock_path),
     ) {
-        if stamp.trim() == source_hash {
+        if cached_lock_matches(&stamp, &lock, &source_hash) {
             return Ok(lock);
         }
     }
@@ -490,6 +503,10 @@ fn locked_requirements(
     std::fs::create_dir_all(dir.join(".blanket"))?;
     std::fs::write(&stamp_path, &source_hash)?;
     std::fs::read_to_string(&lock_path)
+}
+
+fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
+    !lock.is_empty() && stamp.trim() == source_hash
 }
 
 /// Stamp deciding whether `uv pip compile` must re-run. Deliberately NOT
@@ -1323,6 +1340,9 @@ mod tests {
         let changed_lock = lock_source_hash("3.12", "six==1.17.0\n# changed");
         assert_ne!(lock, changed_lock); // source only
         assert_eq!(lock, lock_source_hash("3.12", source)); // same input
+        assert!(cached_lock_matches(&lock, "six==1.17.0\n", &lock));
+        assert!(!cached_lock_matches(&changed_lock, "six==1.17.0\n", &lock));
+        assert!(!cached_lock_matches(&lock, "", &lock));
         {
             use sha2::{Digest, Sha256};
             assert_eq!(

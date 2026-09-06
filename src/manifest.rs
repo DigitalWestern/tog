@@ -37,6 +37,7 @@ pub struct Manifest {
     has_skippable_specs: bool,
     setup: bool,
     setup_cfg: bool,
+    pub dynamic_dependencies: bool,
 }
 
 impl Manifest {
@@ -126,7 +127,13 @@ impl Manifest {
         let cache_path = dir.join(".blanket/egg-info.json");
         if let Ok(text) = fs::read_to_string(&cache_path) {
             if let Ok(cache) = serde_json::from_str::<SetupCache>(&text) {
-                if cache.tree_hash == tree_hash {
+                if setup_cache_matches(
+                    &cache,
+                    &tree_hash,
+                    platform,
+                    python_version,
+                    &build::derivation_fingerprint(),
+                ) {
                     self.requirements = cache.requirements;
                     self.source = self.requirements_text();
                     if let Some(value) = cache.requires_python {
@@ -206,6 +213,9 @@ impl Manifest {
             tree_hash,
             requirements: requirements.clone(),
             requires_python: requires_python.clone(),
+            python_version: python_version.to_string(),
+            platform: platform.triple().to_string(),
+            build_toolchain: build::derivation_fingerprint(),
         };
         fs::create_dir_all(dir.join(".blanket"))?;
         fs::write(&cache_path, serde_json::to_vec_pretty(&cache)?)?;
@@ -236,6 +246,25 @@ struct SetupCache {
     tree_hash: String,
     requirements: Vec<String>,
     requires_python: Option<String>,
+    #[serde(default)]
+    python_version: String,
+    #[serde(default)]
+    platform: String,
+    #[serde(default)]
+    build_toolchain: String,
+}
+
+fn setup_cache_matches(
+    cache: &SetupCache,
+    tree_hash: &str,
+    platform: Platform,
+    python_version: &str,
+    build_toolchain: &str,
+) -> bool {
+    cache.tree_hash == tree_hash
+        && cache.python_version == python_version
+        && cache.platform == platform.triple()
+        && cache.build_toolchain == build_toolchain
 }
 
 #[derive(Debug, Clone, Default)]
@@ -307,6 +336,18 @@ fn pyproject_sections(value: &toml::Value) -> (bool, bool, bool) {
     (has_project, poetry, groups)
 }
 
+fn project_dependencies_are_dynamic(value: &toml::Value) -> bool {
+    value
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .and_then(|project| project.get("dynamic"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .any(|name| name == "dependencies")
+}
+
 /// Read only enough metadata to decide whether Python is present. Parsing is
 /// intentional: a found but broken manifest is `unreadable_manifest`, not a
 /// misleading `no_manifest`.
@@ -337,10 +378,17 @@ pub fn python_inputs(dir: &Path) -> io::Result<PythonInputs> {
 
 pub fn discover(platform: Platform, dir: &Path) -> io::Result<Manifest> {
     let cfg = config(dir)?;
+    let collected_python = python_inputs(dir)?;
+    let discovery_selection =
+        pyselect::select_python_with_inputs(platform, &collected_python)?;
+    let dynamic_dependencies = if dir.join("pyproject.toml").is_file() {
+        let path = dir.join("pyproject.toml");
+        project_dependencies_are_dynamic(&parse_toml(&path, &read_text(&path)?)?)
+    } else {
+        false
+    };
     let mut manifest = if dir.join("requirements.txt").is_file() {
         requirements_manifest(dir, &dir.join("requirements.txt"), "requirements.txt")?
-    } else if dir.join("requirements.lock.txt").is_file() {
-        requirements_manifest(dir, &dir.join("requirements.lock.txt"), "requirements.lock.txt")?
     } else if dir.join("pyproject.toml").is_file() {
         let path = dir.join("pyproject.toml");
         let text = read_text(&path)?;
@@ -348,33 +396,93 @@ pub fn discover(platform: Platform, dir: &Path) -> io::Result<Manifest> {
         let (project, poetry, groups) = pyproject_sections(&value);
         // PEP 621 is the public metadata format and takes precedence when a
         // project also carries a legacy Poetry table.
-        if project {
+        if project && project_dependencies_are_dynamic(&value) {
+            // PEP 621's dynamic declaration is a promise that another build
+            // input supplies the dependencies. An empty [project] table here
+            // is not evidence of an empty environment. Let setup.py and the
+            // requirements-directory convention provide that source.
+            dynamic_dependencies_manifest(dir, &cfg)?
+        } else if project {
             project_manifest(dir, &value, &text, &cfg)?
         } else if poetry {
-            poetry_manifest(platform, dir, &value, &text, &cfg)?
+            poetry_manifest(
+                platform,
+                dir,
+                &value,
+                &text,
+                &cfg,
+                discovery_selection.pin.version,
+            )?
         } else if groups {
             project_manifest(dir, &value, &text, &cfg)?
         } else {
             setup_or_requirements_manifest(dir, &cfg)?
         }
+    } else if dir.join("setup.cfg").is_file()
+        || dir.join("setup.py").is_file()
+        || requirements_directory_candidate(dir, &cfg)?.is_some()
+    {
+        setup_or_requirements_manifest(dir, &cfg)?
+    } else if dir.join("requirements.lock.txt").is_file() {
+        // With no discoverable source, a lock is an explicitly supplied
+        // requirements file. The generated-lock cache path is only reached
+        // after a live source has been discovered above.
+        let lock = dir.join("requirements.lock.txt");
+        requirements_manifest(dir, &lock, "requirements.lock.txt")?
     } else {
         setup_or_requirements_manifest(dir, &cfg)?
     };
 
-    manifest.python = python_inputs(dir)?;
+    manifest.python = collected_python;
+    manifest.dynamic_dependencies = dynamic_dependencies;
     if let Some(packages) = manifest.uv_lock.clone() {
-        let selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
+        let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+            pypi::host_glibc()?
+        } else {
+            pypi::Glibc(0, 0)
+        };
         manifest.locked_packages = uv_lock_manifest(
             &packages,
             &manifest.requirements,
             platform,
-            selection.pin.version,
+            discovery_selection.pin.version,
+            glibc,
         )?;
     }
     if manifest.is_empty() && !manifest.requires_setup() {
         manifest.provenance.push_str(" (empty manifest)");
     }
     Ok(manifest)
+}
+
+fn dynamic_dependencies_manifest(
+    dir: &Path,
+    cfg: &BlanketPythonConfig,
+) -> io::Result<Manifest> {
+    match setup_or_requirements_manifest(dir, cfg) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(unreadable(
+            &dir.join("pyproject.toml"),
+            "[project].dynamic includes dependencies but no setup.py or requirements directory was found",
+        )),
+        result => result,
+    }
+}
+
+/// If a dynamic backend cannot run in the metadata sandbox, an adjacent
+/// requirements tree is still a useful, explicit dependency source. This is
+/// the recovery path used by projects such as vllm whose setup.py imports a
+/// package that is itself not installed during egg_info.
+pub fn dynamic_requirements_fallback(dir: &Path) -> io::Result<Option<Manifest>> {
+    let cfg = config(dir)?;
+    let Some(path) = requirements_directory_candidate(dir, &cfg)? else {
+        return Ok(None);
+    };
+    let relative = path
+        .strip_prefix(dir)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
+    requirements_manifest(dir, &path, &relative).map(Some)
 }
 
 fn setup_or_requirements_manifest(dir: &Path, cfg: &BlanketPythonConfig) -> io::Result<Manifest> {
@@ -400,6 +508,7 @@ fn setup_or_requirements_manifest(dir: &Path, cfg: &BlanketPythonConfig) -> io::
                 has_skippable_specs: false,
                 setup: false,
                 setup_cfg: true,
+                dynamic_dependencies: false,
             });
         }
     }
@@ -418,6 +527,7 @@ fn setup_or_requirements_manifest(dir: &Path, cfg: &BlanketPythonConfig) -> io::
             has_skippable_specs: false,
             setup: true,
             setup_cfg: false,
+            dynamic_dependencies: false,
         });
     }
     let Some(path) = requirements_directory_candidate(dir, cfg)? else {
@@ -483,6 +593,7 @@ fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io::Result<Ma
         has_skippable_specs,
         setup: false,
         setup_cfg: false,
+        dynamic_dependencies: false,
     })
 }
 
@@ -583,6 +694,7 @@ fn project_manifest(
         has_skippable_specs: false,
         setup: false,
         setup_cfg: false,
+        dynamic_dependencies: false,
     };
     Ok(with_generated_source(manifest, source))
 }
@@ -598,6 +710,7 @@ fn poetry_manifest(
     value: &toml::Value,
     _source: &str,
     cfg: &BlanketPythonConfig,
+    python_version: &str,
 ) -> io::Result<Manifest> {
     let poetry = value
         .get("tool")
@@ -683,7 +796,7 @@ fn poetry_manifest(
         let lock_text = read_text(&lock_path)?;
         let lock = parse_toml(&lock_path, &lock_text)?;
         check_poetry_content_hash(value, &lock)?;
-        let locked = poetry_lock_requirements(platform, value, &lock, cfg)
+        let locked = poetry_lock_requirements(platform, value, &lock, cfg, python_version)
             .map_err(|error| unreadable(&lock_path, error))?;
         // A present lock is authoritative, including an intentionally empty
         // main group. Never silently re-resolve from pyproject metadata.
@@ -710,6 +823,7 @@ fn poetry_manifest(
         has_skippable_specs: false,
         setup: false,
         setup_cfg: false,
+        dynamic_dependencies: false,
     })
 }
 
@@ -851,7 +965,13 @@ fn poetry_clause_to_pep440(clause: &str) -> io::Result<String> {
         ));
     }
     if rest.ends_with(".*") {
-        return Ok(format!("=={rest}"));
+        return match operator {
+            "=" | "==" | "!=" => Ok(format!("{operator}{rest}")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("wildcards need equality in Poetry version constraint `{clause}`"),
+            )),
+        };
     }
     if operator == "^" || operator == "~" {
         let values: Vec<u64> = rest
@@ -925,10 +1045,11 @@ fn poetry_python_marker(version: &str) -> io::Result<Option<String>> {
 }
 
 fn poetry_lock_requirements(
-    _platform: Platform,
+    platform: Platform,
     pyproject: &toml::Value,
     lock: &toml::Value,
     cfg: &BlanketPythonConfig,
+    python_version: &str,
 ) -> io::Result<Vec<String>> {
     let packages = lock
         .get("package")
@@ -954,14 +1075,14 @@ fn poetry_lock_requirements(
         })
         .map(|(name, _)| normalize_name(name))
         .collect();
-    let mut by_name = BTreeMap::new();
+    let mut by_name: BTreeMap<String, Vec<&toml::Value>> = BTreeMap::new();
     for package in packages {
         let table = package.as_table().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "poetry.lock package is not a table"))?;
         let name = table.get("name").and_then(toml::Value::as_str).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "poetry.lock package has no name"))?;
-        by_name.insert(normalize_name(name), package);
+        by_name.entry(normalize_name(name)).or_default().push(package);
     }
     for root in &roots {
-        if !by_name.contains_key(root) {
+        if select_poetry_package(by_name.get(root), python_version, platform)?.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("poetry.lock has no locked package for main dependency {root}"),
@@ -971,17 +1092,27 @@ fn poetry_lock_requirements(
     let mut reachable = roots.clone();
     let mut queue: VecDeque<String> = roots.clone().into_iter().collect();
     while let Some(name) = queue.pop_front() {
-        let Some(package) = by_name.get(&name).and_then(|v| v.as_table()) else { continue; };
+        let Some(package) = select_poetry_package(by_name.get(&name), python_version, platform)?
+            .and_then(toml::Value::as_table)
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("poetry.lock has no package variant compatible with Python {python_version} for {name}"),
+            ));
+        };
         if let Some(dependencies) = package.get("dependencies").and_then(toml::Value::as_table) {
-            for dependency in dependencies.keys() {
-                let dependency = normalize_name(dependency.split('[').next().unwrap_or(dependency));
+            for dependency in poetry_active_dependencies(dependencies, python_version, platform)? {
                 if reachable.insert(dependency.clone()) { queue.push_back(dependency); }
             }
         }
     }
     let mut output = Vec::new();
     for name in reachable {
-        let Some(package) = by_name.get(&name).and_then(|v| v.as_table()) else { continue; };
+        let Some(package) = select_poetry_package(by_name.get(&name), python_version, platform)?
+            .and_then(toml::Value::as_table)
+        else {
+            continue;
+        };
         let optional = package.get("optional").and_then(toml::Value::as_bool).unwrap_or(false);
         if optional && !roots.contains(&name) { continue; }
         if package.get("category").and_then(toml::Value::as_str).is_some_and(|v| v != "main") { continue; }
@@ -1012,6 +1143,308 @@ fn poetry_lock_requirements(
     }
     output.sort();
     Ok(output)
+}
+
+fn select_poetry_package<'a>(
+    variants: Option<&Vec<&'a toml::Value>>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<Option<&'a toml::Value>> {
+    let Some(variants) = variants else {
+        return Ok(None);
+    };
+    for package in variants {
+        let Some(table) = package.as_table() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "poetry.lock package is not a table",
+            ));
+        };
+        if poetry_package_matches(table, python_version, platform)? {
+            // Poetry's forked package entries are expected to be disjoint.
+            // Selecting the first matching entry preserves the lock's order
+            // and, importantly, never lets a later incompatible fork shadow
+            // an earlier compatible one.
+            return Ok(Some(*package));
+        }
+    }
+    Ok(None)
+}
+
+fn poetry_package_matches(
+    package: &toml::map::Map<String, toml::Value>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<bool> {
+    if let Some(versions) = package.get("python-versions").and_then(toml::Value::as_str) {
+        let pep440 = poetry_constraint_to_pep440(versions)?;
+        if !pyselect::matches_specifier(&pep440, python_version)? {
+            return Ok(false);
+        }
+    }
+    if let Some(markers) = package.get("markers").and_then(toml::Value::as_str) {
+        if !marker_matches(markers, python_version, platform)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn poetry_dependency_variant_matches(
+    value: &toml::Value,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<bool> {
+    let Some(table) = value.as_table() else {
+        return Ok(true);
+    };
+    if let Some(markers) = table.get("markers").and_then(toml::Value::as_str) {
+        if !marker_matches(markers, python_version, platform)? {
+            return Ok(false);
+        }
+    }
+    if let Some(python) = table.get("python").and_then(toml::Value::as_str) {
+        let Some(marker) = poetry_python_marker(python)? else {
+            return Ok(true);
+        };
+        if !marker_matches(&marker, python_version, platform)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn poetry_active_dependencies(
+    dependencies: &toml::map::Map<String, toml::Value>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<Vec<String>> {
+    let mut active = Vec::new();
+    for (name, value) in dependencies {
+        let enabled = match value {
+            toml::Value::Array(values) => {
+                let mut enabled = false;
+                for value in values {
+                    if poetry_dependency_variant_matches(value, python_version, platform)? {
+                        enabled = true;
+                        break;
+                    }
+                }
+                enabled
+            }
+            value => poetry_dependency_variant_matches(value, python_version, platform)?,
+        };
+        if enabled {
+            active.push(normalize_name(name.split('[').next().unwrap_or(name)));
+        }
+    }
+    Ok(active)
+}
+
+/// Evaluate the small PEP 508 marker subset emitted by Poetry and uv lock
+/// files. Lock variants must be filtered before graph traversal, so retaining
+/// the marker text and handing it to an unconstrained resolver is not enough.
+fn marker_matches(expression: &str, python_version: &str, platform: Platform) -> io::Result<bool> {
+    let expression = strip_marker_parens(expression.trim());
+    if expression.is_empty() {
+        return Ok(true);
+    }
+    let alternatives = split_marker_keyword(expression, "or");
+    if alternatives.len() > 1 {
+        return alternatives
+            .into_iter()
+            .map(|part| marker_matches(part, python_version, platform))
+            .collect::<io::Result<Vec<_>>>()
+            .map(|values| values.into_iter().any(|value| value));
+    }
+    let conjunction = split_marker_keyword(expression, "and");
+    if conjunction.len() > 1 {
+        return conjunction
+            .into_iter()
+            .map(|part| marker_matches(part, python_version, platform))
+            .collect::<io::Result<Vec<_>>>()
+            .map(|values| values.into_iter().all(|value| value));
+    }
+    if let Some(rest) = expression.strip_prefix("not ") {
+        return marker_matches(rest, python_version, platform).map(|value| !value);
+    }
+
+    let operators = [" not in ", " in ", ">=", "<=", "==", "!=", ">", "<"];
+    let (left, operator, right) = operators
+        .iter()
+        .find_map(|operator| {
+            expression.find(operator).map(|index| {
+                (
+                    expression[..index].trim(),
+                    *operator,
+                    expression[index + operator.len()..].trim(),
+                )
+            })
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported environment marker `{expression}`"),
+            )
+        })?;
+    let left_value = marker_value(left, python_version, platform).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported environment marker variable `{left}`"),
+        )
+    })?;
+    let right_value = right
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| right.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))
+        .unwrap_or(right);
+    let numeric = matches!(left, "python_version" | "python_full_version");
+    Ok(compare_marker(left_value.as_str(), right_value, operator, numeric))
+}
+
+fn marker_value(name: &str, python_version: &str, platform: Platform) -> Option<String> {
+    let python_full_version = python_version.to_string();
+    let python_version = python_version
+        .split('.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(".");
+    Some(match name {
+        "python_version" => python_version,
+        "python_full_version" => python_full_version,
+        "sys_platform" => if matches!(platform, Platform::Aarch64AppleDarwin) { "darwin" } else { "linux" }.to_string(),
+        "os_name" => "posix".to_string(),
+        "platform_system" => {
+            if matches!(platform, Platform::Aarch64AppleDarwin) { "Darwin" } else { "Linux" }
+                .to_string()
+        }
+        "platform_machine" => {
+            if matches!(platform, Platform::Aarch64AppleDarwin) { "arm64" } else { "x86_64" }
+                .to_string()
+        }
+        "implementation_name" => "cpython".to_string(),
+        "platform_python_implementation" => "CPython".to_string(),
+        "extra" => String::new(),
+        _ => return None,
+    })
+}
+
+fn compare_marker(left: &str, right: &str, operator: &str, numeric: bool) -> bool {
+    if numeric {
+        let parse = |value: &str| {
+            value
+                .split('.')
+                .map(|part| part.parse::<u64>().ok())
+                .collect::<Option<Vec<_>>>()
+        };
+        if let (Some(mut left), Some(mut right)) = (parse(left), parse(right)) {
+            let length = left.len().max(right.len());
+            left.resize(length, 0);
+            right.resize(length, 0);
+            return compare_order(left.cmp(&right), operator);
+        }
+    }
+    match operator {
+        "==" => left == right,
+        "!=" => left != right,
+        ">=" => left >= right,
+        "<=" => left <= right,
+        ">" => left > right,
+        "<" => left < right,
+        " in " => right.split_whitespace().any(|value| value == left),
+        " not in " => !right.split_whitespace().any(|value| value == left),
+        _ => false,
+    }
+}
+
+fn compare_order(order: std::cmp::Ordering, operator: &str) -> bool {
+    match operator {
+        "==" => order == std::cmp::Ordering::Equal,
+        "!=" => order != std::cmp::Ordering::Equal,
+        ">=" => order != std::cmp::Ordering::Less,
+        "<=" => order != std::cmp::Ordering::Greater,
+        ">" => order == std::cmp::Ordering::Greater,
+        "<" => order == std::cmp::Ordering::Less,
+        _ => false,
+    }
+}
+
+fn strip_marker_parens(mut expression: &str) -> &str {
+    loop {
+        let bytes = expression.as_bytes();
+        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+            return expression;
+        }
+        let mut depth = 0;
+        let mut quote = None;
+        let mut closes_early = false;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if let Some(current) = quote {
+                if byte == current && (index == 0 || bytes[index - 1] != b'\\') {
+                    quote = None;
+                }
+                continue;
+            }
+            if byte == b'\'' || byte == b'"' {
+                quote = Some(byte);
+            } else if byte == b'(' {
+                depth += 1;
+            } else if byte == b')' {
+                depth -= 1;
+                if depth == 0 && index != bytes.len() - 1 {
+                    closes_early = true;
+                    break;
+                }
+            }
+        }
+        if closes_early || depth != 0 {
+            return expression;
+        }
+        expression = expression[1..expression.len() - 1].trim();
+    }
+}
+
+fn split_marker_keyword<'a>(expression: &'a str, keyword: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    let mut quote = None;
+    let bytes = expression.as_bytes();
+    for index in 0..bytes.len() {
+        let byte = bytes[index];
+        if let Some(current) = quote {
+            if byte == current && (index == 0 || bytes[index - 1] != b'\\') {
+                quote = None;
+            }
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            continue;
+        }
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        let end = index + keyword.len();
+        let boundary_before = index == 0 || bytes[index - 1].is_ascii_whitespace();
+        let boundary_after = end >= bytes.len() || bytes[end].is_ascii_whitespace();
+        if depth == 0
+            && boundary_before
+            && boundary_after
+            && expression[index..].starts_with(keyword)
+        {
+            parts.push(expression[start..index].trim());
+            start = end;
+        }
+    }
+    if parts.is_empty() {
+        vec![expression]
+    } else {
+        parts.push(expression[start..].trim());
+        parts
+    }
 }
 
 fn poetry_package_hashes(lock: &toml::Value, package: &toml::map::Map<String, toml::Value>, name: &str) -> io::Result<Vec<String>> {
@@ -1200,6 +1633,14 @@ pub struct UvPackage {
     pub source: String,
     pub files: Vec<UvFile>,
     pub dependencies: Vec<String>,
+    pub resolution_markers: Vec<String>,
+    dependency_edges: Vec<UvDependency>,
+}
+
+#[derive(Debug, Clone)]
+struct UvDependency {
+    name: String,
+    marker: Option<String>,
 }
 
 pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
@@ -1213,21 +1654,41 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
         if version.is_empty() && !is_local_uv_source(&source) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("uv.lock {name} has no version")));
         }
-        let dependencies = if let Some(value) = table.get("dependencies") {
-            value
+        let mut dependencies = Vec::new();
+        let mut dependency_edges = Vec::new();
+        if let Some(value) = table.get("dependencies") {
+            for dependency in value
                 .as_array()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("uv.lock {name}.dependencies is not an array")))?
-                .iter()
-                .filter_map(|dependency| {
-                    dependency
-                        .as_str()
-                        .or_else(|| dependency.as_table().and_then(|table| table.get("name")).and_then(toml::Value::as_str))
-                })
-                .map(normalize_name)
-                .collect()
-        } else {
-            Vec::new()
-        };
+            {
+                let (dependency_name, marker) = if let Some(dependency_name) = dependency.as_str() {
+                    (dependency_name, None)
+                } else if let Some(table) = dependency.as_table() {
+                    let Some(dependency_name) = table.get("name").and_then(toml::Value::as_str) else {
+                        continue;
+                    };
+                    let marker = table
+                        .get("marker")
+                        .or_else(|| table.get("markers"))
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_string);
+                    (dependency_name, marker)
+                } else {
+                    continue;
+                };
+                let dependency_name = normalize_name(dependency_name);
+                dependencies.push(dependency_name.clone());
+                dependency_edges.push(UvDependency { name: dependency_name, marker });
+            }
+        }
+        let resolution_markers = table
+            .get("resolution-markers")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_string)
+            .collect();
         let mut files = Vec::new();
         if let Some(sdist) = table.get("sdist") {
             let sdist = sdist.as_table().ok_or_else(|| {
@@ -1250,7 +1711,15 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
                 })?);
             }
         }
-        Ok(UvPackage { name: normalize_name(name), version: version.into(), source, files, dependencies })
+        Ok(UvPackage {
+            name: normalize_name(name),
+            version: version.into(),
+            source,
+            files,
+            dependencies,
+            resolution_markers,
+            dependency_edges,
+        })
     }).collect()
 }
 
@@ -1266,8 +1735,8 @@ fn uv_lock_manifest(
     requirements: &[String],
     platform: Platform,
     python_version: &str,
+    glibc: pypi::Glibc,
 ) -> io::Result<Option<Vec<LockedPackage>>> {
-    let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) { pypi::host_glibc()? } else { pypi::Glibc(0, 0) };
     let minor = python_version.split('.').take(2).collect::<Vec<_>>().join("");
     let tag = format!("cp{minor}");
     let mut by_name: BTreeMap<String, Vec<&UvPackage>> = BTreeMap::new();
@@ -1281,7 +1750,26 @@ fn uv_lock_manifest(
         // project itself. Its dependencies are the default (non-dev) roots;
         // development groups remain unreachable from this package graph.
         for package in packages.iter().filter(|package| is_uv_project_root(&package.source)) {
-            roots.extend(package.dependencies.iter().cloned());
+            let legacy_edges;
+            let dependency_edges = if package.dependency_edges.is_empty() {
+                legacy_edges = package
+                    .dependencies
+                    .iter()
+                    .map(|name| UvDependency { name: name.clone(), marker: None })
+                    .collect::<Vec<_>>();
+                &legacy_edges
+            } else {
+                &package.dependency_edges
+            };
+            for dependency in dependency_edges {
+                if dependency
+                    .marker
+                    .as_deref()
+                    .map_or(Ok(true), |marker| marker_matches(marker, python_version, platform))?
+                {
+                    roots.insert(dependency.name.clone());
+                }
+            }
         }
     }
     let selected_names = if roots.is_empty() && !has_project_root {
@@ -1292,18 +1780,45 @@ fn uv_lock_manifest(
         let mut reachable = roots;
         let mut queue: VecDeque<String> = reachable.iter().cloned().collect();
         while let Some(name) = queue.pop_front() {
-            if let Some(package) = by_name.get(&name).and_then(|packages| packages.first()) {
-                for dependency in &package.dependencies {
-                    if reachable.insert(dependency.clone()) {
-                        queue.push_back(dependency.clone());
-                    }
+            let Some(package) = select_uv_package(by_name.get(&name), python_version, platform)? else {
+                continue;
+            };
+            let legacy_edges;
+            let dependency_edges = if package.dependency_edges.is_empty() {
+                legacy_edges = package
+                    .dependencies
+                    .iter()
+                    .map(|name| UvDependency { name: name.clone(), marker: None })
+                    .collect::<Vec<_>>();
+                &legacy_edges
+            } else {
+                &package.dependency_edges
+            };
+            for dependency in dependency_edges {
+                if dependency
+                    .marker
+                    .as_deref()
+                    .map_or(Ok(true), |marker| marker_matches(marker, python_version, platform))?
+                    && reachable.insert(dependency.name.clone())
+                {
+                    queue.push_back(dependency.name.clone());
                 }
             }
         }
         reachable
     };
+    let mut selected_packages = BTreeMap::new();
+    for name in &selected_names {
+        let Some(package) = select_uv_package(by_name.get(name), python_version, platform)? else {
+            eprintln!(
+                "blanket: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
+            );
+            return Ok(None);
+        };
+        selected_packages.insert(name.clone(), package);
+    }
     let mut output = Vec::new();
-    for package in packages {
+    for package in selected_packages.into_values() {
         if is_local_uv_source(&package.source) {
             if !is_uv_project_root(&package.source) {
                 crate::policy::record(
@@ -1312,9 +1827,6 @@ fn uv_lock_manifest(
                     "uv lock package is a local or VCS source, not a locked registry artifact",
                 )?;
             }
-            continue;
-        }
-        if !selected_names.contains(&package.name) {
             continue;
         }
         if package.source != "registry"
@@ -1339,6 +1851,30 @@ fn uv_lock_manifest(
     if output.is_empty() { return Ok(None); }
     output.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Some(output))
+}
+
+fn select_uv_package<'a>(
+    variants: Option<&Vec<&'a UvPackage>>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<Option<&'a UvPackage>> {
+    let Some(variants) = variants else {
+        return Ok(None);
+    };
+    for package in variants {
+        if package.resolution_markers.is_empty()
+            || package
+                .resolution_markers
+                .iter()
+                .map(|marker| marker_matches(marker, python_version, platform))
+                .collect::<io::Result<Vec<_>>>()?
+                .into_iter()
+                .any(|matches| matches)
+        {
+            return Ok(Some(*package));
+        }
+    }
+    Ok(None)
 }
 
 fn is_local_uv_source(source: &str) -> bool {
@@ -1605,6 +2141,9 @@ fn setup_tree_hash(dir: &Path) -> io::Result<String> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "requirements.lock.txt" {
+            continue;
+        }
         if matches!(name.as_str(), "setup.py" | "setup.cfg" | "pyproject.toml" | "MANIFEST.in") || name.contains("requirements") { paths.insert(entry.path()); }
     }
     let reqdir = dir.join("requirements");
@@ -1659,7 +2198,7 @@ mod tests {
             ("^0.0.3", ">=0.0.3,<0.0.4"), ("~1.2", ">=1.2,<1.3"),
             ("~1.2.3", ">=1.2.3,<1.3.0"), ("1.2.*", "==1.2.*"),
             ("*", ""), (">=1.0", ">=1.0"), ("<2", "<2"),
-            (">1", ">1"), ("<=2", "<=2"), ("!=1.2", "!=1.2"),
+            (">1", ">1"), ("<=2", "<=2"), ("!=1.2", "!=1.2"), ("!=1.2.*", "!=1.2.*"),
             ("=1.2", "==1.2"), ("1.2", "==1.2"), ("^1.2.3", ">=1.2.3,<2.0.0"),
             ("^0.2.3", ">=0.2.3,<0.3.0"), ("^0.0.0", ">=0.0.0,<0.0.1"),
             ("~1", ">=1,<2"), ("~1.2.0", ">=1.2.0,<1.3.0"),
@@ -1675,13 +2214,16 @@ mod tests {
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [{ name = "idna" }]
+resolution-markers = ["python_full_version >= '3.12'"]
+dependencies = [{ name = "idna", marker = "python_version >= '3.12'" }]
 sdist = { url = "https://files.pythonhosted.org/six.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
 wheels = [{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
 "#).unwrap();
         assert_eq!(packages[0].files.len(), 2);
         assert_eq!(packages[0].files[1].hash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(packages[0].dependencies, ["idna"]);
+        assert_eq!(packages[0].resolution_markers, ["python_full_version >= '3.12'"]);
+        assert_eq!(packages[0].dependency_edges[0].marker.as_deref(), Some("python_version >= '3.12'"));
     }
 
     #[test]
@@ -1701,17 +2243,18 @@ dependencies = [{ name = "six" }]
             UvPackage {
                 name: "demo".into(), version: String::new(), source: "{ editable = \".\" }".into(),
                 files: Vec::new(), dependencies: Vec::new(),
+                resolution_markers: Vec::new(), dependency_edges: Vec::new(),
             },
             UvPackage {
                 name: "pytest".into(), version: "8.0.0".into(), source: "registry".into(),
                 files: vec![UvFile {
                     url: "https://files.example/pytest-8.0.0.tar.gz".into(), hash: "a".repeat(64),
                     filename: "pytest-8.0.0.tar.gz".into(), kind: ArtifactKind::Sdist,
-                }], dependencies: Vec::new(),
+                }], dependencies: Vec::new(), resolution_markers: Vec::new(), dependency_edges: Vec::new(),
             },
         ];
         assert!(uv_lock_manifest(
-            &packages, &[], Platform::X86_64UnknownLinuxGnu, "3.12.14"
+            &packages, &[], Platform::X86_64UnknownLinuxGnu, "3.12.14", pypi::Glibc(2, 43)
         ).unwrap().is_none());
     }
 
@@ -1736,12 +2279,14 @@ dependencies = [{ name = "six" }]
                 },
             ],
             dependencies: Vec::new(),
+            resolution_markers: Vec::new(), dependency_edges: Vec::new(),
         }];
         let selected = uv_lock_manifest(
             &packages,
             &["demo==1.0.0".into()],
             Platform::X86_64UnknownLinuxGnu,
             "3.12.14",
+            pypi::Glibc(2, 43),
         )
         .unwrap()
         .unwrap();
@@ -1760,14 +2305,17 @@ dependencies = [{ name = "six" }]
             UvPackage {
                 name: "six".into(), version: "1.0.0".into(), source: "registry".into(),
                 files: vec![file("six")], dependencies: vec!["idna".into()],
+                resolution_markers: Vec::new(), dependency_edges: Vec::new(),
             },
             UvPackage {
                 name: "idna".into(), version: "3.0.0".into(), source: "registry".into(),
                 files: vec![file("idna")], dependencies: Vec::new(),
+                resolution_markers: Vec::new(), dependency_edges: Vec::new(),
             },
             UvPackage {
                 name: "pytest".into(), version: "8.0.0".into(), source: "registry".into(),
                 files: vec![file("pytest")], dependencies: Vec::new(),
+                resolution_markers: Vec::new(), dependency_edges: Vec::new(),
             },
         ];
         let selected = uv_lock_manifest(
@@ -1775,6 +2323,7 @@ dependencies = [{ name = "six" }]
             &["six".into()],
             Platform::X86_64UnknownLinuxGnu,
             "3.12.14",
+            pypi::Glibc(2, 43),
         ).unwrap().unwrap();
         assert_eq!(
             selected.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
@@ -1841,6 +2390,7 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
             &project,
             &lock,
             &BlanketPythonConfig::default(),
+            "3.12.14",
         ).unwrap();
         assert_eq!(requirements.len(), 2);
         assert!(requirements.iter().any(|line| line.starts_with("six==1.17.0") && line.contains("aaaaaaaa")));
@@ -1866,6 +2416,41 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
         assert!(!is_trivial_setup_py(
             "from setuptools import setup\nrequirements = read_requirements()\nsetup(install_requires=requirements)\n"
         ));
+    }
+
+    #[test]
+    fn setup_metadata_cache_identity_includes_interpreter_platform_and_toolchain() {
+        let cache = SetupCache {
+            tree_hash: "tree".into(),
+            requirements: Vec::new(),
+            requires_python: None,
+            python_version: "3.12.14".into(),
+            platform: Platform::X86_64UnknownLinuxGnu.triple().into(),
+            build_toolchain: build::derivation_fingerprint(),
+        };
+        let toolchain = build::derivation_fingerprint();
+        assert!(setup_cache_matches(
+            &cache,
+            "tree",
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            &toolchain,
+        ));
+        assert!(!setup_cache_matches(
+            &cache,
+            "tree",
+            Platform::X86_64UnknownLinuxGnu,
+            "3.10.21",
+            &toolchain,
+        ));
+        assert!(!setup_cache_matches(
+            &cache,
+            "tree",
+            Platform::Aarch64AppleDarwin,
+            "3.12.14",
+            &toolchain,
+        ));
+        assert!(!setup_cache_matches(&cache, "tree", Platform::X86_64UnknownLinuxGnu, "3.12.14", "changed"));
     }
 
     #[test]
@@ -1941,6 +2526,185 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
             let _ = fs::remove_dir_all(dir);
             crate::policy::clear();
         }
+    }
+
+    #[test]
+    fn generated_lock_does_not_shadow_the_live_project_source() {
+        let dir = temp_project("lock-shadow");
+        fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\ndependencies = [\"idna==3.10\"]\n",
+        )
+        .unwrap();
+        fs::write(dir.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
+        fs::create_dir_all(dir.join(".blanket")).unwrap();
+        fs::write(dir.join(".blanket/lock-source.hash"), "stale\n").unwrap();
+
+        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        assert_eq!(manifest.provenance, "pyproject.toml [project]");
+        assert_eq!(manifest.requirements, ["idna==3.10"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dynamic_project_dependencies_fall_through_to_requirements_directory() {
+        let dir = temp_project("dynamic-reqdir");
+        fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\nname = \"vllm-shaped\"\ndynamic = [\"version\", \"dependencies\"]\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("requirements")).unwrap();
+        fs::write(dir.join("requirements/common.txt"), "six==1.17.0\n").unwrap();
+
+        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        assert_eq!(manifest.input, "requirements/common.txt");
+        assert_eq!(manifest.requirements, ["six==1.17.0"]);
+        assert!(!manifest.provenance.contains("empty manifest"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dynamic_project_without_a_dependency_source_fails_loudly() {
+        let dir = temp_project("dynamic-missing");
+        fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\nname = \"dynamic-demo\"\ndynamic = [\"dependencies\"]\n",
+        )
+        .unwrap();
+        let error = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap_err();
+        assert!(error.to_string().contains("dynamic"));
+        assert!(!error.to_string().contains("empty manifest"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn poetry_lock_selects_python_conditioned_package_and_edge_variants() {
+        let project: toml::Value = toml::from_str(
+            r#"[tool.poetry.dependencies]
+root = "*"
+"#,
+        )
+        .unwrap();
+        let lock: toml::Value = toml::from_str(
+            r#"[[package]]
+name = "root"
+version = "1.0.0"
+python-versions = "*"
+groups = ["main"]
+dependencies = { dep = [
+  { version = "*", markers = "python_version < '3.12'" },
+  { version = "*", markers = "python_version >= '3.12'" },
+] }
+files = [{ file = "root.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+
+[[package]]
+name = "dep"
+version = "1.0.0"
+python-versions = "<3.12"
+groups = ["main"]
+files = [{ file = "dep-1.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
+
+[[package]]
+name = "dep"
+version = "2.0.0"
+python-versions = ">=3.12"
+groups = ["main"]
+files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
+"#,
+        )
+        .unwrap();
+        let cfg = BlanketPythonConfig::default();
+        let old = poetry_lock_requirements(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &lock,
+            &cfg,
+            "3.11.16",
+        )
+        .unwrap();
+        let new = poetry_lock_requirements(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &lock,
+            &cfg,
+            "3.12.14",
+        )
+        .unwrap();
+        assert!(old.iter().any(|line| line.starts_with("dep==1.0.0")));
+        assert!(!old.iter().any(|line| line.starts_with("dep==2.0.0")));
+        assert!(new.iter().any(|line| line.starts_with("dep==2.0.0")));
+        assert!(!new.iter().any(|line| line.starts_with("dep==1.0.0")));
+    }
+
+    #[test]
+    fn uv_lock_selects_resolution_and_dependency_marker_variants() {
+        let file = |name: &str, version: &str| UvFile {
+            url: format!("https://files.example/{name}-{version}.tar.gz"),
+            hash: "a".repeat(64),
+            filename: format!("{name}-{version}.tar.gz"),
+            kind: ArtifactKind::Sdist,
+        };
+        let packages = vec![
+            UvPackage {
+                name: "root".into(),
+                version: "1.0.0".into(),
+                source: "{ editable = \".\" }".into(),
+                files: vec![file("root", "1.0.0")],
+                dependencies: vec!["dep".into()],
+                resolution_markers: Vec::new(),
+                dependency_edges: vec![
+                    UvDependency {
+                        name: "dep".into(),
+                        marker: Some("python_version < '3.12'".into()),
+                    },
+                    UvDependency {
+                        name: "dep".into(),
+                        marker: Some("python_version >= '3.12'".into()),
+                    },
+                ],
+            },
+            UvPackage {
+                name: "dep".into(),
+                version: "1.0.0".into(),
+                source: "registry".into(),
+                files: vec![file("dep", "1.0.0")],
+                dependencies: Vec::new(),
+                resolution_markers: vec!["python_full_version < '3.12'".into()],
+                dependency_edges: Vec::new(),
+            },
+            UvPackage {
+                name: "dep".into(),
+                version: "2.0.0".into(),
+                source: "registry".into(),
+                files: vec![file("dep", "2.0.0")],
+                dependencies: Vec::new(),
+                resolution_markers: vec!["python_full_version >= '3.12'".into()],
+                dependency_edges: Vec::new(),
+            },
+        ];
+        let old = uv_lock_manifest(
+            &packages,
+            &[],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.11.16",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        let new = uv_lock_manifest(
+            &packages,
+            &[],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(old.iter().any(|package| package.version == "1.0.0"));
+        assert!(!old.iter().any(|package| package.name == "dep" && package.version == "2.0.0"));
+        assert!(new.iter().any(|package| package.name == "dep" && package.version == "2.0.0"));
+        assert!(!new.iter().any(|package| package.name == "dep" && package.version == "1.0.0"));
     }
 
     #[test]

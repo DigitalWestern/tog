@@ -20,8 +20,12 @@ fn copy_tree(src: &Path, dst: &Path) {
 
 fn temp_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "blanket-manifests-e2e-{}",
-        std::process::id()
+        "blanket-manifests-e2e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&root).unwrap();
     root
@@ -66,5 +70,43 @@ fn all_manifest_fixtures_sync_and_run() {
             .unwrap();
         assert!(run.status.success(), "{name} run failed: {}", String::from_utf8_lossy(&run.stderr));
     }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore]
+fn dynamic_vllm_shaped_fixture_syncs_real_dependencies() {
+    let root = temp_root();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let project = root.join("proj-vllm-shaped");
+    copy_tree(&fixtures.join("proj-vllm-shaped"), &project);
+    let store = std::env::var_os("BLANKET_STORE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("store"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let output = Command::new(&binary)
+        .current_dir(&project)
+        .env("BLANKET_STORE", &store)
+        .env("BLANKET_SANDBOX_TESTS", "required")
+        .args(["sync"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "vllm-shaped sync failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(&binary)
+        .current_dir(&project)
+        .env("BLANKET_STORE", &store)
+        .args(["run", "python", "-c", "import six, idna"])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "vllm-shaped dependencies missing: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
