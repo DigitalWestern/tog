@@ -189,6 +189,29 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
     env
 }
 
+/// Run the store Go for a delegated edit (`blanket add` and friends).
+pub(crate) fn run_checked(
+    go_obj: &Path,
+    cwd: &Path,
+    modcache: &Path,
+    offline: bool,
+    args: &[&str],
+) -> io::Result<()> {
+    crate::ui::trace(&format!("run: go {} (in {})", args.join(" "), cwd.display()));
+    let out = run_go(go_obj, cwd, modcache, offline, args)?;
+    if crate::ui::verbose() {
+        eprint!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if !out.status.success() {
+        return Err(io::Error::other(format!(
+            "store go {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 fn run_go(
     go_obj: &Path,
     cwd: &Path,

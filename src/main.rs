@@ -1,6 +1,7 @@
 use blanket::{
-    cargo, cli, dotnet, elixir, gc, golang, inspect, manifest, npm, npm_lock_import,
+    cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest, npm, npm_lock_import,
     platform::Platform, policy, project, pypi, pyselect, python, ruby, sbom, store, types, ui,
+    xrun,
 };
 
 use std::io;
@@ -187,6 +188,52 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
         Build { args } => run_build(platform, &args),
         Run { command } => run_run(platform, &command),
         Sbom { output } => run_sbom(output.as_deref()),
+        Add {
+            specs,
+            dev,
+            no_sync,
+        } => run_deps(
+            platform,
+            deps::Request {
+                verb: deps::Verb::Add,
+                specs,
+                dev,
+            },
+            no_sync,
+        ),
+        Remove { names, no_sync } => run_deps(
+            platform,
+            deps::Request {
+                verb: deps::Verb::Remove,
+                specs: names,
+                dev: false,
+            },
+            no_sync,
+        ),
+        Update { names, no_sync } => run_deps(
+            platform,
+            deps::Request {
+                verb: deps::Verb::Update,
+                specs: names,
+                dev: false,
+            },
+            no_sync,
+        ),
+        X {
+            ecosystem,
+            from,
+            tool,
+            args,
+        } => xrun::run(
+            platform,
+            &project_dir(),
+            xrun::Request {
+                ecosystem,
+                from,
+                tool,
+                args,
+            },
+        ),
         Status { json } => {
             let dir = project_dir();
             let rows = inspect::status(platform, &dir)?;
@@ -206,6 +253,25 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
             unreachable!("handled above")
         }
     }
+}
+
+/// `add` / `remove` / `update`: delegate the edit, report it, then the
+/// ordinary sync in the project the edit landed in.
+fn run_deps(platform: Platform, request: deps::Request, no_sync: bool) -> io::Result<()> {
+    let cwd = project_dir();
+    let outcome = deps::run(platform, &cwd, request)?;
+    for line in &outcome.lines {
+        ui::note(line);
+    }
+    if no_sync {
+        ui::note("--no-sync: review the change, then run 'blanket'");
+        return Ok(());
+    }
+    if outcome.project != cwd {
+        std::env::set_current_dir(&outcome.project)?;
+        ui::trace(&format!("syncing in {}", outcome.project.display()));
+    }
+    run_sync(platform, false, false)
 }
 
 fn run_sbom(output: Option<&Path>) -> io::Result<()> {

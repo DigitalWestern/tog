@@ -21,6 +21,17 @@ say what breaks, for whom, and how it fails (loud/silent).
   reported as synced. Cargo, Go, Ruby, Elixir and .NET compare the lock
   hash only, not the manifest. Closures from before the field exists show
   as "synced (unchecked)" until the next sync.
+- **`blanket add` / `remove` / `update` delegate to store tools with
+  network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
+  same trust boundary as missing-lockfile generation. Rows that refuse with
+  instructions instead of editing: Poetry and PDM projects, pnpm and yarn
+  lockfiles, setup.py/setup.cfg, `requirements/` directories, Elixir add and
+  remove, and all of .NET. The registry existence check for an ambiguous
+  bare name in a polyglot directory is one HTTPS GET per candidate
+  registry; a private-registry name needs the explicit prefix.
+- **`blanket x` covers PyPI and npm** (cargo and go later). Each tool's
+  environment lives under `~/.blanket/x/` as a registered project root;
+  `blanket gc --project` does not touch it, and there is no `x --clean` yet.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

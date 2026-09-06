@@ -844,6 +844,29 @@ fn beam_path(beam_obj: &Path) -> String {
     )
 }
 
+/// Run the store mix for a delegated edit (`blanket update`).
+pub(crate) fn run_checked(
+    beam_obj: &Path,
+    cwd: &Path,
+    scratch: &Path,
+    offline: bool,
+    args: &[&str],
+) -> io::Result<()> {
+    crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
+    let out = run_mix(beam_obj, cwd, scratch, offline, args)?;
+    if crate::ui::verbose() {
+        eprint!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if !out.status.success() {
+        return Err(io::Error::other(format!(
+            "store {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 fn run_mix(
     beam_obj: &Path,
     cwd: &Path,

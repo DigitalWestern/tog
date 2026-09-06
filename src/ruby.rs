@@ -285,6 +285,29 @@ pub fn run_env(
     )
 }
 
+/// Run a store Ruby tool for a delegated edit (`blanket add` and friends):
+/// same environment as planning, failure carries the tool's stderr.
+pub(crate) fn run_checked(
+    ruby_obj: &Path,
+    cwd: &Path,
+    gem_home: &Path,
+    args: &[&str],
+) -> io::Result<()> {
+    crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
+    let out = run_ruby(ruby_obj, cwd, gem_home, args)?;
+    if crate::ui::verbose() {
+        eprint!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if !out.status.success() {
+        return Err(err(format!(
+            "store {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 fn run_ruby(
     ruby_obj: &Path,
     cwd: &Path,

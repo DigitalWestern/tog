@@ -289,3 +289,79 @@ fn inspect_verbs_offline() {
     let out = blanket(&project.0, &home.0, &["completions", "powershell"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+// --- CLI.md level two, phases C and D: the offline paths of add/remove/x ---
+
+#[test]
+fn dependency_verbs_offline_paths() {
+    let home = TempDir::new("deps");
+    let nowhere = TempDir::new("deps-nowhere");
+    let out = blanket(&nowhere.0, &home.0, &["add", "requests"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no project from"), "{}", text(&out.stderr));
+
+    // A plain requirements file: blanket edits it itself; with --no-sync
+    // nothing else runs, so this is fully offline.
+    let project = TempDir::new("deps-req");
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let out = blanket(&project.0, &home.0, &["add", "--no-sync", "requests>=2", "six==1.16.0"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("requirements.txt")).unwrap(),
+        "six==1.16.0\nrequests>=2\n"
+    );
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("requirements.txt: added requests, six"), "{stderr}");
+    assert!(stderr.contains("--no-sync"), "{stderr}");
+    let out = blanket(&project.0, &home.0, &["remove", "--no-sync", "idna"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("'idna' is not declared"));
+    let out = blanket(&project.0, &home.0, &["remove", "--no-sync", "Requests"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("requirements.txt")).unwrap(),
+        "six==1.16.0\n"
+    );
+    // --dev has no meaning here.
+    let out = blanket(&project.0, &home.0, &["add", "--dev", "--no-sync", "pytest"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("--dev has no meaning"));
+
+    // Refuse-with-instructions rows never touch the network or the store.
+    let setup = TempDir::new("deps-setup");
+    std::fs::write(setup.0.join("setup.py"), "from setuptools import setup\nsetup()\n").unwrap();
+    let out = blanket(&setup.0, &home.0, &["add", "requests"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("install_requires"), "{}", text(&out.stderr));
+    let pnpm = TempDir::new("deps-pnpm");
+    std::fs::write(pnpm.0.join("package.json"), "{}").unwrap();
+    std::fs::write(pnpm.0.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    let out = blanket(&pnpm.0, &home.0, &["add", "-D", "react", "left-pad"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("run 'pnpm add -D react left-pad'"), "{}", text(&out.stderr));
+    let poetry = TempDir::new("deps-poetry");
+    std::fs::write(poetry.0.join("pyproject.toml"), "[tool.poetry]\nname='p'\n").unwrap();
+    let out = blanket(&poetry.0, &home.0, &["update"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("poetry update"), "{}", text(&out.stderr));
+    let dotnet = TempDir::new("deps-dotnet");
+    std::fs::write(dotnet.0.join("app.csproj"), "<Project/>").unwrap();
+    let out = blanket(&dotnet.0, &home.0, &["add", "Newtonsoft.Json"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("dotnet add package Newtonsoft.Json"), "{}", text(&out.stderr));
+    // A shape that contradicts the project is caught before any tool runs.
+    let out = blanket(&project.0, &home.0, &["add", "@types/node"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no node manifest"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn x_needs_a_registry_outside_a_project() {
+    let home = TempDir::new("x");
+    let out = blanket(&home.0, &home.0, &["x", "ruff", "--version"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("blanket x py:ruff"), "{stderr}");
+    let out = blanket(&home.0, &home.0, &["x"]);
+    assert_eq!(out.status.code(), Some(2));
+}

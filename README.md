@@ -52,6 +52,10 @@ blanket store roots             # registered project roots
 blanket gc --dry-run            # preview unreferenced store/cache cleanup
 blanket sync --fresh            # rebuild the projection (drops caches)
 blanket dev                     # a package.json script, like 'npm run dev'
+blanket add requests            # add a dependency with the ecosystem's own tool, re-lock, sync
+blanket add npm:react@18 --dev  # say the ecosystem when the name alone is ambiguous
+blanket remove requests         # the inverse; blanket update [pkg] re-locks to newer versions
+blanket x ruff check .          # run a tool without adding it (like uvx / npx); cached forever
 blanket status                  # are .venv/node_modules current with the lock? (CI gate)
 blanket ls                      # what is installed, per ecosystem (--json)
 blanket doctor                  # host prerequisites, sandbox, store, free space

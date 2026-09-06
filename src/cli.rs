@@ -34,6 +34,16 @@ pub enum Command {
     /// The program (or package.json script) and its arguments.
     Run { command: Vec<String> },
     Sbom { output: Option<PathBuf> },
+    Add { specs: Vec<String>, dev: bool, no_sync: bool },
+    Remove { names: Vec<String>, no_sync: bool },
+    Update { names: Vec<String>, no_sync: bool },
+    /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
+    X {
+        ecosystem: Option<String>,
+        from: Option<String>,
+        tool: String,
+        args: Vec<String>,
+    },
     Status { json: bool },
     Ls { ecosystem: Option<String>, json: bool },
     Doctor { json: bool },
@@ -188,6 +198,62 @@ them instead.",
         words: &[],
     },
     Spec {
+        name: "add",
+        group: Group::Everyday,
+        summary: "add a dependency, re-lock, sync",
+        usage: "blanket add <package>... [--dev] [--no-sync]",
+        description: "\
+Adds each package to the project's manifest with the ecosystem's own pinned
+tool (uv, the store npm, cargo, go, bundler), re-locks, and syncs. Where no
+pinned tool can make the edit (Poetry, PDM, pnpm, yarn, setup.py, Elixir,
+.NET) blanket refuses and prints the exact line and file instead.
+
+Which ecosystem: an explicit prefix (py:requests, npm:react, cargo:serde,
+go:github.com/x/y, gem:rails, hex:jason, nuget:Foo.Bar) or the name's shape
+(@scope/name, github.com/..., Foo.Bar) decides it; otherwise the nearest
+manifest walking up from here; if that directory holds several, the
+registries are asked and a name known to exactly one wins; if several know
+it you are asked at the terminal. Blanket never guesses from the bare name.
+Constraints pass through to the tool: 'requests>=2', 'react@18',
+'serde@1', 'rails@~> 7.1'.",
+        options: &[
+            ("--dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
+            ("--no-sync", "stop after the manifest and lock edit; review, then run 'blanket'"),
+            HELP_OPTION,
+        ],
+        words: &[],
+    },
+    Spec {
+        name: "remove",
+        group: Group::Everyday,
+        summary: "remove a dependency, re-lock, sync",
+        usage: "blanket remove <package>... [--no-sync]",
+        description: "\
+The inverse of add, through the same pinned tools with the same ecosystem
+choice. For a plain requirements file blanket deletes the line itself.",
+        options: &[
+            ("--no-sync", "stop after the manifest and lock edit; review, then run 'blanket'"),
+            HELP_OPTION,
+        ],
+        words: &[],
+    },
+    Spec {
+        name: "update",
+        group: Group::Everyday,
+        summary: "update dependencies within the manifest's constraints, sync",
+        usage: "blanket update [<package>...] [--no-sync]",
+        description: "\
+Re-locks everything (or only the named packages) to the newest versions the
+manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
+bundle update, mix deps.update. Poetry, PDM, pnpm, yarn and .NET projects
+are told which command to run with their own tool.",
+        options: &[
+            ("--no-sync", "stop after the lock edit; review, then run 'blanket'"),
+            HELP_OPTION,
+        ],
+        words: &[],
+    },
+    Spec {
         name: "run",
         group: Group::Everyday,
         summary: "run a command or package.json script inside the projected env(s)",
@@ -201,6 +267,28 @@ wins over a same-named executable on PATH; 'blanket <script>' is the short
 form when the script name is not a blanket command. Everything after
 <command> is passed through unchanged.",
         options: &[HELP_OPTION],
+        words: &[],
+    },
+    Spec {
+        name: "x",
+        group: Group::Everyday,
+        summary: "run a tool without adding it to the project (like npx / uvx)",
+        usage: "blanket x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]",
+        description: "\
+Resolves the package with the store uv or npm, realizes it as an ordinary
+store environment (a store hit from the second run on), and executes the
+tool with every argument passed through. Which registry: 'py:' or 'npm:'
+on the tool, --py / --npm, or the current project's ecosystem (Python
+first, then Node); outside a project the prefix is required. --from names
+the package when the executable is called something else
+('blanket x --from httpie http'). Environments live under ~/.blanket/x/
+and are gc roots like any project.",
+        options: &[
+            ("--py", "resolve from PyPI"),
+            ("--npm", "resolve from npm"),
+            ("--from <package>", "the package that provides <tool>"),
+            HELP_OPTION,
+        ],
         words: &[],
     },
     Spec {
@@ -540,6 +628,8 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         "build" => parse_passthrough(rest, "build")?,
         "run" => parse_passthrough(rest, "run")?,
         "sbom" => parse_sbom(rest)?,
+        "add" | "remove" | "update" => parse_deps(rest, name)?,
+        "x" => parse_x(rest)?,
         "status" => parse_json_only(rest, "status")?.map(|json| Command::Status { json }),
         "ls" => parse_ls(rest)?,
         "doctor" => parse_json_only(rest, "doctor")?.map(|json| Command::Doctor { json }),
@@ -673,6 +763,112 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
     Ok(Some(match name {
         "run" => Command::Run { command: args },
         _ => Command::Build { args },
+    }))
+}
+
+fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError> {
+    let name: &'static str = match name {
+        "add" => "add",
+        "remove" => "remove",
+        _ => "update",
+    };
+    let mut dev = false;
+    let mut no_sync = false;
+    let mut positional = Vec::new();
+    let mut passthrough = false;
+    for arg in args {
+        if passthrough {
+            positional.push(arg.clone());
+            continue;
+        }
+        match arg.as_str() {
+            "--" => passthrough = true,
+            "-h" | "--help" => return Ok(None),
+            "--no-sync" => no_sync = true,
+            "--dev" | "-D" if name == "add" => dev = true,
+            other if other.starts_with('-') && other.len() > 1 => return Err(reject(name, other)),
+            other => positional.push(other.to_string()),
+        }
+    }
+    match name {
+        "add" if positional.is_empty() => Err(UsageError::new(
+            "add: no package given (e.g. 'blanket add requests', 'blanket add npm:react@18')",
+            Some("add"),
+        )),
+        "add" => Ok(Some(Command::Add {
+            specs: positional,
+            dev,
+            no_sync,
+        })),
+        "remove" if positional.is_empty() => Err(UsageError::new(
+            "remove: no package given",
+            Some("remove"),
+        )),
+        "remove" => Ok(Some(Command::Remove {
+            names: positional,
+            no_sync,
+        })),
+        _ => Ok(Some(Command::Update {
+            names: positional,
+            no_sync,
+        })),
+    }
+}
+
+fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut ecosystem = None;
+    let mut from = None;
+    let mut index = 0;
+    while let Some(arg) = args.get(index).map(String::as_str) {
+        match arg {
+            "-h" | "--help" => return Ok(None),
+            "--py" | "--python" => ecosystem = Some("python".to_string()),
+            "--npm" | "--node" => ecosystem = Some("node".to_string()),
+            "--from" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| UsageError::new("--from needs a package name", Some("x")))?;
+                from = Some(value.clone());
+                index += 1;
+            }
+            _ if arg.starts_with("--from=") => {
+                from = Some(
+                    non_empty(&arg["--from=".len()..], "--from", Some("x"))?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--" => {
+                index += 1;
+                break;
+            }
+            _ if arg.starts_with('-') && arg.len() > 1 => return Err(reject("x", arg)),
+            _ => break,
+        }
+        index += 1;
+    }
+    let Some(tool) = args.get(index) else {
+        return Err(UsageError::new(
+            "x: no tool given (e.g. 'blanket x ruff check .', 'blanket x npm:prettier --write .')",
+            Some("x"),
+        ));
+    };
+    let mut tool = tool.clone();
+    if let Some(rest) = tool.strip_prefix("py:") {
+        ecosystem = Some("python".to_string());
+        tool = rest.to_string();
+    } else if let Some(rest) = tool.strip_prefix("npm:") {
+        ecosystem = Some("node".to_string());
+        tool = rest.to_string();
+    }
+    if tool.is_empty() {
+        return Err(UsageError::new("x: empty tool name", Some("x")));
+    }
+    Ok(Some(Command::X {
+        ecosystem,
+        from,
+        tool,
+        args: args[index + 1..].to_vec(),
     }))
 }
 
@@ -1355,6 +1551,97 @@ mod tests {
             message(&["ls", "node", "python"]),
             "ls: unexpected argument 'python' (one ecosystem at most)"
         );
+    }
+
+    #[test]
+    fn dependency_verbs() {
+        assert_eq!(
+            command(&["add", "requests>=2", "npm:react@18", "--dev", "--no-sync"]),
+            Command::Add {
+                specs: argv(&["requests>=2", "npm:react@18"]),
+                dev: true,
+                no_sync: true,
+            }
+        );
+        assert_eq!(
+            command(&["add", "-D", "--", "-weird"]),
+            Command::Add {
+                specs: argv(&["-weird"]),
+                dev: true,
+                no_sync: false,
+            }
+        );
+        assert!(message(&["add"]).starts_with("add: no package given"));
+        assert_eq!(message(&["add", "--dve", "x"]), "add: unknown option '--dve'; did you mean '--dev'?");
+        assert_eq!(message(&["remove", "--dev", "x"]), "remove: unknown option '--dev'");
+        assert_eq!(
+            command(&["remove", "six", "--no-sync"]),
+            Command::Remove {
+                names: argv(&["six"]),
+                no_sync: true,
+            }
+        );
+        assert_eq!(message(&["remove"]), "remove: no package given");
+        assert_eq!(
+            command(&["update"]),
+            Command::Update {
+                names: vec![],
+                no_sync: false,
+            }
+        );
+        assert_eq!(
+            command(&["update", "serde", "tokio"]),
+            Command::Update {
+                names: argv(&["serde", "tokio"]),
+                no_sync: false,
+            }
+        );
+        for name in ["add", "remove", "update", "x"] {
+            assert_eq!(printed(&[name, "--help"]), help(spec(name).unwrap()));
+        }
+    }
+
+    #[test]
+    fn x_owns_only_its_leading_flags() {
+        assert_eq!(
+            command(&["x", "ruff", "check", "--fix", "."]),
+            Command::X {
+                ecosystem: None,
+                from: None,
+                tool: "ruff".into(),
+                args: argv(&["check", "--fix", "."]),
+            }
+        );
+        assert_eq!(
+            command(&["x", "--npm", "--from", "@angular/cli", "ng@18", "--version"]),
+            Command::X {
+                ecosystem: Some("node".into()),
+                from: Some("@angular/cli".into()),
+                tool: "ng@18".into(),
+                args: argv(&["--version"]),
+            }
+        );
+        assert_eq!(
+            command(&["x", "py:cowsay@6.1", "hi"]),
+            Command::X {
+                ecosystem: Some("python".into()),
+                from: None,
+                tool: "cowsay@6.1".into(),
+                args: argv(&["hi"]),
+            }
+        );
+        assert_eq!(
+            command(&["x", "--", "--weird-tool"]),
+            Command::X {
+                ecosystem: None,
+                from: None,
+                tool: "--weird-tool".into(),
+                args: vec![],
+            }
+        );
+        assert!(message(&["x"]).starts_with("x: no tool given"));
+        assert_eq!(message(&["x", "--from"]), "--from needs a package name");
+        assert_eq!(message(&["x", "--pyy", "ruff"]), "x: unknown option '--pyy'; did you mean '--py'?");
     }
 
     #[test]

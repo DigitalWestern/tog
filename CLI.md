@@ -320,11 +320,17 @@ line is `ok`, `warn`, or `fail` with the fix. Exit 1 on any `fail`.
 
 ### Status of level two (2026-09-06)
 
-Phase B is implemented on the same branch: bare `blanket` → sync, `install`
-/ `i`, `blanket <script>`, `status`, `ls`, `doctor`, `completions`. Python
-and Node closures now carry an additive `inputs` field (root manifest and
-lock file hashes) that `status` compares. Phases C (`add`/`remove`/`update`)
-and D (`x`) are next.
+Implemented on branch `cli/levels-1-2`: phase B (bare `blanket` → sync,
+`install` / `i`, `blanket <script>`, `status`, `ls`, `doctor`,
+`completions`), phase C (`add` / `remove` / `update` with the evidence
+ladder and the delegation table; `src/deps.rs`) and phase D (`x` for PyPI
+and npm; `src/xrun.rs`). Python and Node closures carry an additive
+`inputs` field (root manifest and lock file hashes) that `status` compares.
+Offline paths are covered by `tests/cli.rs`; the delegating rows were
+smoke-tested against a throwaway store on Linux (pip-compile add/remove/
+update, npm add, the registry ladder in a polyglot directory, `x` for
+cowsay from both registries) and need the ignored per-ecosystem e2e tests
+and the Mac run before merging.
 
 ### 2.8 Deferred within level two
 
