@@ -76,7 +76,10 @@ fn go_sync_build_and_rebuild_offline() {
     assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
     let hello = project.join("hello");
     assert!(hello.is_file(), "staged binary moved into project");
-    let out = Command::new(&hello).output().unwrap();
+    let out = Command::new(&hello)
+        .env("LC_ALL", "en_US.UTF-8")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "hello executable failed: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello, world.");
 
@@ -85,7 +88,10 @@ fn go_sync_build_and_rebuild_offline() {
     std::fs::remove_file(&hello).unwrap();
     assert_ok(blanket(&binary, &project, &store, &["build", "go"]), "rebuild");
     assert!(hello.is_file());
-    let out = Command::new(&hello).output().unwrap();
+    let out = Command::new(&hello)
+        .env("LC_ALL", "en_US.UTF-8")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "rebuilt hello failed: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello, world.");
 

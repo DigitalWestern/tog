@@ -505,7 +505,58 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
 /// Project an env into a project directory: `.venv` symlink (atomic swap)
 /// plus closure-envelope provenance (.blanket/closures/python.json).
 pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, None)
+    project_env_inner(project_dir, env_obj, plan, None, &[])
+}
+
+/// A project file the plan was computed from, recorded in the closure so
+/// `blanket status` can tell whether the projection is still current
+/// without re-planning. Additive closure field (`inputs`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InputRecord {
+    /// Project-relative path.
+    pub path: String,
+    pub sha256: String,
+}
+
+/// Hash the given files (absolute or project-relative); missing ones are
+/// skipped so callers can list every candidate input.
+pub fn input_records(project_dir: &Path, candidates: &[PathBuf]) -> io::Result<Vec<InputRecord>> {
+    use sha2::{Digest, Sha256};
+    let mut records: Vec<InputRecord> = Vec::new();
+    for candidate in candidates {
+        let absolute = if candidate.is_absolute() {
+            candidate.clone()
+        } else {
+            project_dir.join(candidate)
+        };
+        if !absolute.is_file() {
+            continue;
+        }
+        let relative = absolute
+            .strip_prefix(project_dir)
+            .unwrap_or(&absolute)
+            .to_string_lossy()
+            .into_owned();
+        if records.iter().any(|record| record.path == relative) {
+            continue;
+        }
+        records.push(InputRecord {
+            sha256: hex::encode(Sha256::digest(fs::read(&absolute)?)),
+            path: relative,
+        });
+    }
+    Ok(records)
+}
+
+/// `project_env_with_selection` plus the input files recorded for status.
+pub fn project_env_with_inputs(
+    project_dir: &Path,
+    env_obj: &Path,
+    plan: &Plan,
+    selection: &pyselect::PythonSelection,
+    inputs: &[InputRecord],
+) -> io::Result<()> {
+    project_env_inner(project_dir, env_obj, plan, Some(selection), inputs)
 }
 
 /// Project a Python env and retain the exact interpreter constraint that led
@@ -517,7 +568,7 @@ pub fn project_env_with_selection(
     plan: &Plan,
     selection: &pyselect::PythonSelection,
 ) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, Some(selection))
+    project_env_inner(project_dir, env_obj, plan, Some(selection), &[])
 }
 
 fn project_env_inner(
@@ -525,6 +576,7 @@ fn project_env_inner(
     env_obj: &Path,
     plan: &Plan,
     selection: Option<&pyselect::PythonSelection>,
+    inputs: &[InputRecord],
 ) -> io::Result<()> {
     let venv = project_dir.join(".venv");
     backup_real_dir(&venv, env_obj)?;
@@ -565,6 +617,7 @@ fn project_env_inner(
             "native_libs": native_reference,
             "plan": plan,
             "python": python,
+            "inputs": inputs,
         }),
     )
 }

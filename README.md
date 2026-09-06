@@ -6,8 +6,9 @@ content-addressed store, project an environment, run your code.
 
 Nix's model, without Nix's interface. See [ARCHITECTURE.md](ARCHITECTURE.md)
 for how it works, [ROADMAP.md](ROADMAP.md) for where it's pointed
-(enterprise supply-chain security + the four pillars), and
-[blanket-notes.md](blanket-notes.md) for the design history.
+(enterprise supply-chain security + the four pillars),
+[blanket-notes.md](blanket-notes.md) for the design history, and
+[REVIEW.md](REVIEW.md) for what has not yet been independently reviewed.
 
 The vocabulary: each language gets a **tailor** (adapter) that cuts its
 ecosystem's packages into a **pattern** (locked plan), which blanket
@@ -41,7 +42,8 @@ Fedora's default). SELinux enforcing is fine.
 cargo build --release
 
 cd your-project     # an EXISTING project works as-is:
-blanket sync        # realize + project -> ./.venv and/or ./node_modules
+blanket             # realize + project -> ./.venv and/or ./node_modules
+blanket sync        # the same, spelled out (also: blanket install)
 blanket run python app.py       # run inside the projected env(s)
 blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
@@ -50,7 +52,26 @@ blanket store path              # where the store lives
 blanket store roots             # registered project roots
 blanket gc --dry-run            # preview unreferenced store/cache cleanup
 blanket sync --fresh            # rebuild the projection (drops caches)
+blanket dev                     # a package.json script, like 'npm run dev'
+blanket add requests            # add a dependency with the ecosystem's own tool, re-lock, sync
+blanket add npm:react@18 --dev  # say the ecosystem when the name alone is ambiguous
+blanket remove requests         # the inverse; blanket update [pkg] re-locks to newer versions
+blanket x ruff check .          # run a tool without adding it (like uvx / npx); cached forever
+blanket status                  # are .venv/node_modules current with the lock? (CI gate)
+blanket ls                      # what is installed, per ecosystem (--json)
+blanket doctor                  # host prerequisites, sandbox, store, free space
+blanket completions zsh         # shell completion script (bash | zsh | fish)
+blanket help sync               # per-command help (also: blanket sync --help)
+blanket -C path/to/project sync # run as if started there
+blanket --version
 ```
+
+Every argument is validated: an unknown command or flag is a usage error
+(exit 2) with a "did you mean" suggestion when one is close. Exit status is
+0 on success, 1 when the command failed, 2 for a usage error; `run` passes
+the program's status through. `-q` silences narration (errors still show),
+`-v` prints every decision and the command line of every subprocess blanket
+starts. [CLI.md](CLI.md) is the plan for the rest of the command surface.
 
 Policy is permissive by default; `.blanket/policy.toml` can tighten it:
 

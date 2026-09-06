@@ -137,7 +137,7 @@ pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
 }
 
 /// PEP 503 name normalization: lowercase; runs of [-_.] collapse to '-'.
-fn normalize_name(name: &str) -> String {
+pub fn normalize_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_sep = false;
     for c in name.chars() {

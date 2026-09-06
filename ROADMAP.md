@@ -67,7 +67,7 @@ binary:
 |---|---|---|
 | **Package manager** | ✅ built for Python + npm + cargo (hash-pinned lockfile realizer) | fourth ecosystem (Go is next-cheapest); native resolver later |
 | **Toolchain manager** | ✅ built (pinned CPython 3.12/3.13, Node 24, Rust 1.96.1 w/ rust-toolchain.toml resolution) | more versions + languages; signed manifests; `.python-version`-style selection per project everywhere |
-| **Task runner** | ⬜ not started | `blanket test` / `blanket build` / `blanket <script>` reading package.json scripts + a `blanket.toml` for cross-language tasks. Sol's caution: mise already owns this shape — differentiate by running tasks *inside the projected env* with provenance, or wait for a real polyglot workspace need |
+| **Task runner** | 🟡 partial (on `cli/levels-1-2`, PR #20, unmerged) | `blanket <script>` reads package.json scripts and runs them in the projected env; `blanket x` runs a tool without adding it. Still open: a `blanket.toml` for cross-language tasks. Sol's caution: mise already owns this shape — differentiate by running tasks *inside the projected env* with provenance, or wait for a real polyglot workspace need |
 | **Runtime manager** | 🟡 partial | today blanket owns *distribution + invocation* of runtimes (the uv/zig model, deliberately chosen over bun-style engine rewrites). A native runtime remains a possible later optimization, per-ecosystem, where it buys speed or security — the interface already allows it |
 
 Boiling the ocean is the point; the architecture (kernel + tailors) is
@@ -220,7 +220,9 @@ starves.
       trust boundary. Also: contained atomic writes for the remaining
       project-side plan caches (go-plan.json, python plan.json).
 - [ ] Central closet / binary cache + fixed store path decision
-- [ ] Friendlier CLI errors (e.g. `node.js` typo → "did you mean node?")
+- [x] Friendlier CLI errors — done 2026-09-06: one validated grammar,
+      per-command help, did-you-mean suggestions (`src/cli.rs`; the rest of
+      the command surface is planned in CLI.md)
 - [x] Linux support — landed 2026-09-05, LINUX_PORT.md (also unlocks the "Linux as reference hermetic
       builder" idea)
 

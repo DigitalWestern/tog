@@ -164,7 +164,10 @@ fn read_closures<W: Write>(
         // Node forests do not record their full path, only the projection id;
         // reconstruct it from the canonical project path and the closure's
         // projection schema.
-        if body["projection_schema"] == "node-forest/1" {
+        if matches!(
+            body["projection_schema"].as_str(),
+            Some("node-forest/1" | "node-forest/2")
+        ) {
             if let Some(projection_id) = body["projection_id"].as_str() {
                 let home = store
                     .root
@@ -656,6 +659,7 @@ fn unix_secs(time: SystemTime) -> u64 {
 mod tests {
     use super::*;
     use crate::types::Identity;
+    use sha2::Digest;
     use std::collections::BTreeMap;
 
     struct TempStore {
@@ -830,6 +834,62 @@ mod tests {
         assert!(output.contains("would remove object"));
         assert!(output.contains("B)"));
         assert!(store.object_path(&orphan).exists());
+    }
+
+    #[test]
+    fn node_forest_v2_workspace_kept_when_root_link_is_missing() {
+        let temp = TempStore::new("forest-v2");
+        let store = temp.store();
+        let project = temp.root.join("project");
+        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let home = store.root.parent().unwrap();
+        let project_key = &hex::encode(sha2::Sha256::digest(
+            project.to_string_lossy().as_bytes(),
+        ))[..32];
+        let projection_id = "a".repeat(32);
+        let forest = home
+            .join("forests")
+            .join(project_key)
+            .join(&projection_id);
+        let workspace_forest = forest
+            .join("workspaces/packages%2Flib/node_modules");
+        fs::create_dir_all(&workspace_forest).unwrap();
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        std::os::unix::fs::symlink(
+            &workspace_forest,
+            project.join("packages/lib/node_modules"),
+        )
+        .unwrap();
+        fs::write(
+            project.join(".blanket/closures/node.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "node",
+                "body": {
+                    "projection_schema": "node-forest/2",
+                    "projection_id": projection_id,
+                    "workspaces": ["packages/lib"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        store.register_root(&project).unwrap();
+        age(&forest);
+
+        let mut output = Vec::new();
+        let _report = collect(
+            &store,
+            Options {
+                project: true,
+                keep_days: 0,
+                ..Options::default()
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert!(workspace_forest.is_dir(), "{}", String::from_utf8_lossy(&output));
     }
 
     #[test]

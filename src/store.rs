@@ -30,6 +30,15 @@ pub struct RootEntry {
 
 const ROOTS_INITIALIZED: &str = ".initialized";
 
+/// Serializes every test that sets or clears `BLANKET_STORE`. The variable is
+/// process-global, so an unguarded test clearing it mid-run sends a guarded one
+/// to the real `~/.blanket/store` — which is populated, and fails any assertion
+/// about a fresh store. One lock for the whole crate: separate per-module locks
+/// do not exclude each other. Poison is ignored deliberately, so a single
+/// failing test does not cascade into every other holder.
+#[cfg(test)]
+pub(crate) static STORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Store {
     pub fn open() -> io::Result<Store> {
         let root = std::env::var_os("BLANKET_STORE")
