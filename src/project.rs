@@ -302,7 +302,14 @@ pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result
     let final_python = store.object_path(&id).join("bin/python");
     let mut installed = BTreeMap::new();
     for (_p, wheel_file) in &artifacts {
-        wheel::install_wheel(wheel_file, &site, &bin, &final_python, &mut installed)?;
+        wheel::install_wheel(
+            wheel_file,
+            &site,
+            &bin,
+            &minor,
+            &final_python,
+            &mut installed,
+        )?;
     }
 
     let candidate = crate::policy::object_exceptions();
