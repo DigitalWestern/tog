@@ -10,6 +10,7 @@ use crate::npm::{NpmLink, NpmPackage, NpmPlan};
 use crate::platform::Platform;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
 use std::io;
 use std::path::{Component, Path};
 
@@ -296,7 +297,26 @@ fn yaml_list(value: Option<&YamlValue>) -> Vec<String> {
 }
 
 fn trim_peer_suffix(value: &str) -> &str {
-    value.find('(').map(|index| &value[..index]).unwrap_or(value)
+    let parenthesis = value.find('(');
+    // pnpm v9 also encodes peer context as `_peer@version`. An underscore
+    // before the package/version separator is an ordinary npm package-name
+    // character (for example `evp_bytestokey@1.0.3`) and is not a suffix.
+    let underscore = {
+        let delimiter = if value.starts_with('@') {
+            value[1..].find('@').map(|index| index + 1)
+        } else {
+            value.find('@')
+        };
+        delimiter
+            .and_then(|index| value[index + 1..].find('_').map(|offset| index + 1 + offset))
+            .or_else(|| delimiter.is_none().then(|| value.find('_')).flatten())
+    };
+    [parenthesis, underscore]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|index| &value[..index])
+        .unwrap_or(value)
 }
 
 fn split_identity(value: &str) -> Option<(String, String)> {
@@ -322,6 +342,37 @@ fn normalize_pnpm_identity(key: &str) -> Option<(String, String)> {
         return None;
     }
     Some((value[..slash].to_string(), value[slash + 1..].to_string()))
+}
+
+/// Normalize the spelling of a pnpm snapshot key once, while retaining its
+/// peer suffix. Package metadata is keyed by the base identity below; the
+/// graph is keyed by this full identity. pnpm v6 used `/name/version` and
+/// `/name@version`, while newer lockfiles generally use `name@version`.
+fn normalize_pnpm_snapshot_key(key: &str) -> Option<String> {
+    let raw = key.trim().trim_start_matches('/');
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, version) = if let Some((name, _version)) = split_identity(raw) {
+        // split_identity deliberately strips peer suffixes, so recover the
+        // exact version from the separator in the original spelling.
+        let name_end = if raw.starts_with('@') {
+            raw[1..].find('@').map(|index| index + 1)?
+        } else {
+            raw.find('@')?
+        };
+        (name, raw[name_end + 1..].to_string())
+    } else {
+        let slash = raw.rfind('/')?;
+        if slash == 0 || slash + 1 >= raw.len() {
+            return None;
+        }
+        (raw[..slash].to_string(), raw[slash + 1..].to_string())
+    };
+    if name.is_empty() || version.is_empty() {
+        return None;
+    }
+    Some(format!("{name}@{version}"))
 }
 
 fn identity_key(name: &str, version: &str) -> String {
@@ -440,16 +491,22 @@ fn dep_version_key(
     snapshots: &BTreeMap<String, Node>,
 ) -> Option<String> {
     let version = version.trim();
-    let direct = format!("{name}@{version}");
+    let direct = normalize_pnpm_snapshot_key(&format!("{name}@{version}"))
+        .unwrap_or_else(|| format!("{name}@{version}"));
     if snapshots.contains_key(&direct) {
         return Some(direct);
     }
     let identity = identity_key(name, version);
-    snapshots
+    let candidates: Vec<String> = snapshots
         .keys()
         .filter(|key| identity_key_for_snapshot(key) == identity)
-        .min()
         .cloned()
+        .collect();
+    // A version-only edge is unambiguous only when the lockfile has one
+    // snapshot for that package identity. If peer variants exist, choosing
+    // one lexicographically is a wrong graph; pnpm normally writes the peer
+    // suffix into the edge and the exact lookup above handles it.
+    (candidates.len() == 1).then(|| candidates.into_iter().next()).flatten()
 }
 
 fn workspace_target(project_dir: &Path, importer: &str, raw: &str) -> io::Result<String> {
@@ -533,14 +590,16 @@ fn target_for_ref(
     // pnpm represents npm aliases as logical-name: real-name@version. The
     // physical package is keyed by the real name, while placement still uses
     // the logical dependency name.
-    if let Some((real_name, real_version)) = split_identity(reference) {
-        if snapshots.contains_key(reference) {
-            return Target::Node(reference.to_string());
+    if let Some(snapshot_key) = normalize_pnpm_snapshot_key(reference) {
+        if snapshots.contains_key(&snapshot_key) {
+            return Target::Node(snapshot_key);
         }
+    }
+    if let Some((real_name, real_version)) = split_identity(reference) {
         return match dep_version_key(&real_name, &real_version, snapshots) {
             Some(key) => Target::Node(key),
             None => Target::External(format!("missing snapshot for {name}@{reference}")),
-        };
+        }
     }
     match dep_version_key(name, reference, snapshots) {
         Some(key) => Target::Node(key),
@@ -615,14 +674,50 @@ fn pnpm_catalogs(
     Ok(catalogs)
 }
 
+fn snapshot_dependencies(
+    snapshot: &BTreeMap<String, YamlValue>,
+    snapshot_key: &str,
+    lookup: &BTreeMap<String, Node>,
+    project_dir: &Path,
+) -> io::Result<Vec<Dependency>> {
+    let mut deps = BTreeMap::<String, Dependency>::new();
+    for (field, optional) in [("dependencies", false), ("optionalDependencies", true)] {
+        if let Some(value) = snapshot.get(field) {
+            let map = yaml_map(value, &format!("snapshot {snapshot_key} {field}"))?;
+            for (name, value) in map {
+                let reference = yaml_str(Some(value)).unwrap_or_default();
+                deps.insert(
+                    name.clone(),
+                    Dependency {
+                        name: name.clone(),
+                        target: target_for_ref(
+                            name,
+                            reference,
+                            ".",
+                            lookup,
+                            project_dir,
+                        ),
+                        optional,
+                    },
+                );
+            }
+        }
+    }
+    Ok(deps.into_values().collect())
+}
+
 fn pnpm_nodes(
     packages: &BTreeMap<String, YamlValue>,
     snapshots_value: Option<&YamlValue>,
     project_dir: &Path,
 ) -> io::Result<BTreeMap<String, Node>> {
-    let mut metadata = BTreeMap::<String, Node>::new();
-    for (key, value) in packages {
-        let entry = yaml_map(value, &format!("packages {key}"))?;
+    // Keep one metadata record per canonical package key. These records are
+    // tarball facts only; they are never graph nodes until a snapshot selects
+    // them. This prevents a v6 `/a@1` package entry from shadowing the real
+    // dependency-bearing snapshot with an empty placeholder.
+    let mut package_nodes = BTreeMap::<String, Node>::new();
+    for (raw_key, value) in packages {
+        let entry = yaml_map(value, &format!("packages {raw_key}"))?;
         let resolution = entry.get("resolution").and_then(|value| match value {
             YamlValue::Map(map) => Some(map),
             _ => None,
@@ -632,8 +727,15 @@ fn pnpm_nodes(
             // packages entry such as 'file:'; importer edges become NpmLink.
             continue;
         }
-        let Some((name, version)) = normalize_pnpm_identity(key) else {
-            return Err(err(format!("packages entry {key:?} has no name@version identity")));
+        let Some(snapshot_key) = normalize_pnpm_snapshot_key(raw_key) else {
+            return Err(err(format!(
+                "packages entry {raw_key:?} has no name@version identity"
+            )));
+        };
+        let Some((name, version)) = normalize_pnpm_identity(&snapshot_key) else {
+            return Err(err(format!(
+                "packages entry {raw_key:?} has no name@version identity"
+            )));
         };
         let integrity = resolution
             .and_then(|resolution| yaml_str(resolution.get("integrity")))
@@ -641,82 +743,113 @@ fn pnpm_nodes(
             .to_string();
         let external = source_error(&name, resolution);
         let url = package_url(&name, &version, resolution).unwrap_or_default();
-        metadata.insert(
-            identity_key(&name, &version),
-            Node {
-                key: identity_key(&name, &version),
-                name,
-                version,
-                url,
-                integrity,
-                optional: yaml_bool(entry.get("optional")),
-                os: yaml_list(entry.get("os")),
-                cpu: yaml_list(entry.get("cpu")),
-                libc: yaml_list(entry.get("libc")),
-                external,
-                deps: Vec::new(),
-            },
-        );
+        if package_nodes
+            .insert(
+                snapshot_key.clone(),
+                Node {
+                    key: snapshot_key,
+                    name,
+                    version,
+                    url,
+                    integrity,
+                    optional: yaml_bool(entry.get("optional")),
+                    os: yaml_list(entry.get("os")),
+                    cpu: yaml_list(entry.get("cpu")),
+                    libc: yaml_list(entry.get("libc")),
+                    external,
+                    deps: Vec::new(),
+                },
+            )
+            .is_some()
+        {
+            return Err(err(format!("duplicate normalized pnpm package key {raw_key:?}")));
+        }
     }
 
     let mut snapshots = BTreeMap::<String, BTreeMap<String, YamlValue>>::new();
     if let Some(value) = snapshots_value {
-        for (key, value) in yaml_map(value, "snapshots")? {
-            snapshots.insert(
-                key.clone(),
-                yaml_map(value, &format!("snapshots {key}"))?.clone(),
-            );
+        for (raw_key, value) in yaml_map(value, "snapshots")? {
+            let snapshot_key = normalize_pnpm_snapshot_key(raw_key).ok_or_else(|| {
+                err(format!("snapshots entry {raw_key:?} has no name@version identity"))
+            })?;
+            if snapshots
+                .insert(
+                    snapshot_key,
+                    yaml_map(value, &format!("snapshots {raw_key}"))?.clone(),
+                )
+                .is_some()
+            {
+                return Err(err(format!("duplicate normalized pnpm snapshot key {raw_key:?}")));
+            }
         }
     } else {
-        // pnpm 6 stores dependency edges on the package entries.
-        for (key, value) in packages {
-            snapshots.insert(
-                key.clone(),
-                yaml_map(value, &format!("packages {key}"))?.clone(),
-            );
+        // pnpm 6 stores dependency edges on the package entries. Normalize
+        // those keys into the same full snapshot namespace before lookup.
+        for (raw_key, value) in packages {
+            let Some(snapshot_key) = normalize_pnpm_snapshot_key(raw_key) else {
+                continue;
+            };
+            if package_nodes.contains_key(&snapshot_key) {
+                snapshots.insert(
+                    snapshot_key,
+                    yaml_map(value, &format!("packages {raw_key}"))?.clone(),
+                );
+            }
         }
     }
 
-    let snapshot_keys: BTreeMap<String, Node> = snapshots
+    let snapshot_metadata: BTreeMap<String, Node> = snapshots
         .keys()
-        .filter_map(|key| {
-            let identity = identity_key_for_snapshot(key);
-            metadata.get(&identity).map(|node| (key.clone(), node.clone()))
+        .filter_map(|snapshot_key| {
+            let base = identity_key_for_snapshot(snapshot_key);
+            package_nodes
+                .get(snapshot_key)
+                .or_else(|| {
+                    package_nodes
+                        .values()
+                        .find(|node| identity_key(&node.name, &node.version) == base)
+                })
+                .map(|node| {
+                    let mut node = node.clone();
+                    node.key = snapshot_key.clone();
+                    (snapshot_key.clone(), node)
+                })
         })
         .collect();
-    for (snapshot_key, snapshot) in snapshots {
-        let identity = identity_key_for_snapshot(&snapshot_key);
-        let Some(mut node) = metadata.get(&identity).cloned() else {
-            continue;
-        };
-        node.key = snapshot_key.clone();
-        let mut deps = BTreeMap::<String, Dependency>::new();
-        for (field, optional) in [("dependencies", false), ("optionalDependencies", true)] {
-            if let Some(value) = snapshot.get(field) {
-                let map = yaml_map(value, &format!("snapshots {snapshot_key} {field}"))?;
-                for (name, value) in map {
-                    let reference = yaml_str(Some(value)).unwrap_or_default();
-                    deps.insert(
-                        name.clone(),
-                        Dependency {
-                            name: name.clone(),
-                            target: target_for_ref(
-                                name,
-                                reference,
-                                ".",
-                                &snapshot_keys,
-                                project_dir,
-                            ),
-                            optional,
-                        },
-                    );
-                }
-            }
-        }
-        node.deps = deps.into_values().collect();
-        metadata.insert(snapshot_key, node);
+
+    if snapshots.is_empty() {
+        // Some v9 lockfiles legitimately carry an empty snapshots map for a
+        // graph with no package-to-package edges. The package entries are
+        // then the complete set of real nodes, not metadata placeholders.
+        return Ok(package_nodes);
     }
-    Ok(metadata)
+
+    let mut nodes = BTreeMap::new();
+    for (snapshot_key, snapshot) in snapshots {
+        let Some(mut node) = snapshot_metadata.get(&snapshot_key).cloned() else {
+            let local_snapshot = normalize_pnpm_identity(&snapshot_key)
+                .map(|(_, version)| version.starts_with("file:") || version.starts_with("link:"))
+                .unwrap_or(false);
+            if local_snapshot {
+                // Local file/link snapshots are workspace source projections,
+                // not fetchable package nodes. Their importer edges already
+                // became Target::Link above.
+                continue;
+            }
+            // A snapshot without package metadata cannot be fetched faithfully.
+            return Err(err(format!(
+                "pnpm snapshot {snapshot_key} has no matching packages metadata"
+            )));
+        };
+        node.deps = snapshot_dependencies(
+            &snapshot,
+            &snapshot_key,
+            &snapshot_metadata,
+            project_dir,
+        )?;
+        nodes.insert(snapshot_key, node);
+    }
+    Ok(nodes)
 }
 
 fn importer_map(
@@ -1039,6 +1172,243 @@ fn yarn_integrity(
     Ok(sri)
 }
 
+#[derive(Debug, Clone)]
+struct YarnWorkspace {
+    path: String,
+    name: String,
+    version: String,
+    package: JsonValue,
+}
+
+fn workspace_segment_matches(pattern: &str, value: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let value: Vec<char> = value.chars().collect();
+    let mut row = vec![false; value.len() + 1];
+    row[0] = true;
+    for character in pattern {
+        let mut next = vec![false; value.len() + 1];
+        for (index, matched) in row.iter().enumerate() {
+            if !matched {
+                continue;
+            }
+            if character == '*' {
+                for slot in &mut next[index..] {
+                    *slot = true;
+                }
+            } else if character == '?' {
+                if index < value.len() {
+                    next[index + 1] = true;
+                }
+            } else if index < value.len() && value[index] == character {
+                next[index + 1] = true;
+            }
+        }
+        row = next;
+    }
+    row[value.len()]
+}
+
+fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.trim_matches('/');
+    let path = path.trim_matches('/');
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    let patterns: Vec<&str> = pattern.split('/').collect();
+    let paths: Vec<&str> = if path.is_empty() {
+        Vec::new()
+    } else {
+        path.split('/').collect()
+    };
+    fn matches(pattern: &[&str], path: &[&str]) -> bool {
+        if pattern.is_empty() {
+            return path.is_empty();
+        }
+        if pattern[0] == "**" {
+            matches(&pattern[1..], path)
+                || (!path.is_empty() && matches(pattern, &path[1..]))
+        } else {
+            !path.is_empty()
+                && workspace_segment_matches(pattern[0], path[0])
+                && matches(&pattern[1..], &path[1..])
+        }
+    }
+    matches(&patterns, &paths)
+}
+
+fn collect_workspace_manifests(
+    root: &Path,
+    directory: &Path,
+    result: &mut Vec<String>,
+) -> io::Result<()> {
+    let entries = fs::read_dir(directory)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "node_modules" || name == ".git" || name == ".blanket" {
+            continue;
+        }
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if path.join("package.json").is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| err("workspace manifest escaped project root"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !relative.is_empty() {
+                result.push(relative);
+            }
+        }
+        collect_workspace_manifests(root, &path, result)?;
+    }
+    Ok(())
+}
+
+fn yarn_workspace_manifests(
+    package: &JsonValue,
+    project_dir: &Path,
+) -> io::Result<Vec<YarnWorkspace>> {
+    let Some(value) = package.get("workspaces") else {
+        return Ok(Vec::new());
+    };
+    let patterns = if let Some(values) = value.as_array() {
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| err("package.json workspaces entries must be strings"))
+            })
+            .collect::<io::Result<Vec<_>>>()?
+    } else if let Some(object) = value.as_object() {
+        let Some(values) = object.get("packages").and_then(JsonValue::as_array) else {
+            return Err(err(
+                "Yarn workspaces object must contain a string-array packages field",
+            ));
+        };
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| err("package.json workspaces entries must be strings"))
+            })
+            .collect::<io::Result<Vec<_>>>()?
+    } else {
+        return Err(err("package.json workspaces must be an array or object"));
+    };
+    if patterns.is_empty() {
+        return Err(err(
+            "Yarn workspaces declared with no package patterns; unsupported monorepo shape",
+        ));
+    }
+
+    let mut candidates = Vec::new();
+    collect_workspace_manifests(project_dir, project_dir, &mut candidates)?;
+    candidates.sort();
+    candidates.dedup();
+    let mut selected = BTreeSet::new();
+    for raw_pattern in patterns {
+        let exclude = raw_pattern.starts_with('!');
+        let pattern = raw_pattern.trim_start_matches('!').trim_start_matches("./");
+        if pattern.starts_with('/') || pattern.split('/').any(|part| part == "..") {
+            return Err(err(format!(
+                "Yarn workspaces pattern {raw_pattern:?} escapes the project"
+            )));
+        }
+        for candidate in &candidates {
+            if workspace_glob_matches(pattern, candidate) {
+                if exclude {
+                    selected.remove(candidate);
+                } else {
+                    selected.insert(candidate.clone());
+                }
+            }
+        }
+    }
+    if selected.is_empty() {
+        return Err(err(
+            "Yarn workspaces declared but no workspace package.json matched the supported patterns",
+        ));
+    }
+    let mut workspaces = Vec::new();
+    for path in selected {
+        let manifest_path = project_dir.join(&path).join("package.json");
+        let text = fs::read_to_string(&manifest_path).map_err(|error| {
+            err(format!("Yarn workspace {path}: read package.json: {error}"))
+        })?;
+        let package: JsonValue = serde_json::from_str(&text).map_err(|error| {
+            err(format!("Yarn workspace {path}: package.json: {error}"))
+        })?;
+        let name = package["name"].as_str().ok_or_else(|| {
+            err(format!("Yarn workspace {path}: package.json has no string name"))
+        })?;
+        let version = package["version"].as_str().ok_or_else(|| {
+            err(format!("Yarn workspace {path}: package.json has no string version"))
+        })?;
+        workspaces.push(YarnWorkspace {
+            path,
+            name: name.to_string(),
+            version: version.to_string(),
+            package,
+        });
+    }
+    Ok(workspaces)
+}
+
+fn version_tuple(value: &str) -> Option<(u64, u64, u64)> {
+    let value = value.trim().trim_start_matches('v');
+    let value = value.split_once('-').map(|(value, _)| value).unwrap_or(value);
+    let mut parts = value.split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
+}
+
+fn yarn_workspace_spec_matches(specifier: &str, version: &str) -> bool {
+    let mut specifier = specifier.trim();
+    let workspace_protocol = specifier.strip_prefix("workspace:");
+    if let Some(protocol) = workspace_protocol {
+        specifier = protocol;
+        if matches!(specifier, "" | "*" | "^" | "~") {
+            return true;
+        }
+    }
+    if matches!(specifier, "*" | "latest") {
+        return true;
+    }
+    let Some(candidate) = version_tuple(version) else {
+        return false;
+    };
+    let (operator, requested) = if let Some(value) = specifier.strip_prefix('^') {
+        ('^', value)
+    } else if let Some(value) = specifier.strip_prefix('~') {
+        ('~', value)
+    } else {
+        ('=', specifier)
+    };
+    let Some(requested) = version_tuple(requested) else {
+        return false;
+    };
+    match operator {
+        '=' => candidate == requested,
+        '~' => candidate >= requested && candidate.0 == requested.0 && candidate.1 == requested.1,
+        '^' if requested.0 != 0 => candidate >= requested && candidate.0 == requested.0,
+        '^' if requested.1 != 0 => {
+            candidate >= requested && candidate.0 == 0 && candidate.1 == requested.1
+        }
+        '^' => candidate == requested,
+        _ => false,
+    }
+}
+
 /// Parse a Yarn classic v1 lockfile. The package.json is needed because Yarn
 /// lock headers are selectors, not a root dependency graph.
 pub fn plan_yarn(
@@ -1121,21 +1491,43 @@ pub fn plan_yarn(
         }
     }
 
-    let root_deps = root_package_dependencies(&package, &selector_to_node)?;
+    let workspaces = yarn_workspace_manifests(&package, project_dir)?;
+    let root_deps = yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
+        .into_iter()
+        .map(|dependency| RootDependency {
+            dependency,
+            workspace: None,
+        })
+        .collect();
+    let mut workspace_roots = Vec::new();
+    for workspace in &workspaces {
+        for dependency in yarn_package_dependencies(
+            &workspace.package,
+            &selector_to_node,
+            &workspaces,
+            Some(&workspace.path),
+        )? {
+            workspace_roots.push(RootDependency {
+                dependency,
+                workspace: Some(workspace.path.clone()),
+            });
+        }
+    }
     let graph = Graph {
         nodes,
         roots: root_deps,
-        workspace_roots: Vec::new(),
+        workspace_roots,
     };
-    let _ = project_dir;
     build_plan(platform, graph, "yarn.lock")
 }
 
-fn root_package_dependencies(
+fn yarn_package_dependencies(
     package: &JsonValue,
     selector_to_node: &BTreeMap<String, String>,
-) -> io::Result<Vec<RootDependency>> {
-    let mut deps = BTreeMap::<String, RootDependency>::new();
+    workspaces: &[YarnWorkspace],
+    _importer: Option<&str>,
+) -> io::Result<Vec<Dependency>> {
+    let mut deps = BTreeMap::<String, Dependency>::new();
     for (field, optional) in [
         ("dependencies", false),
         ("devDependencies", false),
@@ -1146,21 +1538,45 @@ fn root_package_dependencies(
             let spec = spec.as_str().ok_or_else(|| {
                 err(format!("package.json {field} {name}: specifier must be a string"))
             })?;
-            let selector = format!("{name}@{spec}");
-            let target = selector_to_node
-                .get(&selector)
-                .cloned()
-                .map(Target::Node)
-                .unwrap_or_else(|| Target::External(format!("missing yarn selector {selector}")));
+            let workspace = workspaces.iter().find(|workspace| workspace.name == *name);
+            let target = if let Some(workspace) = workspace {
+                if yarn_workspace_spec_matches(spec, &workspace.version) {
+                    Target::Link(workspace.path.clone())
+                } else if spec.starts_with("workspace:") {
+                    return Err(err(format!(
+                        "Yarn workspace dependency {name}@{spec} does not match workspace {}@{}",
+                        workspace.name, workspace.version
+                    )));
+                } else {
+                    let selector = format!("{name}@{spec}");
+                    selector_to_node
+                        .get(&selector)
+                        .cloned()
+                        .map(Target::Node)
+                        .unwrap_or_else(|| {
+                            Target::External(format!("missing yarn selector {selector}"))
+                        })
+                }
+            } else if spec.starts_with("workspace:") {
+                return Err(err(format!(
+                    "Yarn workspace dependency {name}@{spec} has no matching workspace member"
+                )));
+            } else {
+                let selector = format!("{name}@{spec}");
+                selector_to_node
+                    .get(&selector)
+                    .cloned()
+                    .map(Target::Node)
+                    .unwrap_or_else(|| {
+                        Target::External(format!("missing yarn selector {selector}"))
+                    })
+            };
             deps.insert(
                 name.clone(),
-                RootDependency {
-                    dependency: Dependency {
-                        name: name.clone(),
-                        target,
-                        optional,
-                    },
-                    workspace: None,
+                Dependency {
+                    name: name.clone(),
+                    target,
+                    optional,
                 },
             );
         }
@@ -1213,7 +1629,9 @@ fn occupied_description(occupied: &Occupied) -> String {
 
 fn target_identity(target: &Target, nodes: &BTreeMap<String, Node>) -> Option<String> {
     match target {
-        Target::Node(key) => nodes.get(key).map(|node| identity_key(&node.name, &node.version)),
+        // The full snapshot key, including peers, is the graph identity.
+        // Tarball identity is intentionally not used for placement.
+        Target::Node(key) => nodes.get(key).map(|node| node.key.clone()),
         Target::Link(target) => Some(format!("link:{target}")),
         Target::External(_) => None,
     }
@@ -1221,9 +1639,10 @@ fn target_identity(target: &Target, nodes: &BTreeMap<String, Node>) -> Option<St
 
 fn same_target(existing: &Occupied, target: &Target, nodes: &BTreeMap<String, Node>) -> bool {
     match (existing, target_identity(target, nodes)) {
-        (Occupied::Package { name, version, .. }, Some(identity)) => {
-            identity == identity_key(name, version)
-        }
+        (Occupied::Package { node_key, .. }, Some(identity)) => nodes
+            .get(node_key)
+            .map(|node| node.key == identity)
+            .unwrap_or_else(|| node_key == &identity),
         (Occupied::Link { target: old, .. }, Some(identity)) => identity == format!("link:{old}"),
         _ => false,
     }
@@ -1249,18 +1668,21 @@ fn existing_ancestor(
     target: &Target,
     occupied: &BTreeMap<String, Occupied>,
     nodes: &BTreeMap<String, Node>,
-) -> Option<String> {
+) -> Result<Option<String>, ()> {
     let mut context = parent.to_string();
     loop {
         let path = dependency_path(&context, name);
-        if occupied
-            .get(&path)
-            .is_some_and(|existing| same_target(existing, target, nodes))
-        {
-            return Some(path);
+        if let Some(existing) = occupied.get(&path) {
+            if same_target(existing, target, nodes) {
+                return Ok(Some(path));
+            }
+            // Node's resolver stops at the first node_modules/name it finds,
+            // even when that package is the wrong version. Do not skip this
+            // nearer conflict and incorrectly reuse a higher ancestor.
+            return Err(());
         }
         if context.is_empty() {
-            return None;
+            return Ok(None);
         }
         context = parent_context(&context);
     }
@@ -1278,7 +1700,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
     enqueue_roots(graph.roots, &mut queue);
     let mut workspace_queue = VecDeque::new();
     enqueue_roots(graph.workspace_roots, &mut workspace_queue);
-    let mut expanded = BTreeSet::new();
+    let mut expanded = BTreeSet::<(String, String)>::new();
     let mut links = BTreeMap::<String, NpmLink>::new();
 
     while !queue.is_empty() || !workspace_queue.is_empty() {
@@ -1307,11 +1729,20 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                     err(format!("{}: missing graph node {node_key}", dependency.name))
                 })?;
                 if !node_compatible(platform, node) {
-                    // pnpm records every platform variant in one lockfile,
-                    // including dev dependencies. Its installer skips a
-                    // package whose own selectors exclude this host even
-                    // when the importer edge is not marked optional.
-                    continue;
+                    if dependency.optional || node.optional {
+                        // pnpm records every platform variant in one lockfile;
+                        // incompatible optional packages are omitted.
+                        continue;
+                    }
+                    return Err(err(format!(
+                        "{}@{}: required dependency does not support host {} (os={:?}, cpu={:?}, libc={:?})",
+                        node.name,
+                        node.version,
+                        platform.triple(),
+                        node.os,
+                        node.cpu,
+                        node.libc
+                    )));
                 }
                 if let Some(detail) = &node.external {
                     if dependency.optional || node.optional {
@@ -1336,14 +1767,22 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                     )));
                 }
                 integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
-                if let Some(path) =
-                    existing_ancestor(&parent, &dependency.name, &dependency.target, &occupied, &graph.nodes)
-                {
-                    (path, true)
+                let ancestor = existing_ancestor(
+                    &parent,
+                    &dependency.name,
+                    &dependency.target,
+                    &occupied,
+                    &graph.nodes,
+                );
+                if let Ok(Some(path)) = &ancestor {
+                    (path.clone(), true)
                 } else {
+                    let blocked_by_nearer_conflict = ancestor.is_err();
                     let root = dependency_path("", &dependency.name);
                     let path = if let Some(existing) = occupied.get(&root) {
-                        if same_target(existing, &dependency.target, &graph.nodes) {
+                        if !blocked_by_nearer_conflict
+                            && same_target(existing, &dependency.target, &graph.nodes)
+                        {
                             root
                         } else if in_workspace {
                             dependency_path(&parent, &dependency.name)
@@ -1468,7 +1907,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
         };
         if should_expand {
             let Target::Node(node_key) = dependency.target else { continue };
-            if expanded.insert(path.clone()) {
+            if expanded.insert((path.clone(), node_key.clone())) {
                 if let Some(node) = graph.nodes.get(&node_key) {
                     for child in &node.deps {
                         queue.push_back((path.clone(), child.clone(), None));
@@ -1574,6 +2013,146 @@ snapshots:
         assert!(plan.packages.iter().any(|package| package.name == "is-odd"));
         assert!(plan.packages.iter().any(|package| package.name == "is-number"));
         assert!(!plan.packages.iter().any(|package| package.name == "mac-only"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pnpm_v6_normalizes_package_keys_before_traversal() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '6.0'
+dependencies:
+  a:
+    version: 1.0.0
+packages:
+  /a@1.0.0:
+    resolution: {{integrity: {SRI}}}
+    dependencies:
+      b: 1.0.0
+  /b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.path == "node_modules/a"));
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.name == "b"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn peer_snapshots_are_separate_nodes_with_separate_children() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      a:
+        specifier: 1.0.0
+        version: 1.0.0
+      b:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  a@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  plugin@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  child-a@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  child-b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  a@1.0.0:
+    dependencies:
+      plugin: 1.0.0(peer@1.0.0)
+  b@1.0.0:
+    dependencies:
+      plugin: 1.0.0(peer@2.0.0)
+  plugin@1.0.0(peer@1.0.0):
+    dependencies:
+      child-a: 1.0.0
+  plugin@1.0.0(peer@2.0.0):
+    dependencies:
+      child-b: 1.0.0
+  child-a@1.0.0: {{}}
+  child-b@1.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan.packages.iter().any(|package| {
+            package.path == "node_modules/plugin" && package.version == "1.0.0"
+        }));
+        assert!(plan.packages.iter().any(|package| {
+            package.path == "node_modules/b/node_modules/plugin" && package.version == "1.0.0"
+        }));
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.name == "child-a"));
+        assert!(plan.packages.iter().any(|package| {
+            package.name == "child-b"
+        }));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn nearer_conflict_nests_required_version_instead_of_skipping_to_root() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      b:
+        specifier: 1.0.0
+        version: 1.0.0
+      c:
+        specifier: 1.0.0
+        version: 1.0.0
+      d:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  c@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  c@2.0.0:
+    resolution: {{integrity: {SRI}}}
+  d@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  d@2.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  b@1.0.0:
+    dependencies:
+      c: 2.0.0
+      d: 2.0.0
+  c@1.0.0: {{}}
+  c@2.0.0: {{}}
+  d@1.0.0: {{}}
+  d@2.0.0:
+    dependencies:
+      c: 1.0.0
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan.packages.iter().any(|package| {
+            package.path == "node_modules/b/node_modules/d/node_modules/c"
+                && package.version == "1.0.0"
+        }));
+        assert!(!plan.packages.iter().any(|package| {
+            package.path == "node_modules/c" && package.version == "2.0.0"
+        }));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1725,6 +2304,72 @@ is-number@^6.0.0:
         let error =
             plan_yarn(Platform::X86_64UnknownLinuxGnu, berry, package_json, &dir).unwrap_err();
         assert!(error.to_string().contains("item 7"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn yarn_v1_workspace_manifests_supply_roots_and_links() {
+        let dir = project();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"@fixture/lib":"1.0.0"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("packages/lib/package.json"),
+            r#"{"name":"@fixture/lib","version":"1.0.0","dependencies":{"dep":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let lock = format!(
+            r#"# yarn lockfile v1
+dep@1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/dep/-/dep-1.0.0.tgz#0000000000000000000000000000000000000000"
+  integrity {SRI}
+"#
+        );
+        let package = fs::read_to_string(dir.join("package.json")).unwrap();
+        let plan = plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &package,
+            &dir,
+        )
+        .unwrap();
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.name == "dep"));
+        assert!(plan
+            .links
+            .iter()
+            .any(|link| link.path == "node_modules/@fixture/lib" && link.target == "packages/lib"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn required_pnpm_platform_dependency_fails_on_foreign_platform() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      linux-only:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  linux-only@1.0.0:
+    resolution: {{integrity: {SRI}}}
+    os: [linux]
+snapshots:
+  linux-only@1.0.0: {{}}
+"#
+        );
+        let error = plan_pnpm(Platform::Aarch64AppleDarwin, &lock, &dir).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("linux-only@1.0.0"));
+        assert!(text.contains("aarch64-apple-darwin"));
         let _ = fs::remove_dir_all(dir);
     }
 }
