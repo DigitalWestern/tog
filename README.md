@@ -50,7 +50,17 @@ blanket store path              # where the store lives
 blanket store roots             # registered project roots
 blanket gc --dry-run            # preview unreferenced store/cache cleanup
 blanket sync --fresh            # rebuild the projection (drops caches)
+blanket help sync               # per-command help (also: blanket sync --help)
+blanket -C path/to/project sync # run as if started there
+blanket --version
 ```
+
+Every argument is validated: an unknown command or flag is a usage error
+(exit 2) with a "did you mean" suggestion when one is close. Exit status is
+0 on success, 1 when the command failed, 2 for a usage error; `run` passes
+the program's status through. `-q` silences narration (errors still show),
+`-v` prints every decision and the command line of every subprocess blanket
+starts. [CLI.md](CLI.md) is the plan for the rest of the command surface.
 
 Policy is permissive by default; `.blanket/policy.toml` can tighten it:
 

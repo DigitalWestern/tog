@@ -1,0 +1,196 @@
+//! The command surface, exercised through the real binary and offline: no
+//! store objects are realized, no network is touched. Every case here is a
+//! contract from CLI.md (exit status 0/1/2, help on stdout, errors on stderr
+//! with a next step, pass-through for `run`).
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "blanket-cli-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run the binary in `cwd` with a throwaway store and home, so nothing here
+/// can read the developer's policy or touch a real store.
+fn blanket(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_blanket"))
+        .args(args)
+        .current_dir(cwd)
+        .env("BLANKET_STORE", home.join("store"))
+        .env("HOME", home)
+        .env_remove("BLANKET_POLICY")
+        .env_remove("BLANKET_STRICT")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn blanket")
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[test]
+fn no_arguments_prints_usage_and_exits_2() {
+    let home = TempDir::new("noargs");
+    let out = blanket(&home.0, &home.0, &[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("USAGE:"), "{stderr}");
+    assert!(stderr.contains("  sync"), "{stderr}");
+}
+
+#[test]
+fn help_goes_to_stdout_and_exits_0() {
+    let home = TempDir::new("help");
+    for args in [&["--help"][..], &["-h"], &["help"]] {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
+        let stdout = text(&out.stdout);
+        assert!(stdout.contains("COMMANDS:"), "{args:?}: {stdout}");
+        assert!(stdout.contains("BLANKET_STORE"), "{args:?}: {stdout}");
+    }
+    for args in [&["help", "sync"][..], &["sync", "--help"], &["sync", "-h"]] {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        let stdout = text(&out.stdout);
+        assert!(stdout.starts_with("blanket sync — "), "{args:?}: {stdout}");
+        assert!(stdout.contains("--fresh"), "{args:?}: {stdout}");
+    }
+    let out = blanket(&home.0, &home.0, &["help", "snyc"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("did you mean 'sync'?"));
+}
+
+#[test]
+fn version() {
+    let home = TempDir::new("version");
+    for args in [&["--version"][..], &["-V"], &["version"]] {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert_eq!(
+            text(&out.stdout),
+            format!("blanket {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[test]
+fn usage_errors_exit_2_with_a_next_step() {
+    let home = TempDir::new("usage");
+    let cases: &[(&[&str], &str, &str)] = &[
+        (&["snyc"], "unknown command 'snyc'; did you mean 'sync'?", "blanket --help"),
+        (&["sync", "--fersh"], "sync: unknown option '--fersh'; did you mean '--fresh'?", "blanket help sync"),
+        (&["sync", "now"], "sync: unexpected argument 'now'", "blanket help sync"),
+        (&["plan", "--json"], "plan: unknown option '--json'", "blanket help plan"),
+        (&["gc", "--keep-days", "soon"], "--keep-days expects a whole number of days, got 'soon'", "blanket help gc"),
+        (&["gc", "--dryrun"], "gc: unknown option '--dryrun'; did you mean '--dry-run'?", "blanket help gc"),
+        (&["sbom", "--output"], "--output needs a file path", "blanket help sbom"),
+        (&["store"], "store needs a subcommand: 'store path' or 'store roots'", "blanket help store"),
+        (&["store", "root"], "unknown store subcommand 'root'; did you mean 'roots'?", "blanket help store"),
+        (&["run"], "run: no command given", "blanket help run"),
+        (&["--dir", "x", "plan"], "unknown option '--dir'; did you mean '--directory'?", "blanket --help"),
+        (&["-C"], "-C needs a directory", "blanket --help"),
+    ];
+    for (args, message, hint) in cases {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?} wrote to stdout");
+        let stderr = text(&out.stderr);
+        assert_eq!(
+            stderr,
+            format!("blanket: error: {message}\nRun '{hint}' for usage.\n"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn failures_exit_1_and_survive_quiet() {
+    let home = TempDir::new("fail");
+    let project = TempDir::new("empty");
+    // An empty directory has no manifest: a real failure, not a usage error.
+    let out = blanket(&project.0, &home.0, &["plan"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.starts_with("blanket: error: no_manifest"), "{stderr}");
+
+    // --quiet silences narration but never the error.
+    let out = blanket(&project.0, &home.0, &["--quiet", "plan"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).starts_with("blanket: error: no_manifest"));
+    let out = blanket(&project.0, &home.0, &["-q", "--no-color", "-v", "plan"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn directory_option_changes_where_the_command_runs() {
+    let home = TempDir::new("chdir");
+    let project = TempDir::new("chdir-project");
+    // Run from `home`, point at the empty project: the empty project's
+    // failure proves the command ran there.
+    let out = blanket(&home.0, &home.0, &["-C", project.0.to_str().unwrap(), "plan"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no_manifest"));
+    let out = blanket(
+        &home.0,
+        &home.0,
+        &["--directory", project.0.to_str().unwrap(), "-v", "plan"],
+    );
+    assert!(text(&out.stderr).contains("[verbose] working directory:"));
+
+    let missing = project.0.join("missing");
+    let out = blanket(&home.0, &home.0, &["-C", missing.to_str().unwrap(), "plan"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).starts_with("blanket: error: cannot change directory to"));
+}
+
+#[test]
+fn run_passes_arguments_through_and_needs_a_projection() {
+    let home = TempDir::new("run");
+    let project = TempDir::new("run-project");
+    // Flags after the program are the program's: blanket does not parse
+    // them, so the only error is the missing projection.
+    let out = blanket(&project.0, &home.0, &["run", "python", "--help"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("no environment projected here"), "{stderr}");
+    assert!(stderr.contains("blanket sync"), "{stderr}");
+    // `--` reaches the same place with a program literally named `-h`.
+    let out = blanket(&project.0, &home.0, &["run", "--", "-h"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no environment projected here"));
+}
+
+#[test]
+fn store_path_honors_the_store_variable() {
+    let home = TempDir::new("store");
+    let out = blanket(&home.0, &home.0, &["store", "path"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let printed = PathBuf::from(text(&out.stdout).trim());
+    assert_eq!(printed, home.0.join("store").canonicalize().unwrap());
+    let out = blanket(&home.0, &home.0, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+}

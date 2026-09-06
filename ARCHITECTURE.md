@@ -486,7 +486,9 @@ the file held two writers' interleaved bytes).
 
 ## Layout
 
-    src/main.rs     CLI: sync | plan | run | store path
+    src/cli.rs      command grammar + help (pure, unit-tested; see CLI.md)
+    src/ui.rs       output conventions: quiet/verbose/color, error channel
+    src/main.rs     dispatcher + per-ecosystem orchestration
     src/types.rs    Identity, Plan, LockedPackage
     src/store.rs    immutable store: stage/commit/cache
     src/fetch.rs    verified downloads

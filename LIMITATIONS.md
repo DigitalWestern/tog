@@ -7,6 +7,13 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Kernel-wide
 
+- **CLI exit status is 0 / 1 / 2** (success / command failed / usage
+  error) since 2026-09-06; before that a bad `gc` or `sbom` argument
+  exited 1. `blanket build -h` and `blanket run -h` now print blanket's
+  help; a tool argument that is literally `-h` needs `--` in front
+  (`blanket build -- -h`). `--verbose` shows subprocess command lines only
+  for the subprocesses `main.rs` starts (uv, npm, cargo lock generation);
+  the tailors' own subprocesses are not yet traced. See CLI.md.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

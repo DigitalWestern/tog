@@ -10,7 +10,8 @@
 //!   top level and `-h`/`--help` inside every command;
 //! - `run` and `build` pass their arguments through to the program untouched
 //!   (only a leading `-h`/`--help` is blanket's; `--` forces pass-through);
-//! - `-C <dir>` runs the command as if started in `<dir>`.
+//! - `-C <dir>` runs the command as if started in `<dir>`; `-q`, `-v` and
+//!   `--no-color` set the output conventions (see `ui`).
 //!
 //! Exit status contract: 0 success, 1 the command failed, 2 usage error.
 
@@ -44,10 +45,23 @@ pub struct GcArgs {
     pub register: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invocation {
+/// Options accepted before the command; they apply to every command.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Options {
     /// `-C <dir>`: change into this directory before running the command.
     pub directory: Option<PathBuf>,
+    /// `-q`: no narration; only errors and the command's stdout result.
+    pub quiet: bool,
+    /// `-v`: every decision and every subprocess command line.
+    pub verbose: bool,
+    /// `--no-color`: never emit ANSI color (NO_COLOR and a non-tty stderr
+    /// have the same effect).
+    pub no_color: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    pub options: Options,
     pub command: Command,
 }
 
@@ -274,6 +288,9 @@ pub fn usage() -> String {
     text.push_str(
         "\nOPTIONS:\n  \
          -C, --directory <dir>  run as if blanket had been started in <dir>\n  \
+         -q, --quiet            no narration: only errors and results on stdout\n  \
+         -v, --verbose          show every decision and subprocess command line\n      \
+         --no-color             plain output (also: NO_COLOR, or a non-tty stderr)\n  \
          -h, --help             print help ('blanket help <command>' for one command)\n  \
          -V, --version          print the version\n\n",
     );
@@ -313,7 +330,7 @@ fn version_text() -> String {
 }
 
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
-    let mut directory = None;
+    let mut options = Options::default();
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         if HELP_WORDS.contains(&arg) {
@@ -327,19 +344,39 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                 let value = args.get(index + 1).ok_or_else(|| {
                     UsageError::invalid(format!("{arg} needs a directory"), None)
                 })?;
-                directory = Some(PathBuf::from(value));
+                options.directory = Some(PathBuf::from(value));
                 index += 2;
             }
             _ if arg.starts_with("--directory=") => {
-                directory = Some(non_empty(&arg["--directory=".len()..], "--directory", None)?);
+                options.directory =
+                    Some(non_empty(&arg["--directory=".len()..], "--directory", None)?);
                 index += 1;
             }
             _ if arg.starts_with("-C") => {
-                directory = Some(PathBuf::from(&arg[2..]));
+                options.directory = Some(PathBuf::from(&arg[2..]));
+                index += 1;
+            }
+            "-q" | "--quiet" => {
+                options.quiet = true;
+                index += 1;
+            }
+            "-v" | "--verbose" => {
+                options.verbose = true;
+                index += 1;
+            }
+            "--no-color" => {
+                options.no_color = true;
                 index += 1;
             }
             _ if arg.starts_with('-') => {
-                let known = ["--directory", "--help", "--version"];
+                let known = [
+                    "--directory",
+                    "--quiet",
+                    "--verbose",
+                    "--no-color",
+                    "--help",
+                    "--version",
+                ];
                 return Err(UsageError::invalid(
                     with_suggestion(
                         format!("unknown option '{arg}'"),
@@ -382,7 +419,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         Some(command) => command,
         None => return Ok(Parsed::Print(help(spec(name).expect("known command")))),
     };
-    Ok(Parsed::Run(Invocation { directory, command }))
+    Ok(Parsed::Run(Invocation { options, command }))
 }
 
 fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
@@ -600,20 +637,21 @@ fn with_suggestion<'a>(
     }
 }
 
-/// The closest candidate when it is close enough to be a typo: a prefix
-/// relation, or an edit distance of at most one third of the word (and at
-/// least one).
+/// The closest candidate when it is close enough to be a typo: the same
+/// word up to case or an `=value` suffix, a prefix relation (two characters
+/// or more), or, for words of four characters or more, an edit distance of
+/// at most one third of the word where an adjacent transposition counts as
+/// one edit. Short words never get distance-based guesses: `-q` must not
+/// become "did you mean -h".
 pub fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let word = word.to_ascii_lowercase();
-    let budget = (word.len() / 3).max(1);
+    let budget = if word.len() >= 4 { (word.len() / 3).max(1) } else { 0 };
     let mut best: Option<(usize, &str)> = None;
     for candidate in candidates {
-        if candidate == word {
-            continue;
-        }
         let lower = candidate.to_ascii_lowercase();
-        let distance = if word.len() >= 2 && (lower.starts_with(&word) || word.starts_with(&lower))
-        {
+        let distance = if lower == word {
+            0
+        } else if word.len() >= 2 && (lower.starts_with(&word) || word.starts_with(&lower)) {
             0
         } else {
             edit_distance(&word, &lower)
@@ -625,20 +663,32 @@ pub fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Opt
     best.map(|(_, candidate)| candidate)
 }
 
+/// Optimal string alignment distance: Levenshtein plus adjacent
+/// transposition as a single edit (`snyc` → `sync` is one).
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    let mut current = vec![0; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        current[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let substitute = previous[j] + usize::from(ca != cb);
-            current[j + 1] = substitute.min(previous[j + 1] + 1).min(current[j] + 1);
-        }
-        std::mem::swap(&mut previous, &mut current);
+    let width = b.len() + 1;
+    let mut d = vec![0usize; (a.len() + 1) * width];
+    for i in 0..=a.len() {
+        d[i * width] = i;
     }
-    previous[b.len()]
+    for j in 0..=b.len() {
+        d[j] = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (d[(i - 1) * width + j] + 1)
+                .min(d[i * width + j - 1] + 1)
+                .min(d[(i - 1) * width + j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(d[(i - 2) * width + j - 2] + 1);
+            }
+            d[i * width + j] = best;
+        }
+    }
+    d[a.len() * width + b.len()]
 }
 
 #[cfg(test)]
@@ -923,13 +973,16 @@ mod tests {
             assert_eq!(
                 run(words),
                 Invocation {
-                    directory: Some(PathBuf::from("/work")),
+                    options: Options {
+                        directory: Some(PathBuf::from("/work")),
+                        ..Options::default()
+                    },
                     command: Command::Plan
                 },
                 "{words:?}"
             );
         }
-        assert_eq!(run(&["plan"]).directory, None);
+        assert_eq!(run(&["plan"]).options, Options::default());
         assert_eq!(message(&["-C"]), "-C needs a directory");
         assert_eq!(message(&["--directory="]), "--directory= needs a value");
         // After the command, -C belongs to the command (run passes it on).
@@ -942,15 +995,52 @@ mod tests {
     }
 
     #[test]
+    fn output_options_are_global_and_validated() {
+        assert_eq!(
+            run(&["-q", "-v", "--no-color", "-C", "/w", "plan"]).options,
+            Options {
+                directory: Some(PathBuf::from("/w")),
+                quiet: true,
+                verbose: true,
+                no_color: true,
+            }
+        );
+        assert_eq!(run(&["--quiet", "--verbose", "plan"]).options.quiet, true);
+        assert_eq!(
+            message(&["--quite", "plan"]),
+            "unknown option '--quite'; did you mean '--quiet'?"
+        );
+        // -v is verbose, -V is version: both exist, neither is a typo of the other.
+        assert_eq!(printed(&["-V"]), format!("blanket {VERSION}\n"));
+        assert!(run(&["-v", "plan"]).options.verbose);
+        // After the command they belong to the command.
+        assert_eq!(message(&["sync", "-q"]), "sync: unknown option '-q'");
+        assert_eq!(
+            command(&["run", "pytest", "-q"]),
+            Command::Run {
+                command: argv(&["pytest", "-q"])
+            }
+        );
+    }
+
+    #[test]
     fn suggestions_are_conservative() {
         let commands = || COMMANDS.iter().map(|spec| spec.name);
-        assert_eq!(suggest("sync", commands()), None); // exact: nothing to suggest
+        // An exact match is a suggestion too: it is how `--strict=1` learns
+        // that `--strict` takes no value.
+        assert_eq!(suggest("sync", commands()), Some("sync"));
         assert_eq!(suggest("SYNC", commands()), Some("sync"));
         assert_eq!(suggest("s", commands()), None); // one letter is not a typo
+        assert_eq!(suggest("gcx", commands()), Some("gc")); // prefix relation
+        assert_eq!(suggest("gxc", commands()), None); // short words: no edit guesses
+        assert_eq!(suggest("-q", ["-h", "-v"].into_iter()), None);
         assert_eq!(suggest("stor", commands()), Some("store"));
         assert_eq!(suggest("bulid", commands()), Some("build"));
+        assert_eq!(suggest("snyc", commands()), Some("sync"));
         assert_eq!(suggest("deploy", commands()), None);
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("snyc", "sync"), 1);
+        assert_eq!(edit_distance("ab", "ba"), 1);
     }
 }

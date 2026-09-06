@@ -219,13 +219,30 @@ and lock edit to the store tool → run the ordinary sync → print what changed
 `--no-sync` stops after the lock edit, for people who want to review the
 diff first.
 
-**Choosing the ecosystem.** One ecosystem present → that one. Several →
-require a prefix: `py:requests`, `npm:react`, `cargo:serde`, `go:github.com/
-x/y`, `gem:rails`, `hex:jason`, `nuget:Newtonsoft.Json`. An unprefixed spec
-in a polyglot project is a usage error naming the prefixes. A prefix in a
-single-ecosystem project is also accepted. No guessing from the name: `blanket
-add yaml` means different packages on PyPI and npm, and a wrong guess writes
-to the user's manifest.
+**Choosing the ecosystem (decided 2026-09-06: infer from evidence, then
+ask; no required syntax).** Blanket never picks an ecosystem on a coin flip,
+but it also never makes a person learn a prefix. The ladder, cheapest first,
+stopping at the first rung that answers:
+
+1. *The name's shape.* `@scope/name` is npm; `github.com/...` (a slash and a
+   dotted host) is Go; `Foo.Bar` PascalCase with dots is NuGet. Structural
+   facts, not heuristics.
+2. *Where you are standing.* The nearest manifest walking up from the
+   current directory. In a repo with `web/package.json` and a root
+   `pyproject.toml`, `blanket add react` from `web/` is npm. Only a
+   directory holding several manifests itself reaches rung 3.
+3. *Ask the registries.* One existence check per candidate registry (the
+   same network `add` needs anyway). A name known to exactly one registry
+   is resolved by fact.
+4. *Ask the human.* Known to several registries and stderr is a terminal:
+   `requests exists on PyPI (2.32.5) and npm (0.3.0). Which? [1/2]`. The
+   versions make a squat obvious; a name that exists in two places is the
+   case where slowing down is right.
+5. *Non-interactive fallback.* No terminal and still ambiguous: error
+   listing the candidates and the explicit spelling `npm:react` /
+   `py:requests` / `cargo:` / `go:` / `gem:` / `hex:` / `nuget:`. The prefix
+   exists for scripts and CI; help mentions it once. A human at a keyboard
+   never needs it.
 
 **Delegation table.** "Refuse" always means: print the exact line and file,
 exit 1, no writes.
@@ -341,8 +358,9 @@ go-hello, ruby-hello), and one acceptance.sh section per new verb.
 
 1. **Bare `blanket` = sync** inside a project. (Recommended yes.)
 2. **`install` as an alias** for sync, or one name only. (Recommended alias.)
-3. **Prefix syntax** `npm:react` / `py:requests` for ambiguity, versus flags
-   `--npm`/`--py`. (Recommended prefixes; both is fine.)
+3. ~~Prefix syntax for ambiguity~~ **Decided: the evidence ladder** (name
+   shape → nearest manifest → registry existence → prompt), with the prefix
+   only as the non-interactive escape hatch. See 2.3.
 4. **`add` refuses for pnpm/yarn/poetry/pdm/dotnet/elixir in v0** rather
    than growing new pins. (Recommended refuse; the message names the exact
    command, and each row can go green later without changing the CLI.)

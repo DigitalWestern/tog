@@ -220,7 +220,9 @@ starves.
       trust boundary. Also: contained atomic writes for the remaining
       project-side plan caches (go-plan.json, python plan.json).
 - [ ] Central closet / binary cache + fixed store path decision
-- [ ] Friendlier CLI errors (e.g. `node.js` typo → "did you mean node?")
+- [x] Friendlier CLI errors — done 2026-09-06: one validated grammar,
+      per-command help, did-you-mean suggestions (`src/cli.rs`; the rest of
+      the command surface is planned in CLI.md)
 - [x] Linux support — landed 2026-09-05, LINUX_PORT.md (also unlocks the "Linux as reference hermetic
       builder" idea)
 

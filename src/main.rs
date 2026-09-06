@@ -1,6 +1,6 @@
 use blanket::{
     cargo, cli, dotnet, elixir, gc, golang, manifest, npm, npm_lock_import, platform::Platform,
-    policy, project, pypi, pyselect, python, ruby, sbom, store, types,
+    policy, project, pypi, pyselect, python, ruby, sbom, store, types, ui,
 };
 
 use std::io;
@@ -44,19 +44,25 @@ fn main() {
             exit(cli::EXIT_USAGE);
         }
     };
-    if let Some(dir) = &invocation.directory {
+    let options = &invocation.options;
+    if let Err(error) = ui::init(options.quiet, options.verbose, options.no_color) {
+        ui::error(&format!("cannot set up output: {error}"));
+        exit(cli::EXIT_FAILURE);
+    }
+    if let Some(dir) = &options.directory {
         if let Err(error) = std::env::set_current_dir(dir) {
-            eprintln!(
-                "blanket: error: cannot change directory to {}: {error}",
+            ui::error(&format!(
+                "cannot change directory to {}: {error}",
                 dir.display()
-            );
+            ));
             exit(cli::EXIT_FAILURE);
         }
+        ui::trace(&format!("working directory: {}", dir.display()));
     }
     let code = match dispatch(invocation.command) {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("blanket: error: {error}");
+            ui::error(&error.to_string());
             cli::EXIT_FAILURE
         }
     };
@@ -206,12 +212,15 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
         "blanket: no Cargo.lock; generating it with the store Rust toolchain \
          (network allowed, unsandboxed)..."
     );
-    let status = std::process::Command::new(rust_obj.join("bin/cargo"))
+    let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
+    command
         .arg("generate-lockfile")
         .current_dir(root)
         .env("CARGO_NET_OFFLINE", "false")
         .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTUP_TOOLCHAIN");
+    ui::trace_command(&command);
+    let status = command
         .status()
         .map_err(|e| {
             io::Error::new(
@@ -517,8 +526,12 @@ fn locked_requirements(
     let compile_input = compile_path
         .and_then(|path| path.to_str())
         .unwrap_or(input);
-    let status = std::process::Command::new(&uv)
-        .args(["pip", "compile", compile_input, "--generate-hashes", "--quiet"])
+    let mut command = std::process::Command::new(&uv);
+    command.args(["pip", "compile", compile_input, "--generate-hashes"]);
+    if !ui::verbose() {
+        command.arg("--quiet");
+    }
+    command
         .args(["--python-version", pyver])
         // Manifest index directives and ambient pip/uv index variables are
         // never trusted. Resolution is explicitly public PyPI only.
@@ -531,7 +544,9 @@ fn locked_requirements(
         .env_remove("PIP_INDEX_URL")
         .env_remove("PIP_EXTRA_INDEX_URL")
         .env_remove("PIP_TRUSTED_HOST")
-        .env_remove("PIP_FIND_LINKS")
+        .env_remove("PIP_FIND_LINKS");
+    ui::trace_command(&command);
+    let status = command
         .status()
         .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
     if !status.success() {
@@ -688,15 +703,14 @@ fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
         node.join("bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let status = std::process::Command::new(node.join("bin/npm"))
-        .args([
-            "install",
-            "--package-lock-only",
-            "--ignore-scripts",
-            "--silent",
-        ])
-        .current_dir(dir)
-        .env("PATH", path)
+    let mut command = std::process::Command::new(node.join("bin/npm"));
+    command.args(["install", "--package-lock-only", "--ignore-scripts"]);
+    if !ui::verbose() {
+        command.arg("--silent");
+    }
+    command.current_dir(dir).env("PATH", path);
+    ui::trace_command(&command);
+    let status = command
         .status()
         .map_err(|e| {
             io::Error::new(
@@ -758,7 +772,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
         let (plan, selection) = read_plan(platform, &dir)?;
         let env = project::realize_env(&store, platform, &plan)?;
         project::project_env_with_selection(&dir, &env, &plan, &selection)?;
-        eprintln!("synced: .venv -> {}", env.display());
+        ui::synced(".venv", &env);
         any = true;
     }
     if let Some(plan) = load_npm_plan(platform, &dir)? {
@@ -774,7 +788,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
         }
         let env = npm::realize_node_env(&store, platform, &plan, &config.artifacts)?;
         npm::project_node_env(&dir, &env, platform, &plan, &config.mutable_packages, fresh)?;
-        eprintln!("synced: node_modules -> {}", env.display());
+        ui::synced("node_modules", &env);
         any = true;
     }
     if dir.join("go.mod").is_file() {
@@ -787,7 +801,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
             &inputs.plan,
             &inputs.gosum_sha256,
         )?;
-        eprintln!("synced: go modcache -> {}", modcache.display());
+        ui::synced("go modcache", &modcache);
         any = true;
     }
     if dir.join("Gemfile").is_file() {
@@ -795,7 +809,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
         let (plan, lock_sha256) = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
         let gems = ruby::realize_gems(&store, platform, &plan, &ruby_obj)?;
         ruby::project_ruby_env(&dir, &ruby_obj, &gems, &plan, &lock_sha256)?;
-        eprintln!("synced: gems -> {}", gems.display());
+        ui::synced("gems", &gems);
         any = true;
     }
     if dir.join("mix.exs").is_file() {
@@ -804,7 +818,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
         let deps = elixir::realize_deps(&store, platform, &plan, &beam)?;
         let projection =
             elixir::project_elixir_env(platform, &dir, &beam, &deps, &plan, &lock_sha256, fresh)?;
-        eprintln!("synced: hex deps -> {}", projection.display());
+        ui::synced("hex deps", &projection);
         any = true;
     }
     if dotnet::has_marker(&dir)? {
@@ -813,7 +827,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
         let (plan, lock_sha256) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
         let packages = dotnet::realize_packages(&store, platform, &plan, &sdk, &dir)?;
         dotnet::project_dotnet_env(&dir, &sdk, &packages, &plan, &lock_sha256)?;
-        eprintln!("synced: nuget packages -> {}", packages.display());
+        ui::synced("nuget packages", &packages);
         any = true;
     }
     if is_cargo_here(&dir) {
@@ -833,7 +847,7 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
             &inputs.plan,
             &inputs.lock_digest,
         )?;
-        eprintln!("synced: cargo env -> {}", vendor_obj.display());
+        ui::synced("cargo env", &vendor_obj);
         any = true;
     }
     if !any {
