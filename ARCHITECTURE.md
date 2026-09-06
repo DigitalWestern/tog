@@ -88,7 +88,13 @@ Hadoop YARN) — the only cost is publishing any future crate as
 
 Per design review with Sol: **Plan → Realize → Project.**
 
-1. **Plan** (the tailor — adapter, `pypi.rs`): parse hash-pinned `requirements.txt`
+1. **Plan** (the tailor — adapter, `manifest.rs` + `pypi.rs`): discover and
+   normalize requirements files, PEP 621 metadata, Poetry metadata/locks,
+   uv locks, `setup.cfg`, computed `setup.py` metadata, and conventional
+   requirements directories into one list of PEP 508 requirement strings.
+   Optional/development groups stay out unless explicitly requested. A found
+   empty manifest creates an interpreter-only plan; absent and unreadable
+   manifests have separate diagnostics. Hash-pinned `requirements.txt`
    or [project].dependencies from `pyproject.toml`
    (pip/uv `--generate-hashes` format, `==` pins only), lock each
    requirement to one exact PyPI artifact by matching file hashes and
@@ -125,6 +131,9 @@ The user policy and project policy are unioned; deny entries are only added.
 | `unattested-mutable-state` | an npm mutable projection is created |
 | `toolchain-component-unavailable` | Cargo requests an unavailable component |
 | `git-dependency` | reserved for the future git dependency tailor |
+| `skipped_optional` | an optional/dev dependency group was not requested |
+| `unattested_index` | a manifest names a private index or index-like option |
+| `lock_disagreement` | a lock content digest disagrees with its manifest |
 
 Object-affecting exceptions are written into store metadata. A strict policy
 rechecks them on cache hits, so `blanket sync --fresh` cannot bypass an

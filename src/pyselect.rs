@@ -574,6 +574,27 @@ pub fn select_python_with_inputs(
     })
 }
 
+/// Reconstruct the selection recorded in a plan when a later metadata phase
+/// (for example sandboxed setup.py `PKG-INFO`) added a constraint that is not
+/// visible to the lightweight preflight collector.
+pub fn select_python_for_version(
+    platform: Platform,
+    inputs: &PythonInputs,
+    version: &str,
+) -> io::Result<PythonSelection> {
+    let current = select_python_with_inputs(platform, inputs)?;
+    if current.pin.version == version {
+        return Ok(current);
+    }
+    let mut forced = inputs.clone();
+    let minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
+    forced.constraints.push(ConstraintSource::new(
+        format!("=={minor}.*"),
+        "locked plan",
+    ));
+    select_python_with_inputs(platform, &forced)
+}
+
 fn no_satisfying_pin(
     platform: Platform,
     constraint: &str,

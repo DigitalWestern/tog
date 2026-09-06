@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "proj-poetry"
+version = "0.1.0"
+description = "blanket Poetry manifest fixture"
+authors = ["blanket <blanket@example.invalid>"]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.15"
+six = "^1.17.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+
+[tool.poetry.extras]
+extras = ["six"]

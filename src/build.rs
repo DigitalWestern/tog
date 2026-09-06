@@ -172,7 +172,7 @@ mod tests {
     }
 }
 
-fn build_toolchain_plan(python_version: &str) -> Plan {
+pub fn build_toolchain_plan(python_version: &str) -> Plan {
     Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
@@ -188,6 +188,16 @@ fn build_toolchain_plan(python_version: &str) -> Plan {
             })
             .collect(),
     }
+}
+
+/// Realize the pinned setuptools/pip/wheel environment used by sandboxed
+/// metadata probes such as `setup.py egg_info`.
+pub fn ensure_build_environment(
+    store: &Store,
+    platform: Platform,
+    python_version: &str,
+) -> io::Result<PathBuf> {
+    project::realize_env(store, platform, &build_toolchain_plan(python_version))
 }
 
 /// Build (or fetch from store) the wheel for an sdist. Returns the path to

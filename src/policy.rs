@@ -20,6 +20,12 @@ pub const UNATTESTED_MUTABLE_STATE: &str = "unattested-mutable-state";
 pub const TOOLCHAIN_COMPONENT_UNAVAILABLE: &str = "toolchain-component-unavailable";
 /// A future git dependency was accepted without registry provenance.
 pub const GIT_DEPENDENCY: &str = "git-dependency";
+/// An optional dependency/group was not requested by the user.
+pub const SKIPPED_OPTIONAL: &str = "skipped_optional";
+/// A manifest named a private index or an index-like option.
+pub const UNATTESTED_INDEX: &str = "unattested_index";
+/// A lock's content digest did not match its source manifest.
+pub const LOCK_DISAGREEMENT: &str = "lock_disagreement";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -29,6 +35,9 @@ pub const KINDS: &[&str] = &[
     UNATTESTED_MUTABLE_STATE,
     TOOLCHAIN_COMPONENT_UNAVAILABLE,
     GIT_DEPENDENCY,
+    SKIPPED_OPTIONAL,
+    UNATTESTED_INDEX,
+    LOCK_DISAGREEMENT,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
