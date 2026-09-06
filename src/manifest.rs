@@ -136,11 +136,7 @@ impl Manifest {
                 ) {
                     self.requirements = cache.requirements;
                     self.source = self.requirements_text();
-                    if let Some(value) = cache.requires_python {
-                        self.python
-                            .constraints
-                            .push(ConstraintSource::new(value, "setup.py PKG-INFO"));
-                    }
+                    replace_setup_requires_python(&mut self.python, cache.requires_python);
                     return Ok(());
                 }
             }
@@ -222,12 +218,19 @@ impl Manifest {
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
         self.source = self.requirements_text();
-        if let Some(value) = requires_python {
-            self.python
-                .constraints
-                .push(ConstraintSource::new(value, "setup.py PKG-INFO"));
-        }
+        replace_setup_requires_python(&mut self.python, requires_python);
         Ok(())
+    }
+}
+
+fn replace_setup_requires_python(inputs: &mut PythonInputs, value: Option<String>) {
+    inputs
+        .constraints
+        .retain(|constraint| constraint.source != "setup.py PKG-INFO");
+    if let Some(value) = value {
+        inputs
+            .constraints
+            .push(ConstraintSource::new(value, "setup.py PKG-INFO"));
     }
 }
 
@@ -1049,7 +1052,15 @@ fn poetry_python_marker(version: &str) -> io::Result<Option<String>> {
                         .iter()
                         .find_map(|op| clause.strip_prefix(op).map(|value| (*op, value)))
                         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsupported Poetry python constraint `{version}`")))?;
-                    Ok(format!("python_version {op} '{value}'"))
+                    let variable = if crate::pep440::Version::parse(value)
+                        .ok()
+                        .is_some_and(|value| value.release_len() >= 3)
+                    {
+                        "python_full_version"
+                    } else {
+                        "python_version"
+                    };
+                    Ok(format!("{variable} {op} '{value}'"))
                 })
                 .collect::<io::Result<Vec<_>>>()?
                 .join(" and "))
@@ -1155,6 +1166,8 @@ fn poetry_lock_requirements(
             dependencies.extend(poetry_lock_extra_dependencies(
                 package,
                 requested_extras.get(&name),
+                python_version,
+                platform,
             )?);
             for dependency in dependencies {
                 add_poetry_edge(
@@ -1323,11 +1336,14 @@ struct PoetryDependency {
     name: String,
     version: String,
     extras: BTreeSet<String>,
+    marker: Option<String>,
 }
 
 fn poetry_lock_extra_dependencies(
     package: &toml::map::Map<String, toml::Value>,
     requested_extras: Option<&BTreeSet<String>>,
+    python_version: &str,
+    platform: Platform,
 ) -> io::Result<Vec<PoetryDependency>> {
     let Some(requested_extras) = requested_extras else {
         return Ok(Vec::new());
@@ -1353,7 +1369,14 @@ fn poetry_lock_extra_dependencies(
                     format!("Poetry lock extra `{extra}` must contain strings"),
                 )
             })?;
-            active.push(parse_poetry_lock_extra_dependency(value)?);
+            let dependency = parse_poetry_lock_extra_dependency(value)?;
+            if dependency
+                .marker
+                .as_deref()
+                .map_or(Ok(true), |marker| marker_matches(marker, python_version, platform))?
+            {
+                active.push(dependency);
+            }
         }
     }
     Ok(active)
@@ -1361,16 +1384,27 @@ fn poetry_lock_extra_dependencies(
 
 fn parse_poetry_lock_extra_dependency(value: &str) -> io::Result<PoetryDependency> {
     let value = value.trim();
-    let (name, version) = if let Some(open) = value.find(" (") {
-        if !value.ends_with(')') {
+    let (requirement, marker) = value
+        .split_once(';')
+        .map_or((value, None), |(requirement, marker)| {
+            (requirement.trim(), Some(marker.trim().to_string()))
+        });
+    if requirement.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed Poetry lock extra dependency `{value}`"),
+        ));
+    }
+    let (name, version) = if let Some(open) = requirement.find(" (") {
+        if !requirement.ends_with(')') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("malformed Poetry lock extra dependency `{value}`"),
             ));
         }
-        (&value[..open], &value[open + 2..value.len() - 1])
+        (&requirement[..open], &requirement[open + 2..requirement.len() - 1])
     } else {
-        (value, "*")
+        (requirement, "*")
     };
     if name.trim().is_empty() {
         return Err(io::Error::new(
@@ -1383,6 +1417,7 @@ fn parse_poetry_lock_extra_dependency(value: &str) -> io::Result<PoetryDependenc
         name: dependency_name(name),
         version: version.trim().to_string(),
         extras,
+        marker,
     })
 }
 
@@ -1487,6 +1522,7 @@ fn poetry_dependency(name: &str, value: &toml::Value) -> io::Result<PoetryDepend
         name: dependency_name(name),
         version,
         extras,
+        marker: None,
     })
 }
 
@@ -1631,7 +1667,7 @@ fn marker_matches_for_extra(
         return marker_matches_for_extra(rest, python_version, platform, extra).map(|value| !value);
     }
 
-    let operators = [" not in ", " in ", ">=", "<=", "===", "==", "!=", ">", "<"];
+    let operators = [" not in ", " in ", ">=", "<=", "===", "~=", "==", "!=", ">", "<"];
     let (left, operator, right) = operators
         .iter()
         .find_map(|operator| {
@@ -1649,17 +1685,18 @@ fn marker_matches_for_extra(
                 format!("unsupported environment marker `{expression}`"),
             )
         })?;
-    let left_value = marker_value(left, python_version, platform, extra).ok_or_else(|| {
+    let (left_value, left_is_variable) = marker_operand_value(left, python_version, platform, extra).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported environment marker variable `{left}`"),
+            format!("unsupported environment marker operand `{left}`"),
         )
     })?;
-    let right_value = right
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .or_else(|| right.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))
-        .unwrap_or(right);
+    let (right_value, right_is_variable) = marker_operand_value(right, python_version, platform, extra).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported environment marker operand `{right}`"),
+        )
+    })?;
     // PEP 508 defines membership as a string operation, including when the
     // left operand is python_version.
     if operator == " in " {
@@ -1668,7 +1705,7 @@ fn marker_matches_for_extra(
     if operator == " not in " {
         return Ok(!right_value.contains(left_value.as_str()));
     }
-    if matches!(left, "python_version" | "python_full_version") {
+    if (left_is_variable && is_python_marker(left)) || (right_is_variable && is_python_marker(right)) {
         return crate::pep440::matches_specifier(
             &format!("{}{}", operator.trim(), right_value),
             &left_value,
@@ -1677,13 +1714,43 @@ fn marker_matches_for_extra(
     Ok(match operator {
         "==" => left_value == right_value,
         "!=" => left_value != right_value,
-        ">=" => left_value.as_str() >= right_value,
-        "<=" => left_value.as_str() <= right_value,
-        ">" => left_value.as_str() > right_value,
-        "<" => left_value.as_str() < right_value,
+        ">=" => left_value.as_str() >= right_value.as_str(),
+        "<=" => left_value.as_str() <= right_value.as_str(),
+        ">" => left_value.as_str() > right_value.as_str(),
+        "<" => left_value.as_str() < right_value.as_str(),
         "===" => left_value == right_value,
+        "~=" => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("version marker operator `~=` needs a Python version operand: `{expression}`"),
+            ))
+        }
         _ => false,
     })
+}
+
+fn marker_operand_value(
+    operand: &str,
+    python_version: &str,
+    platform: Platform,
+    extra: Option<&str>,
+) -> Option<(String, bool)> {
+    if let Some(value) = marker_value(operand, python_version, platform, extra) {
+        return Some((value, true));
+    }
+    marker_string_value(operand).map(|value| (value, false))
+}
+
+fn marker_string_value(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 2 || !matches!(bytes[0], b'\'' | b'"') || bytes.last() != Some(&bytes[0]) {
+        return None;
+    }
+    Some(value[1..value.len() - 1].to_string())
+}
+
+fn is_python_marker(name: &str) -> bool {
+    matches!(name, "python_version" | "python_full_version")
 }
 
 fn marker_value(
@@ -3705,6 +3772,53 @@ files = [{ file = "bar-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
     }
 
     #[test]
+    fn poetry_serialized_extra_markers_are_filtered_before_graph_traversal() {
+        let project: toml::Value = toml::from_str(
+            r#"[tool.poetry.dependencies]
+foo = { version = "*", extras = ["feature"] }
+"#,
+        )
+        .unwrap();
+        let lock: toml::Value = toml::from_str(
+            r#"[[package]]
+name = "foo"
+version = "1.0.0"
+groups = ["main"]
+files = [{ file = "foo.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+
+[package.extras]
+feature = [
+  'linux-dep (>=1) ; sys_platform == "linux"',
+  'colorama (>=0.4) ; sys_platform == "win32"',
+]
+
+[[package]]
+name = "linux-dep"
+version = "1.0.0"
+groups = ["main"]
+files = [{ file = "linux-dep.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+groups = ["main"]
+files = [{ file = "colorama.whl", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
+"#,
+        )
+        .unwrap();
+        let output = poetry_lock_requirements(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &lock,
+            &BlanketPythonConfig::default(),
+            "3.12.14",
+        )
+        .unwrap();
+        assert!(output.iter().any(|line| line.starts_with("linux-dep==")));
+        assert!(!output.iter().any(|line| line.starts_with("colorama==")));
+    }
+
+    #[test]
     fn poetry_variant_reselection_retracts_discarded_dependencies() {
         let project: toml::Value = toml::from_str(
             r#"[tool.poetry.dependencies]
@@ -3819,6 +3933,44 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         for (marker, expected) in cases {
             assert_eq!(marker_matches(marker, "3.12.14", Platform::X86_64UnknownLinuxGnu).unwrap(), expected, "{marker}");
         }
+    }
+
+    #[test]
+    fn poetry_python_markers_keep_patch_precision_and_marker_grammar() {
+        assert_eq!(
+            poetry_python_marker(">=3.12.1").unwrap().as_deref(),
+            Some("python_full_version >= '3.12.1'"),
+        );
+        assert!(marker_matches(
+            "python_full_version >= '3.12.1'",
+            "3.12.14",
+            Platform::X86_64UnknownLinuxGnu,
+        )
+        .unwrap());
+        assert!(!marker_matches(
+            "python_full_version >= '3.12.1'",
+            "3.12.0",
+            Platform::X86_64UnknownLinuxGnu,
+        )
+        .unwrap());
+        assert!(marker_matches(
+            "python_version ~= '3.12'",
+            "3.12.14",
+            Platform::X86_64UnknownLinuxGnu,
+        )
+        .unwrap());
+        assert!(marker_matches(
+            "'3.12' == python_version",
+            "3.12.14",
+            Platform::X86_64UnknownLinuxGnu,
+        )
+        .unwrap());
+        assert!(marker_matches(
+            "'3.11' < python_version",
+            "3.12.14",
+            Platform::X86_64UnknownLinuxGnu,
+        )
+        .unwrap());
     }
 
     #[test]

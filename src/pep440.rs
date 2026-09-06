@@ -161,6 +161,10 @@ impl Version {
             && self.dev == other.dev
     }
 
+    fn same_release(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && self.release_cmp(other) == Ordering::Equal
+    }
+
     fn release_cmp(&self, other: &Self) -> Ordering {
         compare_release(&self.release, &other.release)
     }
@@ -295,9 +299,9 @@ fn parse_suffix(suffix: &str) -> Result<(Option<(PreKind, u64)>, Option<u64>, Op
         } else if let Some(consumed) = rest.strip_prefix("b") {
             (Some(PreKind::Beta), rest.len() - consumed.len())
         } else if let Some(consumed) = rest.strip_prefix("preview") {
-            (Some(PreKind::Alpha), rest.len() - consumed.len())
+            (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
         } else if let Some(consumed) = rest.strip_prefix("pre") {
-            (Some(PreKind::Alpha), rest.len() - consumed.len())
+            (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
         } else if let Some(consumed) = rest.strip_prefix("rc") {
             (Some(PreKind::ReleaseCandidate), rest.len() - consumed.len())
         } else if let Some(consumed) = rest.strip_prefix("c") {
@@ -588,13 +592,55 @@ fn clause_matches(clause: &Clause, version: &Version) -> bool {
             Operator::NotEqual => {
                 if target.has_local() { !(version.same_public(target) && version.local == target.local) } else { !version.same_public(target) }
             }
-            Operator::GreaterEqual => version >= target,
-            Operator::Greater => version > target,
-            Operator::LessEqual => version <= target,
-            Operator::Less => version < target,
+            Operator::GreaterEqual => compare_public(version, target) != Ordering::Less,
+            Operator::Greater => exclusive_greater(version, target),
+            Operator::LessEqual => compare_public(version, target) != Ordering::Greater,
+            Operator::Less => exclusive_less(version, target),
             Operator::ArbitraryEqual | Operator::Compatible | Operator::PoetryCaret | Operator::PoetryTilde | Operator::BareEqual => false,
         },
     }
+}
+
+/// Ordered specifiers ignore candidate local labels, but `>` and `<` have
+/// additional PEP 440 exclusions for versions sharing the target's release.
+/// Keep this separate from `Ord`: local versions still participate in the
+/// global version ordering used when choosing the newest lock candidate.
+fn compare_public(left: &Version, right: &Version) -> Ordering {
+    left.epoch
+        .cmp(&right.epoch)
+        .then_with(|| left.release_cmp(right))
+        .then_with(|| compare_pre(left, right))
+        .then_with(|| compare_optional_number(left.post, right.post, false))
+        .then_with(|| compare_optional_number(left.dev, right.dev, true))
+}
+
+fn exclusive_greater(candidate: &Version, target: &Version) -> bool {
+    if compare_public(candidate, target) != Ordering::Greater {
+        return false;
+    }
+    // `>V` does not admit a post-release of V unless V is itself a
+    // post-release. This compares the base release, so 1.0.0.post1 is also a
+    // post-release of 1.0 for this purpose.
+    if target.post.is_none() && candidate.post.is_some() && candidate.same_release(target) {
+        return false;
+    }
+    // A local version of the target's base release is not admitted by `>V`.
+    if candidate.local.is_some() && candidate.same_release(target) {
+        return false;
+    }
+    true
+}
+
+fn exclusive_less(candidate: &Version, target: &Version) -> bool {
+    if compare_public(candidate, target) != Ordering::Less {
+        return false;
+    }
+    // `<V` does not admit a pre-release of V unless V is itself a
+    // pre-release. Development releases are pre-releases for this rule.
+    if !target.is_prerelease() && candidate.is_prerelease() && candidate.same_release(target) {
+        return false;
+    }
+    true
 }
 
 /// Match a PEP 440 specifier against a complete version. The same function is
@@ -676,5 +722,46 @@ mod tests {
         assert!(matches_specifier("==1.0", "1.0+local").unwrap());
         assert!(!matches_specifier("==1.0+other", "1.0+local").unwrap());
         assert!(matches_specifier("==1!1.0", "1!1.0.0").unwrap());
+    }
+
+    #[test]
+    fn exclusive_ordered_comparisons_apply_pep440_exclusions() {
+        let cases = [
+            (">1.7", "1.7.1", true),
+            (">1.7", "1.7.0.post1", false),
+            (">1.7", "1.7+local", false),
+            (">1.7.post2", "1.7.1", true),
+            (">1.7.post2", "1.7.0.post3", true),
+            (">1.7.post2", "1.7.0", false),
+            (">1.7.post2", "1.7.0.post3+local", false),
+            ("<1.0", "1.0rc1", false),
+            ("<1.0", "1.0.dev1", false),
+            ("<1.0", "0.9", true),
+            ("<1.0rc2", "1.0rc1", true),
+        ];
+        for (specifier, version, expected) in cases {
+            assert_eq!(matches_specifier(specifier, version).unwrap(), expected, "{specifier} / {version}");
+        }
+        assert!(!matches_specifiers_with_candidates(&["<1.0"], "1.0rc1", &["1.0rc1"]).unwrap());
+    }
+
+    #[test]
+    fn pre_release_spellings_normalize_to_pep440_phases() {
+        let cases = [
+            ("1.0alpha1", "1.0a1"),
+            ("1.0a1", "1.0a1"),
+            ("1.0beta1", "1.0b1"),
+            ("1.0b1", "1.0b1"),
+            ("1.0c1", "1.0rc1"),
+            ("1.0rc1", "1.0rc1"),
+            ("1.0pre1", "1.0rc1"),
+            ("1.0preview1", "1.0rc1"),
+        ];
+        for (spelling, canonical) in cases {
+            let spelling = Version::parse(spelling).unwrap();
+            let canonical = Version::parse(canonical).unwrap();
+            assert!(spelling.same_public(&canonical), "{spelling:?} / {canonical:?}");
+        }
+        assert!(!matches_specifier("<=1.0b1", "1.0preview1").unwrap());
     }
 }

@@ -241,20 +241,43 @@ fn read_plan(
     if manifest.requires_setup() {
         let store = store::Store::open()?;
         let dynamic_dependencies = manifest.dynamic_dependencies;
-        if let Err(error) = manifest.prepare_setup(platform, dir, &store, selection.pin.version) {
-            if !dynamic_dependencies {
-                return Err(error);
+        const MAX_SETUP_PROBES: usize = 3;
+        let mut selection_history = vec![selection.pin.version.to_string()];
+        let mut stabilized = false;
+        for _ in 0..MAX_SETUP_PROBES {
+            let probed_version = selection.pin.version;
+            if let Err(error) = manifest.prepare_setup(platform, dir, &store, probed_version) {
+                if !dynamic_dependencies {
+                    return Err(error);
+                }
+                let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
+                    return Err(error);
+                };
+                eprintln!(
+                    "blanket: setup.py metadata probe failed; using the requirements directory convention: {error}"
+                );
+                fallback.python = manifest.python.clone();
+                manifest = fallback;
+                selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
+                stabilized = true;
+                break;
             }
-            let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
-                return Err(error);
-            };
-            eprintln!(
-                "blanket: setup.py metadata probe failed; using the requirements directory convention: {error}"
-            );
-            fallback.python = manifest.python.clone();
-            manifest = fallback;
+
+            let next = pyselect::select_python_with_inputs(platform, &manifest.python)?;
+            if next.pin.version == probed_version {
+                selection = next;
+                stabilized = true;
+                break;
+            }
+            selection = next;
+            selection_history.push(selection.pin.version.to_string());
         }
-        selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
+        if !stabilized {
+            return Err(io::Error::other(format!(
+                "setup.py metadata probe and Python selection did not stabilize after {MAX_SETUP_PROBES} probes (oscillation: {})",
+                selection_history.join(" -> "),
+            )));
+        }
     }
     if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
         manifest.provenance.push_str(" (empty manifest)");
