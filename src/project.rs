@@ -283,6 +283,16 @@ fn environment_identity(
         let value = match p.kind {
             ArtifactKind::Wheel => format!("Wheel:{}", p.sha256),
             ArtifactKind::Sdist => {
+                // A git dependency is packed into a deterministic sdist first,
+                // so its identity is the ordinary sdist derivation over that
+                // archive's hash (a pure function of the commit's tree).
+                let owned;
+                let p = if p.git.is_some() {
+                    owned = crate::build::git_sdist_package(store, platform, p)?;
+                    &owned
+                } else {
+                    p
+                };
                 let sdist = crate::build::plan_sdist_identity_input(
                     store,
                     platform,
@@ -370,10 +380,17 @@ pub(crate) fn realize_env_at_depth(
             }
             // sdist -> wheel via sandboxed derivation (network denied).
             ArtifactKind::Sdist => {
+                let owned;
+                let source = if p.git.is_some() {
+                    owned = crate::build::git_sdist_package(store, platform, p)?;
+                    &owned
+                } else {
+                    p
+                };
                 crate::build::build_sdist_wheel_at_depth(
                     store,
                     platform,
-                    p,
+                    source,
                     &pin.version,
                     Some(plan),
                     sdist_depth + 1,
@@ -649,6 +666,7 @@ mod closure_platform_tests {
             url: format!("file://{}", archive.display()),
             sha256,
             kind: ArtifactKind::Sdist,
+            git: None,
         }
     }
 
@@ -681,6 +699,7 @@ mod closure_platform_tests {
             url: format!("file://{}", archive.display()),
             sha256,
             kind: ArtifactKind::Sdist,
+            git: None,
         }
     }
 
@@ -703,6 +722,7 @@ mod closure_platform_tests {
                 url: String::new(),
                 sha256: sha256.into(),
                 kind: ArtifactKind::Wheel,
+            git: None,
             }],
         };
         fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();

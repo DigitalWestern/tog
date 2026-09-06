@@ -25,19 +25,32 @@ and gc could not run — Codex hit its usage limit (resets 2026-09-12) — so
 those last fixes were verified against the findings and the gate by the
 supervising agent, not independently.
 
-**CLI (2026-09-06, branch `cli/levels-1-2`, not merged):** the command
-surface was rebuilt per CLI.md levels one and two — validated grammar with
-help/version/-C/-q/-v, bare `blanket` = sync, `blanket <script>`, `status`,
-`ls`, `doctor`, `completions`, `add`/`remove`/`update` (evidence ladder +
-delegation table), and `x`. Offline tests pass; the delegating rows were
-smoke-tested on Linux only. Needs: review, the Mac run, and the ignored
-per-ecosystem e2e tests for `add` before merging.
+**Every item in this file is now merged** (PRs #5–#17). Items 4 and 5 were
+finished on 2026-09-06 morning: git dependencies are realized from their commit
+in npm, python and cargo, and electron's release zip is provisioned into the
+cache its own installer reads.
 
-**Open:** item 4 (git dependencies) and item 5 (built-in artifacts list) are
-not started. The optional stage-6 live shared-store check still wants both
-machines. On Linux run e2e gates with `TMPDIR` on a real disk. Delegation:
-Codex Luna implements, Astra reviews; unit tests `cargo test`, e2e
-`cargo test -- --ignored`.
+**CLI (2026-09-06, branch `cli/levels-1-2`):** the command surface was rebuilt
+per CLI.md levels one and two — validated grammar with help/version/-C/-q/-v,
+bare `blanket` = sync, `blanket <script>`, `status`, `ls`, `doctor`,
+`completions`, `add`/`remove`/`update` (evidence ladder + delegation table),
+and `x`. Merged with main at PR #19. Needs: review, the Mac run, and the
+ignored per-ecosystem e2e tests for `add`.
+
+**Open:** SBOM `vcs` external references for git components; more provisioning
+entries (sharp <0.33, node-sass, sentry-cli) when a real project needs them;
+the optional stage-6 live shared-store check, which wants both machines. On
+Linux run e2e gates with `TMPDIR` on a real disk.
+
+**Review debt (read this before trusting the last stretch):** Codex hit its
+usage limit at 03:18 on 2026-09-06 and resets 2026-09-12. The final review
+round for items 7, 10, 12 and gc, and all of items 4 and 5, was done by the
+supervising agent rather than by an independent adversarial reviewer. Astra
+found roughly seventy real defects across the reviewed rounds — several
+security-relevant — so that gap is worth closing when credits return.
+
+Delegation: Codex Luna implements, Astra reviews (Claude subagents when Codex
+is rate-limited); unit tests `cargo test`, e2e `cargo test -- --ignored`.
 
 **What actually matters, in order** (the rest of this file is the
 backlog; this paragraph is the priority): the product is "one command in
@@ -104,14 +117,46 @@ This strengthens the enterprise pitch: the manifest stops being
 "everything is verified" and becomes "here are exactly the 3 of 400 that
 aren't," which is where their risk actually lives.
 
-## 4. Git dependencies via commit hash
+## 4. Git dependencies via commit hash — DONE (2026-09-06, all three ecosystems)
+
+Done: `src/gitsrc.rs` realizes a git source as a store object whose identity is
+(normalized URL, full commit) — fetch by commit, submodules at their recorded
+commits, `.git` removed, `rev-parse HEAD` verified against the request. npm
+consumes it from every lockfile spelling (package-lock `git+…`, pnpm
+`{repo, commit}` and gitHosted codeload tarballs, yarn classic), with the git
+object id standing in for the tarball digest in the environment identity. An
+unpinned ref is still refused, loudly: `resolve_ref` can pin one via
+`git ls-remote` when a caller wants that.
+
+Python is done too (2026-09-06): `pkg @ git+URL@<40-hex>` (with optional
+`#subdirectory=`) parses into a locked package carrying its git source, and
+realization packs the checkout into a deterministic `.tar.gz` (sorted names,
+fixed mtime/owner/mode), inserts it into the artifact cache under its own
+hash, and hands it to the ordinary sdist path — so build-system inspection,
+isolated build environments, native libraries and derivation identity all work
+unchanged, and the archive hash is a pure function of the commit's tree.
+
+Cargo is done too (2026-09-06): a lock `source = "git+<url>?rev=<ref>#<commit>"`
+(also `?branch=`/`?tag=`, or no query) is realized from its commit and vendored
+as a directory source with `{"files":{},"package":null}`, and the generated
+cargo config carries one `[source."git+…"]` stanza per source — keyed by the
+lockfile's exact string, which is what cargo matches — replaced by the vendor
+directory. The commit is an input of the vendor object's identity, so a
+different commit is a different object. An unpinned git source is refused,
+telling the user to add a `rev=` or regenerate the lock.
+
+Open: SBOM `vcs` external references for git components, and `blanket run`'s
+cargo path uses the project's own Cargo.lock to rebuild the stanzas (a plan is
+not in hand there); a lock that disagrees with the closure would be caught by
+cargo, not by blanket.
+
 
 Record repo plus exact commit, fetch, build from source in the sandbox
 (same path sdists already take). A commit hash is a fingerprint; this is
 a missing feature, not a hole in the model. It's how bun does it.
 Unblocks private forks, unreleased fixes, and unpublished libraries.
 
-## 5. Built-in artifacts list — PARTLY DONE (2026-09-06)
+## 5. Built-in artifacts list — DONE (2026-09-06)
 
 Done (`src/artifacts.rs`): the two families that do not need blanket to host
 a download table. Packages with a documented skip switch (puppeteer,
@@ -124,15 +169,22 @@ the published package's own source — add entries the same way, never from
 memory. Measured: django, earendil-works/pi and louislam/uptime-kuma all sync
 (canvas and sqlite3 compile against item 12's native library set).
 
-Still open — the original idea: **provisioning**, i.e. blanket downloads the
-artifact itself, verifies it, and plants it where the installer's cache lookup
-finds it, so the package really is installed rather than skipped. Electron
-first: the zip is at `https://github.com/electron/electron/releases/download/
-v{version}/electron-v{version}-{platform}.zip` with checksums in the same
-release's `SHASUMS256.txt`. The blocking detail is `@electron/get`'s cache
-layout, which must be verified against a real install rather than guessed.
-Then sharp (<0.33), node-sass, sentry-cli. The per-project escape hatch
-already exists: declare `blanket.artifacts` in package.json.
+Provisioning is done for electron: blanket fetches the release's
+`SHASUMS256.txt`, verifies the zip against it, and writes both into the
+directory `@electron/get` looks in — `<electron_config_cache>/<sha256 of the
+release directory URL>/` — so the installer finds them with the network
+denied. Every detail was read out of `@electron/get`'s published source
+(`install.js` passes `cacheRoot: process.env.electron_config_cache`;
+`Cache.getCacheDirectory` hashes the URL with query/fragment cleared and the
+path replaced by its dirname; the zip is verified against a `SHASUMS256.txt`
+read from the same cache, which is why both files are written). The checksum
+manifest is trust-on-first-use over HTTPS, like the pinned toolchain tables,
+and is recorded as `artifact_provisioned`.
+
+Next entries when a real project needs them: sharp (<0.33), node-sass,
+sentry-cli — add each the same way, by reading the package's own cache lookup
+rather than guessing. The per-project escape hatch remains: declare
+`blanket.artifacts` in package.json.
 
 ## 7. pnpm-lock.yaml (and yarn.lock) importer — DONE (2026-09-06)
 

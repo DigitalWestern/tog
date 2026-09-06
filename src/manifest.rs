@@ -2380,7 +2380,7 @@ fn uv_lock_manifest(
             return Ok(None);
         };
         let kind = package.files.iter().find(|f| f.url == file.url).map(|f| f.kind).unwrap_or(ArtifactKind::Wheel);
-        output.push(LockedPackage { name: package.name.clone(), version: package.version.clone(), filename: file.filename.clone(), url: file.url.clone(), sha256: file.sha256.clone(), kind });
+        output.push(LockedPackage { name: package.name.clone(), version: package.version.clone(), filename: file.filename.clone(), url: file.url.clone(), sha256: file.sha256.clone(), kind, git: None });
     }
     if output.is_empty() {
         return if explicit_requirements { Ok(Some(output)) } else { Ok(None) };

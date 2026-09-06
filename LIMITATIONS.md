@@ -154,10 +154,24 @@ sandbox, and uv fallback still delegates resolution.
   classic, and npm v7+ lockfiles**, including conflicting versions. The
   projection keeps the importer set outside the project under the forest;
   unsupported local sources still fail closed. Loud.
-- **Git sources are classified but not realized yet.** GitHub codeload,
-  archive, and git URL dependencies fail closed as `npm_git_dep` until NEXT.md
-  item 4 adds commit-source realization. Local `file:` links are projected
-  when the lock records their project-relative target.
+- **Git sources are realized only when pinned to a full commit** (NEXT.md
+  item 4). A lockfile entry naming a 40-character commit — `git+https`,
+  `git+ssh`, a GitHub codeload/archive tarball, or a pnpm `{repo, commit}`
+  resolution — is fetched by that commit, stripped of `.git`, and stored as a
+  `git-source` object whose identity is (normalized URL, commit); the commit
+  is the verification, so no SRI is required or recorded. A branch, tag or
+  bare repository URL still fails closed as `npm_git_dep`, because the bytes
+  it names can change. npm runs a git dependency's `prepare` script; blanket
+  does not (it is unsandboxed build logic with its own dependency needs) and
+  records `git-dependency` naming the package. Python and Cargo git dependencies work the
+  same way: a python `pkg @ git+URL@<commit>` checkout is packed into a
+  deterministic sdist and built through the ordinary sdist path, and a cargo
+  `git+…#<commit>` source is vendored as a directory source whose commit is an
+  identity input. Cargo git dependencies are NOT re-verified against the
+  project's Cargo.lock at `blanket run` time: the config stanzas are rebuilt
+  from that lock, so a lock edited after a sync is caught by cargo, not by
+  blanket. Local `file:` links are projected when
+  the lock records their project-relative target.
 - **Install scripts that need network for LOGIC** (not just artifacts) are
   permissive with exception `install-script-failed`; strict via policy.
   Declared-artifacts only covers downloads whose cache location matches the

@@ -930,6 +930,7 @@ build-backend = "hatchling.build"
                 url: String::new(),
                 sha256: "a".repeat(64),
                 kind: crate::types::ArtifactKind::Wheel,
+                git: None,
             }],
         };
         assert_eq!(

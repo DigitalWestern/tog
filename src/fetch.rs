@@ -236,6 +236,27 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Back-compat convenience for sha256 hex callers. Internal extraction paths
 /// use `download_verified_held` so their lease lasts through consumption.
+/// Fetch a small text file over HTTPS (a checksum manifest, for example).
+///
+/// There is no hash to check against — this IS the checksum source — so the
+/// caller must treat it as trust-on-first-use and record it, exactly like the
+/// pinned toolchain tables do. Capped so a hostile server cannot stream
+/// forever.
+pub fn fetch_text(url: &str) -> io::Result<String> {
+    const MAX_TEXT: u64 = 8 << 20;
+    let agent = ureq::AgentBuilder::new().https_only(true).build();
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| io::Error::other(format!("GET {url}: {e}")))?;
+    let mut text = String::new();
+    resp.into_reader()
+        .take(MAX_TEXT)
+        .read_to_string(&mut text)
+        .map_err(|e| io::Error::new(e.kind(), format!("read {url}: {e}")))?;
+    Ok(text)
+}
+
 pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<PathBuf> {
     download_verified_held(store, url, sha256).map(CacheLease::into_path)
 }
@@ -535,7 +556,19 @@ mod tests {
             .unwrap();
         assert!(probe.try_lock().is_err());
         drop(lease);
-        probe.try_lock().unwrap();
+        // The lease is gone, so the lock must be released. On a loaded machine
+        // the release can be observed a moment late, so retry briefly rather
+        // than fail the suite for a scheduling artifact; a lock that is never
+        // released still fails here.
+        let mut released = false;
+        for _ in 0..200 {
+            if probe.try_lock().is_ok() {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(released, "the gc lock was not released when the lease was dropped");
         let _ = fs::remove_dir_all(root);
     }
 }

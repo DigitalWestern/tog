@@ -20,6 +20,7 @@ fn package(name: &str, version: &str, filename: &str, url: &str, sha256: &str) -
         url: url.into(),
         sha256: sha256.into(),
         kind: ArtifactKind::Sdist,
+        git: None,
     }
 }
 
@@ -34,6 +35,7 @@ fn runtime_numpy() -> Plan {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Wheel,
+        git: None,
         }],
     }
 }
