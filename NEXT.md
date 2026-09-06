@@ -161,7 +161,12 @@ Three misses are `no_inputs`, and one of them is not a miss at all.
   `empty_manifest` (found, empty) vs `unreadable_manifest` (found, could
   not parse — always a blanket bug).
 
-## 11. Build isolation for compiled sdists — the wall behind the rest
+## 11. Build isolation for compiled sdists — DONE (2026-09-05)
+
+Implemented archive inspection, cached PEP 517 build environments,
+schema-3 sdist identities, recursive build-requirement sdists, and pinned
+Rust/Cargo vendoring for compiled sdists. Added ignored real-package coverage
+for tomli-w, insightface 0.7.3, and tokenizers 0.13.3.
 
 Three misses are sdists that need things at build time that blanket does
 not give the sandbox: tokenizers 0.13.3 (Rust), insightface 0.7.3
@@ -181,13 +186,15 @@ only the interpreter.
   (the sandbox has no network — vendoring is the only option). Record the
   Rust toolchain id in the fingerprint.
 - Edge cases: sdists with no `Cargo.lock` (resolve once, record the lock
-  in the closure as unattested); `setup_requires` in old setup.py
-  (treat as build requires); backends that need `cmake`/`ninja` from
+  as unattested); `setup_requires` in old setup.py (not handled because
+  pip would need network in the sandbox); backends that need `cmake`/`ninja` from
   PyPI wheels (they resolve fine as build requires); numpy ABI — build
   against the **oldest** numpy the runtime env allows, or the runtime
   env's exact numpy, never a newer one.
 
 ## 12. Pinned native libraries — optional until a real project needs it
+
+Later: run uv's resolve-time metadata builds inside the sandbox.
 
 manimpango needs pango+cairo headers through pkg-config; nokogiri only
 needed host zlib. Two honest options, pick when the first real project
