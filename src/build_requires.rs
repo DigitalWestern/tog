@@ -4,6 +4,7 @@
 //! executed only later, by pip inside the existing build sandbox.
 
 use crate::platform::Platform;
+use crate::pyselect;
 use crate::store::Store;
 use crate::types::Plan;
 use std::fs::{self, File};
@@ -33,6 +34,15 @@ pub(crate) struct ArchiveInfo {
 enum ArchiveKind {
     TarGz,
     Zip,
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveEntry {
+    /// The name as stored in the archive.  Archive readers need this exact
+    /// spelling (notably tar members prefixed with `./`).
+    original: String,
+    /// The validated, normalized spelling used for root and member checks.
+    normalized: String,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -67,6 +77,11 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     if raw.is_empty() {
         return Ok(None);
     }
+    if raw.starts_with('-') {
+        return Err(invalid(format!(
+            "sdist archive contains an option-like path {raw:?}"
+        )));
+    }
     let mut parts = Vec::new();
     for component in Path::new(raw).components() {
         match component {
@@ -91,7 +106,7 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     }
 }
 
-fn tar_entries(path: &Path) -> io::Result<Vec<String>> {
+fn tar_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
     let output = Command::new("/usr/bin/tar")
         .args(["-tzf"])
         .arg(path)
@@ -111,13 +126,16 @@ fn tar_entries(path: &Path) -> io::Result<Vec<String>> {
         .map(|line| {
             let text = std::str::from_utf8(line)
                 .map_err(|_| invalid("sdist archive listing is not UTF-8"))?;
-            clean_entry(text)
+            Ok(clean_entry(text)?.map(|normalized| ArchiveEntry {
+                original: text.to_string(),
+                normalized,
+            }))
         })
         .filter_map(|entry| entry.transpose())
         .collect()
 }
 
-fn zip_entries(path: &Path) -> io::Result<Vec<String>> {
+fn zip_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)
         .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
@@ -126,28 +144,38 @@ fn zip_entries(path: &Path) -> io::Result<Vec<String>> {
         let entry = archive
             .by_index(index)
             .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
-        if let Some(name) = clean_entry(entry.name())? {
-            entries.push(name);
+        if let Some(normalized) = clean_entry(entry.name())? {
+            entries.push(ArchiveEntry {
+                original: entry.name().to_string(),
+                normalized,
+            });
         }
     }
     Ok(entries)
 }
 
-fn entries(path: &Path, kind: ArchiveKind) -> io::Result<Vec<String>> {
+fn entries(path: &Path, kind: ArchiveKind) -> io::Result<Vec<ArchiveEntry>> {
     match kind {
         ArchiveKind::TarGz => tar_entries(path),
         ArchiveKind::Zip => zip_entries(path),
     }
 }
 
-fn archive_root(entries: &[String], path: &Path) -> io::Result<String> {
+fn archive_root(entries: &[ArchiveEntry], path: &Path) -> io::Result<String> {
     let root = entries
         .iter()
-        .find_map(|entry| entry.split('/').next().filter(|part| !part.is_empty()))
+        .find_map(|entry| {
+            entry
+                .normalized
+                .split('/')
+                .next()
+                .filter(|part| !part.is_empty())
+        })
         .ok_or_else(|| invalid(format!("sdist archive {} is empty", path.display())))?;
     let root = root.to_string();
     if entries.iter().any(|entry| {
         entry
+            .normalized
             .split('/')
             .next()
             .map(|part| part != root)
@@ -175,6 +203,7 @@ fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<
             let output = Command::new("/usr/bin/tar")
                 .args(["-xOzf"])
                 .arg(path)
+                .arg("--")
                 .arg(member)
                 .output()
                 .map_err(|e| io::Error::new(e.kind(), format!("read {member} from sdist: {e}")))?;
@@ -293,86 +322,6 @@ fn normalized_name(name: &str) -> String {
     name.to_ascii_lowercase().replace(['_', '.'], "-")
 }
 
-fn numeric_version(version: &str) -> Option<Vec<u64>> {
-    let mut result = Vec::new();
-    for component in version.trim().split('.') {
-        let digits = component
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect::<String>();
-        if digits.is_empty() {
-            return None;
-        }
-        result.push(digits.parse().ok()?);
-    }
-    Some(result)
-}
-
-fn compare_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
-    let mut left = numeric_version(left)?;
-    let mut right = numeric_version(right)?;
-    left.resize(left.len().max(right.len()), 0);
-    right.resize(right.len().max(left.len()), 0);
-    Some(left.cmp(&right))
-}
-
-fn admits_version(spec: &str, pinned: &str) -> bool {
-    let compact = spec
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
-        .collect::<String>();
-    if compact.is_empty() {
-        return true;
-    }
-    compact.split(',').all(|part| {
-        let operators = ["===", "~=", ">=", "<=", "!=", "==", ">", "<"];
-        let Some(operator) = operators.iter().find(|operator| part.starts_with(**operator))
-        else {
-            return false;
-        };
-        let value = &part[operator.len()..];
-        if value.is_empty() {
-            return false;
-        }
-        if let Some(prefix) = value.strip_suffix(".*") {
-            return *operator == "=="
-                && pinned
-                    .split('.')
-                    .zip(prefix.split('.'))
-                    .all(|(actual, expected)| actual == expected);
-        }
-        let Some(ordering) = compare_versions(pinned, value) else {
-            return false;
-        };
-        match *operator {
-            "==" | "===" => ordering == std::cmp::Ordering::Equal,
-            "!=" => ordering != std::cmp::Ordering::Equal,
-            ">=" => ordering != std::cmp::Ordering::Less,
-            "<=" => ordering != std::cmp::Ordering::Greater,
-            ">" => ordering == std::cmp::Ordering::Greater,
-            "<" => ordering == std::cmp::Ordering::Less,
-            "~=" => {
-                let parts = numeric_version(value).unwrap_or_default();
-                let mut upper = parts.clone();
-                if upper.len() < 2 {
-                    upper.resize(2, 0);
-                }
-                let index = upper.len().saturating_sub(2);
-                upper[index] += 1;
-                let upper = upper
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(".");
-                ordering != std::cmp::Ordering::Less
-                    && compare_versions(pinned, &upper)
-                        .is_some_and(|ordering| ordering == std::cmp::Ordering::Less)
-            }
-            _ => false,
-        }
-    })
-}
-
 pub(crate) fn fast_path(requires: &[String]) -> bool {
     requires.iter().all(|requirement| {
         let Some((name, spec, extras)) = requirement_name(requirement) else {
@@ -387,7 +336,7 @@ pub(crate) fn fast_path(requires: &[String]) -> bool {
             "pip" => "26.2.1",
             _ => return false,
         };
-        admits_version(spec, pinned)
+        pyselect::matches_specifier(spec, pinned).unwrap_or(false)
     })
 }
 
@@ -411,7 +360,7 @@ pub(crate) fn lock_cache_key(
     let mut sorted = requires.to_vec();
     sorted.sort();
     let input = format!(
-        "{}\0{}\0{}\0{}",
+        "build-resolve/2\0{}\0{}\0{}\0{}",
         platform.triple(),
         python_version,
         sorted.join("\n"),
@@ -436,17 +385,13 @@ pub(crate) fn resolve_build_plan(
     let lock = match fs::read_to_string(&lock_path) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut requested = requires.to_vec();
-            requested.push("pip==26.2.1".into());
-            if let Some(numpy) = &numpy {
-                requested.push(numpy.clone());
-            }
-            let text = requested.join("\n") + "\n";
+            let text = requires_resolution_text(requires);
             let lock = crate::pypi::lock_requirement_text_with_uv(
                 store,
                 platform,
                 &text,
                 python_version,
+                numpy.as_deref(),
             )?;
             fs::write(&lock_path, &lock)?;
             lock
@@ -464,15 +409,24 @@ pub(crate) fn resolve_build_plan(
     Ok(plan)
 }
 
+fn requires_resolution_text(requires: &[String]) -> String {
+    let mut requested = requires.to_vec();
+    requested.push("pip==26.2.1".into());
+    requested.join("\n") + "\n"
+}
+
 pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
     let kind = archive_kind(path)?;
     let entries = entries(path, kind)?;
     let root = archive_root(&entries, path)?;
     let pyproject_member = format!("{root}/pyproject.toml");
+    let pyproject_entry = entries
+        .iter()
+        .find(|entry| entry.normalized == pyproject_member);
     let (requires, backend, explicit_manifest) =
-        if entries.iter().any(|entry| entry == &pyproject_member) {
+        if let Some(entry) = pyproject_entry {
             parse_pyproject(
-                &archive_file(path, kind, &pyproject_member)?,
+                &archive_file(path, kind, &entry.original)?,
                 &pyproject_member,
             )?
         } else {
@@ -486,7 +440,9 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
         .map(|manifest| {
             if !entries
                 .iter()
-                .any(|entry| root_relative(entry, &root).as_deref() == Some(manifest.as_str()))
+                .any(|entry| {
+                    root_relative(&entry.normalized, &root).as_deref() == Some(manifest.as_str())
+                })
             {
                 return Err(invalid(format!(
                     "sdist build backend points to missing Cargo manifest {manifest}"
@@ -501,19 +457,26 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
             .find(|candidate| {
                 entries
                     .iter()
-                    .any(|entry| root_relative(entry, &root).as_deref() == Some(**candidate))
+                    .any(|entry| {
+                        root_relative(&entry.normalized, &root).as_deref() == Some(**candidate)
+                    })
             })
             .map(PathBuf::from)
     });
     let native_build = entries.iter().any(|entry| {
-        let Some(relative) = root_relative(entry, &root) else {
+        let Some(relative) = root_relative(&entry.normalized, &root) else {
             return false;
         };
         let path = Path::new(&relative);
         path.file_name().and_then(|name| name.to_str()) == Some("binding.gyp")
             || matches!(
                 path.extension().and_then(|extension| extension.to_str()),
-                Some("c") | Some("cc") | Some("pyx")
+                Some("c")
+                    | Some("cc")
+                    | Some("cpp")
+                    | Some("cxx")
+                    | Some("C")
+                    | Some("pyx")
             )
     });
     let rust_build = cargo_manifest.is_some()
@@ -546,6 +509,11 @@ pub(crate) fn extract_sdist(
     fs::create_dir_all(destination)?;
     match archive_kind(path)? {
         ArchiveKind::TarGz => {
+            // Validate archive member paths before tar gets a chance to
+            // materialize anything.  The same check is performed by
+            // inspect_sdist, but extract_sdist is also used directly in the
+            // Rust planning path.
+            let _ = entries(path, ArchiveKind::TarGz)?;
             let status = Command::new("/usr/bin/tar")
                 .args(["-xzf"])
                 .arg(path)
@@ -573,6 +541,12 @@ pub(crate) fn extract_sdist(
                 let mut entry = archive
                     .by_index(index)
                     .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
+                if entry.is_symlink() {
+                    return Err(invalid(format!(
+                        "sdist archive contains a symlink entry: {}",
+                        entry.name()
+                    )));
+                }
                 let Some(name) = clean_entry(entry.name())? else {
                     continue;
                 };
@@ -594,6 +568,7 @@ pub(crate) fn extract_sdist(
         }
     }
     let source = destination.canonicalize()?;
+    validate_extracted_links(&source)?;
     if let Some(manifest) = &info.cargo_manifest {
         let path = source.join(manifest);
         if !path.starts_with(&source) || !path.is_file() {
@@ -604,6 +579,117 @@ pub(crate) fn extract_sdist(
         }
     }
     Ok(source)
+}
+
+fn validate_extracted_links(root: &Path) -> io::Result<()> {
+    fn walk(root: &Path, path: &Path) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            let target = fs::read_link(path)?;
+            if target.is_absolute() || !link_target_within(root, path, &target)? {
+                return Err(invalid(format!(
+                    "extracted sdist link escapes the source root: {} -> {}",
+                    path.display(),
+                    target.display()
+                )));
+            }
+            return Ok(());
+        }
+        if file_type.is_dir() {
+            for entry in fs::read_dir(path)? {
+                walk(root, &entry?.path())?;
+            }
+            return Ok(());
+        }
+        if file_type.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() > 1 {
+                    return Err(invalid(format!(
+                        "extracted sdist contains a hard link: {}",
+                        path.display()
+                    )));
+                }
+            }
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "extracted sdist contains a special file: {}",
+            path.display()
+        )))
+    }
+
+    walk(root, root)
+}
+
+/// Resolve a link lexically while following existing symlinks.  This also
+/// catches a relative link whose apparent target is inside the tree but which
+/// passes through another symlink to outside it.  Missing final targets are
+/// allowed as long as their lexical path remains inside the root.
+fn link_target_within(root: &Path, link: &Path, target: &Path) -> io::Result<bool> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+
+    if target.is_absolute() {
+        return Ok(false);
+    }
+    let candidate = link
+        .parent()
+        .ok_or_else(|| invalid("extracted sdist link has no parent"))?
+        .join(target);
+    let relative = candidate
+        .strip_prefix(root)
+        .map_err(|_| invalid("extracted sdist link is outside its source root"))?;
+    let mut pending: VecDeque<OsString> = relative
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect();
+    let mut current = root.to_path_buf();
+    let mut symlink_count = 0;
+    while let Some(component) = pending.pop_front() {
+        if component == "." {
+            continue;
+        }
+        if component == ".." {
+            if current == root || !current.pop() {
+                return Ok(false);
+            }
+            continue;
+        }
+        let next = current.join(&component);
+        match fs::symlink_metadata(&next) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                symlink_count += 1;
+                if symlink_count > 40 {
+                    return Err(invalid("extracted sdist contains a symlink loop"));
+                }
+                let nested = fs::read_link(&next)?;
+                if nested.is_absolute() {
+                    return Ok(false);
+                }
+                let mut replacement: VecDeque<OsString> = nested
+                    .components()
+                    .map(|component| component.as_os_str().to_os_string())
+                    .collect();
+                replacement.append(&mut pending);
+                pending = replacement;
+            }
+            Ok(_) => current = next,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // There cannot be a symlink below a missing component.  Keep
+                // processing the remaining components so `..` still cannot
+                // cross the root boundary.
+                current = next;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(current.starts_with(root))
 }
 
 #[cfg(test)]
@@ -718,14 +804,112 @@ build-backend = "hatchling.build"
     }
 
     #[test]
+    fn rejects_option_like_tar_root_without_executing_it() {
+        let dir = temp_dir("tar-injection");
+        let root_name = "--checkpoint-action=exec=touch marker;#";
+        let root = dir.join(root_name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("pyproject.toml"), b"[build-system]\nrequires = []\n").unwrap();
+        let archive = dir.join("malicious.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&dir)
+            .arg("--")
+            .arg(root_name)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&root).unwrap();
+
+        let marker = std::env::current_dir().unwrap().join("marker");
+        let _ = fs::remove_file(&marker);
+        let error = inspect_sdist(&archive).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!marker.exists(), "tar option-like member was executed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tar_member_with_dot_prefix_is_inspected() {
+        let dir = temp_dir("dot-prefix");
+        let root = dir.join("example-1.0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            b"[build-system]\nrequires = [\"hatchling>=1\"]\nbuild-backend = \"hatchling.build\"\n",
+        )
+        .unwrap();
+        let path = dir.join("dot-prefix.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&path)
+            .args(["-C"])
+            .arg(&dir)
+            .arg("./example-1.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&root).unwrap();
+
+        let info = inspect_sdist(&path).unwrap();
+        assert_eq!(info.build_requires, vec!["hatchling>=1"]);
+        assert_eq!(info.build_backend, "hatchling.build");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_archive_symlink_escape_before_cargo_work() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink-escape");
+        let root = dir.join("example-1.0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            b"[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "blanket-escape-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&outside);
+        symlink(&outside, root.join("Cargo.lock")).unwrap();
+        let path = dir.join("symlink-escape.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&path)
+            .args(["-C"])
+            .arg(&dir)
+            .arg("example-1.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&root).unwrap();
+
+        let info = inspect_sdist(&path).unwrap();
+        let error = extract_sdist(&path, &dir.join("source"), &info).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!outside.exists(), "extraction created a file outside scratch");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn fast_path_predicate_covers_build_requirement_table() {
         let cases = [
-            ("setuptools>=40.8.0", true),
+            ("setuptools~=83.1", false),
+            ("setuptools>=40.8", true),
+            ("setuptools==84.0.0", true),
+            ("setuptools==84.0.0rc1", false),
             ("setuptools<70", false),
             ("Cython", false),
             ("maturin>=1,<2", false),
             ("pip==26.2.1", true),
             ("wheel~=0.48", true),
+            ("wheel!=0.48.0", false),
         ];
         for (requirement, expected) in cases {
             assert_eq!(fast_path(&[requirement.into()]), expected, "{requirement}");
@@ -759,5 +943,15 @@ build-backend = "hatchling.build"
         };
         assert_eq!(numpy_constraint(Some(&without_numpy)), None);
         assert_eq!(numpy_constraint(None), None);
+    }
+
+    #[test]
+    fn runtime_numpy_is_a_constraint_not_a_build_requirement() {
+        let requirements = requires_resolution_text(&["setuptools>=40.8".into()]);
+        assert!(requirements.lines().any(|line| line == "setuptools>=40.8"));
+        assert!(requirements.lines().any(|line| line == "pip==26.2.1"));
+        assert!(!requirements
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("numpy")));
     }
 }

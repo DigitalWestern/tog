@@ -217,6 +217,18 @@ Linux gate is:
     BLANKET_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp \
     BLANKET_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
 
+Later: run uv's resolve-time metadata builds inside the sandbox.
+
+manimpango needs pango+cairo headers through pkg-config; nokogiri only
+needed host zlib. Two honest options, pick when the first real project
+asks: (a) a small pinned library set (pango, cairo, libffi, openssl,
+zlib, libxml2…) realized like any other toolchain object and mounted
+read-only, with `PKG_CONFIG_PATH` pointed at it — ids stay host-
+independent; or (b) allow declared host library reads under an
+unattested exception, which is faster but makes the object depend on the
+ host. (a) is the one consistent with the store model; it also subsumes
+ the "pinned Linux C toolchain" roadmap item.
+
 ## Hit-rate bookkeeping (so the number stays honest)
 
 - Every miss carries a class that maps to an item in this file; a miss

@@ -135,6 +135,15 @@ fn rust_identity(platform: Platform, components: &[&'static RustComponent]) -> I
     }
 }
 
+pub(crate) fn rust_object_id(platform: Platform, version: &str) -> io::Result<String> {
+    if version != RUST_VERSION {
+        return Err(err(format!(
+            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
+        )));
+    }
+    Ok(rust_identity(platform, &rust_components(platform)?).object_id())
+}
+
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
@@ -493,34 +502,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
 }
 
 fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
-    let mut crates = plan.crates.clone();
-    crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
-
-    let mut seen = BTreeSet::new();
-    let mut inputs = BTreeMap::from([(String::from("schema"), String::from("cargo-vendor/1"))]);
-    for krate in &mut crates {
-        validate_crate_component("name", &krate.name)?;
-        validate_crate_component("version", &krate.version)?;
-        let checksum = normalize_checksum(&krate.sha256)?;
-        if !seen.insert((krate.name.clone(), krate.version.clone())) {
-            return Err(err(format!(
-                "duplicate Cargo crate {}@{}",
-                krate.name, krate.version
-            )));
-        }
-        krate.sha256 = checksum.clone();
-        inputs.insert(format!("crate:{}@{}", krate.name, krate.version), checksum);
-    }
-    let identity = Identity {
-        kind: "cargo-vendor".into(),
-        name: "vendor".into(),
-        version: if crates.is_empty() {
-            "1".into()
-        } else {
-            crates.len().to_string()
-        },
-        inputs,
-    };
+    let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -596,6 +578,42 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         .commit(&identity, &staged, &[])
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
+}
+
+fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> {
+    let mut crates = plan.crates.clone();
+    crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+
+    let mut seen = BTreeSet::new();
+    let mut inputs = BTreeMap::from([(String::from("schema"), String::from("cargo-vendor/1"))]);
+    for krate in &mut crates {
+        validate_crate_component("name", &krate.name)?;
+        validate_crate_component("version", &krate.version)?;
+        let checksum = normalize_checksum(&krate.sha256)?;
+        if !seen.insert((krate.name.clone(), krate.version.clone())) {
+            return Err(err(format!(
+                "duplicate Cargo crate {}@{}",
+                krate.name, krate.version
+            )));
+        }
+        krate.sha256 = checksum.clone();
+        inputs.insert(format!("crate:{}@{}", krate.name, krate.version), checksum);
+    }
+    let identity = Identity {
+        kind: "cargo-vendor".into(),
+        name: "vendor".into(),
+        version: if crates.is_empty() {
+            "1".into()
+        } else {
+            crates.len().to_string()
+        },
+        inputs,
+    };
+    Ok((crates, identity))
+}
+
+pub(crate) fn vendor_object_id(plan: &CargoPlan) -> io::Result<String> {
+    Ok(vendor_identity(plan)?.1.object_id())
 }
 
 #[derive(Serialize)]
