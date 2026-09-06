@@ -164,7 +164,12 @@ Three misses are `no_inputs`, and one of them is not a miss at all.
   `empty_manifest` (found, empty) vs `unreadable_manifest` (found, could
   not parse — always a blanket bug).
 
-## 11. Build isolation for compiled sdists — the wall behind the rest
+## 11. Build isolation for compiled sdists — DONE (2026-09-05)
+
+Implemented archive inspection, cached PEP 517 build environments,
+schema-3 sdist identities, recursive build-requirement sdists, and pinned
+Rust/Cargo vendoring for compiled sdists. Added ignored real-package coverage
+for tomli-w, insightface 0.7.3, and tokenizers 0.13.3.
 
 Three misses are sdists that need things at build time that blanket does
 not give the sandbox: tokenizers 0.13.3 (Rust), insightface 0.7.3
@@ -184,13 +189,44 @@ only the interpreter.
   (the sandbox has no network — vendoring is the only option). Record the
   Rust toolchain id in the fingerprint.
 - Edge cases: sdists with no `Cargo.lock` (resolve once, record the lock
-  in the closure as unattested); `setup_requires` in old setup.py
-  (treat as build requires); backends that need `cmake`/`ninja` from
+  as unattested); `setup_requires` in old setup.py (not handled because
+  pip would need network in the sandbox); backends that need `cmake`/`ninja` from
   PyPI wheels (they resolve fine as build requires); numpy ABI — build
   against the **oldest** numpy the runtime env allows, or the runtime
   env's exact numpy, never a newer one.
 
-## 12. Pinned native libraries — optional until a real project needs it
+## 12. Pinned native libraries — DONE (2026-09-06)
+
+Implemented option (a), Linux first. `src/nativelibs.rs` realizes one
+input-addressed `native-libs/libset/3` object from a pinned conda-forge
+closure, relocates every text/binary prefix occurrence during staging, and
+exposes it read-only to compiled sdists and npm `node-gyp` builds. The conda
+pkg-config wrapper is replaced with a direct real-binary launcher so the
+libset-only `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR` cannot be widened by host
+paths. Because relocation embeds the absolute object path, the canonical
+store root is also an identity input: different `BLANKET_STORE` roots produce
+different native ids. These wrapper, relocation, and identity changes are the
+libset v2 -> v3 bump. The native object id is recorded in the sdist/npm
+derivation and environment identities; Python and Node closure envelopes
+retain the reference for liveness/GC. Fast pure setuptools sdists do not
+mount it; archives with C/C++/Cython or `binding.gyp` and all isolated PEP 517
+builds do.
+
+The Linux pin is the 2022-era conda-forge closure listed in
+`src/nativelibs.rs` (legacy `.tar.bz2` records; the extractor also supports
+`.conda`). It includes pango/cairo and their complete repodata dependency
+closure, including the shared GCC 12 runtime. The realized object is about
+289.1 MiB on Fedora 44. `manimpango==0.6.1` now builds from its sdist and
+imports successfully with only the object-library runpath at runtime.
+
+macOS arm64 is intentionally not realized yet: no native v1 pin is shipped,
+and requesting it fails closed before store/network access. The ignored
+Linux gate is:
+
+    BLANKET_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp \
+    BLANKET_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
+
+Later: run uv's resolve-time metadata builds inside the sandbox.
 
 manimpango needs pango+cairo headers through pkg-config; nokogiri only
 needed host zlib. Two honest options, pick when the first real project
@@ -199,8 +235,8 @@ zlib, libxml2…) realized like any other toolchain object and mounted
 read-only, with `PKG_CONFIG_PATH` pointed at it — ids stay host-
 independent; or (b) allow declared host library reads under an
 unattested exception, which is faster but makes the object depend on the
-host. (a) is the one consistent with the store model; it also subsumes
-the "pinned Linux C toolchain" roadmap item.
+ host. (a) is the one consistent with the store model; it also subsumes
+ the "pinned Linux C toolchain" roadmap item.
 
 ## Hit-rate bookkeeping (so the number stays honest)
 
@@ -213,7 +249,8 @@ the "pinned Linux C toolchain" roadmap item.
   item; update the HITRATE.md table with a dated column rather than
   overwriting.
 
-## Later, but before anyone runs it for a year
+## 13. Store GC — DONE (2026-09-06)
 
-- `blanket gc`: delete store objects, forests, and backups that no
-  project points at. Store grows forever today.
+Implemented `blanket gc` with project-root registration, closure and
+transitive object liveness, keep-days cache retention, dry-run reporting,
+stale-stage cleanup, and opt-in `--project` forest/backup cleanup.

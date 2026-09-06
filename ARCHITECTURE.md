@@ -173,6 +173,35 @@ at the HOME-relative path before scripts run; the package's own downloader
 finds its cache warm and never touches the (denied) network. Artifacts are
 identity inputs, so the env object id changes with them.
 
+## Pinned native libraries (Linux first)
+
+Compiled Python sdists and npm `node-gyp` builds that need C libraries get a
+single pinned `native-libs/libset/3` object. Version 3 is a fixed conda-forge
+closure for Linux x86_64: pkg-config, zlib, libffi, OpenSSL, expat, libpng,
+freetype, fontconfig, pixman, cairo, glib, harfbuzz, fribidi, pango, libxml2,
+libiconv, and the exact runtime closure recorded in the table in
+`src/nativelibs.rs`. The selected historical records are `.tar.bz2` because
+those are the available forms for this coherent pin; the extractor also
+supports modern `.conda` archives with `/usr/bin/zstd`.
+
+The object is staged at its final input-addressed path. Conda's
+`info/paths.json` or legacy `info/has_prefix` entries are rewritten there:
+text prefixes become the object path, while every binary-string occurrence
+uses a same-length null-padded replacement. Unlisted payload hardlinks are
+also swept, and staging rejects any declared placeholder that survives. The
+conda pkg-config wrapper is replaced with a direct real-binary launcher so
+the isolated `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR` cannot be widened. Build
+sandboxes mount the object read-only and set those variables, compiler include
+and link flags, an object `rpath`, and the object `bin` directory. The native
+set id includes the canonical store root and is an input of every derivation
+that mounts it, including the Python and npm environment identities.
+
+Extensions retain the object-library runpath, so `blanket run` does not need
+the host's library search path. Python and npm closure envelopes record the
+native object reference for liveness/GC. macOS arm64 has no v3 native pin yet;
+requests fail closed with the normal unsupported-platform error and do not
+touch the store or network.
+
 ## The cargo tailor (wrap hermetically — possibly permanently)
 
 Rust has no installed-environment analog: cargo compiles source crates into
@@ -423,11 +452,15 @@ the file held two writers' interleaved bytes).
   whole-environment level. Per-package objects are a later optimization
   the identity scheme already permits.
 - **Sdists build in a sandbox** (macOS: sandbox-exec/Seatbelt; Linux: bubblewrap with user/net/pid/ipc/uts namespaces — same `BuildSpec` contract, see `src/sandbox.rs` and LINUX_PORT.md stage 3; deny-by-default, no
-  network) using a pinned hermetic pip/setuptools/wheel toolchain; the
-  built wheel is a derivation-style store object. v0 sandbox limitations,
-  eyes open: mach-lookup and process-exec are still broad (Seatbelt
-  hermeticity, not hostile-code containment), and macOS deployment-target
-  versions in wheel tags are not compared.
+  network). Blanket inspects the archive's `pyproject.toml` before any
+  build code runs. Legacy/setuptools-compatible requirements retain the
+  `sdist-build/2` derivation; other PEP 517 requirements are resolved into
+  one immutable Python build environment and use `sdist-build/3`, whose
+  inputs include that environment. Rust sdists additionally include the
+  pinned Rust and Cargo-vendor objects; a generated `Cargo.lock` is recorded
+  as unattested. The sandbox remains cooperative hermeticity (mach-lookup
+  and process-exec are broad), and host C/C++ SDK versions are not in the
+  identity.
 - **CPython pins are trust-on-first-use** (hashes computed at pin time).
   A signed provider manifest replaces the static table post-MVP.
 - **No solver**: blanket consumes existing hash-pinned lockfiles
