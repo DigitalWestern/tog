@@ -888,7 +888,15 @@ pub fn env_reference(env_object: &Path) -> io::Result<Option<serde_json::Value>>
         .and_then(Path::parent)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "environment object has no store root"))?;
     let metadata = store_root.join("meta").join(format!("{id}.json"));
-    let value: serde_json::Value = serde_json::from_reader(File::open(&metadata)?).map_err(|e| {
+    // An environment object with no recorded metadata cannot carry a
+    // native_libs input (it predates the library set, or is a synthetic
+    // object): that is "no reference", not a projection failure.
+    let file = match File::open(&metadata) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let value: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
         io::Error::new(io::ErrorKind::InvalidData, format!("parse {}: {e}", metadata.display()))
     })?;
     let Some(native_id) = value["identity"]["inputs"]["native_libs"].as_str() else {

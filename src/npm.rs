@@ -2229,8 +2229,11 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                patch: None,
             }],
             links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
         };
         let identity = node_env_identity(&store, &node_obj, &plan, &[], None).unwrap();
         let staged = store.stage().unwrap();
@@ -2273,8 +2276,11 @@ mod tests {
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
                 optional: false,
+                patch: None,
             }],
             links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
         };
         let digest = Digest::from_sri(TEST_SRI).unwrap();
         write_archive_classification(&store, &digest, false).unwrap();
