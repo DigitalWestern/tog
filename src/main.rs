@@ -23,7 +23,8 @@ USAGE:
   blanket run dev/test    run the package.json script inside the projected env
                           (script wins over a same-named PATH executable)
   blanket sbom [--output <file>]  CycloneDX 1.5 SBOM from the synced closures
-  blanket gc [--dry-run] [--keep-days N] [--project]
+  blanket gc [--dry-run] [--keep-days N] [--project] [--collect-legacy]
+                          [--register <dir>...]
                           collect unreferenced objects and cached artifacts
   blanket store path      print the store root
   blanket store roots     list registered project roots
@@ -163,11 +164,38 @@ fn run_store_roots(args: &[String]) -> io::Result<()> {
 
 fn run_gc(args: &[String]) -> io::Result<()> {
     let mut options = gc::Options::default();
+    let mut register = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--dry-run" => options.dry_run = true,
             "--project" => options.project = true,
+            "--collect-legacy" => options.collect_legacy = true,
+            "--register" => {
+                index += 1;
+                let first = index;
+                while index < args.len() && !args[index].starts_with("--") {
+                    register.push(PathBuf::from(&args[index]));
+                    index += 1;
+                }
+                if first == index {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--register needs at least one project directory",
+                    ));
+                }
+                continue;
+            }
+            value if value.starts_with("--register=") => {
+                let path = &value["--register=".len()..];
+                if path.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--register needs a project directory",
+                    ));
+                }
+                register.push(PathBuf::from(path));
+            }
             "--keep-days" => {
                 index += 1;
                 let value = args.get(index).ok_or_else(|| {
@@ -193,6 +221,10 @@ fn run_gc(args: &[String]) -> io::Result<()> {
     }
     let store = store::Store::open()?;
     let mut stdout = io::stdout().lock();
+    for project in register {
+        let entry = store.register_root(&project)?;
+        writeln!(stdout, "blanket: registered root {}", entry.path.display())?;
+    }
     let report = gc::collect(&store, options, &mut stdout)?;
     let verb = if options.dry_run { "would free" } else { "freed" };
     writeln!(

@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 
 struct TempDir(PathBuf);
 
@@ -67,6 +68,13 @@ fn ok(output: Output, label: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn age(path: &Path) {
+    let old = SystemTime::now()
+        .checked_sub(Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
+    fs::File::open(path).unwrap().set_modified(old).unwrap();
+}
+
 #[test]
 #[ignore]
 fn gc_drops_deleted_node_project_but_keeps_python_root() {
@@ -96,12 +104,10 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
         ));
         let text = fs::read_to_string(meta).unwrap();
         if text.contains(r#""kind": "node-env""#) {
-            let status = Command::new("/usr/bin/touch")
-                .args(["-d", "11 minutes ago"])
-                .arg(entry.path())
-                .status()
+            let old = SystemTime::now()
+                .checked_sub(Duration::from_secs(11 * 60))
                 .unwrap();
-            assert!(status.success());
+            fs::File::open(entry.path()).unwrap().set_modified(old).unwrap();
         }
     }
 
@@ -140,4 +146,63 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
         ),
         "python after gc",
     );
+}
+
+/// Upgrade scenario: objects and closure files can predate the roots
+/// registry, while the project's root entry was never written. A default GC
+/// must refuse to sweep before migration, regardless of --keep-days.
+#[test]
+#[ignore]
+fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
+    let temp = TempDir::new();
+    let store = temp.0.join("store");
+    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        fs::create_dir_all(store.join(sub)).unwrap();
+    }
+    let id = format!("{}-legacy", "a".repeat(40));
+    let object = store.join("objects").join(&id);
+    fs::create_dir_all(&object).unwrap();
+    fs::write(object.join("payload"), b"pre-registry object").unwrap();
+    fs::write(
+        store.join("meta").join(format!("{id}.json")),
+        serde_json::json!({
+            "id": id,
+            "identity": {"kind": "legacy-project", "inputs": {}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    age(&object);
+
+    let project = temp.0.join("never-resynced");
+    fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+    fs::write(
+        project.join(".blanket/closures/python.json"),
+        serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": object.display().to_string()}
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let refused = blanket(&bin, &project, &store, &["gc", "--keep-days", "0"]);
+    assert!(!refused.status.success(), "uninitialized GC unexpectedly ran");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("refusing to sweep"), "unexpected error: {stderr}");
+    assert!(stderr.contains("--register"), "migration hint missing: {stderr}");
+    assert!(object.is_dir(), "default upgrade GC deleted the old object");
+
+    ok(
+        blanket(
+            &bin,
+            &project,
+            &store,
+            &["gc", "--register", project.to_str().unwrap(), "--keep-days", "0"],
+        ),
+        "register existing project",
+    );
+    assert!(object.is_dir(), "registered legacy object was collected");
 }

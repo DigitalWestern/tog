@@ -5,7 +5,7 @@
 //! projects with identical locks share one env object; different locks get
 //! different objects and coexist. Projection into a project is one symlink.
 
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::{ArtifactKind, Identity, Plan};
@@ -50,7 +50,10 @@ pub fn write_closure(
     // synthetic stores from accidentally creating ~/.blanket/store. The
     // fallback is for future tailor bodies that do not yet carry an object
     // path.
-    let store = store_from_closure_body(&body).unwrap_or(Store::open()?);
+    let store = match store_from_closure_body(&body) {
+        Some(store) => store,
+        None => Store::open()?,
+    };
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
@@ -356,9 +359,16 @@ pub(crate) fn realize_env_at_depth(
 
     // Fetch everything first (all-or-nothing before assembly starts).
     let mut artifacts: Vec<(&crate::types::LockedPackage, PathBuf)> = Vec::new();
+    // Keep verified cache leases alive until every wheel has been extracted.
+    let mut _cache_leases = Vec::new();
     for &p in &packages {
         let wheel_file = match p.kind {
-            ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
+            ArtifactKind::Wheel => {
+                let lease = download_verified_held(store, &p.url, &p.sha256)?;
+                let path = lease.to_path_buf();
+                drop(lease);
+                path
+            }
             // sdist -> wheel via sandboxed derivation (network denied).
             ArtifactKind::Sdist => {
                 crate::build::build_sdist_wheel_at_depth(
@@ -372,6 +382,16 @@ pub(crate) fn realize_env_at_depth(
             }
         };
         artifacts.push((p, wheel_file));
+    }
+    // Sdist realization may recursively fetch toolchains. Re-verify all
+    // wheel inputs only after that work, then hold their leases through wheel
+    // extraction and publication.
+    for (p, path) in &mut artifacts {
+        if p.kind == ArtifactKind::Wheel {
+            let lease = download_verified_held(store, &p.url, &p.sha256)?;
+            *path = lease.to_path_buf();
+            _cache_leases.push(lease);
+        }
     }
 
     let minor = pin.version.split('.').take(2).collect::<Vec<_>>().join(".");

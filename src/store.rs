@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Content/input-addressed immutable store (the closet).
 ///
@@ -26,6 +27,8 @@ pub struct RootEntry {
     pub path: PathBuf,
     pub registry_path: PathBuf,
 }
+
+const ROOTS_INITIALIZED: &str = ".initialized";
 
 impl Store {
     pub fn open() -> io::Result<Store> {
@@ -57,6 +60,9 @@ impl Store {
         let tmp = roots.join(format!(".{key}.tmp.{}", std::process::id()));
         fs::write(&tmp, format!("{}\n", project_dir.display()))?;
         fs::rename(&tmp, &dest)?;
+        // Keep an explicit initialization marker so an empty registry can be
+        // distinguished from a store upgraded from before roots existed.
+        fs::write(roots.join(ROOTS_INITIALIZED), b"1\n")?;
         Ok(RootEntry {
             key,
             path: project_dir,
@@ -95,6 +101,28 @@ impl Store {
         Ok(entries)
     }
 
+    /// Whether this store has opted into registry-rooted collection. Stores
+    /// created before the registry feature may have objects but no roots
+    /// directory, so Store::open creating that directory is not sufficient.
+    /// Valid root entries are accepted as initialized for compatibility with
+    /// stores written by the first registry implementation, before the marker
+    /// was added.
+    pub(crate) fn registry_initialized(&self) -> io::Result<bool> {
+        let roots = self.root.join("roots");
+        if roots.join(ROOTS_INITIALIZED).is_file() {
+            return Ok(true);
+        }
+        for entry in fs::read_dir(roots)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file()
+                && is_sha1(&entry.file_name().to_string_lossy())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn remove_root_entry(&self, entry: &RootEntry) -> io::Result<()> {
         match fs::remove_file(&entry.registry_path) {
             Ok(()) => Ok(()),
@@ -111,6 +139,17 @@ impl Store {
             .create(true)
             .write(true)
             .open(self.root.join("tmp/.publish.lock"))?;
+        f.lock()?;
+        Ok(f)
+    }
+
+    /// Exclusive lock shared by fetches and GC. A cache lease keeps this
+    /// lock until its verified artifact has been extracted by the caller.
+    pub(crate) fn gc_lock(&self) -> io::Result<fs::File> {
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(self.root.join("gc.lock"))?;
         f.lock()?;
         Ok(f)
     }
@@ -238,6 +277,10 @@ impl Store {
         let meta_tmp = self.root.join("tmp").join(format!("meta-{id}.json"));
         fs::write(&meta_tmp, serde_json::to_vec_pretty(&meta)?)?;
         fs::rename(&meta_tmp, self.root.join("meta").join(format!("{id}.json")))?;
+        // The stage directory may have been built for hours. Refresh the
+        // published object's activity marker while publication is still
+        // protected by the lock, before GC can inspect it.
+        touch_path(&dest)?;
         Ok((dest, exceptions.to_vec()))
     }
 
@@ -329,19 +372,11 @@ fn make_read_only(path: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(e.kind(), format!("chmod {}: {e}", path.display())))
 }
 
-/// The object directory mtime is the cheap activity marker used by GC. The
-/// supported hosts both provide `/usr/bin/touch`; failure is deliberately
-/// best-effort because object correctness is still protected by the publish
-/// lock and read-only publication protocol.
-fn touch_path(path: &Path) -> io::Result<()> {
-    let status = std::process::Command::new("/usr/bin/touch")
-        .arg(path)
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("touch {} failed", path.display())))
-    }
+/// The object/cache mtime is the cheap activity marker used by GC. Opening
+/// the path and setting its timestamp avoids a platform-specific touch
+/// executable and also works for read-only published directories/files.
+pub(crate) fn touch_path(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.set_modified(SystemTime::now())
 }
 
 pub(crate) fn object_id_token(value: &str) -> Option<String> {

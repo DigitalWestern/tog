@@ -20,6 +20,9 @@ pub struct Options {
     pub dry_run: bool,
     pub keep_days: u64,
     pub project: bool,
+    /// Explicit opt-in to collect objects written without reference
+    /// metadata. They may belong to projects from before the roots registry.
+    pub collect_legacy: bool,
 }
 
 impl Default for Options {
@@ -28,6 +31,7 @@ impl Default for Options {
             dry_run: false,
             keep_days: 30,
             project: false,
+            collect_legacy: false,
         }
     }
 }
@@ -63,12 +67,24 @@ pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Re
     // across the liveness snapshot and removals. Store::has/commit use the
     // latter, so a sync either touches an object before this sweep or waits
     // until after it.
-    let gc_lock = lock_file(&store.root.join("gc.lock"))?;
+    let _gc_lock = store.gc_lock()?;
     let _publish_lock = store.publish_lock()?;
 
+    if !store.registry_initialized()? {
+        return Err(io::Error::other(
+            "refusing to sweep: the project-root registry is not initialized; register existing "
+                .to_string()
+                + "projects with `blanket gc --register <dir>...` or run `blanket sync` in each "
+                + "project",
+        ));
+    }
     let roots = store.roots()?;
     let state = collect_roots(store, &roots, options, out)?;
-    let (live, metadata) = mark_live(store, &state.object_ids)?;
+    // Recency and keep-days are retention decisions, not just sweep skips:
+    // every retained object is a marking root so its dependencies survive it.
+    let mut marking_roots = state.object_ids.clone();
+    marking_roots.extend(retained_object_ids(store, options)?);
+    let (live, metadata) = mark_live(store, &marking_roots)?;
     let mut report = sweep_objects(store, &live, &metadata, options, out)?;
     report = add_report(
         report,
@@ -85,7 +101,6 @@ pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Re
         );
     }
 
-    drop(gc_lock);
     Ok(report)
 }
 
@@ -97,15 +112,6 @@ fn add_report(mut left: Report, right: Report) -> Report {
     left.forests += right.forests;
     left.backups += right.backups;
     left
-}
-
-fn lock_file(path: &Path) -> io::Result<fs::File> {
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(path)?;
-    file.lock()?;
-    Ok(file)
 }
 
 fn collect_roots<W: Write>(
@@ -281,6 +287,26 @@ fn mark_live(
     Ok((live, metadata))
 }
 
+fn retained_object_ids(store: &Store, options: Options) -> io::Result<HashSet<String>> {
+    let mut roots = HashSet::new();
+    for entry in fs::read_dir(store.root.join("objects"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let info = read_meta(store, &id)?.unwrap_or_default();
+        let retained = recent(&entry.path(), ACTIVE_WINDOW)
+            || (!info.has_refs
+                && (!options.collect_legacy
+                    || !older_than(&entry.path(), keep_age(options.keep_days))));
+        if retained {
+            roots.insert(id);
+        }
+    }
+    Ok(roots)
+}
+
 fn read_meta(store: &Store, id: &str) -> io::Result<Option<MetaInfo>> {
     let path = store.root.join("meta").join(format!("{id}.json"));
     if !path.is_file() {
@@ -312,7 +338,11 @@ fn read_meta(store: &Store, id: &str) -> io::Result<Option<MetaInfo>> {
         .unwrap_or_default();
     let refs: Vec<String> = refs.into_iter().collect();
     Ok(Some(MetaInfo {
-        has_refs: has_refs || !refs.is_empty(),
+        // The explicit refs field is the schema boundary. Older metadata may
+        // still let us infer dependencies from identity.inputs, and those
+        // inferred refs are traversed, but the object remains legacy until
+        // the user explicitly opts into collecting it.
+        has_refs,
         refs,
         cache_hashes,
         kind: value["identity"]["kind"].as_str().unwrap_or_default().to_string(),
@@ -391,7 +421,10 @@ fn sweep_objects<W: Write>(
         } else {
             read_meta(store, &id)?.unwrap_or_default()
         };
-        if !info.has_refs && !older_than(&entry.path(), Duration::from_secs(options.keep_days * 86400)) {
+        if !info.has_refs
+            && (!options.collect_legacy
+                || !older_than(&entry.path(), keep_age(options.keep_days)))
+        {
             continue;
         }
         let bytes = tree_size(&entry.path())?
@@ -443,7 +476,8 @@ fn sweep_cache<W: Write>(
         }
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
         if referenced.contains(&name)
-            || !older_than(&entry.path(), Duration::from_secs(options.keep_days * 86400))
+            || recent(&entry.path(), ACTIVE_WINDOW)
+            || !older_than(&entry.path(), keep_age(options.keep_days))
         {
             continue;
         }
@@ -520,7 +554,7 @@ fn sweep_projects<W: Write>(
         for backup in fs::read_dir(backups)? {
             let backup = backup?;
             if !backup.file_type()?.is_dir()
-                || !older_than(&backup.path(), Duration::from_secs(options.keep_days * 86400))
+                || !older_than(&backup.path(), keep_age(options.keep_days))
             {
                 continue;
             }
@@ -551,6 +585,10 @@ fn older_than(path: &Path, age: Duration) -> bool {
     modified(path)
         .and_then(|time| SystemTime::now().duration_since(time).ok())
         .is_some_and(|elapsed| elapsed > age)
+}
+
+fn keep_age(days: u64) -> Duration {
+    Duration::from_secs(days.saturating_mul(24 * 60 * 60))
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -679,12 +717,10 @@ mod tests {
     }
 
     fn age(path: &Path) {
-        let status = std::process::Command::new("/usr/bin/touch")
-            .args(["-d", "2 days ago"])
-            .arg(path)
-            .status()
+        let old = SystemTime::now()
+            .checked_sub(Duration::from_secs(2 * 24 * 60 * 60))
             .unwrap();
-        assert!(status.success());
+        fs::File::open(path).unwrap().set_modified(old).unwrap();
     }
 
     #[test]
@@ -701,14 +737,24 @@ mod tests {
         store.register_root(&project).unwrap();
 
         let mut output = Vec::new();
-        let report = collect(&store, Options { dry_run: true, keep_days: 0, project: false }, &mut output).unwrap();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: true,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+            },
+            &mut output,
+        )
+        .unwrap();
         assert_eq!(report.objects, 1);
         assert!(store.object_path(&dead).is_dir());
         assert!(String::from_utf8(output).unwrap().contains(&dead));
     }
 
     #[test]
-    fn keep_days_retains_a_new_unreferenced_legacy_object() {
+    fn collect_legacy_requires_explicit_opt_in() {
         let temp = TempStore::new("keep-days");
         let store = temp.store();
         let id = commit(&store, "new", None);
@@ -726,11 +772,31 @@ mod tests {
         fs::create_dir_all(project.join(".blanket/closures")).unwrap();
         store.register_root(&project).unwrap();
         let mut output = Vec::new();
-        let report = collect(&store, Options { dry_run: false, keep_days: 30, project: false }, &mut output).unwrap();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 30,
+                project: false,
+                collect_legacy: false,
+            },
+            &mut output,
+        )
+        .unwrap();
         assert_eq!(report.objects, 0);
         assert_eq!(report.cached_artifacts, 0);
         assert!(store.object_path(&id).exists());
-        let report = collect(&store, Options { dry_run: false, keep_days: 0, project: false }, &mut output).unwrap();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: true,
+            },
+            &mut output,
+        )
+        .unwrap();
         assert_eq!(report.objects, 1);
         assert_eq!(report.cached_artifacts, 1);
         assert!(!store.object_path(&id).exists());
@@ -749,10 +815,66 @@ mod tests {
         let orphan = commit(&store, "orphan", None);
         age(&store.object_path(&orphan));
         let mut output = Vec::new();
-        collect(&store, Options { dry_run: true, keep_days: 0, project: false }, &mut output).unwrap();
+        collect(
+            &store,
+            Options {
+                dry_run: true,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+            },
+            &mut output,
+        )
+        .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("would remove object"));
         assert!(output.contains("B)"));
         assert!(store.object_path(&orphan).exists());
+    }
+
+    #[test]
+    fn retained_object_keeps_old_dependency() {
+        let temp = TempStore::new("retained-dependency");
+        let store = temp.store();
+        let child = commit(&store, "old-child", None);
+        age(&store.object_path(&child));
+        let parent = commit(&store, "fresh-parent", Some(&child));
+        let project = temp.root.join("project");
+        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        store.register_root(&project).unwrap();
+
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(report.objects, 0);
+        assert!(store.object_path(&parent).exists());
+        assert!(store.object_path(&child).exists());
+    }
+
+    #[test]
+    fn publication_refreshes_an_old_stage_mtime() {
+        let temp = TempStore::new("publication-mtime");
+        let store = temp.store();
+        let identity = Identity {
+            kind: "test".into(),
+            name: "published".into(),
+            version: "1".into(),
+            inputs: BTreeMap::new(),
+        };
+        let staged = store.stage().unwrap();
+        fs::write(staged.join("payload"), b"payload").unwrap();
+        age(&staged);
+        let id = identity.object_id();
+        store.commit(&identity, &staged, &[]).unwrap();
+        assert!(recent(&store.object_path(&id), ACTIVE_WINDOW));
     }
 }
