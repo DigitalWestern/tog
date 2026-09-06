@@ -104,12 +104,16 @@ Same bytes at the same moment as npm would download; the only change is
 who does it. A few dozen entries cover the famous cases; users should
 never write these themselves.
 
-## 7. pnpm-lock.yaml (and yarn.lock) importer — DONE (2026-09-05)
+## 7. pnpm-lock.yaml (and yarn.lock) importer — DONE (2026-09-06)
 
 7 of 13 npm misses were pnpm workspaces whose `workspace:`/`catalog:`
 protocols npm cannot re-resolve. Implemented dependency-free pnpm v9/v6 and
-Yarn classic v1 importers, deterministic hoisting, links, platform filtering,
-and closure `lock_source`; Berry is rejected with an item-7 diagnostic.
+Yarn classic v1 importers, deterministic root-plus-per-workspace hoisting,
+workspace-local links and `.bin` maps, package.json bin discovery, platform
+filtering, and closure `lock_source`; Berry is rejected with an item-7
+diagnostic. Round 2 measured 5/8 on the pinned eight-repo npm slice; the
+remaining three are a native/install-script permission failure and two git
+sources deferred to item 4. See the dated table in HITRATE.md.
 
 ## 8. Interpreter selection + CPython 3.10/3.11/3.14 pins — DONE (2026-09-05)
 

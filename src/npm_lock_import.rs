@@ -404,14 +404,30 @@ fn package_url(
         })
 }
 
-fn source_error(resolution: Option<&BTreeMap<String, YamlValue>>) -> Option<String> {
+fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) -> Option<String> {
     let resolution = resolution?;
     let kind = yaml_str(resolution.get("type")).unwrap_or_default();
     let repo = yaml_str(resolution.get("repo"));
     if kind == "git" || repo.is_some() {
-        return Some(format!("git dependency {}", repo.unwrap_or("(unknown repository)")));
+        let repo = repo.unwrap_or("(unknown repository)");
+        let commit = yaml_str(resolution.get("commit")).unwrap_or("unspecified commit");
+        return Some(
+            crate::npm::git_dependency_detail(
+                name,
+                &format!("git+{repo}#{commit}"),
+            )
+            .unwrap_or_else(|| {
+                format!(
+                    "npm_git_dep: {name}: repo {repo}, commit {commit}; \
+                     git sources are deferred to NEXT.md item 4"
+                )
+            }),
+        );
     }
     let tarball = yaml_str(resolution.get("tarball")).unwrap_or_default();
+    if let Some(detail) = crate::npm::git_dependency_detail(name, tarball) {
+        return Some(detail);
+    }
     if tarball.starts_with("file:") || tarball.starts_with("link:") {
         return Some(format!("local dependency {tarball}"));
     }
@@ -437,7 +453,13 @@ fn dep_version_key(
 }
 
 fn workspace_target(project_dir: &Path, importer: &str, raw: &str) -> io::Result<String> {
-    if raw.is_empty() || raw.starts_with('/') || raw.starts_with('~') {
+    // pnpm v6 collapses a workspace package's `file:../..` importer
+    // reference to the synthetic `file:` package. That entry denotes the
+    // project root, not an empty/unsafe path.
+    if raw.is_empty() {
+        return Ok(".".into());
+    }
+    if raw.starts_with('/') || raw.starts_with('~') {
         return Err(err(format!("workspace link target {raw:?} is outside the project")));
     }
     let mut relative = Vec::<String>::new();
@@ -488,11 +510,21 @@ fn target_for_ref(
     project_dir: &Path,
 ) -> Target {
     let reference = reference.trim();
-    if reference.starts_with("link:") || reference.starts_with("file:") {
-        let raw = reference.split_once(':').map(|(_, value)| value).unwrap_or("");
+    let local_reference = reference
+        .find("file:")
+        .map(|index| &reference[index..])
+        .or_else(|| reference.find("link:").map(|index| &reference[index..]))
+        .or_else(|| reference.strip_prefix("link:").map(|_| reference));
+    if let Some(local_reference) = local_reference {
+        let raw = local_reference
+            .split_once(':')
+            .map(|(_, value)| value)
+            .unwrap_or("");
         return match workspace_target(project_dir, importer, raw) {
             Ok(target) => Target::Link(target),
-            Err(error) => Target::External(error.to_string()),
+            Err(error) => Target::External(format!(
+                "{error} (reference {reference:?}, importer {importer:?})"
+            )),
         };
     }
     if reference.starts_with("workspace:") || reference.starts_with("catalog:") {
@@ -607,7 +639,7 @@ fn pnpm_nodes(
             .and_then(|resolution| yaml_str(resolution.get("integrity")))
             .unwrap_or_default()
             .to_string();
-        let external = source_error(resolution);
+        let external = source_error(&name, resolution);
         let url = package_url(&name, &version, resolution).unwrap_or_default();
         metadata.insert(
             identity_key(&name, &version),
@@ -1027,8 +1059,15 @@ pub fn plan_yarn(
             .split_once('#')
             .map(|(url, _)| url)
             .unwrap_or(entry.resolved.as_str());
-        let integrity = yarn_integrity(&entry.resolved, entry.integrity.clone(), &key)?;
-        let external = if !url.starts_with("https://") {
+        let git_detail = crate::npm::git_dependency_detail(&entry.name, &entry.resolved);
+        let integrity = if git_detail.is_some() {
+            String::new()
+        } else {
+            yarn_integrity(&entry.resolved, entry.integrity.clone(), &key)?
+        };
+        let external = if let Some(detail) = git_detail {
+            Some(detail)
+        } else if !url.starts_with("https://") {
             Some(format!("non-https resolved URL {url}"))
         } else {
             None
@@ -1232,7 +1271,8 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
     let mut queue = VecDeque::<(String, Dependency, Option<String>)>::new();
     let enqueue_roots = |roots: Vec<RootDependency>, queue: &mut VecDeque<_>| {
         for root in roots {
-            queue.push_back((String::new(), root.dependency, root.workspace));
+            let parent = root.workspace.clone().unwrap_or_default();
+            queue.push_back((parent, root.dependency, root.workspace));
         }
     };
     enqueue_roots(graph.roots, &mut queue);
@@ -1246,39 +1286,45 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             std::mem::swap(&mut queue, &mut workspace_queue);
         }
         let (parent, dependency, workspace) = queue.pop_front().unwrap();
+        let in_workspace = workspace.is_some()
+            || (!parent.is_empty() && !parent.starts_with("node_modules/"));
         let (path, should_expand) = match &dependency.target {
             Target::External(detail) => {
                 if dependency.optional {
+                    if detail.starts_with("npm_git_dep:") {
+                        crate::policy::record(
+                            crate::policy::GIT_DEPENDENCY,
+                            &dependency.name,
+                            detail,
+                        )?;
+                    }
                     continue;
                 }
-                return Err(err(format!(
-                    "{}: {} (item 4: git/file dependencies are not installable offline)",
-                    dependency.name, detail
-                )));
+                return Err(err(format!("{}: {detail}", dependency.name)));
             }
             Target::Node(node_key) => {
                 let node = graph.nodes.get(node_key).ok_or_else(|| {
                     err(format!("{}: missing graph node {node_key}", dependency.name))
                 })?;
                 if !node_compatible(platform, node) {
-                    if dependency.optional || node.optional {
-                        continue;
-                    }
-                    return Err(err(format!(
-                        "{}@{}: required dependency does not support host {}",
-                        node.name,
-                        node.version,
-                        platform.triple()
-                    )));
+                    // pnpm records every platform variant in one lockfile,
+                    // including dev dependencies. Its installer skips a
+                    // package whose own selectors exclude this host even
+                    // when the importer edge is not marked optional.
+                    continue;
                 }
                 if let Some(detail) = &node.external {
                     if dependency.optional || node.optional {
+                        if detail.starts_with("npm_git_dep:") {
+                            crate::policy::record(
+                                crate::policy::GIT_DEPENDENCY,
+                                &node.name,
+                                detail,
+                            )?;
+                        }
                         continue;
                     }
-                    return Err(err(format!(
-                        "{}@{}: {detail} (item 4: git/file dependencies are not installable offline)",
-                        node.name, node.version
-                    )));
+                    return Err(err(format!("{}@{}: {detail}", node.name, node.version)));
                 }
                 if node.integrity.is_empty() {
                     if dependency.optional || node.optional {
@@ -1295,19 +1341,13 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                 {
                     (path, true)
                 } else {
-                let root = dependency_path("", &dependency.name);
-                let path = if let Some(existing) = occupied.get(&root) {
-                    if same_target(existing, &dependency.target, &graph.nodes) {
-                        root
-                    } else if workspace.is_some() {
-                        return Err(err(format!(
-                            "{}: nested inside workspace {} unsupported; versions {} and {} conflict; hoist by aligning versions or dedupe",
-                            dependency.name,
-                            workspace.as_deref().unwrap_or("workspace importer"),
-                            occupied_description(existing),
-                            format!("{}@{}", node.name, node.version)
-                        )));
-                    } else if parent.is_empty() {
+                    let root = dependency_path("", &dependency.name);
+                    let path = if let Some(existing) = occupied.get(&root) {
+                        if same_target(existing, &dependency.target, &graph.nodes) {
+                            root
+                        } else if in_workspace {
+                            dependency_path(&parent, &dependency.name)
+                        } else if parent.is_empty() {
                         return Err(err(format!(
                             "{}: root dependencies conflict between {} and {}",
                             dependency.name,
@@ -1348,7 +1388,36 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                 if let Some(existing) = occupied.get(&root) {
                     if same_target(existing, &dependency.target, &graph.nodes) {
                         (root, false)
-                    } else if workspace.is_some() || parent.is_empty() {
+                    } else if in_workspace {
+                        let path = dependency_path(&parent, &dependency.name);
+                        if let Some(existing) = occupied.get(&path) {
+                            if !same_target(existing, &dependency.target, &graph.nodes) {
+                                return Err(err(format!(
+                                    "{}: two workspace versions conflict at {} ({} and link:{})",
+                                    dependency.name,
+                                    path,
+                                    occupied_description(existing),
+                                    target
+                                )));
+                            }
+                        } else {
+                            occupied.insert(
+                                path.clone(),
+                                Occupied::Link {
+                                    target: target.clone(),
+                                    name: dependency.name.clone(),
+                                },
+                            );
+                            links.insert(
+                                path.clone(),
+                                NpmLink {
+                                    path: path.clone(),
+                                    target: target.clone(),
+                                },
+                            );
+                        }
+                        (path, false)
+                    } else if parent.is_empty() {
                         return Err(err(format!(
                             "{}: workspace hoisting conflict between {} and link:{}",
                             dependency.name,
@@ -1374,21 +1443,26 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                         (path, false)
                     }
                 } else {
+                    let path = if in_workspace {
+                        dependency_path(&parent, &dependency.name)
+                    } else {
+                        root.clone()
+                    };
                     occupied.insert(
-                        root.clone(),
+                        path.clone(),
                         Occupied::Link {
                             target: target.clone(),
                             name: dependency.name.clone(),
                         },
                     );
                     links.insert(
-                        root.clone(),
+                        path.clone(),
                         NpmLink {
-                            path: root.clone(),
+                            path: path.clone(),
                             target: target.clone(),
                         },
                     );
-                    (root, false)
+                    (path, false)
                 }
             }
         };
@@ -1406,6 +1480,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
 
     let mut packages = Vec::new();
     for (path, occupied) in occupied {
+        crate::npm::validate_lock_path(&path)?;
         let Occupied::Package { node_key, .. } = occupied else { continue };
         let node = graph
             .nodes
@@ -1422,6 +1497,9 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
         });
     }
     packages.sort_by(|a, b| a.path.cmp(&b.path));
+    for link in links.values() {
+        crate::npm::validate_lock_path(&link.path)?;
+    }
     Ok(NpmPlan {
         node_version: crate::npm::node_pin(platform)?.version.to_string(),
         packages,
@@ -1440,8 +1518,14 @@ mod tests {
         "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
     fn project() -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("blanket-lock-import-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "blanket-lock-import-{}-{nonce}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(path.join("packages/lib"));
         path
     }
@@ -1570,6 +1654,43 @@ snapshots:
             sorted.sort();
             sorted
         });
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workspace_importer_gets_its_own_conflicting_version() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      shared:
+        specifier: 1.0.0
+        version: 1.0.0
+  packages/lib:
+    dependencies:
+      shared:
+        specifier: 2.0.0
+        version: 2.0.0
+packages:
+  shared@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  shared@2.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  shared@1.0.0: {{}}
+  shared@2.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.path == "node_modules/shared" && package.version == "1.0.0"));
+        assert!(plan.packages.iter().any(|package| {
+            package.path == "packages/lib/node_modules/shared" && package.version == "2.0.0"
+        }));
         let _ = fs::remove_dir_all(dir);
     }
 

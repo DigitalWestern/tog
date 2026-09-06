@@ -6,8 +6,10 @@
 //! exactly that tree as an immutable store object; projection is one
 //! node_modules symlink.
 //!
-//! v0 limits: registry tarballs only (no git/file/workspace links). Lifecycle
-//! scripts run in the sandbox; failures are retained as exceptions by default.
+//! v0 limits: registry tarballs only for installed packages; git sources are
+//! classified for NEXT.md item 4, while local/workspace links are projected
+//! back into the project. Lifecycle scripts run in the sandbox; failures are
+//! retained as exceptions by default.
 //!
 //! Trust model: the lockfile is a TRUSTED input. Integrity pins every
 //! tarball's bytes, but `resolved` URLs choose where the GET goes, so a
@@ -213,7 +215,8 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
 
 #[derive(Debug, Clone)]
 pub struct NpmPackage {
-    /// Literal lockfile path, e.g. "node_modules/a/node_modules/@s/b".
+    /// Project-relative lockfile path, e.g. "node_modules/a/node_modules/@s/b"
+    /// or "packages/foo/node_modules/a" for a package-local importer.
     pub path: String,
     pub name: String,
     pub version: String,
@@ -250,9 +253,10 @@ fn add_node_env_layout_input(inputs: &mut BTreeMap<String, String>, packages: &[
     }
 }
 
-/// Validate a lockfile "packages" key as a safe, well-formed npm path:
-/// repeated `node_modules/<name>` or `node_modules/@scope/<name>` units.
-fn validate_lock_path(path: &str) -> io::Result<()> {
+/// Validate a lockfile "packages" key as a safe, well-formed npm path. A
+/// workspace importer is a safe project-relative prefix followed by the same
+/// repeated `node_modules/<name>` units used by the root importer.
+pub(crate) fn validate_lock_path(path: &str) -> io::Result<()> {
     let bad = || err(format!("malformed lockfile package path: {path}"));
     let ok_name = |s: &str| {
         !s.is_empty()
@@ -264,6 +268,30 @@ fn validate_lock_path(path: &str) -> io::Result<()> {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
     };
     let mut comps = path.split('/').peekable();
+    // package-lock v2/v3 records workspace packages as
+    // `packages/foo/node_modules/bar`. Keep the importer prefix in the plan;
+    // realization maps it to the immutable workspace subtree.
+    if !path.starts_with("node_modules/") {
+        let Some(index) = path.find("/node_modules/") else {
+            return Err(bad());
+        };
+        let prefix = &path[..index];
+        let workspace_name = |component: &str| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component != "node_modules"
+                && !component.starts_with('.')
+                && component.bytes().all(|b| {
+                    b.is_ascii_alphanumeric()
+                        || matches!(b, b'@' | b'-' | b'_' | b'.' | b'+')
+                })
+        };
+        if prefix.is_empty() || prefix.split('/').any(|component| !workspace_name(component)) {
+            return Err(bad());
+        }
+        comps = path[index + 1..].split('/').peekable();
+    }
     while comps.peek().is_some() {
         if comps.next() != Some("node_modules") {
             return Err(bad());
@@ -283,6 +311,205 @@ fn validate_lock_path(path: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Return the workspace importer and its importer-relative node_modules path.
+/// Root-importer paths return `None`.
+fn workspace_path(path: &str) -> Option<(&str, &str)> {
+    if path.starts_with("node_modules/") {
+        None
+    } else {
+        let index = path.find("/node_modules/")?;
+        Some((&path[..index], &path[index + 1..]))
+    }
+}
+
+fn encode_workspace_path(workspace: &str) -> String {
+    workspace.replace('%', "%25").replace('/', "%2F")
+}
+
+/// Map a project-relative package path into the immutable env object's
+/// layout. This is also used by lifecycle scripts, which run before the
+/// project symlinks are projected.
+pub(crate) fn env_package_path(staged: &Path, path: &str) -> PathBuf {
+    match workspace_path(path) {
+        Some((workspace, relative)) => staged
+            .join("workspaces")
+            .join(encode_workspace_path(workspace))
+            .join(relative),
+        None => staged.join(path),
+    }
+}
+
+fn env_node_modules_path(staged: &Path, path: &str) -> PathBuf {
+    match workspace_path(path) {
+        Some((workspace, _)) => staged
+            .join("workspaces")
+            .join(encode_workspace_path(workspace))
+            .join("node_modules"),
+        None => staged.join("node_modules"),
+    }
+}
+
+fn importer_relative_path(path: &str) -> &str {
+    workspace_path(path)
+        .map(|(_, relative)| relative)
+        .unwrap_or(path)
+}
+
+fn is_importer_top_level(path: &str) -> bool {
+    importer_relative_path(path).matches("node_modules/").count() == 1
+}
+
+fn normalized_bin_path(path: &str) -> io::Result<PathBuf> {
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
+        return Err(err(format!("unsafe bin target {path:?}")));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.split('/') {
+        if component.is_empty() {
+            return Err(err(format!("unsafe bin target {path:?}")));
+        }
+        if component == ".." {
+            return Err(err(format!("unsafe bin target {path:?}")));
+        }
+        if component != "." {
+            normalized.push(component);
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(err(format!("unsafe bin target {path:?}")));
+    }
+    Ok(normalized)
+}
+
+/// Read npm's normalized bin forms from an extracted package. Lockfile bin
+/// metadata remains authoritative; realization calls this only when the lock
+/// did not provide a mapping (pnpm/yarn normally omit it).
+pub(crate) fn discover_package_bins(
+    package_json: &str,
+    package_name: &str,
+    package_dir: &Path,
+) -> io::Result<Vec<(String, String)>> {
+    let package: serde_json::Value = serde_json::from_str(package_json)
+        .map_err(|e| err(format!("{}: package.json: {e}", package_dir.display())))?;
+    let mut bins = Vec::new();
+    match package.get("bin") {
+        Some(value) if value.is_string() => {
+            let name = package_name.rsplit('/').next().unwrap_or(package_name);
+            bins.push((name.to_string(), value.as_str().unwrap().to_string()));
+        }
+        Some(value) if value.is_object() => {
+            for (name, path) in value.as_object().unwrap() {
+                if let Some(path) = path.as_str() {
+                    bins.push((name.clone(), path.to_string()));
+                }
+            }
+        }
+        Some(_) => {}
+        None => {
+            let Some(directory) = package["directories"]["bin"].as_str() else {
+                return Ok(bins);
+            };
+            let directory = normalized_bin_path(directory)?;
+            let bin_dir = package_dir.join(&directory);
+            let entries = match fs::read_dir(&bin_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(bins),
+                Err(error) => return Err(error),
+            };
+            let mut names = Vec::new();
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    names.push((name, directory.join(entry.file_name())));
+                }
+            }
+            names.sort_by(|a, b| a.0.cmp(&b.0));
+            bins.extend(
+                names
+                    .into_iter()
+                    .map(|(name, path)| (name, path.to_string_lossy().replace('\\', "/"))),
+            );
+        }
+    }
+    bins.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(bins)
+}
+
+fn bin_link_target(path: &str, bin: &str) -> PathBuf {
+    Path::new("..").join(
+        Path::new(importer_relative_path(path))
+            .strip_prefix("node_modules/")
+            .unwrap_or_else(|_| Path::new(importer_relative_path(path)))
+            .join(bin),
+    )
+}
+
+fn workspace_set(plan: &NpmPlan) -> Vec<String> {
+    let mut workspaces = BTreeMap::<String, ()>::new();
+    for path in plan
+        .packages
+        .iter()
+        .map(|package| package.path.as_str())
+        .chain(plan.links.iter().map(|link| link.path.as_str()))
+    {
+        if let Some((workspace, _)) = workspace_path(path) {
+            workspaces.insert(workspace.to_string(), ());
+        }
+    }
+    workspaces.into_keys().collect()
+}
+
+/// A git source cannot be represented by a registry tarball integrity: GitHub
+/// codeload and archive endpoints can change their generated bytes. Keep the
+/// diagnostic in one place so all npm lockfile importers classify it equally.
+pub(crate) fn git_dependency_detail(name: &str, url: &str) -> Option<String> {
+    let mut repo = None;
+    let mut commit = None;
+    let mut source = url;
+    let was_git = source.starts_with("git+");
+    if let Some(stripped) = source.strip_prefix("git+") {
+        source = stripped;
+    }
+    let (source_without_fragment, fragment) = source.split_once('#').unwrap_or((source, ""));
+    source = source_without_fragment;
+    let fragment_commit = (!fragment.is_empty()).then(|| fragment.to_string());
+    if source.starts_with("git://")
+        || source.starts_with("ssh://")
+        || source.starts_with("git@")
+        || was_git && source.starts_with("https://")
+    {
+        repo = Some(source.trim_end_matches(".git").to_string());
+        commit = fragment_commit;
+    } else if let Some(path) = source.strip_prefix("https://codeload.github.com/") {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 4 && parts[2] == "tar.gz" {
+            repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
+            commit = fragment_commit.or_else(|| {
+                Some(parts[3].trim_end_matches(".tar.gz").to_string())
+            });
+        }
+    } else if let Some(path) = source.strip_prefix("https://github.com/") {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 4 && parts[2] == "archive" {
+            repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
+            commit = fragment_commit.or_else(|| {
+                Some(parts[3].trim_end_matches(".tar.gz").to_string())
+            });
+        } else if parts.len() >= 2 && parts[0] != "" && parts[1] != "" {
+            // Yarn also emits the repository URL itself for some GitHub
+            // dependencies (not an immutable registry tarball).
+            repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
+            commit = fragment_commit;
+        }
+    }
+    let repo = repo?;
+    let commit = commit.unwrap_or_else(|| "unspecified commit".into());
+    Some(format!(
+        "npm_git_dep: {name}: repo {repo}, commit {commit}; git sources are deferred to NEXT.md item 4"
+    ))
 }
 
 /// Derive the package name from the last node_modules/ segment of the key.
@@ -410,15 +637,6 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
         if workspace_dirs.contains(&path.as_str()) {
             continue; // workspace source dir definition
         }
-        if let Some(ws) = workspace_dirs
-            .iter()
-            .find(|w| path.starts_with(&format!("{w}/node_modules/")))
-        {
-            return Err(err(format!(
-                "{path}: dependencies nested inside workspace {ws:?} are \
-                 unsupported yet; hoist by aligning versions or dedupe"
-            )));
-        }
         validate_lock_path(path)?;
         if skipped.iter().any(|s| path.starts_with(s.as_str())) {
             continue; // descendant of a platform-skipped package
@@ -483,6 +701,18 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
                 "{path}: missing 'resolved' URL (regenerate the lockfile)"
             ))
         })?;
+        let name = entry["name"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| name_from_path(path));
+        if let Some(detail) = git_dependency_detail(&name, resolved) {
+            if entry["optional"].as_bool() == Some(true) {
+                crate::policy::record(crate::policy::GIT_DEPENDENCY, path, &detail)?;
+                skipped.push(format!("{path}/"));
+                continue;
+            }
+            return Err(err(format!("{path}: {detail}")));
+        }
         if !resolved.starts_with("https://") {
             return Err(err(format!(
                 "{path}: only https registry tarballs supported (v0), got {resolved}"
@@ -585,6 +815,8 @@ pub fn realize_node_env(
         node_obj.file_name().unwrap().to_string_lossy().into_owned(),
     );
     add_node_env_layout_input(&mut inputs, &plan.packages);
+    let workspaces = workspace_set(plan);
+    inputs.insert("workspaces".into(), workspaces.join("|"));
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
         // bin mappings change the realized tree, so they are identity inputs.
@@ -630,21 +862,29 @@ pub fn realize_node_env(
     }
 
     // Fetch everything first.
-    let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
+    let mut tarballs: Vec<(NpmPackage, PathBuf)> = Vec::new();
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
         let t = download_verified_digest(store, &p.url, &digest).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
         })?;
-        tarballs.push((p, t));
+        tarballs.push((p.clone(), t));
     }
 
     let staged = store.stage()?;
     fs::create_dir_all(staged.join("node_modules"))?;
+    for workspace in &workspaces {
+        fs::create_dir_all(
+            staged
+                .join("workspaces")
+                .join(encode_workspace_path(workspace))
+                .join("node_modules"),
+        )?;
+    }
     // Parents before children (path depth = lexicographic prefix ordering
     // already holds after sort, since "a/node_modules/b" sorts after "a").
-    for (p, tarball) in &tarballs {
-        let dest = staged.join(&p.path);
+    for (p, tarball) in &mut tarballs {
+        let dest = env_package_path(&staged, &p.path);
         fs::create_dir_all(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path))
         })?;
@@ -671,6 +911,11 @@ pub fn realize_node_env(
         normalize_modes(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path))
         })?;
+        if p.bin.is_empty() {
+            if let Ok(manifest) = fs::read_to_string(dest.join("package.json")) {
+                p.bin = discover_package_bins(&manifest, &p.name, &dest)?;
+            }
+        }
         // ponytail: post-extraction size cap (1 GiB/package) — catches
         // decompression bombs after the fact; a streaming extractor with
         // preflight limits is the M5 upgrade. Lockfiles are trusted inputs.
@@ -687,11 +932,11 @@ pub fn realize_node_env(
 
     // .bin launchers for physically top-level (hoisted) packages, which is
     // what node_modules/.bin holds in npm's own layout.
-    let bin_dir = staged.join("node_modules/.bin");
     for (p, _) in &tarballs {
-        if p.path.matches("node_modules/").count() != 1 || p.bin.is_empty() {
+        if !is_importer_top_level(&p.path) || p.bin.is_empty() {
             continue;
         }
+        let bin_dir = env_node_modules_path(&staged, &p.path).join(".bin");
         fs::create_dir_all(&bin_dir)?;
         for (bin_name, rel) in &p.bin {
             // bin metadata comes from the lockfile (attacker-editable), so
@@ -702,19 +947,16 @@ pub fn realize_node_env(
                 && !bin_name.starts_with('.')
                 && !bin_name.contains('/')
                 && !bin_name.contains('\\');
-            let rel_ok = !rel.is_empty()
-                && !rel.starts_with('/')
-                && rel
-                    .split('/')
-                    .all(|c| !c.is_empty() && c != "." && c != "..");
-            if !name_ok || !rel_ok {
+            let rel_path = normalized_bin_path(rel);
+            if !name_ok || rel_path.is_err() {
                 return Err(err(format!(
                     "{}: unsafe bin entry {bin_name:?} -> {rel:?}",
                     p.path
                 )));
             }
-            let pkg_dir = staged.join(&p.path);
-            let target_file = pkg_dir.join(rel);
+            let rel_path = rel_path.unwrap();
+            let pkg_dir = env_package_path(&staged, &p.path);
+            let target_file = pkg_dir.join(&rel_path);
             let md = match fs::symlink_metadata(&target_file) {
                 Ok(md) => md,
                 Err(_) => continue, // bin target genuinely absent: npm tolerates this
@@ -733,9 +975,8 @@ pub fn realize_node_env(
                 )));
             }
             // Relative link: node_modules/.bin/x -> ../<name>/<rel>
-            let link_target = Path::new("..")
-                .join(p.path.trim_start_matches("node_modules/"))
-                .join(rel);
+            // Relative link: <importer>/node_modules/.bin/x -> ../<name>/<rel>.
+            let link_target = bin_link_target(&p.path, &rel_path.to_string_lossy());
             let link = bin_dir.join(bin_name);
             if link.symlink_metadata().is_ok() {
                 // Real graphs collide (playwright + @playwright/test both
@@ -845,7 +1086,7 @@ fn run_install_scripts_staged(
     // the system toolchain drift. Realized lazily, only when needed.
     let mut python_obj: Option<PathBuf> = None;
     for p in &pkgs {
-        let pkg_dir = staged.join(&p.path);
+        let pkg_dir = env_package_path(staged, &p.path);
         let manifest = match fs::read_to_string(pkg_dir.join("package.json")) {
             Ok(m) => m,
             Err(_) => continue,
@@ -936,12 +1177,23 @@ fn run_install_scripts_staged(
         };
         let python_bin = python.join("bin/python3");
 
-        let path_env = format!(
-            "{}:{}:{}:/usr/bin:/bin:/usr/sbin:/sbin",
-            tools_dir.join("bin").display(),
-            node_obj.join("bin").display(),
-            staged.join("node_modules/.bin").display(),
-        );
+        let nearest_bin = env_node_modules_path(staged, &p.path).join(".bin");
+        let root_bin = staged.join("node_modules/.bin");
+        let mut path_entries = vec![
+            tools_dir.join("bin").display().to_string(),
+            node_obj.join("bin").display().to_string(),
+            nearest_bin.display().to_string(),
+        ];
+        if nearest_bin != root_bin {
+            path_entries.push(root_bin.display().to_string());
+        }
+        path_entries.extend([
+            "/usr/bin".into(),
+            "/bin".into(),
+            "/usr/sbin".into(),
+            "/sbin".into(),
+        ]);
+        let path_env = path_entries.join(":");
         let mut envs: Vec<(String, String)> = vec![
             ("PYTHON".into(), python_bin.display().to_string()),
             ("npm_config_python".into(), python_bin.display().to_string()),
@@ -1021,24 +1273,36 @@ fn run_install_scripts_staged(
             }
             crate::store::remove_tree(&pkg_dir)?;
             fs::rename(&snapshot, &pkg_dir)?;
-            remove_dangling_bin_links(staged)?;
+            remove_dangling_bin_links(staged, plan)?;
             break;
         }
     }
     Ok(())
 }
 
-fn remove_dangling_bin_links(staged: &Path) -> io::Result<()> {
-    let bin_dir = staged.join("node_modules/.bin");
-    let entries = match fs::read_dir(&bin_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if fs::symlink_metadata(&path)?.file_type().is_symlink() && !path.exists() {
-            fs::remove_file(path)?;
+fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Result<()> {
+    let mut bin_dirs = vec![staged.join("node_modules/.bin")];
+    bin_dirs.extend(
+        workspace_set(plan)
+            .into_iter()
+            .map(|workspace| {
+                staged
+                    .join("workspaces")
+                    .join(encode_workspace_path(&workspace))
+                    .join("node_modules/.bin")
+            }),
+    );
+    for bin_dir in bin_dirs {
+        let entries = match fs::read_dir(&bin_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if fs::symlink_metadata(&path)?.file_type().is_symlink() && !path.exists() {
+                fs::remove_file(path)?;
+            }
         }
     }
     Ok(())
@@ -1146,12 +1410,59 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
     Ok(out)
 }
 
-/// Project the env into the project as a "forest": node_modules is a symlink
-/// to a WRITABLE per-project dir under .blanket/nm/<projection-id>, holding
-/// one symlink per top-level entry into the immutable store object. Tools
-/// that treat node_modules' top level as scratch space (vite's .vite dep
-/// cache, prisma's .prisma client) get real writable directories, while
-/// package contents stay read-only in the store — pnpm's proven layout.
+fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from
+        .iter()
+        .zip(&to)
+        .take_while(|(a, b)| a == b)
+        .count();
+    if common == 0 {
+        return Err(err(format!(
+            "cannot make relative link from {} to {}",
+            from.iter().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            to.iter().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+        )));
+    }
+    let mut result = PathBuf::new();
+    for _ in common..from.len() {
+        result.push("..");
+    }
+    for component in &to[common..] {
+        result.push(component.as_os_str());
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    Ok(result)
+}
+
+fn replace_with_symlink(path: &Path, target: &Path, label: &str) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| err(format!("{label} has no parent")))?;
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.blanket-swap.{}.{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::os::unix::fs::symlink(target, &tmp)?;
+    fs::rename(&tmp, path)
+}
+
+/// Project the env into the project as a "forest": the root and every
+/// package-local importer node_modules is a symlink to a WRITABLE per-project
+/// directory under the forest projection, holding one symlink per top-level
+/// entry into the immutable store object. Tools that treat node_modules' top
+/// level as scratch space (vite's .vite dep cache, prisma's .prisma client)
+/// get real writable directories, while package contents stay read-only in
+/// the store — pnpm's proven layout.
 ///
 /// If mutable packages are declared, the whole tree is instead cloned
 /// (APFS copy-on-write) so runtime writes inside those packages succeed and
@@ -1172,9 +1483,17 @@ pub fn project_node_env(
         )?;
     }
     let nm = project_dir.join("node_modules");
+    let workspaces = workspace_set(plan);
     // A real (npm-made) node_modules is moved aside automatically so
-    // pointing blanket at an existing project is one command.
+    // pointing blanket at an existing project is one command. Workspace
+    // importers get the same treatment in their source directories.
     crate::project::backup_real_dir(&nm, env_obj)?;
+    for workspace in &workspaces {
+        crate::project::backup_real_dir(
+            &project_dir.join(workspace).join("node_modules"),
+            env_obj,
+        )?;
+    }
 
     // Projection id: env object + mutable declarations + layout schema.
     use sha2::{Digest as _, Sha256};
@@ -1184,9 +1503,10 @@ pub fn project_node_env(
         .iter()
         .map(|l| format!("{}={};", l.path, l.target))
         .collect();
+    let workspace_key = workspaces.join(",");
     let proj_id = hex::encode(Sha256::digest(
         format!(
-            "node-forest/1\x00{env_name}\x00{}\x00{link_key}",
+            "node-forest/2\x00{env_name}\x00{}\x00{workspace_key}\x00{link_key}",
             mutable.join(",")
         )
         .as_bytes(),
@@ -1214,7 +1534,14 @@ pub fn project_node_env(
     if fresh && proj_dir.exists() {
         crate::store::remove_tree(&proj_dir)?;
     }
-    if !forest.exists() {
+    let workspace_forests_ready = workspaces.iter().all(|workspace| {
+        proj_dir
+            .join("workspaces")
+            .join(encode_workspace_path(workspace))
+            .join("node_modules")
+            .is_dir()
+    });
+    if !forest.exists() || !workspace_forests_ready {
         fs::create_dir_all(&nm_root)?;
         let tmp = nm_root.join(format!(".{proj_id}.tmp.{}", std::process::id()));
         if tmp.exists() {
@@ -1227,19 +1554,46 @@ pub fn project_node_env(
         } else {
             crate::project::clone_tree_for(&src, &tmp.join("node_modules"), platform)?;
         }
+        for workspace in &workspaces {
+            let src = env_obj
+                .join("workspaces")
+                .join(encode_workspace_path(workspace))
+                .join("node_modules");
+            let dest = tmp
+                .join("workspaces")
+                .join(encode_workspace_path(workspace))
+                .join("node_modules");
+            if mutable.is_empty() {
+                build_forest(&src, &dest)?;
+            } else {
+                crate::project::clone_tree_for(&src, &dest, platform)?;
+            }
+        }
         fs::rename(&tmp, &proj_dir)?;
     }
     // Workspace links: symlinks into the project's own source dirs. The
     // targets are user-owned and writable by nature. Idempotent — the
     // projection id covers the link set, so a changed set is a new forest.
     for l in &plan.links {
-        let rel = l.path.trim_start_matches("node_modules/");
-        let link = forest.join(rel);
+        let link_root = workspace_path(&l.path)
+            .map(|(workspace, _)| {
+                proj_dir
+                    .join("workspaces")
+                    .join(encode_workspace_path(workspace))
+                    .join("node_modules")
+            })
+            .unwrap_or_else(|| forest.clone());
+        let rel = importer_relative_path(&l.path).trim_start_matches("node_modules/");
+        let link = link_root.join(rel);
         if let Some(parent) = link.parent() {
             fs::create_dir_all(parent)?;
         }
         if link.symlink_metadata().is_err() {
-            std::os::unix::fs::symlink(project_dir.join(&l.target), &link)?;
+            let target = relative_path(
+                link.parent().ok_or_else(|| err("workspace link has no parent"))?,
+                &project_dir.join(&l.target),
+            )?;
+            std::os::unix::fs::symlink(target, &link)?;
         }
     }
     // Old forests are deliberately NOT pruned here (Sol review 3): a dev
@@ -1280,16 +1634,17 @@ pub fn project_node_env(
         }
     }
 
-    let tmp_link = project_dir.join(format!(
-        ".node_modules.blanket-swap.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::os::unix::fs::symlink(&forest, &tmp_link)?;
-    fs::rename(&tmp_link, &nm)?;
+    replace_with_symlink(&nm, &forest, "node_modules")?;
+    for workspace in &workspaces {
+        let workspace_dir = project_dir.join(workspace);
+        fs::create_dir_all(&workspace_dir)?;
+        let workspace_nm = workspace_dir.join("node_modules");
+        let workspace_forest = proj_dir
+            .join("workspaces")
+            .join(encode_workspace_path(workspace))
+            .join("node_modules");
+        replace_with_symlink(&workspace_nm, &workspace_forest, "workspace-node_modules")?;
+    }
 
     // Mutable declarations expand to every matching physical lockfile path.
     let mutable_paths: Vec<&str> = plan
@@ -1303,9 +1658,10 @@ pub fn project_node_env(
     fs::create_dir_all(&meta_dir)?;
     let body = serde_json::json!({
         "env_object": env_obj,
-        "projection_schema": "node-forest/1",
+        "projection_schema": "node-forest/2",
         "projection_id": proj_id,
         "node_version": plan.node_version,
+        "workspaces": workspaces,
         "mutable_packages": mutable,
         "mutable_paths": mutable_paths,
         "mutable_state": if mutable.is_empty() { "none" } else { "unattested" },
@@ -1489,6 +1845,98 @@ mod tests {
         assert_eq!(plan.packages[1].path, "node_modules/b/node_modules/c");
         // deterministic order
         assert!(plan.packages[0].path < plan.packages[1].path);
+    }
+
+    #[test]
+    fn discovers_string_object_and_legacy_directory_bins() {
+        let dir = std::env::temp_dir().join(format!("blanket-npm-bin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("cli")).unwrap();
+        fs::write(dir.join("cli/a"), "a").unwrap();
+        fs::write(dir.join("cli/b"), "b").unwrap();
+
+        assert_eq!(
+            discover_package_bins(r#"{"bin":"./cli.js"}"#, "@scope/tool", &dir).unwrap(),
+            vec![("tool".into(), "./cli.js".into())]
+        );
+        assert_eq!(
+            discover_package_bins(
+                r#"{"bin":{"tool":"bin/tool.js","other":"bin/other.js"}}"#,
+                "tool",
+                &dir,
+            )
+            .unwrap(),
+            vec![
+                ("other".into(), "bin/other.js".into()),
+                ("tool".into(), "bin/tool.js".into()),
+            ]
+        );
+        assert_eq!(
+            discover_package_bins(r#"{"directories":{"bin":"cli"}}"#, "tool", &dir)
+                .unwrap(),
+            vec![("a".into(), "cli/a".into()), ("b".into(), "cli/b".into())]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workspace_paths_and_forest_keys_are_distinct() {
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "packages/lib/node_modules/a".into(),
+                name: "a".into(),
+                version: "1".into(),
+                url: "https://example.invalid/a.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                optional: false,
+            }],
+            links: Vec::new(),
+            lock_source: "pnpm-lock.yaml".into(),
+        };
+        assert_eq!(workspace_set(&plan), vec!["packages/lib"]);
+        assert_eq!(
+            encode_workspace_path("packages/lib"),
+            "packages%2Flib"
+        );
+        assert_eq!(
+            env_package_path(Path::new("/env"), "packages/lib/node_modules/a"),
+            PathBuf::from("/env/workspaces/packages%2Flib/node_modules/a")
+        );
+    }
+
+    #[test]
+    fn git_dependency_urls_are_classified_with_repo_and_commit() {
+        let cases = [
+            (
+                "https://codeload.github.com/acme/tool/tar.gz/0123456789abcdef",
+                "acme/tool",
+                "0123456789abcdef",
+            ),
+            (
+                "https://github.com/acme/tool/archive/0123456789abcdef.tar.gz",
+                "acme/tool",
+                "0123456789abcdef",
+            ),
+            (
+                "git+https://github.com/acme/tool.git#0123456789abcdef",
+                "github.com/acme/tool",
+                "0123456789abcdef",
+            ),
+            (
+                "https://github.com/acme/tool#0123456789abcdef",
+                "github.com/acme/tool",
+                "0123456789abcdef",
+            ),
+        ];
+        for (url, repo, commit) in cases {
+            let detail = git_dependency_detail("tool", url).unwrap();
+            assert!(detail.starts_with("npm_git_dep:"), "{detail}");
+            assert!(detail.contains(repo), "{detail}");
+            assert!(detail.contains(commit), "{detail}");
+            assert!(detail.contains("NEXT.md item 4"), "{detail}");
+        }
     }
 
     #[test]

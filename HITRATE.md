@@ -293,3 +293,28 @@ This run is 0/8, below the requested 5/8 target. The seven workspace
 failures are the deliberately fail-closed branch required when the existing
 forest cannot project a package-local `node_modules`; the Yarn miss is an
 artifact/hash failure after direct import, not npm re-resolution.
+
+### After item 7, round 2 — 2026-09-06
+
+Command: `cargo build --release`; then
+`python3 tests/hitrate.py --repos $HOME/scratch/tmp/nx7-repos.tsv
+--work $HOME/scratch/tmp/nx7-hr2 --out $HOME/scratch/tmp/nx7-hr2-rerun3.csv
+--timeout 900 --only npm`. This is the eight pinned repositories from the
+round-1 table, with a fresh CSV. Result: **5/8 syncs ok (62%)**, including
+three with permissive `install-script-failed` exceptions.
+
+| repo | result | class | one-line reason |
+|---|---|---|---|
+| vuejs/vue | ok | ok | pnpm v6 synthetic `file:` root link and workspace-local importer trees projected |
+| deepseek-ai/deepseek-harness | ok | ok | workspace-local version conflicts projected |
+| shadcn-ui/ui | ok | ok | workspace-local version conflicts projected |
+| tailwindlabs/tailwindcss | fail | npm_script_failed | an install script hit `Permission denied (os error 13)` in the required sandbox |
+| sveltejs/svelte | ok | ok | workspace-local version conflicts projected |
+| vitejs/vite | ok | ok | aliased local `file:` dependency projected and workspace trees resolved |
+| hoppscotch/hoppscotch | fail | npm_git_dep | codeload GitHub dependency is deferred to NEXT.md item 4 |
+| Eugeny/tabby | fail | npm_git_dep | GitHub `@electron/node-gyp` dependency is deferred to NEXT.md item 4 |
+
+The measurement exceeded the requested 5/8 target. The tailwind failure is
+not a workspace-placement failure; its exact script-side operation remains
+unverified beyond the sandbox's permission diagnostic. The hoppscotch and
+Tabby misses are intentional future git-source coverage.

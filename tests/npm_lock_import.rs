@@ -16,8 +16,18 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
+    run_from(binary, project, store, args, tmp)
+}
+
+fn run_from(
+    binary: &Path,
+    current_dir: &Path,
+    store: &Path,
+    args: &[&str],
+    tmp: &Path,
+) -> Output {
     Command::new(binary)
-        .current_dir(project)
+        .current_dir(current_dir)
         .env("BLANKET_STORE", store)
         .env("TMPDIR", tmp)
         .args(args)
@@ -91,6 +101,35 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
                 &scratch,
             );
             assert_ok(&workspace, "workspace link");
+
+            let workspace_dir = project.join("packages/lib");
+            let workspace_dep = run_from(
+                binary,
+                &workspace_dir,
+                &store,
+                &[
+                    "run",
+                    "node",
+                    "-e",
+                    "if (require('is-number/package.json').version !== '7.0.0') process.exit(1)",
+                ],
+                &scratch,
+            );
+            assert_ok(&workspace_dep, "workspace-local is-number");
+
+            let root_dep = run(
+                binary,
+                &project,
+                &store,
+                &[
+                    "run",
+                    "node",
+                    "-e",
+                    "if (require('is-number/package.json').version !== '6.0.0') process.exit(1)",
+                ],
+                &scratch,
+            );
+            assert_ok(&root_dep, "root is-number");
         }
     }
 }

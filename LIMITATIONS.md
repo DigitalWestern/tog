@@ -97,9 +97,14 @@ unsatisfiable constraints fail closed.
 
 ## JavaScript / npm
 
-- **Nested per-workspace node_modules rejected** (version conflicts
-  inside workspaces need hoisting). Loud with hint.
-- **git:// and file:// `resolved` URLs fail closed.** Loud.
+- **Workspace-local node_modules are supported for imported pnpm, Yarn
+  classic, and npm v7+ lockfiles**, including conflicting versions. The
+  projection keeps the importer set outside the project under the forest;
+  unsupported local sources still fail closed. Loud.
+- **Git sources are classified but not realized yet.** GitHub codeload,
+  archive, and git URL dependencies fail closed as `npm_git_dep` until NEXT.md
+  item 4 adds commit-source realization. Local `file:` links are projected
+  when the lock records their project-relative target.
 - **Install scripts that need network for LOGIC** (not just artifacts) are
   permissive with exception `install-script-failed`; strict via policy.
   Declared-artifacts only covers downloads whose cache location matches the
@@ -109,8 +114,9 @@ unsatisfiable constraints fail closed.
   `file-collision`; the later deterministic wheel wins. Strict via policy.
 - **SHA-1 npm integrity** is permissive with exception `weak-integrity`;
   the tarball is still verified. Strict via policy.
-- **Lifecycle scripts run in lockfile order, not dependency order**, and
-  ancestor .bin dirs aren't on script PATH (Sol review 3 leftover).
+- **Lifecycle scripts run in lockfile order, not dependency order**. Their
+  nearest importer `.bin` directory is first on PATH, followed by the root
+  `.bin`; deeper package-local `.bin` directories are not separately built.
   Rarely bites; silent when it does.
 - **npm optional-dependency failure parity is permissive with exception
   `install-script-failed`**; the extracted package is retained. Strict via
@@ -119,10 +125,9 @@ unsatisfiable constraints fail closed.
   started by postinstall can outlive realization).
 - **Yarn Berry is not imported**: its cache-zip checksums are not tarball
   integrity values, so item 7 rejects it loudly and names the npm/pnpm
-  conversion path. pnpm/yarn classic imports do not currently read pnpm's
-  `hasBin` flag back from the realized package.json; lockfiles without a bin
-  map therefore do not get new `.bin` entries. Lockfile-less projects still
-  fall back to npm resolution.
+  conversion path. pnpm/yarn classic imports discover `bin` and legacy
+  `directories.bin` entries from each extracted package.json before launcher
+  generation. Lockfile-less projects still fall back to npm resolution.
 
 ## Rust / cargo
 

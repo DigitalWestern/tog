@@ -974,6 +974,27 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         .map(|md| md.file_type().is_symlink())
         .unwrap_or(false)
         && std::fs::symlink_metadata(dir.join(".blanket/closures/node.json")).is_ok();
+    let nearest_nm = if node_projected {
+        let forest_root = nm
+            .canonicalize()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        cwd.ancestors()
+            .take_while(|path| path.starts_with(&dir))
+            .map(|path| path.join("node_modules"))
+            .find(|path| {
+                std::fs::symlink_metadata(path)
+                    .map(|md| md.file_type().is_symlink())
+                    .unwrap_or(false)
+                    && forest_root
+                        .as_ref()
+                        .and_then(|root| path.canonicalize().ok().map(|path| path.starts_with(root)))
+                        .unwrap_or(false)
+            })
+            .unwrap_or_else(|| nm.clone())
+    } else {
+        nm.clone()
+    };
     let package_json = if node_projected {
         project::read_closure(&dir, "node")?;
         let path = dir.join("package.json");
@@ -1022,7 +1043,10 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         command.env("PYTHONDONTWRITEBYTECODE", "1"); // site-packages is read-only
     }
     if nm.exists() {
-        prefix.push(nm.join(".bin").to_string_lossy().into_owned());
+        prefix.push(nearest_nm.join(".bin").to_string_lossy().into_owned());
+        if nearest_nm != nm {
+            prefix.push(nm.join(".bin").to_string_lossy().into_owned());
+        }
         // Node toolchain from the store (cache hit after sync).
         let store = store::Store::open()?;
         let node = npm::ensure_node_for(&store, platform)?;
