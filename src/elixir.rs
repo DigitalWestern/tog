@@ -10,7 +10,7 @@
 //! native deps (make/rebar3 ports) write INTO their source trees, so the
 //! deps projection is a writable clonefile copy, recorded unattested.
 
-use crate::fetch::{download_verified, download_verified_digest, Digest};
+use crate::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
@@ -706,10 +706,10 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let otp_tar = download_verified(store, pin.url, pin.sha256)?;
-    let elixir_zip = download_verified(store, ELIXIR_URL, ELIXIR_SHA256)?;
-    let hex_ez = download_verified_digest(store, HEX_URL, &Digest::sha512(HEX_SHA512)?)?;
-    let rebar3 = download_verified_digest(store, REBAR3_URL, &Digest::sha512(REBAR3_SHA512)?)?;
+    let otp_tar = download_verified_held(store, pin.url, pin.sha256)?;
+    let elixir_zip = download_verified_held(store, ELIXIR_URL, ELIXIR_SHA256)?;
+    let hex_ez = download_verified_digest_held(store, HEX_URL, &Digest::sha512(HEX_SHA512)?)?;
+    let rebar3 = download_verified_digest_held(store, REBAR3_URL, &Digest::sha512(REBAR3_SHA512)?)?;
 
     let staged = store.stage()?;
     let result = (|| {
@@ -1179,7 +1179,7 @@ pub fn realize_deps(
             "https://repo.hex.pm/tarballs/{}-{}.tar",
             d.package, d.version
         );
-        let tar = download_verified(store, &url, &d.outer_sha256).map_err(|e| {
+        let tar = download_verified_held(store, &url, &d.outer_sha256).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: {e}", d.app))
         })?;
         // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz,

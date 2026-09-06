@@ -47,6 +47,8 @@ blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
 blanket build                   # sandboxed Cargo build (network denied)
 blanket store path              # where the store lives
+blanket store roots             # registered project roots
+blanket gc --dry-run            # preview unreferenced store/cache cleanup
 blanket sync --fresh            # rebuild the projection (drops caches)
 ```
 
@@ -72,6 +74,13 @@ Use `blanket sync --strict` or `BLANKET_STRICT=1` to deny every exception.
 via npm; an existing real `node_modules`/`.venv` is moved aside to
 `~/.blanket/backups/`. Resolution belongs to the ecosystem's tools —
 realization, verification, and provenance belong to blanket.
+
+`blanket gc` follows every registered project closure, removes unreachable
+store objects and old unreferenced `cache/sha256` artifacts, and cleans stale
+staging directories. It keeps a ten-minute activity window so a concurrent
+sync cannot lose an object. Use `blanket gc --project` separately to collect
+old unused forests and backups; ordinary GC never deletes inside project
+projections.
 
 Python uses the explicit `.python-version` request when present; otherwise
 it intersects `requires-python`/`python_requires` metadata and selects the

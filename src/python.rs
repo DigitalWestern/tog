@@ -1,4 +1,4 @@
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -171,7 +171,7 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified(store, pin.url, pin.sha256)?;
+    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     // Tarball root is platform-specific; strip it.
     let status = Command::new("/usr/bin/tar")
@@ -217,7 +217,7 @@ pub(crate) fn ensure_python_for(
         return Ok(store.object_path(&id));
     }
 
-    let tarball = download_verified(store, pin.url, pin.sha256)?;
+    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
     let status = Command::new("/usr/bin/tar")

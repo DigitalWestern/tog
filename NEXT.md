@@ -217,7 +217,8 @@ the "pinned Linux C toolchain" roadmap item.
   item; update the HITRATE.md table with a dated column rather than
   overwriting.
 
-## Later, but before anyone runs it for a year
+## 13. Store GC — DONE (2026-09-06)
 
-- `blanket gc`: delete store objects, forests, and backups that no
-  project points at. Store grows forever today.
+Implemented `blanket gc` with project-root registration, closure and
+transitive object liveness, keep-days cache retention, dry-run reporting,
+stale-stage cleanup, and opt-in `--project` forest/backup cleanup.
