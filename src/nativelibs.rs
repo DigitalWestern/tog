@@ -769,9 +769,38 @@ pub fn compose_env(object: &Path, base: &[(String, String)]) -> Vec<(String, Str
     let mut out = base.to_vec();
     set_env(&mut out, "PKG_CONFIG_PATH", object.join("lib/pkgconfig").display().to_string());
     set_env(&mut out, "PKG_CONFIG_LIBDIR", object.join("lib/pkgconfig").display().to_string());
-    append_env(&mut out, "CFLAGS", format!("-I{include}"));
-    append_env(&mut out, "CXXFLAGS", format!("-I{include}"));
-    append_env(&mut out, "LDFLAGS", format!("-L{lib} -Wl,-rpath,{lib}"));
+    append_env(&mut out, "CFLAGS", shell_quote_arg(&format!("-I{include}")));
+    append_env(&mut out, "CXXFLAGS", shell_quote_arg(&format!("-I{include}")));
+    append_env(
+        &mut out,
+        "LDFLAGS",
+        format!(
+            "{} {}",
+            shell_quote_arg(&format!("-L{lib}")),
+            shell_quote_arg(&format!("-Wl,-rpath,{lib}")),
+        ),
+    );
+
+    // cc-rs and other C build helpers read CFLAGS/LDFLAGS, but Cargo/rustc
+    // deliberately do not. Supply the same native search path and runtime
+    // rpath through both Rust flag channels Cargo understands. The encoded
+    // form preserves each argument exactly, including paths containing spaces.
+    let rust_args = [
+        "-C".to_string(),
+        format!("link-arg=-Wl,-rpath,{lib}"),
+        "-L".to_string(),
+        format!("native={lib}"),
+    ];
+    append_env(
+        &mut out,
+        "RUSTFLAGS",
+        rust_args
+            .iter()
+            .map(|arg| shell_quote_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    append_encoded_env(&mut out, "CARGO_ENCODED_RUSTFLAGS", &rust_args);
     let path = out.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone());
     set_env(
         &mut out,
@@ -810,6 +839,37 @@ fn append_env(env: &mut Vec<(String, String)>, key: &str, suffix: String) {
         key,
         match value {
             Some(value) if !value.is_empty() => format!("{value} {suffix}"),
+            _ => suffix,
+        },
+    );
+}
+
+/// Quote one compiler/linker argument for the shell-like flag parsers used by
+/// setuptools, cc-rs, and Cargo's RUSTFLAGS handling. Paths without shell
+/// metacharacters retain the historical compact form; paths containing a
+/// space (or another special character) remain one complete argument.
+fn shell_quote_arg(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/=,+@".contains(&byte))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// Cargo separates CARGO_ENCODED_RUSTFLAGS arguments with ASCII unit
+/// separator (0x1f). Unlike RUSTFLAGS, this channel does not need shell
+/// quoting and therefore handles a store root containing spaces directly.
+fn append_encoded_env(env: &mut Vec<(String, String)>, key: &str, args: &[String]) {
+    let suffix = args.join("\x1f");
+    let value = env.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone());
+    set_env(
+        env,
+        key,
+        match value {
+            Some(value) if !value.is_empty() => format!("{value}\x1f{suffix}"),
             _ => suffix,
         },
     );
@@ -1045,6 +1105,40 @@ mod tests {
         assert_eq!(
             get("PATH"),
             "/build-env/bin:/store/objects/libset/bin:/rust/bin:/usr/bin:/bin"
+        );
+        assert_eq!(get("RUSTFLAGS"), "-C link-arg=-Wl,-rpath,/store/objects/libset/lib -L native=/store/objects/libset/lib");
+        assert_eq!(
+            get("CARGO_ENCODED_RUSTFLAGS"),
+            "-C\x1flink-arg=-Wl,-rpath,/store/objects/libset/lib\x1f-L\x1fnative=/store/objects/libset/lib"
+        );
+    }
+
+    #[test]
+    fn native_env_composition_quotes_store_paths_for_compilers() {
+        let env = compose_env(
+            Path::new("/store with spaces/objects/libset"),
+            &[("PATH".into(), "/usr/bin:/bin".into())],
+        );
+        let get = |key: &str| {
+            env.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+                .unwrap()
+        };
+        assert_eq!(get("PKG_CONFIG_PATH"), "/store with spaces/objects/libset/lib/pkgconfig");
+        assert_eq!(get("CFLAGS"), "'-I/store with spaces/objects/libset/include'");
+        assert_eq!(get("CXXFLAGS"), "'-I/store with spaces/objects/libset/include'");
+        assert_eq!(
+            get("LDFLAGS"),
+            "'-L/store with spaces/objects/libset/lib' '-Wl,-rpath,/store with spaces/objects/libset/lib'"
+        );
+        assert_eq!(
+            get("RUSTFLAGS"),
+            "-C 'link-arg=-Wl,-rpath,/store with spaces/objects/libset/lib' -L 'native=/store with spaces/objects/libset/lib'"
+        );
+        assert_eq!(
+            get("CARGO_ENCODED_RUSTFLAGS"),
+            "-C\x1flink-arg=-Wl,-rpath,/store with spaces/objects/libset/lib\x1f-L\x1fnative=/store with spaces/objects/libset/lib"
         );
     }
 }

@@ -107,6 +107,89 @@ fn linux_native_libs_pkg_config_sdist_and_runtime() {
         &native.path,
         &[("PATH".into(), "/usr/bin:/bin".into())],
     );
+
+    // Cargo must receive the native library search path and rpath through its
+    // Rust-specific flag channels. This deliberately uses a Rust cdylib
+    // rather than a C/Cython build: the latter only exercises LDFLAGS.
+    let rust_probe = temp.0.join("rust-pango-probe");
+    std::fs::create_dir_all(rust_probe.join("src")).unwrap();
+    std::fs::write(
+        rust_probe.join("Cargo.toml"),
+        "[package]\nname = \"rust-pango-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        rust_probe.join("src/lib.rs"),
+        r#"use std::ffi::CStr;
+
+#[link(name = "pango-1.0")]
+unsafe extern "C" {
+    fn pango_version_string() -> *const std::ffi::c_char;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn blanket_pango_version() -> *const std::ffi::c_char {
+    pango_version_string()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
+    CStr::from_ptr(pango_version_string()).to_bytes() == b"1.50.11"
+}
+"#,
+    )
+    .unwrap();
+    let host_path = std::env::var_os("PATH").unwrap();
+    let find_tool = |name: &str| {
+        std::env::split_paths(&host_path)
+            .map(|directory| directory.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from(name))
+    };
+    let cargo_bin = find_tool("cargo");
+    let rustc_bin = find_tool("rustc");
+    let mut cargo_probe = Command::new(&cargo_bin);
+    cargo_probe
+        .current_dir(&rust_probe)
+        .args(["build", "--release"])
+        .env("RUSTC", &rustc_bin)
+        .env_remove("RUSTUP_HOME")
+        .env_remove("RUSTUP_TOOLCHAIN");
+    for (key, value) in &env {
+        cargo_probe.env(key, value);
+    }
+    cargo_probe.env("PATH", host_path);
+    let cargo_output = cargo_probe.output().unwrap();
+    assert_ok(cargo_output, "Rust Pango probe build");
+    let probe = rust_probe.join("target/release/librust_pango_probe.so");
+    assert!(probe.is_file(), "Rust probe did not produce {}", probe.display());
+    let readelf = assert_ok(
+        Command::new("readelf").args(["-dW"]).arg(&probe).output().unwrap(),
+        "readelf Rust Pango probe",
+    );
+    let native_lib = native.path.join("lib/libpango-1.0.so.0");
+    assert!(
+        readelf.lines().any(|line| {
+            (line.contains("RUNPATH") || line.contains("RPATH"))
+                && line.contains(&native.path.join("lib").display().to_string())
+        }),
+        "Rust probe has no native library runpath:\n{readelf}"
+    );
+    let ldd = assert_ok(
+        Command::new("ldd").arg(&probe).output().unwrap(),
+        "ldd Rust Pango probe",
+    );
+    assert!(
+        ldd.lines().any(|line| line.contains(&native_lib.display().to_string())),
+        "Rust probe resolved a host Pango instead of {}:\n{ldd}",
+        native_lib.display()
+    );
+    println!(
+        "Rust Pango probe: {} -> {}",
+        probe.display(),
+        native_lib.display()
+    );
+
     let path = env
         .iter()
         .find(|(key, _)| key == "PATH")

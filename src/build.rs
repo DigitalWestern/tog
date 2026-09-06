@@ -42,6 +42,12 @@ fn build_toolchain_fingerprint() -> String {
     BUILD_TOOLCHAIN.iter().map(|tool| tool.4).collect::<Vec<_>>().join(",")
 }
 
+// The native library set is mounted into sdist builds through environment
+// flags. Keep that interface versioned in the identity: changing linker flags
+// changes the produced extension bytes even when the mounted object is the
+// same one.
+const NATIVE_LINKER_CONFIG: &str = "native-libs-rpath/1";
+
 fn sdist_build_env(platform: Platform) -> Vec<(String, String)> {
     if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
         vec![
@@ -107,6 +113,7 @@ fn isolated_sdist_identity_from_ids(
     }
     if let Some(native_libs_id) = native_libs_id {
         inputs.insert("native_libs".into(), native_libs_id.into());
+        inputs.insert("native_linker".into(), NATIVE_LINKER_CONFIG.into());
     }
     Identity {
         kind: "sdist-build".into(),
@@ -858,6 +865,30 @@ mod tests {
         );
         assert_eq!(identity.inputs["schema"], "sdist-build/3");
         assert_eq!(identity.inputs["build_env"], "build-env-id");
+    }
+
+    #[test]
+    fn native_sdist_identity_records_linker_configuration() {
+        let pkg = LockedPackage {
+            name: "example".into(),
+            version: "1.0".into(),
+            filename: "example-1.0.tar.gz".into(),
+            url: String::new(),
+            sha256: "a".repeat(64),
+            kind: ArtifactKind::Sdist,
+        };
+        let pin = crate::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
+        let identity = isolated_sdist_identity_from_ids(
+            Platform::X86_64UnknownLinuxGnu,
+            &pkg,
+            pin,
+            "build-env-id",
+            Some("rust-id"),
+            Some("vendor-id"),
+            Some("native-libs-id"),
+        );
+        assert_eq!(identity.inputs["native_libs"], "native-libs-id");
+        assert_eq!(identity.inputs["native_linker"], NATIVE_LINKER_CONFIG);
     }
 
     #[test]
