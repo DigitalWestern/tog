@@ -157,7 +157,11 @@ fn plan_named(tarball: &std::path::Path, sri: &str, name: &str) -> NpmPlan {
 /// another's closure. Every test here that realizes an env holds this.
 fn policy_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Exceptions recorded by a test that never writes a closure stay pending
+    // for the next one that does, so start each test from an empty list.
+    policy::clear();
+    guard
 }
 
 fn store_at(dir: &std::path::Path) -> Store {
