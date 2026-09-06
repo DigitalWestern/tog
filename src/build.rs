@@ -10,6 +10,7 @@
 //! backends that need other build dependencies fail loudly in the sandbox.
 
 use crate::fetch::download_verified;
+use crate::platform::{no_pin, Platform};
 use crate::project;
 use crate::sandbox::Sandbox;
 use crate::store::Store;
@@ -48,15 +49,127 @@ const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
 /// Everything (besides the sdist bytes and interpreter) that determines a
 /// built wheel: schema + build-toolchain hashes. Parent env identities must
 /// include this so a toolchain upgrade re-derives dependents.
+fn build_toolchain_fingerprint() -> String {
+    BUILD_TOOLCHAIN
+        .iter()
+        .map(|t| t.4)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn sdist_build_env(platform: Platform) -> Vec<(String, String)> {
+    if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        // python-build-standalone defaults sysconfig's compiler to clang,
+        // which is absent on the target host; see LINUX_PORT.md stage 3.
+        vec![
+            ("CC".into(), "gcc".into()),
+            ("CXX".into(), "g++".into()),
+            ("LDSHARED".into(), "gcc -shared".into()),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn derivation_fingerprint() -> String {
-    format!(
-        "sdist-build/2;toolchain:{}",
-        BUILD_TOOLCHAIN
-            .iter()
-            .map(|t| t.4)
-            .collect::<Vec<_>>()
-            .join(",")
+    format!("sdist-build/2;toolchain:{}", build_toolchain_fingerprint())
+}
+
+fn sdist_identity(
+    platform: Platform,
+    pkg: &LockedPackage,
+    pin: &crate::python::PinnedPython,
+) -> Identity {
+    Identity {
+        kind: "sdist-build".into(),
+        name: pkg.name.clone(),
+        version: pkg.version.clone(),
+        inputs: BTreeMap::from([
+            ("schema".to_string(), "sdist-build/2".to_string()),
+            ("sdist_sha256".to_string(), pkg.sha256.clone()),
+            (
+                "python".to_string(),
+                format!("{}:{}", pin.version, pin.sha256),
+            ),
+            ("platform".to_string(), platform.triple().to_string()),
+            ("toolchain".to_string(), build_toolchain_fingerprint()),
+        ]),
+    }
+}
+
+fn wrap_sandbox_build_error(pkg: &LockedPackage, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "sandboxed build of {}=={} failed: {error}\n\
+             (network is denied during builds; sdists needing undeclared \
+             build deps or network access are unsupported in v0)",
+            pkg.name, pkg.version
+        ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        assert_eq!(
+            derivation_fingerprint(),
+            "sdist-build/2;toolchain:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e,51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670,3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"
+        );
+    }
+
+    #[test]
+    fn darwin_sdist_identity_unchanged() {
+        let pkg = LockedPackage {
+            name: "docopt".into(),
+            version: "0.6.2".into(),
+            filename: "docopt-0.6.2.tar.gz".into(),
+            url: "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz".into(),
+            sha256: "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491".into(),
+            kind: ArtifactKind::Sdist,
+        };
+        let platform = Platform::Aarch64AppleDarwin;
+        let pin = crate::python::lookup(platform, "3.12.14").unwrap();
+        let identity = sdist_identity(platform, &pkg, pin);
+        assert_eq!(
+            identity.object_id(),
+            "a26c6aa7246296eac77249f89a9faed77175eb16-docopt-0.6.2"
+        );
+    }
+
+    #[test]
+    fn build_sdist_preserves_unsupported_kind() {
+        let pkg = LockedPackage {
+            name: "example".into(),
+            version: "1.0.0".into(),
+            filename: "example-1.0.0.tar.gz".into(),
+            url: "https://example.invalid/example.tar.gz".into(),
+            sha256: "a".repeat(64),
+            kind: ArtifactKind::Sdist,
+        };
+        let error = wrap_sandbox_build_error(
+            &pkg,
+            io::Error::new(io::ErrorKind::Unsupported, "injected sandbox failure"),
+        );
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("sandboxed build"));
+    }
+
+    #[test]
+    fn linux_sdist_build_uses_host_compilers() {
+        assert_eq!(
+            sdist_build_env(Platform::X86_64UnknownLinuxGnu),
+            vec![
+                ("CC".into(), "gcc".into()),
+                ("CXX".into(), "g++".into()),
+                ("LDSHARED".into(), "gcc -shared".into()),
+            ]
+        );
+        assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
+    }
 }
 
 fn build_toolchain_plan(python_version: &str) -> Plan {
@@ -81,37 +194,14 @@ fn build_toolchain_plan(python_version: &str) -> Plan {
 /// the built .whl inside its immutable store object.
 pub fn build_sdist_wheel(
     store: &Store,
+    platform: Platform,
     pkg: &LockedPackage,
     python_version: &str,
 ) -> io::Result<PathBuf> {
-    let pin = crate::python::lookup(python_version).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no pinned CPython {python_version}"),
-        )
-    })?;
-    let identity = Identity {
-        kind: "sdist-build".into(),
-        name: pkg.name.clone(),
-        version: pkg.version.clone(),
-        inputs: BTreeMap::from([
-            ("schema".to_string(), "sdist-build/2".to_string()),
-            ("sdist_sha256".to_string(), pkg.sha256.clone()),
-            (
-                "python".to_string(),
-                format!("{}:{}", pin.version, pin.sha256),
-            ),
-            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
-            (
-                "toolchain".to_string(),
-                BUILD_TOOLCHAIN
-                    .iter()
-                    .map(|t| t.4)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
-        ]),
-    };
+    crate::platform::require_host(platform, "sdist build", "stage 3")?;
+    let pin = crate::python::lookup(platform, python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
+    let identity = sdist_identity(platform, pkg, pin);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -120,7 +210,7 @@ pub fn build_sdist_wheel(
 
     // Hermetic build env through the ordinary kernel path (cache-shared
     // across all sdist builds for this interpreter).
-    let build_env = project::realize_env(store, &build_toolchain_plan(python_version))?;
+    let build_env = project::realize_env(store, platform, &build_toolchain_plan(python_version))?;
     let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
 
     let work = store.stage()?; // writable build area
@@ -145,13 +235,15 @@ pub fn build_sdist_wheel(
     // Narrow reads to declared inputs only: the build env object and the
     // CPython object its bin/python resolves to. (mach-lookup and broad
     // process-exec remain allowed -- documented v0 sandbox limitation.)
-    let cpython_obj = crate::python::ensure_python(store, pin)?;
+    let cpython_obj = crate::python::ensure_python_for(store, pin, platform)?;
     let sb = Sandbox {
         read: vec![&build_env, &cpython_obj],
         write: vec![&work],
     };
     let env_path = format!("{}:/usr/bin:/bin", build_env.join("bin").display());
-    sb.run(
+    let build_envs = sdist_build_env(platform);
+    sb.run_in_on(
+        platform,
         &[
             py.to_str().unwrap(),
             "-m",
@@ -166,18 +258,10 @@ pub fn build_sdist_wheel(
         ],
         &env_path,
         &work,
+        &work,
+        &build_envs,
     )
-    .map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "sandboxed build of {}=={} failed: {e}\n\
-                 (network is denied during builds; sdists needing undeclared \
-                 build deps or network access are unsupported in v0)",
-                pkg.name, pkg.version
-            ),
-        )
-    })?;
+    .map_err(|e| wrap_sandbox_build_error(pkg, e))?;
 
     // Exactly one wheel expected; stage it alone as the object's content.
     let wheels: Vec<_> = fs::read_dir(&outdir)?

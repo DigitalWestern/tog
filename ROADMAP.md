@@ -221,7 +221,7 @@ starves.
       project-side plan caches (go-plan.json, python plan.json).
 - [ ] Central closet / binary cache + fixed store path decision
 - [ ] Friendlier CLI errors (e.g. `node.js` typo → "did you mean node?")
-- [ ] Linux support (also unlocks the "Linux as reference hermetic
+- [x] Linux support — landed 2026-09-05, LINUX_PORT.md (also unlocks the "Linux as reference hermetic
       builder" idea)
 
 ## Open questions for Ethan + Claude to chew on together

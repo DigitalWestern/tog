@@ -46,27 +46,90 @@ fn assert_ok(output: Output, label: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn copy_dotnet_hello(project: &Path) {
+    std::fs::create_dir_all(project).unwrap();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dotnet-hello");
+    for f in ["proj.csproj", "packages.lock.json", "Program.cs"] {
+        std::fs::copy(fixtures.join(f), project.join(f)).unwrap();
+    }
+}
+
+fn published_dll(project: &Path) -> PathBuf {
+    std::fs::read_dir(project.join("bin"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with("blanket-"))
+        .map(|e| e.path().join("proj.dll"))
+        .expect("staged bin dir")
+}
+
+fn sdk_object(store: &Path) -> PathBuf {
+    std::fs::read_dir(store.join("objects"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|path| path.join("dotnet").is_file() && path.join("sdk/9.0.317").is_dir())
+        .expect("committed .NET SDK object")
+}
+
+fn assert_realization_does_not_evaluate_user_project(binary: &Path, temp: &TempDir) {
+    let project = temp.0.join("dotnet-tripwire");
+    copy_dotnet_hello(&project);
+    let csproj = project.join("proj.csproj");
+    let mut text = std::fs::read_to_string(&csproj).unwrap();
+    text = text.replace(
+        "</Project>",
+        "<Target Name=\"Tripwire\" BeforeTargets=\"Restore\"><WriteLinesToFile File=\"tripwire.txt\" Lines=\"executed\" Overwrite=\"true\" /></Target></Project>",
+    );
+    std::fs::write(csproj, text).unwrap();
+    let store = temp.0.join("tripwire-store");
+    assert_ok(blanket(binary, &project, &store, &["sync"]), "tripwire sync");
+    assert!(
+        !project.join("tripwire.txt").exists(),
+        "realization evaluated the user's project"
+    );
+}
+
 #[test]
 #[ignore]
 fn dotnet_sync_sandboxed_build_and_run() {
     let temp = TempDir::new();
     let project = temp.0.join("dotnet-hello");
-    std::fs::create_dir_all(&project).unwrap();
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dotnet-hello");
-    for f in ["proj.csproj", "packages.lock.json", "Program.cs"] {
-        std::fs::copy(fixtures.join(f), project.join(f)).unwrap();
-    }
+    copy_dotnet_hello(&project);
     let store = temp.0.join("store");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
     assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    let version = assert_ok(
+        blanket(&binary, &project, &store, &["run", "dotnet", "--version"]),
+        "dotnet --version",
+    );
+    assert!(
+        version.lines().any(|line| line.trim() == "9.0.317"),
+        "{version}"
+    );
+    if cfg!(target_os = "linux") {
+        let info = assert_ok(
+            blanket(&binary, &project, &store, &["run", "dotnet", "--info"]),
+            "dotnet --info",
+        );
+        // `dotnet --info` pads with variable whitespace; compare fields.
+        let field = |name: &str| {
+            info.lines()
+                .filter_map(|line| line.trim().strip_prefix(name))
+                .map(|rest| rest.trim().to_string())
+                .next()
+        };
+        assert_eq!(field("OS Platform:").as_deref(), Some("Linux"), "{info}");
+        assert_eq!(field("RID:").as_deref(), Some("linux-x64"), "{info}");
+        let base_path = sdk_object(&store).join("sdk/9.0.317");
+        assert!(
+            info.contains(&base_path.display().to_string()),
+            "SDK base path is not under the committed store object: {base_path:?}\n{info}"
+        );
+    }
     assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
-    let dll = std::fs::read_dir(project.join("bin"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .find(|e| e.file_name().to_string_lossy().starts_with("blanket-"))
-        .map(|e| e.path().join("proj.dll"))
-        .expect("staged bin dir");
+    let dll = published_dll(&project);
     assert!(dll.is_file());
     let out = assert_ok(
         blanket(
@@ -78,6 +141,24 @@ fn dotnet_sync_sandboxed_build_and_run() {
         "run built app",
     );
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
+
+    std::fs::remove_dir_all(dll.parent().unwrap()).unwrap();
+    assert_ok(
+        blanket(&binary, &project, &store, &["build"]),
+        "build after published output deletion",
+    );
+    let rebuilt = published_dll(&project);
+    let out = assert_ok(
+        blanket(
+            &binary,
+            &project,
+            &store,
+            &["run", "dotnet", rebuilt.to_str().unwrap()],
+        ),
+        "run rebuilt app",
+    );
+    assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
+
     // Build-capable verbs are sandbox-only.
     let refused = blanket(&binary, &project, &store, &["run", "dotnet", "build"]);
     assert!(!refused.status.success());
@@ -85,32 +166,14 @@ fn dotnet_sync_sandboxed_build_and_run() {
         String::from_utf8_lossy(&refused.stderr).contains("blanket build dotnet"),
         "build verb must be refused at run"
     );
+
+    assert_realization_does_not_evaluate_user_project(&binary, &temp);
 }
 
 #[test]
 #[ignore]
 fn dotnet_realization_does_not_evaluate_user_project() {
     let temp = TempDir::new();
-    let project = temp.0.join("dotnet-tripwire");
-    std::fs::create_dir_all(&project).unwrap();
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dotnet-hello");
-    let mut csproj = std::fs::read_to_string(fixtures.join("proj.csproj")).unwrap();
-    csproj = csproj.replace(
-        "</Project>",
-        "<Target Name=\"Tripwire\" BeforeTargets=\"Restore\"><WriteLinesToFile File=\"tripwire.txt\" Lines=\"executed\" Overwrite=\"true\" /></Target></Project>",
-    );
-    std::fs::write(project.join("proj.csproj"), csproj).unwrap();
-    std::fs::copy(
-        fixtures.join("packages.lock.json"),
-        project.join("packages.lock.json"),
-    )
-    .unwrap();
-    let store = temp.0.join("store");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
-
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
-    assert!(
-        !project.join("tripwire.txt").exists(),
-        "realization evaluated the user's project"
-    );
+    assert_realization_does_not_evaluate_user_project(&binary, &temp);
 }

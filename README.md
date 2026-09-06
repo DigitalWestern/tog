@@ -15,11 +15,25 @@ realizes into a **comforter** (an immutable, shareable environment) kept
 in the **closet** (the store). Your `.venv` and `node_modules` are
 comforters.
 
-**Status: Python + Node ecosystems working on real projects, macOS arm64.**
+**Status: all seven ecosystems pass the acceptance checklist on Linux x86_64 (Fedora 44, 2026-09-05) and, before the Linux refactor, on macOS arm64.** The macOS re-run on real hardware is the one open item in LINUX_PORT.md; every darwin pin and store identity is byte-identical to the pre-port tree. Python + Node are proven on real projects; the others on the fixtures in `tests/`.
 Proven on: Next.js 15 (build + vitest), vite apps (build AND dev server),
 prisma (generate/query), native addons compiled hermetically
 (better-sqlite3 from source, sharp via declared artifacts), npm
 workspaces, FastAPI + pandas/lxml stacks.
+
+## Linux host prerequisites
+
+Blanket downloads every language toolchain itself, but native builds
+compile against the host C toolchain (like Xcode CLT on macOS) and the
+build sandbox uses bubblewrap. On Fedora:
+
+```sh
+sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel \
+  pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel
+```
+
+Unprivileged user namespaces must be enabled (`/proc/sys/user/max_user_namespaces` > 0;
+Fedora's default). SELinux enforcing is fine.
 
 ## Use
 
@@ -106,3 +120,15 @@ each one against real PyPI):
 cargo test               # unit tests (no network)
 bash tests/acceptance.sh # end-to-end (network, real PyPI, throwaway store)
 ```
+
+## Working across machines
+
+A project can be synced on a Mac and on a Linux box in turn. Nothing
+platform-specific is committed: `.venv`, `node_modules`, `.blanket/` are
+ignored. Each host keeps its own store; toolchain and environment object
+ids include the platform triple, so a store shared between platforms (or
+rsynced) never reuses a Mac object on Linux — only the artifact cache
+(`cache/sha256/`) is common, because artifacts are content-addressed.
+`.blanket/closures/<eco>.json` records the `platform` it was projected on.
+After switching machines, run `blanket sync` once; it is a cache hit if
+that host has seen the lock before.

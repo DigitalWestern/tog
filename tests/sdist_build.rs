@@ -2,7 +2,7 @@
 //! sdist-only on PyPI) must build into a wheel inside the network-denied
 //! sandbox. Heavy; run: cargo test --test sdist_build -- --ignored
 
-use blanket::{build, store::Store, types::*};
+use blanket::{build, platform::Platform, store::Store, types::*};
 
 #[test]
 #[ignore]
@@ -16,7 +16,13 @@ fn docopt_sdist_builds_in_sandbox() {
         sha256: "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491".into(),
         kind: ArtifactKind::Sdist,
     };
-    let wheel = build::build_sdist_wheel(&store, &pkg, "3.12.14").expect("sdist build");
+    let wheel = build::build_sdist_wheel(
+        &store,
+        Platform::host().unwrap(),
+        &pkg,
+        "3.12.14",
+    )
+    .expect("sdist build");
     assert!(wheel.file_name().unwrap().to_string_lossy().starts_with("docopt-0.6.2-"));
     assert!(wheel.exists());
 }

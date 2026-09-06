@@ -9,6 +9,7 @@
 
 use crate::dirhash;
 use crate::fetch::{cache_insert, download_verified};
+use crate::platform::{no_pin, Platform};
 use crate::sandbox::BuildSpec;
 use crate::store::Store;
 use crate::types::Identity;
@@ -20,45 +21,135 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PLATFORM: &str = "aarch64-apple-darwin";
 const GO_VERSION: &str = "1.27.0";
-const GO_URL: &str = "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz";
-const GO_SHA256: &str = "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e";
-const GO_PINS: &[&str] = &[GO_VERSION];
+struct GoPin {
+    platform: Platform,
+    version: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+}
+
+const GO_PIN_ROWS: &[GoPin] = &[GoPin {
+    platform: Platform::Aarch64AppleDarwin,
+    version: GO_VERSION,
+    url: "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz",
+    sha256: "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e",
+}, GoPin {
+    platform: Platform::X86_64UnknownLinuxGnu,
+    version: GO_VERSION,
+    url: "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
+    sha256: "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
+}];
+
+fn go_pin(platform: Platform) -> io::Result<&'static GoPin> {
+    GO_PIN_ROWS
+        .iter()
+        .find(|pin| pin.platform == platform)
+        .ok_or_else(|| no_pin("go", platform, "stage 4"))
+}
+
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    go_pin(platform).map(|_| ())
+}
+
+fn go_identity(pin: &GoPin) -> Identity {
+    Identity {
+        kind: "go".into(),
+        name: "go".into(),
+        version: pin.version.into(),
+        inputs: BTreeMap::from([
+            ("schema".to_string(), "go-toolchain/1".to_string()),
+            ("artifact_sha256".to_string(), pin.sha256.to_string()),
+            ("platform".to_string(), pin.platform.triple().to_string()),
+        ]),
+    }
+}
+
+fn go_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
+    let mut pins: Vec<_> = GO_PIN_ROWS
+        .iter()
+        .filter(|pin| pin.platform == platform)
+        .map(|pin| pin.version)
+        .collect();
+    pins.sort_unstable();
+    pins.dedup();
+    if pins.is_empty() {
+        return Err(no_pin("go", platform, "stage 4"));
+    }
+    Ok(pins)
+}
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
+/// Extract a provider Go archive into its store staging directory. Go's
+/// release archives have exactly one `go/` root; strip that one level while
+/// retaining the complete toolchain tree below it.
+fn extract_go_toolchain(archive: &Path, staged: &Path) -> io::Result<()> {
+    let listing = Command::new("/usr/bin/tar")
+        .args(["-tzf"])
+        .arg(archive)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("list Go archive: {e}")))?;
+    if !listing.status.success() {
+        return Err(err(format!(
+            "could not inspect Go archive layout: {}",
+            String::from_utf8_lossy(&listing.stderr).trim()
+        )));
+    }
+    let mut saw_entry = false;
+    for raw in String::from_utf8_lossy(&listing.stdout).lines() {
+        let entry = raw.trim_end_matches('/');
+        if entry.is_empty() {
+            continue;
+        }
+        let mut components = entry.split('/');
+        if components.next() != Some("go")
+            || components.any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return Err(err(format!(
+                "go archive has unexpected layout entry {raw:?}; expected a single top-level go/ root"
+            )));
+        }
+        saw_entry = true;
+    }
+    if !saw_entry {
+        return Err(err("go archive has unexpected empty layout"));
+    }
+
+    let status = Command::new("/usr/bin/tar")
+        .args(["-xzf"])
+        .arg(archive)
+        .args(["-C"])
+        .arg(staged)
+        .args(["--strip-components", "1"])
+        .status()
+        .map_err(|e| io::Error::new(e.kind(), format!("extract Go archive: {e}")))?;
+    if !status.success() || !staged.join("bin/go").is_file() {
+        return Err(err("go tarball extraction failed or has unexpected layout"));
+    }
+    Ok(())
+}
+
 /// Ensure the pinned Go toolchain is realized in the store.
 pub fn ensure_go(store: &Store) -> io::Result<PathBuf> {
-    let identity = Identity {
-        kind: "go".into(),
-        name: "go".into(),
-        version: GO_VERSION.into(),
-        inputs: BTreeMap::from([
-            ("schema".to_string(), "go-toolchain/1".to_string()),
-            ("artifact_sha256".to_string(), GO_SHA256.to_string()),
-            ("platform".to_string(), PLATFORM.to_string()),
-        ]),
-    };
+    ensure_go_for(store, Platform::host()?)
+}
+
+pub fn ensure_go_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    let pin = go_pin(platform)?;
+    let identity = go_identity(pin);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified(store, GO_URL, GO_SHA256)?;
+    let tarball = download_verified(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    let status = Command::new("/usr/bin/tar")
-        .args(["-xzf"])
-        .arg(&tarball)
-        .args(["-C"])
-        .arg(&staged)
-        .args(["--strip-components", "1"])
-        .status()?;
-    if !status.success() || !staged.join("bin/go").is_file() {
-        return Err(err("go tarball extraction failed or has unexpected layout"));
-    }
+    extract_go_toolchain(&tarball, &staged)?;
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
@@ -120,28 +211,29 @@ fn run_go(
 
 /// Toolchain selection from go.mod directives (Sol rules): `go` is a
 /// minimum, `toolchain` a suggestion; pick the lowest pin satisfying both.
-pub fn resolve_toolchain(gomod: &str) -> io::Result<&'static str> {
+pub fn resolve_toolchain(platform: Platform, gomod: &str) -> io::Result<&'static str> {
+    let pins = go_pins(platform)?;
     let mut min_go: Option<Vec<u64>> = None;
     let mut suggestion: Option<Vec<u64>> = None;
     for line in gomod.lines() {
         let line = line.trim();
         if let Some(v) = line.strip_prefix("go ") {
-            min_go = Some(go_version_key(v.trim())?);
+            min_go = Some(go_version_key(v.trim(), &pins)?);
         } else if let Some(v) = line.strip_prefix("toolchain ") {
             let v = v.trim();
             if v == "default" {
                 continue;
             }
             let v = v.strip_prefix("go").unwrap_or(v);
-            suggestion = Some(go_version_key(v)?);
+            suggestion = Some(go_version_key(v, &pins)?);
         }
     }
     let floor = |k: &Option<Vec<u64>>| k.clone().unwrap_or_default();
     let (need_a, need_b) = (floor(&min_go), floor(&suggestion));
-    GO_PINS
+    pins
         .iter()
         .copied()
-        .filter_map(|p| go_version_key(p).ok().map(|k| (k, p)))
+        .filter_map(|p| go_version_key(p, &pins).ok().map(|k| (k, p)))
         .filter(|(k, _)| *k >= need_a && *k >= need_b)
         .min_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, p)| p)
@@ -149,21 +241,21 @@ pub fn resolve_toolchain(gomod: &str) -> io::Result<&'static str> {
             err(format!(
                 "no pinned Go toolchain satisfies this module's go/toolchain \
                  directives; pinned: {}",
-                GO_PINS.join(", ")
+                pins.join(", ")
             ))
         })
 }
 
 /// Go version ordering: numeric dot components, missing patch = 0.
 /// Prerelease suffixes (rc/beta) are rejected — no pins carry them.
-fn go_version_key(v: &str) -> io::Result<Vec<u64>> {
+fn go_version_key(v: &str, pins: &[&str]) -> io::Result<Vec<u64>> {
     let mut key: Vec<u64> = Vec::new();
     for part in v.split('.') {
         key.push(part.parse::<u64>().map_err(|_| {
             err(format!(
                 "unsupported Go version {v:?} (prerelease/custom toolchains \
                  are not supported; pinned: {})",
-                GO_PINS.join(", ")
+                pins.join(", ")
             ))
         })?);
     }
@@ -327,13 +419,18 @@ pub fn module_path(gomod: &str) -> io::Result<String> {
 /// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
 /// by blanket-owned verification of every artifact. Cached in
 /// .blanket/go-plan.json keyed by go.mod+go.sum content.
-pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<GoPlan> {
+pub fn plan_go(
+    store: &Store,
+    platform: Platform,
+    project_dir: &Path,
+    go_obj: &Path,
+) -> io::Result<GoPlan> {
     reject_workspaces(project_dir)?;
     let gomod = fs::read_to_string(project_dir.join("go.mod"))
         .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
     reject_local_replaces(&gomod)?;
-    let go_version = resolve_toolchain(&gomod)?;
+    let go_version = resolve_toolchain(platform, &gomod)?;
 
     // The tidy gate's inputs are exactly go.mod + go.sum + the .go sources,
     // so the plan-cache key covers all three: a hit proves the last
@@ -393,7 +490,7 @@ pub fn plan_go(store: &Store, project_dir: &Path, go_obj: &Path) -> io::Result<G
     };
     reject_local_replaces(&gomod)?;
     // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
-    let go_version = resolve_toolchain(&gomod)?;
+    let go_version = resolve_toolchain(platform, &gomod)?;
     let module = module_path(&gomod)?;
     let input_hash = hex::encode(Sha256::digest(
         format!(
@@ -646,7 +743,9 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
             // already exist, so a poisoned cache byte would go straight
             // into the object).
             let src = crate::fetch::cache_verified(store, hash)
-                .map_err(|e| err(format!("{}@{}: {e}", m.path, m.version)))?;
+                .map_err(|e| {
+                    io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version))
+                })?;
             // COPY, never hardlink: builds must not reach the cache.
             fs::copy(&src, dir.join(format!("{ver}.{ext}")))?;
         }
@@ -663,15 +762,14 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
     Ok(())
 }
 
-/// Realize the immutable GOMODCACHE object: verified skeleton + extraction
-/// delegated to the store Go offline (full x/mod/zip validation), whose
-/// recipe is part of the identity.
-pub fn realize_modcache(store: &Store, plan: &GoPlan, go_obj: &Path) -> io::Result<PathBuf> {
+/// Identity of the immutable GOMODCACHE object. Shared by production and the
+/// darwin golden test so the extractor input cannot drift unobserved.
+fn modcache_identity(pin: &GoPin, plan: &GoPlan) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "go-modcache/1".to_string()),
         (
             "extractor".to_string(),
-            format!("go{}:{}", GO_VERSION, GO_SHA256),
+            format!("go{}:{}", pin.version, pin.sha256),
         ),
     ]);
     for m in &plan.modules {
@@ -694,6 +792,22 @@ pub fn realize_modcache(store: &Store, plan: &GoPlan, go_obj: &Path) -> io::Resu
         version: plan.modules.len().to_string(),
         inputs,
     };
+    identity
+}
+
+/// Realize the immutable GOMODCACHE object: verified skeleton + extraction
+/// delegated to the store Go offline (full x/mod/zip validation), whose
+/// recipe is part of the identity.
+pub fn realize_modcache(
+    store: &Store,
+    platform: Platform,
+    plan: &GoPlan,
+    go_obj: &Path,
+) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Go module cache", "stage 4")?;
+    let pin = go_pin(platform)?;
+    let identity = modcache_identity(pin, plan);
+
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -777,6 +891,7 @@ pub fn project_go_env(
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
 /// staged in scratch and moved into the project by blanket afterwards.
 pub fn build_sandboxed(
+    platform: Platform,
     project_dir: &Path,
     go_obj: &Path,
     modcache_obj: &Path,
@@ -853,8 +968,8 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", go_obj.join("bin").display()),
     };
-    let result = crate::sandbox::run_build_spec(&spec).map_err(|e| {
-        err(format!(
+    let result = crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+        io::Error::new(e.kind(), format!(
             "go build failed: {e}; network is denied during builds (local \
              replace directives and network-dependent tooling are unsupported)"
         ))
@@ -878,23 +993,222 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_unique_pin_per_supported_platform() {
+        assert_eq!(GO_PIN_ROWS.len(), Platform::ALL.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for pin in GO_PIN_ROWS {
+            assert!(seen.insert(pin.platform.triple()), "duplicate pin platform");
+        }
+        for platform in Platform::ALL {
+            assert_eq!(
+                GO_PIN_ROWS
+                    .iter()
+                    .filter(|pin| pin.platform == *platform)
+                    .count(),
+                1,
+                "expected one Go pin for {}",
+                platform.triple()
+            );
+        }
+
+        let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_eq!(linux.version, "1.27.0");
+        assert_eq!(
+            linux.url,
+            "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            linux.sha256,
+            "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
+        );
+    }
+
+    #[test]
+    fn production_toolchain_identities_are_platform_distinct() {
+        let darwin = go_identity(go_pin(Platform::Aarch64AppleDarwin).unwrap());
+        let linux = go_identity(go_pin(Platform::X86_64UnknownLinuxGnu).unwrap());
+        assert_ne!(darwin.object_id(), linux.object_id());
+        assert_eq!(
+            darwin.inputs.get("platform").map(String::as_str),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(
+            linux.inputs.get("platform").map(String::as_str),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        let platform = Platform::Aarch64AppleDarwin;
+        let pin = go_pin(platform).unwrap();
+        let identity = go_identity(pin);
+        assert_eq!(
+            identity.object_id(),
+            "d2d13392a210fa6589345911feb433fbf3bc06ae-go-1.27.0"
+        );
+        let empty = GoPlan { go_version: "1.27.0".into(), module: "example.com/x".into(), modules: vec![] };
+        let modcache = modcache_identity(pin, &empty);
+        assert_eq!(
+            modcache.inputs["extractor"],
+            "go1.27.0:90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"
+        );
+        assert_eq!(modcache.inputs["schema"], "go-modcache/1");
+        let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_ne!(
+            modcache_identity(linux, &empty).object_id(),
+            modcache.object_id()
+        );
+        assert_eq!(
+            pin.url,
+            "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz"
+        );
+    }
+
+    #[test]
     fn toolchain_selection_rules() {
         assert_eq!(
-            resolve_toolchain("module m\n\ngo 1.21\n").unwrap(),
+            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.21\n").unwrap(),
             "1.27.0"
         );
         assert_eq!(
-            resolve_toolchain("module m\n\ngo 1.27\n\ntoolchain go1.27.0\n").unwrap(),
+            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27\n\ntoolchain go1.27.0\n").unwrap(),
             "1.27.0"
         );
         assert_eq!(
-            resolve_toolchain("module m\n\ngo 1.24\n\ntoolchain default\n").unwrap(),
+            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.24\n\ntoolchain default\n").unwrap(),
             "1.27.0"
         );
         // Requirement above every pin -> fail.
-        assert!(resolve_toolchain("module m\n\ngo 1.99\n").is_err());
+        assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.99\n").is_err());
         // Prerelease -> fail with instructions.
-        assert!(resolve_toolchain("module m\n\ngo 1.27rc1\n").is_err());
+        assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27rc1\n").is_err());
+    }
+
+    #[test]
+    fn linux_toolchain_selection_rules() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        for directive in ["go 1.21", "go 1.27", "go 1.27.0"] {
+            assert_eq!(
+                resolve_toolchain(platform, &format!("module m\n\n{directive}\n")).unwrap(),
+                "1.27.0",
+                "directive {directive}"
+            );
+        }
+        assert_eq!(
+            resolve_toolchain(
+                platform,
+                "module m\n\ngo 1.21\n\ntoolchain go1.27.0\n"
+            )
+            .unwrap(),
+            "1.27.0"
+        );
+        assert_eq!(
+            resolve_toolchain(platform, "module m\n\ngo 1.21\n\ntoolchain default\n").unwrap(),
+            "1.27.0"
+        );
+        assert!(resolve_toolchain(platform, "module m\n\ngo 1.28\n").is_err());
+        assert!(resolve_toolchain(
+            platform,
+            "module m\n\ngo 1.27\n\ntoolchain go1.28\n"
+        )
+        .is_err());
+        assert!(resolve_toolchain(platform, "module m\n\ngo 1.27rc1\n").is_err());
+        assert!(resolve_toolchain(
+            platform,
+            "module m\n\ngo 1.27\n\ntoolchain go1.27rc1\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn go_environment_policy_is_forced_and_pinned() {
+        let go_obj = Path::new("/store/objects/linux-go");
+        let modcache = Path::new("/store/objects/modcache");
+        fn value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+            env.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        }
+
+        let offline = go_env(go_obj, modcache, true);
+        assert_eq!(value(&offline, "GOTOOLCHAIN"), Some("local"));
+        assert_eq!(value(&offline, "GOROOT"), Some("/store/objects/linux-go"));
+        assert_eq!(value(&offline, "GOENV"), Some("off"));
+        assert_eq!(value(&offline, "GOWORK"), Some("off"));
+        assert_eq!(value(&offline, "GOMODCACHE"), Some("/store/objects/modcache"));
+        assert_eq!(value(&offline, "GOPROXY"), Some("off"));
+        assert_eq!(value(&offline, "GOSUMDB"), Some("off"));
+        assert!(value(&offline, "GOVCS").is_none());
+
+        let online = go_env(go_obj, modcache, false);
+        assert_eq!(value(&online, "GOPROXY"), Some("https://proxy.golang.org"));
+        assert_eq!(value(&online, "GOSUMDB"), Some("sum.golang.org"));
+        assert_eq!(value(&online, "GOVCS"), Some("*:off"));
+        assert_ne!(value(&online, "GOPROXY"), Some("file:///host/cache"));
+    }
+
+    #[test]
+    fn go_archive_layout_strips_only_the_go_root() {
+        let temp = std::env::temp_dir().join(format!(
+            "blanket-go-layout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = temp.join("source");
+        std::fs::create_dir_all(source.join("go/bin")).unwrap();
+        std::fs::create_dir_all(source.join("go/src")).unwrap();
+        std::fs::create_dir_all(source.join("go/pkg")).unwrap();
+        std::fs::write(source.join("go/bin/go"), b"go").unwrap();
+        std::fs::write(source.join("go/bin/gofmt"), b"gofmt").unwrap();
+        std::fs::write(source.join("go/src/README"), b"src").unwrap();
+        std::fs::write(source.join("go/pkg/README"), b"pkg").unwrap();
+        let archive = temp.join("go.tar.gz");
+        std::fs::create_dir_all(&source).unwrap();
+        assert!(
+            Command::new("/usr/bin/tar")
+                .args(["-czf"])
+                .arg(&archive)
+                .args(["-C"])
+                .arg(&source)
+                .arg("go")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let staged = temp.join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        extract_go_toolchain(&archive, &staged).unwrap();
+        assert!(staged.join("bin/go").is_file());
+        assert!(staged.join("bin/gofmt").is_file());
+        assert!(staged.join("src/README").is_file());
+        assert!(staged.join("pkg/README").is_file());
+
+        let nested_source = temp.join("nested-source");
+        std::fs::create_dir_all(nested_source.join("outer/go/bin")).unwrap();
+        std::fs::write(nested_source.join("outer/go/bin/go"), b"go").unwrap();
+        let nested_archive = temp.join("nested.tar.gz");
+        assert!(
+            Command::new("/usr/bin/tar")
+                .args(["-czf"])
+                .arg(&nested_archive)
+                .args(["-C"])
+                .arg(&nested_source)
+                .arg("outer")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let nested_staged = temp.join("nested-staged");
+        std::fs::create_dir_all(&nested_staged).unwrap();
+        let error = extract_go_toolchain(&nested_archive, &nested_staged).unwrap_err();
+        assert!(error.to_string().contains("unexpected layout"));
+        assert!(!nested_staged.join("go").exists());
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -981,6 +1295,7 @@ mod tests {
             "--toolexec",
         ] {
             let e = build_sandboxed(
+                Platform::Aarch64AppleDarwin,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),

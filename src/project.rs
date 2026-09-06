@@ -6,6 +6,7 @@
 //! different objects and coexist. Projection into a project is one symlink.
 
 use crate::fetch::download_verified;
+use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::{ArtifactKind, Identity, Plan};
 use crate::{python, wheel};
@@ -39,9 +40,15 @@ pub fn write_closure(
     if let Some(body) = body.as_object_mut() {
         body.insert("exceptions".into(), serde_json::to_value(&pending)?);
     }
+    // Envelope-level platform (LINUX_PORT.md stage 6): a project synced on
+    // a Mac and then on a Linux box carries two different closures over
+    // time; readers must not assume the body's object ids are valid for
+    // the current host. Additive field, schema unchanged.
+    let platform = Platform::host()?.triple();
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
+        "platform": platform,
         "projected_at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
         "body": body,
@@ -69,6 +76,22 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
             format!("parse {}: {e}; run `blanket sync` first", path.display()),
         )
     })?;
+    if let Some(recorded) = v["platform"].as_str() {
+        let host = Platform::host()?;
+        if recorded != host.triple() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "{}: closure was projected on {recorded}; this host is {}; run `blanket sync` here",
+                    path.display(),
+                    host.triple()
+                ),
+            ));
+        }
+    }
+    // Envelopes without a platform field predate the Linux port (all darwin);
+    // they are accepted and their object ids simply will not resolve on a
+    // foreign store, which already demands a re-sync.
     if v["schema"] != "closure/1" || v["ecosystem"] != ecosystem {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -86,12 +109,24 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 /// as read-only from the store. Used for writable projections of immutable
 /// objects (npm mutablePackages, elixir deps trees).
 pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    clone_tree_for(src, dest, Platform::host()?)
+}
+
+pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io::Result<()> {
     use std::process::Command;
-    let clone = Command::new("/bin/cp")
-        .args(["-Rc"])
-        .arg(src)
-        .arg(dest)
-        .status()?;
+    let clone = if platform.is_macos() {
+        Command::new("/bin/cp")
+            .args(["-Rc"])
+            .arg(src)
+            .arg(dest)
+            .status()?
+    } else {
+        Command::new("/bin/cp")
+            .args(["-a", "--reflink=auto"])
+            .arg(src)
+            .arg(dest)
+            .status()?
+    };
     if !clone.success() {
         if dest.exists() {
             crate::store::remove_tree(dest)?;
@@ -169,22 +204,11 @@ pub fn closure_object(
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
-pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
-    let pin = python::lookup(&plan.python_version).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "no pinned CPython {} (available: {})",
-                plan.python_version,
-                python::PYTHONS
-                    .iter()
-                    .map(|p| p.version)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
-    })?;
-    let python_obj = python::ensure_python(store, pin)?;
+pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Python environment", "stage 2")?;
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let python_obj = python::ensure_python_for(store, pin, platform)?;
 
     // Canonical package order + duplicate rejection: identity must commit
     // to exactly one artifact per name, installed in a deterministic order.
@@ -245,7 +269,9 @@ pub fn realize_env(store: &Store, plan: &Plan) -> io::Result<PathBuf> {
         let wheel_file = match p.kind {
             ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
             // sdist -> wheel via sandboxed derivation (network denied).
-            ArtifactKind::Sdist => crate::build::build_sdist_wheel(store, p, &pin.version)?,
+            ArtifactKind::Sdist => {
+                crate::build::build_sdist_wheel(store, platform, p, &pin.version)?
+            }
         };
         artifacts.push((p, wheel_file));
     }
@@ -321,7 +347,7 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
         .as_secs();
     let dest = backups.join(format!("{project}-{dirname}-{secs}"));
     fs::rename(path, &dest).map_err(|e| {
-        io::Error::other(format!(
+        io::Error::new(e.kind(), format!(
             "could not move existing {} aside to {}: {e}",
             path.display(),
             dest.display()
@@ -361,4 +387,46 @@ pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Resul
             "plan": plan,
         }),
     )
+}
+
+#[cfg(test)]
+mod closure_platform_tests {
+    use super::*;
+
+    fn write_closure(dir: &Path, platform: Option<&str>) {
+        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        let mut v = serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"ok": true}
+        });
+        if let Some(platform) = platform {
+            v["platform"] = serde_json::Value::String(platform.to_string());
+        }
+        fs::write(dir.join(".blanket/closures/python.json"), v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn foreign_platform_closure_is_refused_and_legacy_is_accepted() {
+        let host = Platform::host().unwrap();
+        let foreign = Platform::ALL
+            .iter()
+            .copied()
+            .find(|p| *p != host)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("blanket-closure-plat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        write_closure(&dir, Some(foreign.triple()));
+        let err = read_closure(&dir, "python").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+        assert!(err.to_string().contains(foreign.triple()), "{err}");
+
+        write_closure(&dir, Some(host.triple()));
+        assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
+
+        write_closure(&dir, None); // pre-port envelope
+        assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

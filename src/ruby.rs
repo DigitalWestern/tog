@@ -10,7 +10,8 @@
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
 use crate::fetch::download_verified;
-use crate::sandbox::{force_env, run_build_spec, BuildSpec};
+use crate::platform::{no_pin, Platform};
+use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
 use crate::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -25,44 +26,215 @@ const RUBY_VERSION: &str = "3.4.6";
 // Homebrew portable-ruby: relocatable, bundler included; the ruby Homebrew
 // itself ships on. Newest PORTABLE artifact (ruby-lang 3.4.x source may be
 // newer; documented gap until a newer portable build exists).
-const RUBY_URL: &str = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.arm64_big_sur.bottle.tar.gz";
-const RUBY_SHA256: &str = "62fe925f284cc38aac68b9a42b02cd90de753f8832e8866be3fd60558dd70f67";
-
-fn err(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+//
+// Both 3.4.6 bottles were inspected (2026-09-05): root `portable-ruby/3.4.6/`,
+// no symlinks, `#!/bin/sh` wrappers that `exec "$bindir/ruby"` relative to
+// $0, `--enable-load-relative` (RbConfig prefix follows the object path) and
+// `--with-static-linked-ext` (openssl/zlib/yaml/ffi compiled into
+// `bin/ruby`). The Linux binary's NEEDED set is glibc only; its RUNPATH still
+// lists `/home/linuxbrew/...` build directories but nothing NEEDED lives
+// there, so it is inert provenance (like `configure_args`) and is NOT
+// rewritten: no staging repair, hence no relocation-recipe identity input.
+// RubyGems reports `Gem::Platform.local` = `x86_64-linux` for that bottle,
+// which is neither the bottle tag (`x86_64_linux`) nor the Rust triple; the
+// plan records whatever the pinned interpreter says.
+struct RubyPin {
+    platform: Platform,
+    url: &'static str,
+    sha256: &'static str,
 }
 
-/// Ensure the pinned portable Ruby is realized (interpreter at <obj>/bin/ruby).
-pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
-    let identity = Identity {
+const RUBY_PINS: &[RubyPin] = &[RubyPin {
+    platform: Platform::Aarch64AppleDarwin,
+    url: "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.arm64_big_sur.bottle.tar.gz",
+    sha256: "62fe925f284cc38aac68b9a42b02cd90de753f8832e8866be3fd60558dd70f67",
+}, RubyPin {
+    platform: Platform::X86_64UnknownLinuxGnu,
+    url: "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.x86_64_linux.bottle.tar.gz",
+    sha256: "40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259",
+}];
+
+fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
+    RUBY_PINS
+        .iter()
+        .find(|pin| pin.platform == platform)
+        .ok_or_else(|| no_pin("ruby", platform, "stage 4"))
+}
+
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Ruby", "stage 4")?;
+    ruby_pin(platform).map(|_| ())
+}
+
+fn ruby_identity(pin: &RubyPin) -> Identity {
+    Identity {
         kind: "ruby".into(),
         name: "ruby".into(),
         version: RUBY_VERSION.into(),
         inputs: BTreeMap::from([
             ("schema".to_string(), "ruby-toolchain/1".to_string()),
-            ("artifact_sha256".to_string(), RUBY_SHA256.to_string()),
-            ("platform".to_string(), "aarch64-apple-darwin".to_string()),
+            ("artifact_sha256".to_string(), pin.sha256.to_string()),
+            ("platform".to_string(), pin.platform.triple().to_string()),
         ]),
-    };
+    }
+}
+
+fn ruby_gems_identity(pin: &RubyPin, plan: &RubyPlan) -> Identity {
+    let mut inputs = BTreeMap::from([
+        ("schema".to_string(), "ruby-gems/1".to_string()),
+        // Installer recipe AND wrapper-byte provenance: generated binstubs
+        // embed interpreter paths.
+        (
+            "installer".to_string(),
+            format!("ruby{}:{}", RUBY_VERSION, pin.sha256),
+        ),
+        ("ruby_platform".to_string(), plan.ruby_platform.clone()),
+    ]);
+    for g in &plan.gems {
+        inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
+    }
+    Identity {
+        kind: "ruby-gems".into(),
+        name: "gems".into(),
+        version: plan.gems.len().to_string(),
+        inputs,
+    }
+}
+
+fn err(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn required_entry(root: &Path, relative: &str) -> io::Result<()> {
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("portable-ruby is missing {relative}: {e}"),
+        )
+    })?;
+    if !metadata.is_file() && !metadata.file_type().is_symlink() {
+        return Err(err(format!(
+            "portable-ruby path is not a file: {}",
+            path.display()
+        )));
+    }
+    if metadata.file_type().is_symlink() {
+        let root = root.canonicalize()?;
+        let resolved = path.canonicalize().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("portable-ruby has dangling symlink {}: {e}", path.display()),
+            )
+        })?;
+        if !resolved.starts_with(&root) {
+            return Err(err(format!(
+                "portable-ruby symlink escapes the object: {} -> {}",
+                path.display(),
+                resolved.display()
+            )));
+        }
+        if !resolved.is_file() {
+            return Err(err(format!(
+                "portable-ruby symlink does not resolve to a file: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn find_file(root: &Path, wanted: &dyn Fn(&Path) -> bool) -> io::Result<Option<PathBuf>> {
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    if metadata.is_file() {
+        return Ok(wanted(root).then(|| root.to_path_buf()));
+    }
+    if !metadata.is_dir() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if let Some(found) = find_file(&path, wanted)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_ruby_layout(root: &Path) -> io::Result<()> {
+    required_entry(root, "bin/ruby")?;
+    required_entry(root, "bin/gem")?;
+
+    let bin = root.join("bin");
+    let bundle = find_file(&bin, &|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "bundle" || name == "bundler" || name.starts_with("bundle"))
+    })?;
+    if bundle.is_none() {
+        return Err(err(format!(
+            "portable-ruby is missing a Bundler launcher under {}",
+            bin.display()
+        )));
+    }
+
+    let library = find_file(&root.join("lib"), &|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("libruby"))
+    })?;
+    if library.is_none() {
+        return Err(err("portable-ruby is missing its Ruby runtime library"));
+    }
+
+    let header = find_file(&root.join("include"), &|path| {
+        path.file_name().and_then(|name| name.to_str()) == Some("ruby.h")
+    })?;
+    if header.is_none() {
+        return Err(err("portable-ruby is missing interpreter headers"));
+    }
+    Ok(())
+}
+
+fn extract_ruby_bottle(tarball: &Path, staged: &Path) -> io::Result<()> {
+    // The verified Linux and Darwin bottles both use
+    // portable-ruby/<version>/<tree>; this is deliberately not Node's
+    // strip count. The archive remains unchanged in the verified cache.
+    let status = Command::new("/usr/bin/tar")
+        .args(["-xzf"])
+        .arg(tarball)
+        .args(["-C"])
+        .arg(staged)
+        .args(["--strip-components", "2"])
+        .status()?;
+    if !status.success() {
+        return Err(err("portable-ruby extraction failed"));
+    }
+    validate_ruby_layout(staged)
+}
+
+/// Ensure the pinned portable Ruby is realized (interpreter at <obj>/bin/ruby).
+pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
+    ensure_ruby_for(store, Platform::host()?)
+}
+
+pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Ruby", "stage 4")?;
+    let pin = ruby_pin(platform)?;
+    let identity = ruby_identity(pin);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified(store, RUBY_URL, RUBY_SHA256)?;
+    let tarball = download_verified(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    // Bottle layout: portable-ruby/3.4.6/<tree> — strip 2.
-    let status = Command::new("/usr/bin/tar")
-        .args(["-xzf"])
-        .arg(&tarball)
-        .args(["-C"])
-        .arg(&staged)
-        .args(["--strip-components", "2"])
-        .status()?;
-    if !status.success() || !staged.join("bin/ruby").is_file() {
-        return Err(err(
-            "portable-ruby extraction failed or has unexpected layout",
-        ));
+    if let Err(error) = extract_ruby_bottle(&tarball, &staged) {
+        let _ = crate::store::remove_tree(&staged);
+        return Err(error);
     }
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
@@ -487,27 +659,16 @@ pub fn plan_ruby(
 
 /// Realize the immutable GEM_HOME object: dependency-first sandboxed
 /// installs (native extensions compile here, network denied).
-pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Result<PathBuf> {
+pub fn realize_gems(
+    store: &Store,
+    platform: Platform,
+    plan: &RubyPlan,
+    ruby_obj: &Path,
+) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Ruby gems", "stage 4")?;
+    let pin = ruby_pin(platform)?;
     validate_plan(plan)?;
-    let mut inputs = BTreeMap::from([
-        ("schema".to_string(), "ruby-gems/1".to_string()),
-        // Installer recipe AND wrapper-byte provenance: generated binstubs
-        // embed interpreter paths.
-        (
-            "installer".to_string(),
-            format!("ruby{RUBY_VERSION}:{RUBY_SHA256}"),
-        ),
-        ("ruby_platform".to_string(), plan.ruby_platform.clone()),
-    ]);
-    for g in &plan.gems {
-        inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
-    }
-    let identity = Identity {
-        kind: "ruby-gems".into(),
-        name: "gems".into(),
-        version: plan.gems.len().to_string(),
-        inputs,
-    };
+    let identity = ruby_gems_identity(pin, plan);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -522,8 +683,9 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
         let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let file = download_verified(store, &url, &g.sha256)
-            .map_err(|e| err(format!("{}: {e}", g.full_name)))?;
+        let file = download_verified(store, &url, &g.sha256).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: {e}", g.full_name))
+        })?;
         let out = run_ruby(
             ruby_obj,
             &scratch,
@@ -604,8 +766,8 @@ pub fn realize_gems(store: &Store, plan: &RubyPlan, ruby_obj: &Path) -> io::Resu
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
         };
-        run_build_spec(&spec).map_err(|e| {
-            err(format!(
+        crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+            io::Error::new(e.kind(), format!(
                 "{}: sandboxed gem install failed: {e}\n(network is denied; \
                  gems whose installers need network or missing host \
                  libraries are unsupported in v0)",
@@ -647,6 +809,180 @@ pub fn project_ruby_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blanket-ruby-unit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = crate::store::remove_tree(&self.0);
+        }
+    }
+
+    #[test]
+    fn ruby_pins_cover_supported_platforms() {
+        assert_eq!(RUBY_PINS.len(), Platform::ALL.len());
+        for platform in Platform::ALL {
+            assert_eq!(ruby_pin(*platform).unwrap().platform, *platform);
+        }
+        let linux = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_eq!(linux.url, "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.x86_64_linux.bottle.tar.gz");
+        assert_eq!(
+            linux.sha256,
+            "40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259"
+        );
+    }
+
+    fn linux_test_plan() -> RubyPlan {
+        RubyPlan {
+            ruby_version: RUBY_VERSION.into(),
+            ruby_platform: "x86_64-linux".into(),
+            bundler_version: "2.6.9".into(),
+            gems: vec![RubyGem {
+                name: "rake".into(),
+                version: "13.2.1".into(),
+                platform: "ruby".into(),
+                full_name: "rake-13.2.1".into(),
+                sha256: "a".repeat(64),
+            }],
+        }
+    }
+
+    #[test]
+    fn linux_and_darwin_identities_are_distinct_rows_of_one_schema() {
+        let darwin_pin = ruby_pin(Platform::Aarch64AppleDarwin).unwrap();
+        let linux_pin = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        let darwin = ruby_identity(darwin_pin);
+        let linux = ruby_identity(linux_pin);
+        assert_ne!(darwin.object_id(), linux.object_id());
+        // Same input keys: the Linux pin is a row, not a second recipe.
+        assert_eq!(
+            darwin.inputs.keys().collect::<Vec<_>>(),
+            linux.inputs.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(linux.inputs["platform"], "x86_64-unknown-linux-gnu");
+        assert_eq!(linux.inputs["artifact_sha256"], linux_pin.sha256);
+
+        let plan = linux_test_plan();
+        let darwin_gems = ruby_gems_identity(darwin_pin, &plan);
+        let linux_gems = ruby_gems_identity(linux_pin, &plan);
+        assert_ne!(darwin_gems.object_id(), linux_gems.object_id());
+        assert!(linux_gems.inputs["installer"].contains(linux_pin.sha256));
+    }
+
+    #[test]
+    fn linux_identities_pinned() {
+        // Goldens for the shared-store check (LINUX_PORT.md stage 6): a Mac
+        // and a Linux box realizing the same pin must not collide, and the
+        // Linux ids must not drift without a deliberate identity change.
+        let pin = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_eq!(
+            (
+                ruby_identity(pin).object_id(),
+                ruby_gems_identity(pin, &linux_test_plan()).object_id(),
+            ),
+            (
+                "192a4c7b501dd09eb3c76a3ebd427e8077fbda6e-ruby-3.4.6".to_string(),
+                "ee94737d938d41b8454fd6ea7d75dc737ccf73e5-gems-1".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn synthetic_bottle_uses_two_root_components_and_validates_layout() {
+        let temp = TempDir::new();
+        let source = temp.0.join("source with spaces");
+        let tree = source.join("portable-ruby/3.4.6");
+        fs::create_dir_all(tree.join("bin")).unwrap();
+        fs::create_dir_all(tree.join("lib")).unwrap();
+        fs::create_dir_all(tree.join("include/ruby-3.4.0")).unwrap();
+        fs::write(tree.join("bin/ruby"), b"#!/bin/sh\n").unwrap();
+        fs::write(tree.join("bin/gem-real"), b"#!/bin/sh\n").unwrap();
+        symlink("gem-real", tree.join("bin/gem")).unwrap();
+        fs::write(tree.join("bin/bundle"), b"#!/bin/sh\n").unwrap();
+        fs::write(tree.join("lib/libruby-3.4.so"), b"ELF\0not text").unwrap();
+        fs::write(tree.join("include/ruby-3.4.0/ruby.h"), b"#define RUBY_H 1\n").unwrap();
+        fs::set_permissions(tree.join("bin/ruby"), fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let archive = temp.0.join("portable ruby.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&source)
+            .arg("portable-ruby")
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let staged = temp.0.join("staged");
+        fs::create_dir(&staged).unwrap();
+        extract_ruby_bottle(&archive, &staged).unwrap();
+        assert!(staged.join("bin/ruby").is_file());
+        assert!(staged.join("bin/gem").is_symlink());
+        assert!(!staged.join("portable-ruby").exists());
+        assert_eq!(
+            fs::metadata(staged.join("bin/ruby"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+
+        fs::remove_file(staged.join("bin/bundle")).unwrap();
+        let error = validate_ruby_layout(&staged).unwrap_err();
+        assert!(error.to_string().contains("Bundler launcher"));
+    }
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        let platform = Platform::Aarch64AppleDarwin;
+        let pin = ruby_pin(platform).unwrap();
+        let identity = ruby_identity(pin);
+        assert_eq!(
+            identity.object_id(),
+            "c4c2411b7540521f48dcdd8cff25786e261ed1ee-ruby-3.4.6"
+        );
+    }
+
+    #[test]
+    fn darwin_ruby_gems_identity_unchanged() {
+        let pin = ruby_pin(Platform::Aarch64AppleDarwin).unwrap();
+        let plan = RubyPlan {
+            ruby_version: RUBY_VERSION.into(),
+            ruby_platform: "arm64-darwin20".into(),
+            bundler_version: "2.6.9".into(),
+            gems: vec![RubyGem {
+                name: "rake".into(),
+                version: "13.2.1".into(),
+                platform: "ruby".into(),
+                full_name: "rake-13.2.1".into(),
+                sha256: "a".repeat(64),
+            }],
+        };
+        let identity = ruby_gems_identity(pin, &plan);
+        assert_eq!(
+            identity.object_id(),
+            "c017bc4da37483c7d35d1997df4c541d35e4a751-gems-1"
+        );
+    }
 
     #[test]
     fn plan_validation_rejects_hostile_fields() {
@@ -683,6 +1019,32 @@ mod tests {
             ..ok.clone()
         };
         assert!(validate_plan(&dup).is_err());
+    }
+
+    #[test]
+    fn linux_plan_accepts_source_and_platform_qualified_gems() {
+        let plan = RubyPlan {
+            ruby_version: RUBY_VERSION.into(),
+            ruby_platform: "x86_64-linux".into(),
+            bundler_version: "2.6.9".into(),
+            gems: vec![
+                RubyGem {
+                    name: "mini_portile2".into(),
+                    version: "2.8.9".into(),
+                    platform: "ruby".into(),
+                    full_name: "mini_portile2-2.8.9".into(),
+                    sha256: "a".repeat(64),
+                },
+                RubyGem {
+                    name: "nokogiri".into(),
+                    version: "1.18.10".into(),
+                    platform: "x86_64-linux".into(),
+                    full_name: "nokogiri-1.18.10-x86_64-linux".into(),
+                    sha256: "b".repeat(64),
+                },
+            ],
+        };
+        assert!(validate_plan(&plan).is_ok());
     }
 
     #[test]

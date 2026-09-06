@@ -1,6 +1,7 @@
 //! The Cargo tailor: Cargo.lock importer and registry vendor realization.
 
 use crate::fetch::download_verified;
+use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -11,48 +12,103 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-const PLATFORM: &str = "aarch64-apple-darwin";
 const RUST_VERSION: &str = "1.96.1";
-const RUST_PINS: &[&str] = &[RUST_VERSION];
 
 struct RustComponent {
-    name: &'static str,
+    platform: Platform,
+    component: &'static str,
+    version: &'static str,
     url: &'static str,
     sha256: &'static str,
 }
 
 const RUST_COMPONENTS: &[RustComponent] = &[
     RustComponent {
-        name: "rustc",
+        platform: Platform::Aarch64AppleDarwin,
+        component: "rustc",
+        version: RUST_VERSION,
         url: "https://static.rust-lang.org/dist/rustc-1.96.1-aarch64-apple-darwin.tar.xz",
         sha256: "9b548f0665f85f3c7fd45165611e3dea79f048c69d163be193986310d204fc2c",
     },
     RustComponent {
-        name: "rust_std",
+        platform: Platform::Aarch64AppleDarwin,
+        component: "rust-std",
+        version: RUST_VERSION,
         url: "https://static.rust-lang.org/dist/rust-std-1.96.1-aarch64-apple-darwin.tar.xz",
         sha256: "0d433a74c303febc915f8fa1091ef166445706461d0c96984ecb7303aa8208f5",
     },
     RustComponent {
-        name: "cargo",
+        platform: Platform::Aarch64AppleDarwin,
+        component: "cargo",
+        version: RUST_VERSION,
         url: "https://static.rust-lang.org/dist/cargo-1.96.1-aarch64-apple-darwin.tar.xz",
         sha256: "2f43d75e9ad3febae5022c6f295cf93b74131cfdb1293a83e291f878ea9585a0",
     },
+    RustComponent {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        component: "rustc",
+        version: RUST_VERSION,
+        url: "https://static.rust-lang.org/dist/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923",
+    },
+    RustComponent {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        component: "rust-std",
+        version: RUST_VERSION,
+        url: "https://static.rust-lang.org/dist/rust-std-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae",
+    },
+    RustComponent {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        component: "cargo",
+        version: RUST_VERSION,
+        url: "https://static.rust-lang.org/dist/cargo-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e",
+    },
 ];
 
-fn err(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>> {
+    let components: Vec<_> = RUST_COMPONENTS
+        .iter()
+        .filter(|component| component.platform == platform)
+        .collect();
+    let complete = components.len() == 3
+        && ["rustc", "rust-std", "cargo"]
+            .iter()
+            .all(|name| components.iter().filter(|c| c.component == *name).count() == 1);
+    if !complete {
+        return Err(no_pin("rust toolchain", platform, "stage 4"));
+    }
+    Ok(components)
 }
 
-/// Ensure the pinned Rust toolchain is realized in the store. Takes the
-/// resolved version so a future second pin can't silently realize the
-/// wrong toolchain (only RUST_VERSION is realizable today).
-pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
-    if version != RUST_VERSION {
-        return Err(err(format!(
-            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
-        )));
-    }
-    let identity = Identity {
+pub fn preflight_platform(platform: Platform) -> io::Result<()> {
+    crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    rust_components(platform).map(|_| ())
+}
+
+fn rust_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
+    let mut pins: Vec<_> = rust_components(platform)?
+        .into_iter()
+        .map(|component| component.version)
+        .collect();
+    pins.sort_unstable();
+    pins.dedup();
+    Ok(pins)
+}
+
+fn rust_component<'a>(
+    components: &'a [&'static RustComponent],
+    name: &str,
+) -> &'a RustComponent {
+    components
+        .iter()
+        .find(|component| component.component == name)
+        .expect("validated Rust component set")
+}
+
+fn rust_identity(platform: Platform, components: &[&'static RustComponent]) -> Identity {
+    Identity {
         kind: "rust".into(),
         name: "rust".into(),
         version: RUST_VERSION.into(),
@@ -62,19 +118,47 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
             ("schema".to_string(), "rust-toolchain/1".to_string()),
             (
                 "cargo_sha256".to_string(),
-                RUST_COMPONENTS[2].sha256.to_string(),
+                rust_component(components, "cargo").sha256.to_string(),
             ),
-            ("platform".to_string(), PLATFORM.to_string()),
+            ("platform".to_string(), platform.triple().to_string()),
             (
                 "rust_std_sha256".to_string(),
-                RUST_COMPONENTS[1].sha256.to_string(),
+                rust_component(components, "rust-std")
+                    .sha256
+                    .to_string(),
             ),
             (
                 "rustc_sha256".to_string(),
-                RUST_COMPONENTS[0].sha256.to_string(),
+                rust_component(components, "rustc").sha256.to_string(),
             ),
         ]),
-    };
+    }
+}
+
+fn err(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// Ensure the pinned Rust toolchain is realized in the store. Takes the
+/// resolved version so a future second pin can't silently realize the
+/// wrong toolchain (only RUST_VERSION is realizable today).
+pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
+    ensure_rust_for(store, Platform::host()?, version)
+}
+
+pub fn ensure_rust_for(
+    store: &Store,
+    platform: Platform,
+    version: &str,
+) -> io::Result<PathBuf> {
+    crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    let components = rust_components(platform)?;
+    if version != RUST_VERSION {
+        return Err(err(format!(
+            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
+        )));
+    }
+    let identity = rust_identity(platform, &components);
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -82,38 +166,61 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
     }
 
     let mut tarballs = Vec::new();
-    for component in RUST_COMPONENTS {
+    for component in &components {
         tarballs.push(download_verified(store, component.url, component.sha256)?);
     }
 
     let staged = store.stage()?;
-    for (component, tarball) in RUST_COMPONENTS.iter().zip(tarballs) {
+    extract_rust_components(&staged, platform, &components, &tarballs)?;
+
+    store
+        .commit(&identity, &staged, &[])
+        .map(|(path, _)| path)
+        .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
+}
+
+fn extract_rust_components(
+    staged: &Path,
+    platform: Platform,
+    components: &[&RustComponent],
+    tarballs: &[PathBuf],
+) -> io::Result<()> {
+    if components.len() != tarballs.len() {
+        return Err(err("Rust component/archive count mismatch"));
+    }
+    for (component, tarball) in components.iter().zip(tarballs) {
         let status = Command::new("/usr/bin/tar")
             .args(["-xJf"])
             .arg(tarball)
             .args(["-C"])
-            .arg(&staged)
+            .arg(staged)
             .args(["--strip-components", "2"])
             .status()
-            .map_err(|e| err(format!("spawn tar for {}: {e}", component.name)))?;
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("spawn tar for {}: {e}", component.component),
+                )
+            })?;
         if !status.success() {
-            return Err(err(format!("{} tarball extraction failed", component.name)));
+            return Err(err(format!("{} tarball extraction failed", component.component)));
         }
     }
+    validate_rust_layout(staged, platform)
+}
 
+fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Result<()> {
     if !staged.join("bin/rustc").is_file()
         || !staged.join("bin/cargo").is_file()
-        || !staged.join(format!("lib/rustlib/{PLATFORM}")).is_dir()
+        || !staged
+            .join(format!("lib/rustlib/{}", platform.triple()))
+            .is_dir()
     {
         return Err(err(
             "Rust toolchain extraction has an unexpected layout; refusing to commit",
         ));
     }
-
-    store
-        .commit(&identity, &staged, &[])
-        .map(|(path, _)| path)
-        .map_err(|e| err(format!("commit rust object: {e}")))
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,51 +236,62 @@ struct ToolchainSpec {
 }
 
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
-pub fn resolve_toolchain(project_dir: &Path) -> io::Result<&'static str> {
+pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
+    let _ = rust_pins(platform)?;
     let mut dir = project_dir;
     loop {
         let legacy = dir.join("rust-toolchain");
         if legacy.exists() {
-            return resolve_toolchain_file(&legacy, true);
+            return resolve_toolchain_file(platform, &legacy, true);
         }
         let toml = dir.join("rust-toolchain.toml");
         if toml.exists() {
-            return resolve_toolchain_file(&toml, false);
+            return resolve_toolchain_file(platform, &toml, false);
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent,
             _ => break,
         }
     }
-    Ok(newest_pin())
+    Ok(newest_pin(platform)?)
 }
 
-fn resolve_toolchain_file(path: &Path, legacy: bool) -> io::Result<&'static str> {
-    let text =
-        fs::read_to_string(path).map_err(|e| err(format!("read {}: {e}", path.display())))?;
+fn resolve_toolchain_file(
+    platform: Platform,
+    path: &Path,
+    legacy: bool,
+) -> io::Result<&'static str> {
+    let text = fs::read_to_string(path).map_err(|e| {
+        io::Error::new(e.kind(), format!("read {}: {e}", path.display()))
+    })?;
     if legacy {
         if let Ok(document) = toml::from_str::<ToolchainDocument>(&text) {
             if let Some(spec) = document.toolchain {
-                return resolve_toolchain_spec(path, spec);
+                return resolve_toolchain_spec(platform, path, spec);
             }
         }
-        return resolve_channel(path, text.trim());
+        return resolve_channel(platform, path, text.trim());
     }
     let document = toml::from_str::<ToolchainDocument>(&text)
         .map_err(|e| err(format!("parse {}: {e}", path.display())))?;
     let spec = document
         .toolchain
         .ok_or_else(|| err(format!("{} has no [toolchain] table", path.display())))?;
-    resolve_toolchain_spec(path, spec)
+    resolve_toolchain_spec(platform, path, spec)
 }
 
-fn resolve_toolchain_spec(path: &Path, spec: ToolchainSpec) -> io::Result<&'static str> {
+fn resolve_toolchain_spec(
+    platform: Platform,
+    path: &Path,
+    spec: ToolchainSpec,
+) -> io::Result<&'static str> {
     if let Some(targets) = spec.targets {
         for target in targets {
-            if target != PLATFORM {
+            if target != platform.triple() {
                 return Err(err(format!(
-                    "{}: target {target:?} is unsupported; only {PLATFORM} is pinned",
-                    path.display()
+                    "{}: target {target:?} is unsupported; only {} is pinned",
+                    path.display(),
+                    platform.triple()
                 )));
             }
         }
@@ -195,12 +313,16 @@ fn resolve_toolchain_spec(path: &Path, spec: ToolchainSpec) -> io::Result<&'stat
     let channel = spec
         .channel
         .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
-    resolve_channel(path, channel.trim())
+    resolve_channel(platform, path, channel.trim())
 }
 
-fn resolve_channel(path: &Path, channel: &str) -> io::Result<&'static str> {
+fn resolve_channel(
+    platform: Platform,
+    path: &Path,
+    channel: &str,
+) -> io::Result<&'static str> {
     if channel == "stable" {
-        let pin = newest_pin();
+        let pin = newest_pin(platform)?;
         eprintln!(
             "blanket: {} resolves stable to pinned Rust {pin}",
             path.display()
@@ -209,7 +331,8 @@ fn resolve_channel(path: &Path, channel: &str) -> io::Result<&'static str> {
     }
 
     let prefix = format!("{channel}.");
-    if let Some(pin) = RUST_PINS
+    let pins = rust_pins(platform)?;
+    if let Some(pin) = pins
         .iter()
         .copied()
         .filter(|pin| *pin == channel || pin.starts_with(&prefix))
@@ -221,7 +344,7 @@ fn resolve_channel(path: &Path, channel: &str) -> io::Result<&'static str> {
     Err(err(format!(
         "{}: unsupported Rust toolchain {channel:?}; pinned versions available: {}",
         path.display(),
-        RUST_PINS.join(", ")
+        pins.join(", ")
     )))
 }
 
@@ -232,12 +355,12 @@ fn version_key(version: &str) -> Vec<u64> {
         .collect()
 }
 
-fn newest_pin() -> &'static str {
-    RUST_PINS
+fn newest_pin(platform: Platform) -> io::Result<&'static str> {
+    rust_pins(platform)?
         .iter()
         .copied()
         .max_by_key(|pin| version_key(pin))
-        .expect("at least one Rust pin")
+        .ok_or_else(|| no_pin("rust toolchain", platform, "stage 4"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -365,6 +488,11 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 
 /// Realize the registry closure as a Cargo directory source.
 pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
+    preflight_platform(Platform::host()?)?;
+    realize_vendor_inner(store, plan)
+}
+
+fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     let mut crates = plan.crates.clone();
     crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
 
@@ -414,7 +542,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     for (krate, archive) in crates.iter().zip(archives) {
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         fs::create_dir_all(&crate_dir).map_err(|e| {
-            err(format!(
+            io::Error::new(e.kind(), format!(
                 "{}@{}: create staging dir: {e}",
                 krate.name, krate.version
             ))
@@ -426,7 +554,12 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
             .arg(&crate_dir)
             .args(["--strip-components", "1"])
             .status()
-            .map_err(|e| err(format!("{}@{}: spawn tar: {e}", krate.name, krate.version)))?;
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{}@{}: spawn tar: {e}", krate.name, krate.version),
+                )
+            })?;
         if !status.success() {
             return Err(err(format!(
                 "{}@{}: crate extraction failed",
@@ -452,7 +585,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
             ))
         })?;
         fs::write(crate_dir.join(".cargo-checksum.json"), json).map_err(|e| {
-            err(format!(
+            io::Error::new(e.kind(), format!(
                 "{}@{}: write .cargo-checksum.json: {e}",
                 krate.name, krate.version
             ))
@@ -462,7 +595,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     store
         .commit(&identity, &staged, &[])
         .map(|(path, _)| path)
-        .map_err(|e| err(format!("commit cargo vendor object: {e}")))
+        .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
 }
 
 #[derive(Serialize)]
@@ -661,6 +794,7 @@ pub fn project_cargo_env(
 
 /// Build a Cargo project in the existing network-denied seatbelt sandbox.
 pub fn build_sandboxed(
+    platform: Platform,
     project_dir: &Path,
     rust_obj: &Path,
     vendor_obj: &Path,
@@ -726,10 +860,10 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
     };
-    let result = crate::sandbox::run_build_spec(&spec);
+    let result = crate::sandbox::run_build_spec_on(platform, &spec);
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
-        err(format!(
+        io::Error::new(e.kind(), format!(
             "Cargo build failed: {e}; network is denied; external path dependencies outside the project and build scripts needing network are unsupported (declared-artifact support may come later)"
         ))
     })
@@ -812,6 +946,86 @@ fn shell_double_quote(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn darwin_identity_unchanged() {
+        let platform = Platform::Aarch64AppleDarwin;
+        let components = rust_components(platform).unwrap();
+        let identity = rust_identity(platform, &components);
+        assert_eq!(
+            identity.object_id(),
+            "b8418440835c4ec1f591381a17ae60ab12d1c727-rust-1.96.1"
+        );
+    }
+
+    #[test]
+    fn rust_component_sets_are_complete_unique_and_pinned() {
+        let expected_names = BTreeSet::from(["cargo", "rust-std", "rustc"]);
+        for platform in Platform::ALL {
+            let components = rust_components(*platform).unwrap();
+            assert_eq!(components.len(), 3);
+            assert_eq!(
+                components
+                    .iter()
+                    .map(|component| component.component)
+                    .collect::<BTreeSet<_>>(),
+                expected_names
+            );
+            assert!(components
+                .iter()
+                .all(|component| component.version == RUST_VERSION));
+            assert!(components
+                .iter()
+                .all(|component| component.platform == *platform));
+        }
+    }
+
+    #[test]
+    fn linux_rust_component_urls_and_digests_are_exact() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let expected = [
+            (
+                "rustc",
+                "https://static.rust-lang.org/dist/rustc-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+                "3545a0efad2355ecb0a3b9ac02efee96e27f1f9d24b7ce2fc3f279b2efb0d923",
+            ),
+            (
+                "rust-std",
+                "https://static.rust-lang.org/dist/rust-std-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+                "1bf4fde5048cca33e6ea00c7471281ed96d792f6923141e3db45072743a1afae",
+            ),
+            (
+                "cargo",
+                "https://static.rust-lang.org/dist/cargo-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
+                "ecc53a3c49fab5ab8c9301b3bbc8fb1dff9be6c65287add3f57a0fe8fddfea9e",
+            ),
+        ];
+        let components = rust_components(platform).unwrap();
+        for (name, url, sha256) in expected {
+            let component = components
+                .iter()
+                .find(|component| component.component == name)
+                .unwrap();
+            assert_eq!(component.url, url);
+            assert_eq!(component.sha256, sha256);
+            assert!(component.url.contains("x86_64-unknown-linux-gnu"));
+        }
+        assert!(rust_components(Platform::Aarch64AppleDarwin)
+            .unwrap()
+            .iter()
+            .all(|component| component.url.contains("aarch64-apple-darwin")));
+    }
+
+    #[test]
+    fn rust_identity_is_platform_specific() {
+        let darwin = rust_components(Platform::Aarch64AppleDarwin).unwrap();
+        let linux = rust_components(Platform::X86_64UnknownLinuxGnu).unwrap();
+        assert_ne!(
+            rust_identity(Platform::Aarch64AppleDarwin, &darwin).object_id(),
+            rust_identity(Platform::X86_64UnknownLinuxGnu, &linux).object_id()
+        );
+    }
     use std::env;
     use std::ffi::OsString;
     use std::sync::Mutex;
@@ -965,7 +1179,7 @@ checksum = "{hash_b}"
         let root = project.parent().unwrap();
 
         fs::write(root.join("rust-toolchain"), "1.96\n").unwrap();
-        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
+        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::write(
@@ -973,7 +1187,7 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\nprofile = \"minimal\"\n",
         )
         .unwrap();
-        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
+        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
 
         fs::write(root.join("rust-toolchain"), "1.96.1\n").unwrap();
         fs::write(
@@ -981,14 +1195,16 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"beta\"\n",
         )
         .unwrap();
-        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
+        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::write(root.join("rust-toolchain"), "stable\n").unwrap();
-        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
+        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
 
         fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
-        let error = resolve_toolchain(&project).unwrap_err().to_string();
+        let error = resolve_toolchain(Platform::Aarch64AppleDarwin, &project)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("1.96.1"));
 
         fs::write(
@@ -996,17 +1212,178 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
         )
         .unwrap();
-        assert!(resolve_toolchain(&project).is_err());
+        assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).is_err());
         fs::write(
             root.join("rust-toolchain"),
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
         )
         .unwrap();
-        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
+        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
-        assert_eq!(resolve_toolchain(&project).unwrap(), "1.96.1");
+        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+    }
+
+    #[test]
+    fn resolves_linux_toolchain_files_targets_and_policy() {
+        let temp = TempDir::new("blanket-cargo-linux-toolchain");
+        let project = temp.path().join("project/child");
+        fs::create_dir_all(&project).unwrap();
+        let root = project.parent().unwrap();
+
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        for channel in ["stable", "1.96", "1.96.1"] {
+            fs::write(root.join("rust-toolchain"), format!("{channel}\n")).unwrap();
+            assert_eq!(
+                resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+                "1.96.1"
+            );
+        }
+
+        fs::write(root.join("rust-toolchain"), "beta\n").unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+        fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        for target in ["aarch64-apple-darwin", "wasm32-unknown-unknown"] {
+            fs::write(
+                root.join("rust-toolchain"),
+                format!("[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"{target}\"]\n"),
+            )
+            .unwrap();
+            assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+        }
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
+        )
+        .unwrap();
+        crate::policy::clear();
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        assert!(crate::policy::pending()
+            .iter()
+            .any(|exception| exception.kind == crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE));
+        crate::policy::clear();
+
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"aarch64-apple-darwin\"]\n",
+        )
+        .unwrap();
+        assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+    }
+
+    fn make_component_archives(
+        dir: &Path,
+        components: &[&RustComponent],
+        platform: Platform,
+        rustlib_target: Option<&str>,
+    ) -> Vec<PathBuf> {
+        components
+            .iter()
+            .map(|component| {
+                let root_name = format!(
+                    "{}-{}-{}",
+                    component.component, RUST_VERSION, platform.triple()
+                );
+                let root = dir.join(&root_name);
+                let package = match component.component {
+                    "rust-std" => root.join(format!("rust-std-{}", platform.triple())),
+                    name => root.join(name),
+                };
+                fs::create_dir_all(&package).unwrap();
+                match component.component {
+                    "rustc" | "cargo" => {
+                        fs::create_dir_all(package.join("bin")).unwrap();
+                        fs::write(
+                            package.join("bin").join(component.component),
+                            component.component,
+                        )
+                        .unwrap();
+                    }
+                    "rust-std" => {
+                        if let Some(target) = rustlib_target {
+                            let rustlib = package.join("lib/rustlib").join(target);
+                            fs::create_dir_all(&rustlib).unwrap();
+                            fs::write(rustlib.join("marker"), b"synthetic").unwrap();
+                        }
+                    }
+                    other => panic!("unexpected component {other}"),
+                }
+                let archive = dir.join(format!("{root_name}.tar.xz"));
+                let status = std::process::Command::new("/usr/bin/tar")
+                    .args(["-cJf"])
+                    .arg(&archive)
+                    .args(["-C"])
+                    .arg(dir)
+                    .arg(&root_name)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                archive
+            })
+            .collect()
+    }
+
+    #[test]
+    fn component_layout_is_validated_before_publication() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let components = rust_components(platform).unwrap();
+
+        let correct = TempDir::new("blanket-rust-layout-correct");
+        let archives = make_component_archives(
+            correct.path(),
+            &components,
+            platform,
+            Some(platform.triple()),
+        );
+        let staged = correct.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        extract_rust_components(&staged, platform, &components, &archives).unwrap();
+        assert!(staged.join("bin/rustc").is_file());
+        assert!(staged.join("bin/cargo").is_file());
+        assert!(staged
+            .join(format!("lib/rustlib/{}", platform.triple()))
+            .is_dir());
+
+        let missing = TempDir::new("blanket-rust-layout-missing");
+        let archives = make_component_archives(
+            missing.path(),
+            &components,
+            platform,
+            None,
+        );
+        let staged = missing.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
+
+        let wrong = TempDir::new("blanket-rust-layout-wrong");
+        let archives = make_component_archives(
+            wrong.path(),
+            &components,
+            platform,
+            Some(Platform::Aarch64AppleDarwin.triple()),
+        );
+        let staged = wrong.path().join("staged");
+        fs::create_dir(&staged).unwrap();
+        assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
     }
 
     fn make_crate(dir: &Path, name: &str, version: &str, symlink: bool) -> (PathBuf, String) {
@@ -1048,7 +1425,7 @@ checksum = "{hash_b}"
                 }],
                 members: vec![],
             };
-            let object = realize_vendor(store, &plan).unwrap();
+            let object = realize_vendor_inner(store, &plan).unwrap();
             let crate_dir = object.join("tiny-1.0.0");
             assert_eq!(
                 fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -1082,7 +1459,7 @@ checksum = "{hash_b}"
                 }],
                 members: vec![],
             };
-            let error = realize_vendor(store, &plan).unwrap_err().to_string();
+            let error = realize_vendor_inner(store, &plan).unwrap_err().to_string();
             assert!(error.contains("tiny@1.0.0"));
             assert!(error.contains("symlink"));
         });
@@ -1172,6 +1549,7 @@ checksum = "{hash_b}"
     fn build_rejects_user_config_flag() {
         for bad in ["--config", "--config=net.offline=false"] {
             let error = build_sandboxed(
+                Platform::Aarch64AppleDarwin,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),

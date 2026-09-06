@@ -7,8 +7,37 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Kernel-wide
 
-- **macOS arm64 only.** No Linux (the enterprise enforcement point) or
-  Intel mac support. Highest-leverage single item on the books.
+- **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
+  2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
+  musl/Alpine — each is a row per pin table plus a wheel-tag band, not a
+  port. Linux verified on Fedora 44 only; other glibc distros untested.
+- **Linux host C toolchain is an unpinned build input** (gcc, binutils,
+  glibc headers, and for nokogiri host zlib) — the exact analogue of the
+  Xcode item below. Two Linux hosts with different gcc/glibc can produce
+  different "identical" objects. Host packages required for native
+  builds on Fedora: `gcc gcc-c++ make binutils glibc-devel
+  pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel`.
+  Pinning a C toolchain as a store object is the roadmap item that
+  closes this for both platforms.
+- **Linux sandbox roots are canonical paths.** bubblewrap binds the
+  canonicalized path of every declared root; a caller that declares a
+  symlink alias and then refers to files through the alias will not see
+  them (Seatbelt resolves aliases itself). Every tailor passes store or
+  scratch paths, which are canonical; the contract only matters for new
+  callers of `Sandbox`/`BuildSpec`. An undeclared cwd is an empty tmpfs.
+- **Linux sandbox (bubblewrap) is cooperative hermeticity too**: a Unix
+  socket inside an immutable read root (store object) is not scanned for
+  (write roots, cwd and scratch are, and are rejected pre-mount); a
+  daemon started by a build can outlive it. Same class as Seatbelt.
+- **Our own OTP artifact for Linux** (blanket-toolchains release): built
+  on Fedora 44, glibc floor 2.43, dynamically linked to the host
+  `libcrypto.so.3`. It will not run on older glibc hosts; a static-OpenSSL
+  build on an older baseline is the fix. Provenance is published but the
+  trust model is still TOFU.
+- **Source-built native gems/addons link host libraries** (e.g. nokogiri
+  → `libz.so.1`); recorded, not pinned.
+- **Copy-on-write projection falls back to a full copy** on filesystems
+  without reflink (ext4); XFS/btrfs get `cp --reflink`. Silent, slower.
 - **Store objects are trusted from permissions + metadata** (Sol, ruby
   review): same-user replacement of object contents after commit is
   undetected. Needs content spot-verification or an explicitly narrower
@@ -20,10 +49,10 @@ say what breaks, for whom, and how it fails (loud/silent).
 - **Sandbox is cooperative hermeticity, not hostile-code containment**:
   mach-lookup broad, process-exec broad, daemons can outlive scripts,
   same-realization packages only partially isolated. Documented since M4.5.
-- **Host Xcode/clang/SDK is an unpinned build input** for every native
-  compile (python sdists, npm gyp, cgo, ruby extconf). Not in build
-  identity; two machines with different Xcodes can produce different
-  "identical" objects. Linux + pinned toolchain would close this.
+- **Host Xcode/clang/SDK is an unpinned build input** (macOS) for every
+  native compile (python sdists, npm gyp, cgo, ruby extconf). Not in
+  build identity; two machines with different Xcodes can produce
+  different "identical" objects. A pinned toolchain would close this.
 - **Delegated planning runs unsandboxed with user privileges** (uv, npm,
   cargo generate-lockfile, go mod tidy/download, bundle lock, Gemfile
   eval). Status-quo trust, deliberate — but a hostile manifest executes
@@ -151,6 +180,17 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Elixir
 
+- **Two OTP steps run outside the sandbox on Linux**: the `Install -cross
+  -minimal` relocation of the extracted OTP tree and the OTP runtime
+  probe (`src/elixir.rs`) run as direct children with a clean env. They
+  only touch the staged store object, but they are the one non-sandboxed
+  build step in the kernel.
+- **OTP cache hits skip the runtime-compatibility probe.** The Linux OTP
+  object was built on Fedora 44 (glibc 2.43 floor, OpenSSL 3.x; see the
+  provenance file in `DigitalWestern/blanket-toolchains`); a store copied
+  to a host with an older glibc or a different OpenSSL ABI fails only at
+  execution time, not at `sync`. The probe runs on first realization
+  only. Loud, but late.
 - **git deps and non-hexpm repos fail closed.** Loud.
 - **Umbrella projects untested** — likely partially working, deliberately
   unverified; treat as unsupported until the test matrix exists. Silent

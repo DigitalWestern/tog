@@ -10,6 +10,16 @@ export BLANKET_STORE="$WORK/store"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 pass=0; fail=0
+
+# Network-denied wrapper for the offline checks: Seatbelt on macOS, a user +
+# network namespace on Linux (unshare -rn). LINUX_PORT.md stage 2.
+deny_net() {
+  case "$(uname -s)" in
+    Darwin) sandbox-exec -p '(version 1)(allow default)(deny network*)' "$@" ;;
+    Linux)  unshare -rn "$@" ;;
+    *) echo "deny_net: unsupported OS" >&2; return 1 ;;
+  esac
+}
 ok()   { pass=$((pass+1)); echo "  ok: $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL: $1"; }
 
@@ -39,7 +49,7 @@ ENV_A2=$(readlink "$WORK/a2/.venv")
 
 echo "== 4a. offline reprojection: delete only .venv, resync with network denied"
 rm -f "$WORK/a/.venv"
-if (cd "$WORK/a" && sandbox-exec -p '(version 1)(allow default)(deny network*)' "$BLANKET" sync); then
+if (cd "$WORK/a" && deny_net "$BLANKET" sync); then
   V=$(cd "$WORK/a" && "$BLANKET" run python -c 'import markupsafe; print(markupsafe.__version__)')
   [ "$V" = "3.0.2" ] && ok "reprojected offline" || bad "offline env broken: $V"
 else
@@ -51,7 +61,7 @@ rm -f "$WORK/a/.venv"
 chmod -R u+w "$BLANKET_STORE/objects"
 for o in "$BLANKET_STORE/objects"/*env*; do rm -rf "$o"; done
 rm -f "$BLANKET_STORE"/meta/*env*.json
-if (cd "$WORK/a" && sandbox-exec -p '(version 1)(allow default)(deny network*)' "$BLANKET" sync); then
+if (cd "$WORK/a" && deny_net "$BLANKET" sync); then
   V=$(cd "$WORK/a" && "$BLANKET" run python -c 'import markupsafe, six; print(markupsafe.__version__)')
   [ "$V" = "3.0.2" ] && ok "env object rebuilt offline from verified artifact cache" || bad "rebuilt env broken: $V"
 else

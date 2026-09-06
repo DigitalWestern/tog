@@ -3,7 +3,7 @@
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
 
-use blanket::{project, store::Store, types::*};
+use blanket::{platform::Platform, project, store::Store, types::*};
 use std::process::Command;
 
 #[test]
@@ -23,7 +23,7 @@ fn realize_env_and_run_python() {
         }],
     };
 
-    let env = project::realize_env(&store, &plan).expect("realize");
+    let env = project::realize_env(&store, Platform::host().unwrap(), &plan).expect("realize");
     assert!(env.join("bin/python").exists());
     assert!(env.join("pyvenv.cfg").is_file());
 
@@ -40,6 +40,7 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 = project::realize_env(&store, &plan).expect("realize again");
+    let env2 = project::realize_env(&store, Platform::host().unwrap(), &plan)
+        .expect("realize again");
     assert_eq!(env, env2);
 }

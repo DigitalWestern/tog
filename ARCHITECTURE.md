@@ -42,10 +42,22 @@ trend holds; the kernel thesis holds.
   while package contents stay read-only in the store. Forests live OUTSIDE
   the project so test runners never crawl store packages' own test files.
   Declared-mutable packages (`package.json` → `"blanket": {"mutablePackages":
-  [...]}`) switch the projection to a whole-tree APFS clonefile copy so
+  [...]}`) switch the projection to a whole-tree copy-on-write clone (APFS clonefile on macOS, `cp --reflink=auto` on Linux) so
   runtime writes inside those packages succeed; the closure records them as
   `mutable_state: "unattested"`. `blanket sync --fresh` rebuilds the
   projection, dropping caches and mutable state.
+
+## Platforms
+
+`src/platform.rs` defines `Platform` (`aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu`). Every pin table has one row per platform;
+every toolchain identity carries the triple, so a store shared between a
+Mac and a Linux box never confuses objects (artifact-cache entries are
+shared by content hash). Selection helpers take an explicit `Platform` so
+both variants are unit-tested in one binary; `Platform::host()` is called
+only at entry points. Anything not yet supported on a platform fails with
+`io::ErrorKind::Unsupported` and a `LINUX_PORT.md` stage reference before
+touching the store or the network.
 
 ## Vocabulary
 
@@ -285,7 +297,7 @@ the .tar (the lock's 8th field), inner = sha256(VERSION ++
 metadata.config ++ contents.tar.gz) (the 4th field).
 
 Toolchain (`beam` object) is FOUR pinned artifacts: OTP
-(erlef/otp_builds community macOS arm64 build — relocatable by
+(macOS: erlef/otp_builds community arm64 build; Linux: our own Fedora build published in DigitalWestern/blanket-toolchains because hex.pm's Ubuntu build cannot load crypto on Fedora — relocatable by
 construction), the Elixir release zip (platform-neutral BEAM code keyed
 to the OTP major — it contains NEITHER Hex nor rebar3), plus Hex and
 rebar3 from builds.hex.pm, both OTP-QUALIFIED builds (the legacy
@@ -393,7 +405,7 @@ the file held two writers' interleaved bytes).
   rather than per-package store objects merged by clonefile. Sharing is at
   whole-environment level. Per-package objects are a later optimization
   the identity scheme already permits.
-- **Sdists build in a sandbox** (sandbox-exec, deny-by-default, no
+- **Sdists build in a sandbox** (macOS: sandbox-exec/Seatbelt; Linux: bubblewrap with user/net/pid/ipc/uts namespaces — same `BuildSpec` contract, see `src/sandbox.rs` and LINUX_PORT.md stage 3; deny-by-default, no
   network) using a pinned hermetic pip/setuptools/wheel toolchain; the
   built wheel is a derivation-style store object. v0 sandbox limitations,
   eyes open: mach-lookup and process-exec are still broad (Seatbelt
