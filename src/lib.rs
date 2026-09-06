@@ -7,6 +7,7 @@ pub mod dotnet;
 pub mod elixir;
 pub mod fetch;
 pub mod gc;
+pub mod gitsrc;
 pub mod golang;
 pub mod npm;
 pub mod manifest;

@@ -576,7 +576,31 @@ fn package_url(
         })
 }
 
+/// The git source a pnpm resolution names, when it is pinned to a full commit.
+fn pinned_git_source(
+    resolution: Option<&BTreeMap<String, YamlValue>>,
+) -> Option<crate::gitsrc::GitSource> {
+    let resolution = resolution?;
+    if let (Some(repo), Some(commit)) = (
+        yaml_str(resolution.get("repo")),
+        yaml_str(resolution.get("commit")),
+    ) {
+        if crate::gitsrc::is_full_commit(commit) {
+            return Some(crate::gitsrc::GitSource {
+                url: crate::gitsrc::normalize_url(repo),
+                commit: commit.to_ascii_lowercase(),
+                subdirectory: None,
+            });
+        }
+    }
+    crate::npm::git_source_from_url(yaml_str(resolution.get("tarball")).unwrap_or_default())
+}
+
 fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) -> Option<String> {
+    // A commit hash is a fingerprint: pinned git sources are realized (item 4).
+    if pinned_git_source(resolution).is_some() {
+        return None;
+    }
     let resolution = resolution?;
     let kind = yaml_str(resolution.get("type")).unwrap_or_default();
     let repo = yaml_str(resolution.get("repo"));
@@ -908,7 +932,12 @@ fn pnpm_nodes(
             .unwrap_or_default()
             .to_string();
         let external = source_error(&name, resolution);
-        let url = package_url(&name, &version, resolution).unwrap_or_default();
+        // A pinned git source is recorded as a git+ URL so the package builder
+        // (which parses it back) realizes the commit.
+        let url = match pinned_git_source(resolution) {
+            Some(source) => format!("git+{}#{}", source.url, source.commit),
+            None => package_url(&name, &version, resolution).unwrap_or_default(),
+        };
         if package_nodes
             .insert(
                 snapshot_key.clone(),
@@ -1722,15 +1751,24 @@ pub fn plan_yarn(
             .split_once('#')
             .map(|(url, _)| url)
             .unwrap_or(entry.resolved.as_str());
-        let git_detail = crate::npm::git_dependency_detail(&entry.name, &entry.resolved);
-        let integrity = if git_detail.is_some() {
+        let pinned_git = crate::npm::git_source_from_url(&entry.resolved);
+        let git_detail = if pinned_git.is_some() {
+            None
+        } else {
+            crate::npm::git_dependency_detail(&entry.name, &entry.resolved)
+        };
+        let integrity = if git_detail.is_some() || pinned_git.is_some() {
             String::new()
         } else {
             yarn_integrity(&entry.resolved, entry.integrity.clone(), &key)?
         };
+        let url = match &pinned_git {
+            Some(source) => format!("git+{}#{}", source.url, source.commit),
+            None => url.to_string(),
+        };
         let external = if let Some(detail) = git_detail {
             Some(detail)
-        } else if !url.starts_with("https://") {
+        } else if pinned_git.is_none() && !url.starts_with("https://") {
             Some(format!("non-https resolved URL {url}"))
         } else {
             None
@@ -2086,7 +2124,10 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                     }
                     return Err(err(format!("{}@{}: {detail}", node.name, node.version)));
                 }
-                if node.integrity.is_empty() {
+                // A git source is verified by its commit, so it legitimately
+                // has no tarball integrity (item 4).
+                if node.integrity.is_empty() && crate::npm::git_source_from_url(&node.url).is_none()
+                {
                     if dependency.optional || node.optional {
                         continue;
                     }
@@ -2095,7 +2136,10 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                         node.name, node.version
                     )));
                 }
-                integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
+                // Git sources carry `git:<commit>` instead of an SRI.
+                if crate::npm::git_source_from_url(&node.url).is_none() {
+                    integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
+                }
                 let ancestor = existing_ancestor(
                     &parent,
                     &dependency.name,
@@ -2263,14 +2307,19 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             .nodes
             .get(&node_key)
             .ok_or_else(|| err(format!("internal: no package for {path}")))?;
+        let git = crate::npm::git_source_from_url(&node.url);
         packages.push(NpmPackage {
             path,
             name: node.name.clone(),
             version: node.version.clone(),
             url: node.url.clone(),
-            integrity: node.integrity.clone(),
+            integrity: match &git {
+                Some(source) => format!("git:{}", source.commit),
+                None => node.integrity.clone(),
+            },
             bin: Vec::new(),
             patch: node.patch.clone(),
+            git,
             optional: node.optional,
         });
     }
@@ -2887,5 +2936,89 @@ snapshots:
         assert!(text.contains("linux-only@1.0.0"));
         assert!(text.contains("aarch64-apple-darwin"));
         let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod git_import_tests {
+    #[test]
+    fn a_real_pnpm_git_hosted_resolution_parses() {
+        // Verbatim from clash-verge-rev's pnpm-lock.yaml: an inline map with
+        // gitHosted, an integrity and the codeload tarball.
+        let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\
+             \n\
+             packages:\n\
+             \x20\x20api@https://codeload.github.com/o/r/tar.gz/{commit}:\n\
+             \x20\x20\x20\x20resolution: {{gitHosted: true, integrity: sha512-ZUNzoqUI/328gbYuFUw9oKe0BVi/reurZZ2ut1+B8ZgEtZ6dtNgKMea7Kp8UvKTnF543WvI/8RwetH1Fzkflzw==, tarball: https://codeload.github.com/o/r/tar.gz/{commit}}}\n"
+        );
+        let parsed = super::parse_yaml(&lock).expect("parse");
+        let super::YamlValue::Map(top) = &parsed else { panic!("top level is a map") };
+        let super::YamlValue::Map(packages) = &top["packages"] else { panic!("packages map") };
+        let (_key, entry) = packages.iter().next().expect("one package");
+        let super::YamlValue::Map(entry) = entry else { panic!("entry map") };
+        let resolution = match entry.get("resolution") {
+            Some(super::YamlValue::Map(map)) => Some(map),
+            other => panic!("resolution is not a map: {other:?}"),
+        };
+        let source = super::pinned_git_source(resolution)
+            .expect("a gitHosted codeload resolution names a commit");
+        assert_eq!(source.commit, commit);
+        assert_eq!(source.url, "https://github.com/o/r");
+    }
+
+    #[test]
+    fn a_codeload_dependency_is_realized_not_rejected() {
+        let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\
+             \n\
+             importers:\n\
+             \x20\x20.:\n\
+             \x20\x20\x20\x20dependencies:\n\
+             \x20\x20\x20\x20\x20\x20plugin:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: https://codeload.github.com/o/r/tar.gz/{commit}\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: https://codeload.github.com/o/r/tar.gz/{commit}\n\
+             \n\
+             packages:\n\
+             \x20\x20plugin@https://codeload.github.com/o/r/tar.gz/{commit}:\n\
+             \x20\x20\x20\x20resolution: {{tarball: https://codeload.github.com/o/r/tar.gz/{commit}}}\n\
+             \n\
+             snapshots:\n\
+             \x20\x20plugin@https://codeload.github.com/o/r/tar.gz/{commit}: {{}}\n"
+        );
+        let project = std::env::temp_dir().join(format!(
+            "blanket-gitimport-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let result = super::plan_pnpm(
+            crate::platform::Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &project,
+        );
+        let _ = crate::store::remove_tree(&project);
+        let plan = match result {
+            Ok(plan) => plan,
+            Err(error) => panic!("codeload dependency was rejected: {error}"),
+        };
+        let package = plan
+            .packages
+            .iter()
+            .find(|p| p.name == "plugin")
+            .expect("the git package is in the plan");
+        let source = package.git.as_ref().expect("a git source");
+        assert_eq!(source.commit, commit);
+        assert_eq!(source.url, "https://github.com/o/r");
     }
 }

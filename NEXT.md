@@ -96,7 +96,24 @@ This strengthens the enterprise pitch: the manifest stops being
 "everything is verified" and becomes "here are exactly the 3 of 400 that
 aren't," which is where their risk actually lives.
 
-## 4. Git dependencies via commit hash
+## 4. Git dependencies via commit hash — npm DONE (2026-09-06); python and cargo open
+
+Done: `src/gitsrc.rs` realizes a git source as a store object whose identity is
+(normalized URL, full commit) — fetch by commit, submodules at their recorded
+commits, `.git` removed, `rev-parse HEAD` verified against the request. npm
+consumes it from every lockfile spelling (package-lock `git+…`, pnpm
+`{repo, commit}` and gitHosted codeload tarballs, yarn classic), with the git
+object id standing in for the tarball digest in the environment identity. An
+unpinned ref is still refused, loudly: `resolve_ref` can pin one via
+`git ls-remote` when a caller wants that.
+
+Open: **python** (`pkg @ git+URL@sha` → build a wheel from the checkout through
+the item-11 isolated build path; needs an `ArtifactKind::GitSource` and a
+`plan_git_identity_input` mirroring the sdist one) and **cargo** (vendor a git
+source as a directory source with `.cargo-checksum.json` plus the
+`[source."<url>"]` replacement stanza). SBOM `vcs` external references for git
+components are also still to do.
+
 
 Record repo plus exact commit, fetch, build from source in the sandbox
 (same path sdists already take). A commit hash is a fingerprint; this is

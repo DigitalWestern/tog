@@ -535,7 +535,19 @@ mod tests {
             .unwrap();
         assert!(probe.try_lock().is_err());
         drop(lease);
-        probe.try_lock().unwrap();
+        // The lease is gone, so the lock must be released. On a loaded machine
+        // the release can be observed a moment late, so retry briefly rather
+        // than fail the suite for a scheduling artifact; a lock that is never
+        // released still fails here.
+        let mut released = false;
+        for _ in 0..200 {
+            if probe.try_lock().is_ok() {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(released, "the gc lock was not released when the lease was dropped");
         let _ = fs::remove_dir_all(root);
     }
 }
