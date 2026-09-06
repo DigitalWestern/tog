@@ -3,7 +3,7 @@
 //! The table below is a deliberately boring conda-forge closure. It is not a
 //! solver: the records, including their sha256 values, were selected once
 //! from conda-forge's linux-64 and noarch repodata and are immutable inputs
-//! to the native-libs object. macOS has no v1 pin yet and fails before it
+//! to the native-libs object. macOS has no native pin yet and fails before it
 //! touches the store or network.
 
 use crate::fetch::download_verified;
@@ -18,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use zip::ZipArchive;
 
-pub const NATIVE_LIBS_VERSION: &str = "1";
+pub const NATIVE_LIBS_VERSION: &str = "2";
 const CONDA_BASE: &str = "https://conda.anaconda.org/conda-forge";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +147,12 @@ fn identity(platform: Platform) -> io::Result<Identity> {
             ("manifest_sha256".into(), manifest_sha256(platform)?),
         ]),
     })
+}
+
+/// Return the object id for the pinned native library set without realizing
+/// it. The manifest and platform are the complete identity input.
+pub fn object_id_for(platform: Platform) -> io::Result<String> {
+    Ok(identity(platform)?.object_id())
 }
 
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
@@ -413,26 +419,39 @@ pub(crate) fn rewrite_prefix_file(
         .ok_or_else(|| invalid_conda("native object path is not UTF-8"))?;
     let old = placeholder.as_bytes();
     let replacement = target.as_bytes();
-    if binary && replacement.len() > old.len() {
-        return Err(invalid_conda(format!(
-            "native object path {} is longer than binary prefix placeholder",
-            object.display()
-        )));
-    }
     let mut bytes = fs::read(path)?;
     let mut changed = false;
-    let padded = if binary {
-        let mut value = replacement.to_vec();
-        value.resize(old.len(), 0);
-        value
-    } else {
-        replacement.to_vec()
-    };
     let mut index = 0;
     while let Some(relative) = find_bytes(&bytes[index..], old) {
         let start = index + relative;
-        bytes.splice(start..start + old.len(), padded.iter().copied());
-        index = start + padded.len();
+        if binary {
+            // Conda's binary prefix entries reserve a fixed-width string,
+            // but the path after the prefix is part of that string too. Keep
+            // that complete suffix and use only the remaining slack for NULs.
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|offset| start + offset)
+                .unwrap_or(bytes.len());
+            let suffix = bytes[start + old.len()..end].to_vec();
+            let new_len = replacement.len() + suffix.len();
+            let original_len = end - start;
+            if new_len > original_len {
+                return Err(invalid_conda(format!(
+                    "rewritten native path {} is longer than original binary path",
+                    object.display()
+                )));
+            }
+            let mut value = Vec::with_capacity(original_len);
+            value.extend_from_slice(replacement);
+            value.extend_from_slice(&suffix);
+            value.resize(original_len, 0);
+            bytes[start..end].copy_from_slice(&value);
+            index = end;
+        } else {
+            bytes.splice(start..start + old.len(), replacement.iter().copied());
+            index = start + replacement.len();
+        }
         changed = true;
     }
     if !changed {
@@ -488,11 +507,22 @@ pub fn compose_env(object: &Path, base: &[(String, String)]) -> Vec<(String, Str
         &mut out,
         "PATH",
         match path {
-            Some(path) if !path.is_empty() => format!("{bin}:{path}"),
+            Some(path) if !path.is_empty() => prepend_after_first_path_entry(&path, &bin),
             _ => bin,
         },
     );
     out
+}
+
+fn prepend_after_first_path_entry(path: &str, entry: &str) -> String {
+    let Some((first, rest)) = path.split_once(':') else {
+        return format!("{path}:{entry}");
+    };
+    if rest.is_empty() {
+        format!("{first}:{entry}")
+    } else {
+        format!("{first}:{entry}:{rest}")
+    }
 }
 
 fn set_env(env: &mut Vec<(String, String)>, key: &str, value: String) {
@@ -596,6 +626,11 @@ mod tests {
         assert!(names.contains("libstdcxx-ng"));
         assert!(names.contains("libgcc-ng"));
         assert_eq!(manifest_sha256(Platform::X86_64UnknownLinuxGnu).unwrap().len(), 64);
+        assert_eq!(NATIVE_LIBS_VERSION, "2");
+        assert_eq!(
+            object_id_for(Platform::X86_64UnknownLinuxGnu).unwrap(),
+            object_id_for(Platform::X86_64UnknownLinuxGnu).unwrap()
+        );
         assert!(packages(Platform::Aarch64AppleDarwin).is_err());
     }
 
@@ -627,6 +662,23 @@ mod tests {
     }
 
     #[test]
+    fn binary_rewrite_preserves_the_complete_path_suffix() {
+        let root = temp_dir("binary-suffix");
+        let path = root.join("fontconfig.so");
+        fs::write(
+            &path,
+            b"prefix=/old/prefix/etc/fonts/fonts.conf\0trailing-bytes",
+        )
+        .unwrap();
+        rewrite_prefix_file(&path, "/old/prefix", Path::new("/new"), true).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"prefix=/new/etc/fonts/fonts.conf\0\0\0\0\0\0\0\0trailing-bytes"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn binary_rewrite_refuses_a_longer_target() {
         let root = temp_dir("long");
         let path = root.join("lib.so");
@@ -641,7 +693,13 @@ mod tests {
     fn native_env_composition_is_isolated_and_additive() {
         let env = compose_env(
             Path::new("/store/objects/libset"),
-            &[("PATH".into(), "/usr/bin".into()), ("CFLAGS".into(), "-O2".into())],
+            &[
+                (
+                    "PATH".into(),
+                    "/build-env/bin:/rust/bin:/usr/bin:/bin".into(),
+                ),
+                ("CFLAGS".into(), "-O2".into()),
+            ],
         );
         let get = |key: &str| {
             env.iter()
@@ -657,6 +715,9 @@ mod tests {
             get("LDFLAGS"),
             "-L/store/objects/libset/lib -Wl,-rpath,/store/objects/libset/lib"
         );
-        assert_eq!(get("PATH"), "/store/objects/libset/bin:/usr/bin");
+        assert_eq!(
+            get("PATH"),
+            "/build-env/bin:/store/objects/libset/bin:/rust/bin:/usr/bin:/bin"
+        );
     }
 }

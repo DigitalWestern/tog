@@ -83,34 +83,6 @@ fn object_id(path: &Path, label: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} has no object id")))
 }
 
-fn isolated_sdist_identity(
-    platform: Platform,
-    pkg: &LockedPackage,
-    pin: &crate::python::PinnedPython,
-    build_env: &Path,
-    rust: Option<&Path>,
-    vendor: Option<&Path>,
-    native_libs: Option<&Path>,
-) -> io::Result<Identity> {
-    let build_env_id = object_id(build_env, "build environment")?;
-    let rust_id = rust.map(|path| object_id(path, "Rust object")).transpose()?;
-    let vendor_id = vendor
-        .map(|path| object_id(path, "Cargo vendor object"))
-        .transpose()?;
-    let native_libs_id = native_libs
-        .map(|path| object_id(path, "native library object"))
-        .transpose()?;
-    Ok(isolated_sdist_identity_from_ids(
-        platform,
-        pkg,
-        pin,
-        &build_env_id,
-        rust_id.as_deref(),
-        vendor_id.as_deref(),
-        native_libs_id.as_deref(),
-    ))
-}
-
 fn isolated_sdist_identity_from_ids(
     platform: Platform,
     pkg: &LockedPackage,
@@ -196,28 +168,50 @@ fn has_package(plan: &Plan, wanted: &str) -> bool {
     })
 }
 
+fn native_libs_identity_id(
+    platform: Platform,
+    native_build: bool,
+    fast_requirements: bool,
+) -> io::Result<Option<String>> {
+    if (native_build || !fast_requirements) && native_libs_supported(platform) {
+        Ok(Some(crate::nativelibs::object_id_for(platform)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn native_libs_supported(platform: Platform) -> bool {
+    matches!(platform, Platform::X86_64UnknownLinuxGnu)
+}
+
+pub(crate) struct SdistIdentityPlan {
+    pub input: String,
+    pub native_libs_id: Option<String>,
+}
+
 /// Return the exact package input used by a parent Python environment. This
 /// performs only archive inspection plus deterministic input planning; the
 /// actual wheel build still happens in `build_sdist_wheel_at_depth`.
-pub(crate) fn sdist_identity_input(
+pub(crate) fn plan_sdist_identity_input(
     store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
     python_version: &str,
     runtime_plan: Option<&Plan>,
-) -> io::Result<String> {
+) -> io::Result<SdistIdentityPlan> {
     let pin = crate::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
     let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist(&sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
-    let fast_sdist = fast_requirements && !info.rust_build && !info.native_build;
+    let fast_sdist = fast_requirements
+        && !info.rust_build
+        && (!info.native_build || !native_libs_supported(platform));
     if fast_sdist {
-        return Ok(format!(
-            "Sdist:{}:{}",
-            pkg.sha256,
-            derivation_fingerprint()
-        ));
+        return Ok(SdistIdentityPlan {
+            input: format!("Sdist:{}:{}", pkg.sha256, derivation_fingerprint()),
+            native_libs_id: None,
+        });
     }
 
     let build_plan = if fast_requirements {
@@ -232,11 +226,7 @@ pub(crate) fn sdist_identity_input(
         )?
     };
     let build_env_id = crate::project::planned_env_object_id(store, platform, &build_plan)?;
-    let native_libs = if info.native_build || !fast_requirements {
-        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
-    } else {
-        None
-    };
+    let native_libs_id = native_libs_identity_id(platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
         let work = store.stage()?;
         let result: io::Result<Identity> = (|| {
@@ -249,7 +239,7 @@ pub(crate) fn sdist_identity_input(
                 &build_env_id,
                 Some(&rust.rust_id),
                 Some(&rust.vendor_id),
-                native_libs.as_ref().map(|set| set.id.as_str()),
+                native_libs_id.as_deref(),
             ))
         })();
         let _ = crate::store::remove_tree(&work);
@@ -262,10 +252,24 @@ pub(crate) fn sdist_identity_input(
             &build_env_id,
             None,
             None,
-            native_libs.as_ref().map(|set| set.id.as_str()),
+            native_libs_id.as_deref(),
         )
     };
-    Ok(format!("Sdist:{}:{}", pkg.sha256, identity.object_id()))
+    Ok(SdistIdentityPlan {
+        input: format!("Sdist:{}:{}", pkg.sha256, identity.object_id()),
+        native_libs_id,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn sdist_identity_input(
+    store: &Store,
+    platform: Platform,
+    pkg: &LockedPackage,
+    python_version: &str,
+    runtime_plan: Option<&Plan>,
+) -> io::Result<String> {
+    Ok(plan_sdist_identity_input(store, platform, pkg, python_version, runtime_plan)?.input)
 }
 
 fn stderr_tail(path: &Path) -> Option<String> {
@@ -541,7 +545,9 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
     let fast_requirements = build_requires::fast_path(&info.build_requires);
-    let fast_sdist = fast_requirements && !info.rust_build && !info.native_build;
+    let fast_sdist = fast_requirements
+        && !info.rust_build
+        && (!info.native_build || !native_libs_supported(platform));
     let fast_identity = sdist_identity(platform, pkg, pin);
     if fast_sdist {
         let fast_id = fast_identity.object_id();
@@ -562,15 +568,10 @@ pub(crate) fn build_sdist_wheel_at_depth(
         )?
     };
     let build_env = project::realize_env_at_depth(store, platform, &build_plan, depth)?;
-    // Non-fast builds are isolated PEP 517 builds; they may generate C/C++
-    // sources during the backend step, so give every one the same pinned
-    // native set. The fast setuptools path stays lean unless its archive
-    // visibly contains a native source/binding.gyp.
-    let native_libs = if info.native_build || !fast_requirements {
-        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
-    } else {
-        None
-    };
+    // Native library identity is pure. Realization is deferred until after
+    // the wheel cache lookup, so planning never downloads the libset.
+    let native_libs_id =
+        native_libs_identity_id(platform, info.native_build, fast_requirements)?;
 
     let work = store.stage()?;
     let outdir = work.join("out");
@@ -617,20 +618,20 @@ pub(crate) fn build_sdist_wheel_at_depth(
             &object_id(&build_env, "build environment")?,
             Some(&rust.rust_id),
             Some(&rust.vendor_id),
-            native_libs.as_ref().map(|set| set.id.as_str()),
+            native_libs_id.as_deref(),
         )
     } else if fast_sdist {
         fast_identity
     } else {
-        isolated_sdist_identity(
+        isolated_sdist_identity_from_ids(
             platform,
             pkg,
             pin,
-            &build_env,
+            &object_id(&build_env, "build environment")?,
             None,
             None,
-            native_libs.as_ref().map(|set| set.path.as_path()),
-        )?
+            native_libs_id.as_deref(),
+        )
     };
     let id = identity.object_id();
     if store.has(&id) {
@@ -638,6 +639,12 @@ pub(crate) fn build_sdist_wheel_at_depth(
         let _ = crate::store::remove_tree(&work);
         return find_wheel(&store.object_path(&id));
     }
+
+    let native_libs = if native_libs_id.is_some() {
+        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+    } else {
+        None
+    };
 
     if let Some(rust) = &rust_inputs {
         if rust.generated_lock {
@@ -718,6 +725,54 @@ fn find_wheel(dir: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest as _;
+
+    fn test_store(label: &str) -> Store {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-build-identity-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        Store {
+            root: root.canonicalize().unwrap(),
+        }
+    }
+
+    fn local_native_sdist(store: &Store, name: &str) -> LockedPackage {
+        let source = store.root.join(format!("{name}-source"));
+        let root = source.join(format!("{name}-1.0"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            "[build-system]\nrequires = [\"setuptools>=40.8\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("binding.gyp"), "{}").unwrap();
+        let archive = store.root.join(format!("{name}-1.0.tar.gz"));
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&source)
+            .arg(format!("{name}-1.0"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = fs::read(&archive).unwrap();
+        let sha256 = hex::encode(sha2::Sha256::digest(bytes));
+        let _ = fs::remove_dir_all(source);
+        LockedPackage {
+            name: name.into(),
+            version: "1.0".into(),
+            filename: format!("{name}-1.0.tar.gz"),
+            url: format!("file://{}", archive.display()),
+            sha256,
+            kind: ArtifactKind::Sdist,
+        }
+    }
 
     #[test]
     fn darwin_identity_unchanged() {
@@ -746,6 +801,37 @@ mod tests {
     }
 
     #[test]
+    fn darwin_native_sdist_identity_does_not_realize_native_libs() {
+        let store = test_store("darwin-native");
+        let pkg = local_native_sdist(&store, "darwin-native");
+        let planned = plan_sdist_identity_input(
+            &store,
+            Platform::Aarch64AppleDarwin,
+            &pkg,
+            "3.12.14",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            sdist_identity_input(
+                &store,
+                Platform::Aarch64AppleDarwin,
+                &pkg,
+                "3.12.14",
+                None,
+            )
+            .unwrap(),
+            planned.input
+        );
+        assert!(planned.native_libs_id.is_none());
+        assert_eq!(
+            planned.input,
+            format!("Sdist:{}:{}", pkg.sha256, derivation_fingerprint())
+        );
+        let _ = fs::remove_dir_all(&store.root);
+    }
+
+    #[test]
     fn isolated_identity_has_schema_three_and_build_env() {
         let pkg = LockedPackage {
             name: "example".into(),
@@ -756,16 +842,15 @@ mod tests {
             kind: ArtifactKind::Sdist,
         };
         let pin = crate::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
-        let identity = isolated_sdist_identity(
+        let identity = isolated_sdist_identity_from_ids(
             Platform::Aarch64AppleDarwin,
             &pkg,
             pin,
-            Path::new("build-env-id"),
+            "build-env-id",
             None,
             None,
             None,
-        )
-        .unwrap();
+        );
         assert_eq!(
             identity.object_id(),
             "bbd092b50e11e7b3c04c0ebfd449d03e87baeded-example-1.0"

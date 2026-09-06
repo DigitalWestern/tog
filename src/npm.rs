@@ -576,6 +576,17 @@ fn tarball_has_binding_gyp(path: &Path) -> io::Result<bool> {
         .any(|entry| entry == "binding.gyp" || entry.ends_with("/binding.gyp")))
 }
 
+fn native_libs_identity_id(
+    platform: Platform,
+    has_native: bool,
+) -> io::Result<Option<String>> {
+    if has_native && matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        Ok(Some(crate::nativelibs::object_id_for(platform)?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Realize the node_modules tree as an immutable store object.
 /// Object content root contains exactly `node_modules/`.
 pub fn realize_node_env(
@@ -650,13 +661,9 @@ pub fn realize_node_env(
     for (_, tarball) in &tarballs {
         has_native |= tarball_has_binding_gyp(tarball)?;
     }
-    let native_libs = if has_native {
-        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
-    } else {
-        None
-    };
-    if let Some(native_libs) = &native_libs {
-        inputs.insert("native_libs".into(), native_libs.id.clone());
+    let native_libs_id = native_libs_identity_id(platform, has_native)?;
+    if let Some(native_libs_id) = &native_libs_id {
+        inputs.insert("native_libs".into(), native_libs_id.clone());
     }
     let identity = Identity {
         kind: "node-env".into(),
@@ -669,6 +676,12 @@ pub fn realize_node_env(
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
+
+    let native_libs = if native_libs_id.is_some() {
+        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+    } else {
+        None
+    };
 
     let staged = store.stage()?;
     fs::create_dir_all(staged.join("node_modules"))?;
@@ -1481,6 +1494,14 @@ mod tests {
         assert_eq!(
             identity.object_id(),
             "174e755a9fcb532c2addfefb93562ba28874abdc-nodejs-24.20.0"
+        );
+    }
+
+    #[test]
+    fn darwin_binding_gyp_keeps_legacy_identity_inputs() {
+        assert_eq!(
+            native_libs_identity_id(Platform::Aarch64AppleDarwin, true).unwrap(),
+            None
         );
     }
 

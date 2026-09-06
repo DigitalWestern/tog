@@ -120,16 +120,39 @@ fn linux_native_libs_pkg_config_sdist_and_runtime() {
     run_build_spec(&BuildSpec {
         argv: vec!["/bin/sh".into(), "-c".into(), command],
         cwd: pkg_scratch.clone(),
-        env,
+        env: env.clone(),
         read: vec![native.path.clone()],
         write: vec![pkg_scratch.clone()],
         scratch: pkg_scratch,
-        path,
+        path: path.clone(),
     })
     .expect("sandboxed pkg-config");
     let pango_version = std::fs::read_to_string(&version_file).unwrap();
     println!("sandbox pkg-config pango={}", pango_version.trim());
     assert_eq!(pango_version.trim(), "1.50.11");
+
+    let confdir_file = temp.0.join("fontconfig-confdir");
+    let command = format!(
+        "{} --variable=confdir fontconfig > {}",
+        shell_quote(&native.path.join("bin/pkg-config")),
+        shell_quote(&confdir_file)
+    );
+    run_build_spec(&BuildSpec {
+        argv: vec!["/bin/sh".into(), "-c".into(), command],
+        cwd: temp.0.clone(),
+        env,
+        read: vec![native.path.clone()],
+        write: vec![temp.0.clone()],
+        scratch: temp.0.clone(),
+        path,
+    })
+    .expect("sandboxed fontconfig pkg-config");
+    let confdir = std::fs::read_to_string(&confdir_file).unwrap();
+    println!("sandbox pkg-config fontconfig confdir={}", confdir.trim());
+    assert_eq!(
+        confdir.trim(),
+        native.path.join("etc/fonts").display().to_string()
+    );
 
     let project = temp.0.join("manimpango");
     std::fs::create_dir_all(&project).unwrap();
