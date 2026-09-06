@@ -1120,11 +1120,13 @@ pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io:
             yaml_str(root.get("lockfileVersion")).unwrap_or_default()
         )));
     }
-    let packages = yaml_map(
-        root.get("packages")
-            .ok_or_else(|| err("pnpm lockfile has no packages map"))?,
-        "packages",
-    )?;
+    // A project with no dependencies has no `packages` map at all: pnpm writes
+    // only `importers: { .: {} }`. That is an empty graph, not a broken lock.
+    let empty_packages = BTreeMap::new();
+    let packages = match root.get("packages") {
+        Some(value) => yaml_map(value, "packages")?,
+        None => &empty_packages,
+    };
     let snapshots = root.get("snapshots");
     let patches = pnpm_patches(root, project_dir)?;
     let (mut nodes, local_snapshots) = pnpm_nodes(packages, snapshots, project_dir)?;
@@ -2455,6 +2457,48 @@ packages:
             .packages
             .iter()
             .any(|package| package.name == "b"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pnpm_lock_without_packages_map_is_an_empty_plan() {
+        // `pnpm self-update` in a bare directory writes a two-document lock:
+        // a prelude holding pnpm's own binary, then the real project lock,
+        // which has no dependencies and therefore no `packages` key.
+        let dir = project();
+        let lock = format!(
+            r#"---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {{}}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.3.4
+        version: 12.3.4
+
+packages:
+
+  pnpm@12.3.4:
+    resolution: {{integrity: {SRI}}}
+
+---
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan.packages.is_empty(), "{:?}", plan.packages);
+        assert!(plan.links.is_empty(), "{:?}", plan.links);
         let _ = fs::remove_dir_all(dir);
     }
 
