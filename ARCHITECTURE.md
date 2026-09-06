@@ -33,14 +33,21 @@ trend holds; the kernel thesis holds.
 - **Projection**: a project's `.venv` is one symlink into the store, swapped
   atomically. Rollback = swapping back (instant cache hit). Provenance is
   written to `.blanket/closure.json`.
-- **Node projection is a forest** (`node-forest/1`): `node_modules` is a
-  symlink to `~/.blanket/forests/<project-key>/<projection-id>/node_modules`,
-  a WRITABLE per-project directory holding one symlink per top-level package
-  into the immutable store object (pnpm's proven resolution model). The
-  ecosystem treats node_modules' top level as scratch space — vite's `.vite`
-  dep cache, prisma's `.prisma` client — and the forest absorbs those writes
-  while package contents stay read-only in the store. Forests live OUTSIDE
-  the project so test runners never crawl store packages' own test files.
+- **Node projection is a forest** (`node-forest/2`): the root
+  `node_modules` is a symlink to
+  `~/.blanket/forests/<project-key>/<projection-id>/node_modules`, and each
+  workspace importer gets its own symlink at
+  `<project>/<workspace>/node_modules` pointing to
+  `.../<projection-id>/workspaces/<workspace-with-slashes-encoded>/node_modules`.
+  The immutable node environment contains the same root/workspace importer
+  layout; each forest is a writable per-project directory holding one
+  symlink per top-level package into that layout (pnpm's proven resolution
+  model). Workspace links are relative symlinks back to source directories,
+  and each importer gets its own `.bin`. The ecosystem treats node_modules'
+  top level as scratch space — vite's `.vite` dep cache, prisma's `.prisma`
+  client — and the forest absorbs those writes while package contents stay
+  read-only in the store. Forests live OUTSIDE the project so test runners
+  never crawl store packages' own test files.
   Declared-mutable packages (`package.json` → `"blanket": {"mutablePackages":
   [...]}`) switch the projection to a whole-tree copy-on-write clone (APFS clonefile on macOS, `cp --reflink=auto` on Linux) so
   runtime writes inside those packages succeed; the closure records them as
@@ -394,15 +401,20 @@ packages.config files fail closed.
   blanket runs the STORE-pinned uv
   (`uv pip compile --generate-hashes`) into `requirements.lock.txt`
   (staleness-stamped, regenerated when the source changes).
-- `package.json` with no `package-lock.json` (bun/yarn/pnpm projects) →
-  blanket runs the store node's bundled npm (`npm install
-  --package-lock-only`).
+- JavaScript lock selection is `package-lock.json` first, then a pnpm
+  `pnpm-lock.yaml` importer (v9 and the compatible v6 importer shape), then a
+  Yarn classic v1 `yarn.lock`; these are parsed directly into the npm plan.
+  The pnpm subset uses a dependency-free strict 2-space YAML parser;
+  workspace links stay project-local and the closure records `lock_source`.
+  A package.json with none of those lockfiles falls back to the store node's
+  bundled npm (`npm install --package-lock-only`).
 - Missing `Cargo.lock` → the store cargo runs `generate-lockfile`.
 
-All three resolvers come from the store (uv is a pinned single-binary
-artifact like CPython/Node) — a bare machine needs nothing installed
-besides blanket itself. Proven with a scrubbed-PATH (`/usr/bin:/bin`)
-sync + run on both ecosystems, 2026-08-31.
+Delegated resolvers come from the store (uv and npm are pinned toolchain
+components like CPython/Node), while existing npm lockfiles are parsed
+locally — a bare machine needs nothing installed besides blanket itself.
+Proven with a scrubbed-PATH (`/usr/bin:/bin`) sync + run on both ecosystems,
+2026-08-31.
 
 Planning may touch the network with the ecosystem's own resolver; every
 byte that reaches an environment still goes through the verified cache and

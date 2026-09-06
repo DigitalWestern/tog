@@ -9,6 +9,7 @@ pub mod gc;
 pub mod golang;
 pub mod npm;
 pub mod nativelibs;
+pub mod npm_lock_import;
 pub mod policy;
 pub mod platform;
 pub mod project;

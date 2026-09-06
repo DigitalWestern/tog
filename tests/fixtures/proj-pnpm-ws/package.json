@@ -1,0 +1,8 @@
+{
+  "name": "proj-pnpm-ws",
+  "version": "1.0.0",
+  "dependencies": {
+    "@fixture/lib": "workspace:*",
+    "is-odd": "3.0.1"
+  }
+}
