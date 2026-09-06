@@ -73,6 +73,11 @@ via npm; an existing real `node_modules`/`.venv` is moved aside to
 `~/.blanket/backups/`. Resolution belongs to the ecosystem's tools —
 realization, verification, and provenance belong to blanket.
 
+Python uses the explicit `.python-version` request when present; otherwise
+it intersects `requires-python`/`python_requires` metadata and selects the
+default CPython 3.12.14 when compatible, or the newest compatible pinned
+CPython 3.10.21, 3.11.16, 3.12.14, 3.13.15, or 3.14.7.
+
 npm install scripts run inside a network-denied sandbox with pinned
 toolchains (store node headers + pinned CPython for node-gyp). Two escape
 hatches, both explicit in `package.json`:
