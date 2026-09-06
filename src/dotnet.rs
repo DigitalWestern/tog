@@ -1441,7 +1441,9 @@ mod tests {
 
     #[test]
     fn dotnet_tmp_validation_is_path_specific_and_testable() {
-        let base = std::env::temp_dir().join(format!(
+        // Canonical base: the validator requires canonical paths, and macOS
+        // TMPDIR lives under /var -> /private/var.
+        let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "blanket-dn-tmp-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1481,7 +1483,7 @@ mod tests {
 
     #[test]
     fn linux_precreates_shm_under_the_dotnet_tmp_dir() {
-        let temp = std::env::temp_dir().join(format!("blanket-dotnet-shm-{}", std::process::id()));
+        let temp = std::env::temp_dir().canonicalize().unwrap().join(format!("blanket-dotnet-shm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         let uid = invoking_uid().unwrap();
         let dir = ensure_dotnet_tmp_at(&temp, uid, true).unwrap();

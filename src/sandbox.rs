@@ -313,6 +313,8 @@ impl Sandbox<'_> {
             OsString::from("--unshare-pid"),
             OsString::from("--unshare-ipc"),
             OsString::from("--unshare-uts"),
+            OsString::from("--hostname"),
+            OsString::from("blanket"),
             OsString::from("--unshare-cgroup-try"),
             OsString::from("--die-with-parent"),
             OsString::from("--new-session"),
@@ -359,9 +361,14 @@ impl Sandbox<'_> {
             .chain(write.iter())
             .any(|root| cwd.starts_with(root));
         if !cwd_is_declared {
-            // Mount the implicit cwd before declared children so a writable
-            // child can override this read-only host view.
-            push_bind_path(&mut args, "--ro-bind", &cwd);
+            // An undeclared cwd must exist so the command can start there,
+            // but nothing under it was declared readable: give it an empty
+            // tmpfs (Seatbelt grants only metadata reads on an undeclared
+            // cwd; a read-only bind here would expose the whole subtree).
+            // Mounted before declared children so a declared child under
+            // it still binds on top.
+            push_arg(&mut args, "--tmpfs");
+            push_arg(&mut args, cwd.as_os_str());
         }
         for path in &read {
             push_bind_path(&mut args, "--ro-bind", path);
@@ -584,6 +591,8 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
+            "--hostname",
+            "blanket",
             "--unshare-cgroup-try",
             "--die-with-parent",
             "--new-session",
@@ -629,6 +638,14 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
 }
 
 fn find_bwrap() -> Option<PathBuf> {
+    // The distro binary first (mirrors the hardcoded /usr/bin/sandbox-exec on
+    // macOS); PATH only as a fallback for unusual installs.
+    let system = PathBuf::from("/usr/bin/bwrap");
+    if let Ok(metadata) = fs::metadata(&system) {
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            return Some(system);
+        }
+    }
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join("bwrap");
@@ -1058,8 +1075,8 @@ mod tests {
     }
 
     #[test]
-    fn linux_unbound_tmp_cwd_is_readable() {
-        if !linux_ready("linux_unbound_tmp_cwd_is_readable") {
+    fn linux_unbound_cwd_is_enterable_but_empty() {
+        if !linux_ready("linux_unbound_cwd_is_enterable_but_empty") {
             return;
         }
         let root = temp_dir("cwd");
@@ -1068,6 +1085,7 @@ mod tests {
         let output = scratch.join("pwd");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&project).unwrap();
+        fs::write(project.join("secret"), b"host data").unwrap();
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&scratch],
@@ -1077,7 +1095,7 @@ mod tests {
             &[
                 "/usr/bin/sh",
                 "-c",
-                r#"pwd > "$1""#,
+                r#"pwd > "$1"; ls -A | wc -l >> "$1"; cat secret >> "$1" 2>/dev/null || echo unreadable >> "$1""#,
                 "sh",
                 output.to_str().unwrap(),
             ],
@@ -1086,7 +1104,12 @@ mod tests {
             &[],
         );
         assert!(result.is_ok(), "unbound cwd failed: {result:?}");
-        assert_eq!(fs::read_to_string(&output).unwrap().trim(), project.display().to_string());
+        let lines: Vec<String> = fs::read_to_string(&output)
+            .unwrap()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert_eq!(lines, vec![project.display().to_string(), "0".to_string(), "unreadable".to_string()]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1102,8 +1125,8 @@ mod tests {
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&project).unwrap();
         fs::create_dir(&out).unwrap();
-        // cwd is neither a read nor a write root: the implicit read-only
-        // cwd bind must precede the writable child so it cannot shadow it.
+        // cwd is neither a read nor a write root: the implicit empty tmpfs
+        // at cwd must precede the writable child so it cannot shadow it.
         let sandbox = Sandbox {
             read: vec![],
             write: vec![&out, &scratch],
@@ -1127,8 +1150,10 @@ mod tests {
             &project,
             &[],
         );
-        assert!(result.is_err(), "implicit cwd accepted a write");
-        assert!(!project_file.exists());
+        // The undeclared cwd is a private tmpfs: a write there succeeds
+        // inside the sandbox but never reaches the host directory.
+        assert!(result.is_ok(), "write into the tmpfs cwd failed: {result:?}");
+        assert!(!project_file.exists(), "implicit cwd write reached the host");
         fs::remove_dir_all(root).unwrap();
     }
 

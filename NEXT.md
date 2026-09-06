@@ -129,7 +129,7 @@ cp312 wheel for faiss-cpu 1.7.4, reported as `py_uv_resolve_failed`).
   interpreter constraint that must NOT be treated as a package; a
   `.python-version` that names a patch release not pinned (satisfy on
   major.minor, warn).
-- Review fixes carried here from PR #1 (do first, they are small):
+- Review fixes carried here from PR #1 — **all four DONE in the review round (LINUX_PORT.md changelog)**; kept for the record:
   (a) an undeclared cwd on Linux is `--ro-bind`-ed wholesale
   (`src/sandbox.rs`), so mount `--tmpfs <cwd>` instead and invert
   `linux_unbound_tmp_cwd_is_readable`; (b) drop the platform triple from

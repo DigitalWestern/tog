@@ -76,6 +76,22 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
             format!("parse {}: {e}; run `blanket sync` first", path.display()),
         )
     })?;
+    if let Some(recorded) = v["platform"].as_str() {
+        let host = Platform::host()?;
+        if recorded != host.triple() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "{}: closure was projected on {recorded}; this host is {}; run `blanket sync` here",
+                    path.display(),
+                    host.triple()
+                ),
+            ));
+        }
+    }
+    // Envelopes without a platform field predate the Linux port (all darwin);
+    // they are accepted and their object ids simply will not resolve on a
+    // foreign store, which already demands a re-sync.
     if v["schema"] != "closure/1" || v["ecosystem"] != ecosystem {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -371,4 +387,46 @@ pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Resul
             "plan": plan,
         }),
     )
+}
+
+#[cfg(test)]
+mod closure_platform_tests {
+    use super::*;
+
+    fn write_closure(dir: &Path, platform: Option<&str>) {
+        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        let mut v = serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"ok": true}
+        });
+        if let Some(platform) = platform {
+            v["platform"] = serde_json::Value::String(platform.to_string());
+        }
+        fs::write(dir.join(".blanket/closures/python.json"), v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn foreign_platform_closure_is_refused_and_legacy_is_accepted() {
+        let host = Platform::host().unwrap();
+        let foreign = Platform::ALL
+            .iter()
+            .copied()
+            .find(|p| *p != host)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("blanket-closure-plat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        write_closure(&dir, Some(foreign.triple()));
+        let err = read_closure(&dir, "python").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+        assert!(err.to_string().contains(foreign.triple()), "{err}");
+
+        write_closure(&dir, Some(host.triple()));
+        assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
+
+        write_closure(&dir, None); // pre-port envelope
+        assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

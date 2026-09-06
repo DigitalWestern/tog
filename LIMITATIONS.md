@@ -19,6 +19,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel`.
   Pinning a C toolchain as a store object is the roadmap item that
   closes this for both platforms.
+- **Linux sandbox roots are canonical paths.** bubblewrap binds the
+  canonicalized path of every declared root; a caller that declares a
+  symlink alias and then refers to files through the alias will not see
+  them (Seatbelt resolves aliases itself). Every tailor passes store or
+  scratch paths, which are canonical; the contract only matters for new
+  callers of `Sandbox`/`BuildSpec`. An undeclared cwd is an empty tmpfs.
 - **Linux sandbox (bubblewrap) is cooperative hermeticity too**: a Unix
   socket inside an immutable read root (store object) is not scanned for
   (write roots, cwd and scratch are, and are rejected pre-mount); a
@@ -174,6 +180,17 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Elixir
 
+- **Two OTP steps run outside the sandbox on Linux**: the `Install -cross
+  -minimal` relocation of the extracted OTP tree and the OTP runtime
+  probe (`src/elixir.rs`) run as direct children with a clean env. They
+  only touch the staged store object, but they are the one non-sandboxed
+  build step in the kernel.
+- **OTP cache hits skip the runtime-compatibility probe.** The Linux OTP
+  object was built on Fedora 44 (glibc 2.43 floor, OpenSSL 3.x; see the
+  provenance file in `DigitalWestern/blanket-toolchains`); a store copied
+  to a host with an older glibc or a different OpenSSL ABI fails only at
+  execution time, not at `sync`. The probe runs on first realization
+  only. Loud, but late.
 - **git deps and non-hexpm repos fail closed.** Loud.
 - **Umbrella projects untested** — likely partially working, deliberately
   unverified; treat as unsupported until the test matrix exists. Silent

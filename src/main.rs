@@ -401,7 +401,7 @@ fn locked_requirements(
 ) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
     let stamp_path = dir.join(".blanket/lock-source.hash");
-    let source_hash = lock_source_hash(platform, pyver, source);
+    let source_hash = lock_source_hash(pyver, source);
     if let (Ok(stamp), Ok(lock)) = (
         std::fs::read_to_string(&stamp_path),
         std::fs::read_to_string(&lock_path),
@@ -428,11 +428,14 @@ fn locked_requirements(
     std::fs::read_to_string(&lock_path)
 }
 
-fn lock_source_hash(platform: Platform, pyver: &str, source: &str) -> String {
+/// Stamp deciding whether `uv pip compile` must re-run. Deliberately NOT
+/// platform-qualified: `.blanket/lock-source.hash` is per-machine state and
+/// the format is byte-identical to the pre-port one, so existing darwin
+/// stamps stay valid after the Linux port (platform lives in
+/// `planner_input_hash`, which keys the plan cache).
+fn lock_source_hash(pyver: &str, source: &str) -> String {
     use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(
-        format!("{pyver}\x00{source}\x00{}", platform.triple()).as_bytes(),
-    ))
+    hex::encode(Sha256::digest(format!("{pyver}\x00{source}").as_bytes()))
 }
 
 fn run_plan(platform: Platform) -> io::Result<()> {
@@ -1268,23 +1271,19 @@ mod tests {
             "dc181496c6681389a89b3191dba44abdfe8efef8044e540777e7b62c91166411"
         );
 
-        let darwin_lock = lock_source_hash(Platform::Aarch64AppleDarwin, "3.12", source);
-        let linux_lock = lock_source_hash(Platform::X86_64UnknownLinuxGnu, "3.12", source);
-        let changed_lock = lock_source_hash(
-            Platform::Aarch64AppleDarwin,
-            "3.12",
-            "six==1.17.0\n# changed",
-        );
-        assert_ne!(darwin_lock, changed_lock); // source only
-        assert_ne!(darwin_lock, linux_lock); // platform only
-        assert_eq!(
-            darwin_lock,
-            lock_source_hash(Platform::Aarch64AppleDarwin, "3.12", source)
-        ); // neither
-        assert_eq!(
-            darwin_lock,
-            "416cfad5b520d8042cac0eb2325a79211dec71064188a0e801992376260a8063"
-        );
+        // The lock-source stamp is platform-free on purpose (see its doc):
+        // this is main's exact format, so pre-port darwin stamps stay valid.
+        let lock = lock_source_hash("3.12", source);
+        let changed_lock = lock_source_hash("3.12", "six==1.17.0\n# changed");
+        assert_ne!(lock, changed_lock); // source only
+        assert_eq!(lock, lock_source_hash("3.12", source)); // same input
+        {
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                lock,
+                hex::encode(Sha256::digest(format!("3.12\x00{source}").as_bytes()))
+            );
+        }
     }
 
     #[test]

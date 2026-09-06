@@ -54,10 +54,11 @@ fn network_access_during_build_fails() {
     );
     let err = result.expect_err("build reaching the network must fail");
     let msg = err.to_string();
-    assert!(
-        msg.contains("sandboxed build") || msg.contains("failed"),
-        "unexpected error shape: {msg}"
-    );
+    // A sandbox that failed to set up (Unsupported) is not evidence of
+    // denial: the build must have run and exited non-zero inside it.
+    assert_ne!(err.kind(), std::io::ErrorKind::Unsupported, "sandbox did not run: {msg}");
+    assert!(msg.contains("sandboxed build of evil==0.1 failed"), "unexpected error shape: {msg}");
+    assert!(msg.contains("sandboxed command failed (exit status"), "build did not execute: {msg}");
 }
 
 #[test]

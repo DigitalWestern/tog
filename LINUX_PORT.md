@@ -167,6 +167,51 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ---
 
+### 2026-09-05 (review round) — two independent reviews of PR #1, fixes applied
+
+Claude (Fable) and GPT-6 Astra each reviewed the full diff adversarially
+and returned MERGE-AFTER-FIXES. Both found the same hole; Astra found a
+real macOS test regression. Applied in this round:
+
+- **macOS `cargo test` would have failed** (Astra, blocker): the two new
+  `dotnet` temp-dir unit tests built their fixtures under
+  `std::env::temp_dir()` and the validator demands canonical paths; on
+  macOS `TMPDIR` is under `/var -> /private/var`. Fixed by canonicalizing
+  the test base; reproduced and verified here with a symlinked TMPDIR.
+- **Undeclared cwd was a read-only view of the host** (both, blocker):
+  `run_build_spec` with a cwd outside every declared root `--ro-bind`-ed
+  the whole subtree; a probe listed `~/.ssh`. Now an empty tmpfs is
+  mounted at the cwd (command can start there; nothing visible; writes
+  stay in the sandbox). Seatbelt grants only metadata reads there, so the
+  two backends now agree. Tests inverted accordingly.
+- **Lock-source stamp is platform-free again** (both): the stamp is
+  per-machine state; qualifying it by platform would have forced one
+  needless `uv pip compile` on every Mac project after merge. Restored to
+  main's exact byte format; `planner_input_hash` keeps the platform.
+- **The ignored network-denial gate accepted a sandbox setup failure as
+  a denial** (Astra): it now requires a non-`Unsupported` error whose
+  text proves the build ran and exited non-zero inside the sandbox.
+- **Closure envelopes from another platform are refused** (Astra):
+  `read_closure` returns `Unsupported` naming both triples; envelopes
+  without the field (pre-port, all darwin) are accepted. Unit-tested.
+- `bwrap` is looked up at `/usr/bin/bwrap` first, PATH second (Claude);
+  `--hostname blanket` inside the UTS namespace so the host name stops
+  leaking into builds (Claude); README's macOS acceptance sentence now
+  says the Mac re-run is owed; LIMITATIONS gained the canonical-root
+  contract, the two unsandboxed OTP steps, and the OTP cache-hit
+  compatibility gap; the `linux_python` coverage row now says what the
+  gate actually covers (Astra).
+- Not changed, recorded: declared symlink aliases are not preserved on
+  Linux (documented contract, LIMITATIONS); OTP runtime compatibility is
+  probed on first realization only (LIMITATIONS + NEXT); the `.ssh`
+  unit test still creates its scratch under the real `$HOME/.cache`.
+- Verification after the fixes: 159 offline unit tests, all ignored e2e
+  gates and `tests/acceptance.sh` re-run on m6-fedora (results in the
+  PR). Still owed on the Mac: `cargo test`, `bash tests/acceptance.sh`,
+  a warm-project resync, the stage-6 shared-store check.
+
+---
+
 ## Surface inventory (what is actually macOS-specific)
 
 Everything below hardcodes `aarch64-apple-darwin` or a Darwin-only
@@ -242,7 +287,7 @@ acceptance/hit-rate harnesses.
 | Stream | Owns | Needs | Merge gate (fresh store) |
 |---|---|---|---|
 | B: sandbox (stage 3) | `sandbox.rs`, `tests/sandbox_deny.rs` | stage 1 | `sandbox_deny` passes on Linux incl. read/write/network denials and an overlapping read-only-parent / writable-child mount |
-| P: Python (stage 2) | `python.rs`, `pypi.rs`, `build.rs`, `main.rs` planner-key lines | B | new `linux_python` round-trip: both CPython pins, uv, manylinux selection, a compiled-extension import, an sdist build |
+| P: Python (stage 2) | `python.rs`, `pypi.rs`, `build.rs`, `main.rs` planner-key lines | B | `linux_python` round-trip: 3.12 manylinux wheel selection, a compiled-extension import (markupsafe), uv 0.12.7; the sdist build is the `sdist_build` gate (docopt) and 3.13 is covered by the pin/identity unit tests plus a manual realization |
 | N: npm (stage 2 + lifecycle) | `npm.rs`, `tests/npm_scripts.rs` | P, B | new `linux_npm` round-trip: optional-platform package selection (`@esbuild/linux-x64` chosen, darwin skipped), a source-built addon |
 | Rust (stage 4) | `cargo.rs`, `tests/cargo_e2e.rs` | B | `cargo_sync_build_and_run_again_offline` |
 | .NET (stage 4) | `dotnet.rs`, `tests/dotnet_e2e.rs` | B | `dotnet_sync_sandboxed_build_and_run` |
