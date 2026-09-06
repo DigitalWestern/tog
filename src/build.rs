@@ -421,7 +421,11 @@ fn prepare_rust(
     let vendor_obj = crate::cargo::realize_vendor(store, &cargo_plan)?;
     let cargo_home = work.join("cargo-home");
     fs::create_dir_all(&cargo_home)?;
-    fs::write(cargo_home.join("config.toml"), crate::cargo::blanket_config_text(&vendor_obj)?)?;
+    // An sdist's vendored crates can themselves come from git sources.
+    fs::write(
+        cargo_home.join("config.toml"),
+        crate::cargo::blanket_config_text_for(&vendor_obj, &crate::cargo::plan_git_sources(&cargo_plan))?,
+    )?;
     Ok((rust_obj, vendor_obj))
 }
 

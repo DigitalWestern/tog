@@ -191,3 +191,56 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     let again = blanket::project::realize_env(&store, platform, &plan).expect("second realize");
     assert_eq!(env, again);
 }
+
+/// A local repository holding one small library crate.
+fn cargo_fixture_repo(root: &Path) -> (String, String) {
+    let repo = root.join("crate-repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["config", "user.email", "t@example.invalid"], &repo);
+    git(&["config", "user.name", "t"], &repo);
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"gitdep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn value() -> u32 { 7 }\n").unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-qm", "one"], &repo);
+    let commit = git(&["rev-parse", "HEAD"], &repo);
+    (format!("file://{}", repo.display()), commit)
+}
+
+#[test]
+#[ignore]
+fn cargo_git_dependency_is_vendored_from_its_commit() {
+    let root = temp("cargo");
+    let (url, commit) = cargo_fixture_repo(&root.0);
+    let store = store_at(&root.0);
+    policy::clear();
+
+    let source = format!("git+{url}?rev={commit}#{commit}");
+    let lock = format!(
+        "version = 3\n\n[[package]]\nname = \"gitdep\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
+    );
+    let plan = blanket::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    assert_eq!(plan.crates.len(), 1);
+    assert!(plan.crates[0].git.is_some(), "the crate carries its git source");
+
+    let vendor = blanket::cargo::realize_vendor(&store, &plan).expect("vendor");
+    let crate_dir = vendor.join("gitdep-1.0.0");
+    assert_eq!(
+        std::fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
+        "pub fn value() -> u32 { 7 }\n"
+    );
+    // cargo's directory source requires this file; git sources carry no package hash.
+    assert_eq!(
+        std::fs::read_to_string(crate_dir.join(".cargo-checksum.json")).unwrap(),
+        r#"{"files":{},"package":null}"#
+    );
+    assert!(!crate_dir.join(".git").exists(), "the .git directory must not be vendored");
+
+    // Realizing again is a cache hit on the same object.
+    let again = blanket::cargo::realize_vendor(&store, &plan).expect("second vendor");
+    assert_eq!(vendor, again);
+}

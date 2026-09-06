@@ -379,6 +379,19 @@ pub struct CargoCrate {
     pub version: String,
     pub sha256: String,
     pub url: String,
+    /// A git dependency pinned to a commit (NEXT.md item 4): the crate's files
+    /// come from the realized commit instead of a registry `.crate` archive,
+    /// and `source` is the lock's exact source string, which the generated
+    /// cargo config must replace verbatim.
+    pub git: Option<CargoGitSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CargoGitSource {
+    /// The lockfile's `source` value, e.g. `git+https://host/o/r?rev=<sha>#<sha>`.
+    pub source: String,
+    #[serde(skip)]
+    pub inner: crate::gitsrc::GitSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -451,11 +464,24 @@ pub fn plan_cargo(lock_toml: &str, rust_version: &str) -> io::Result<CargoPlan> 
                     name,
                     version,
                     sha256: checksum,
+                    git: None,
                 });
             }
             Some(source) if source.starts_with("git+") => {
+                if let Some(git) = parse_cargo_git_source(source) {
+                    crates.push(CargoCrate {
+                        url: git.inner.url.clone(),
+                        name,
+                        version,
+                        // The commit is the verification; there is no crate
+                        // archive to checksum.
+                        sha256: String::new(),
+                        git: Some(git),
+                    });
+                    continue;
+                }
                 return Err(err(
-                    "git dependencies are not supported yet; vendor the crate or use a registry release",
+                    "git dependency is not pinned to a commit; add a rev= or regenerate the lock",
                 ));
             }
             Some(source) => {
@@ -502,6 +528,68 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     realize_vendor_inner(store, plan)
 }
 
+/// Parse a Cargo lock `source` for a git dependency pinned to a commit.
+///
+/// Cargo writes `git+<url>?rev=<ref>#<commit>` (also `?branch=`/`?tag=`, and
+/// sometimes no query at all). The fragment is always the resolved commit,
+/// which is what blanket realizes; the whole string is kept because the
+/// generated config's `[source."…"]` key must match it exactly.
+pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
+    let rest = source.strip_prefix("git+")?;
+    let (locator, commit) = rest.rsplit_once('#')?;
+    if !crate::gitsrc::is_full_commit(commit) {
+        return None;
+    }
+    let url = locator.split_once('?').map(|(before, _)| before).unwrap_or(locator);
+    Some(CargoGitSource {
+        source: source.to_string(),
+        inner: crate::gitsrc::GitSource {
+            url: crate::gitsrc::normalize_url(url),
+            commit: commit.to_ascii_lowercase(),
+            subdirectory: None,
+        },
+    })
+}
+
+/// Find the directory inside a realized repository that holds the crate with
+/// this name: the root when its own Cargo.toml names it, otherwise the first
+/// matching directory (workspace members live one or two levels down).
+fn crate_dir_in_repo(root: &Path, name: &str) -> io::Result<PathBuf> {
+    fn package_name(manifest: &Path) -> Option<String> {
+        let text = fs::read_to_string(manifest).ok()?;
+        let value: toml::Value = toml::from_str(&text).ok()?;
+        value
+            .get("package")?
+            .get("name")?
+            .as_str()
+            .map(str::to_string)
+    }
+    if package_name(&root.join("Cargo.toml")).as_deref() == Some(name) {
+        return Ok(root.to_path_buf());
+    }
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 3 {
+            continue;
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if package_name(&path.join("Cargo.toml")).as_deref() == Some(name) {
+                return Ok(path);
+            }
+            stack.push((path, depth + 1));
+        }
+    }
+    Err(err(format!(
+        "git source {} contains no crate named {name}",
+        root.display()
+    )))
+}
+
 fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
@@ -510,8 +598,26 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         return Ok(store.object_path(&id));
     }
 
+    // Git crates are realized from their commit; registry crates are fetched
+    // as .crate archives. Both end up as a vendored directory below.
     let mut archives = Vec::new();
+    let mut git_roots = Vec::new();
     for krate in &crates {
+        if let Some(git) = &krate.git {
+            let object = crate::gitsrc::ensure_git_source(store, &git.inner).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{}@{}: git source {}: {e}", krate.name, krate.version, git.inner.url),
+                )
+            })?;
+            crate::policy::record(
+                crate::policy::GIT_DEPENDENCY,
+                &format!("{}@{}", krate.name, krate.version),
+                &format!("{} at {}", git.inner.url, git.inner.commit),
+            )?;
+            git_roots.push((krate.clone(), object));
+            continue;
+        }
         let archive = download_verified_held(store, &krate.url, &krate.sha256).map_err(|e| {
             err(format!(
                 "{}@{}: fetch {}: {e}",
@@ -522,7 +628,32 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
     }
 
     let staged = store.stage()?;
-    for (krate, archive) in crates.iter().zip(archives) {
+    for (krate, root) in &git_roots {
+        // Cargo's directory source wants the crate's own directory, so a
+        // workspace repository is searched for the crate the lock names.
+        let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
+        let source_dir = crate_dir_in_repo(root, &krate.name)?;
+        crate::project::clone_tree(&source_dir, &crate_dir).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
+            )
+        })?;
+        // A directory source's files are not checksummed by cargo (the commit
+        // is the provenance), and `package: null` is what `cargo vendor`
+        // writes for git sources.
+        fs::write(
+            crate_dir.join(".cargo-checksum.json"),
+            br#"{"files":{},"package":null}"#,
+        )
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("{}@{}: write .cargo-checksum.json: {e}", krate.name, krate.version),
+            )
+        })?;
+    }
+    for (krate, archive) in crates.iter().filter(|k| k.git.is_none()).zip(archives) {
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         fs::create_dir_all(&crate_dir).map_err(|e| {
             io::Error::new(e.kind(), format!(
@@ -590,14 +721,20 @@ fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> 
     for krate in &mut crates {
         validate_crate_component("name", &krate.name)?;
         validate_crate_component("version", &krate.version)?;
-        let checksum = normalize_checksum(&krate.sha256)?;
+        let checksum = match &krate.git {
+            // The commit determines the bytes; there is no .crate checksum.
+            Some(git) => format!("git:{}", git.inner.commit),
+            None => normalize_checksum(&krate.sha256)?,
+        };
         if !seen.insert((krate.name.clone(), krate.version.clone())) {
             return Err(err(format!(
                 "duplicate Cargo crate {}@{}",
                 krate.name, krate.version
             )));
         }
-        krate.sha256 = checksum.clone();
+        if krate.git.is_none() {
+            krate.sha256 = checksum.clone();
+        }
         inputs.insert(format!("crate:{}@{}", krate.name, krate.version), checksum);
     }
     let identity = Identity {
@@ -723,15 +860,69 @@ pub fn lock_digest(lock_toml: &str) -> String {
 /// The forced policy config: source replacement into the vendor object plus
 /// offline. Applied via CLI `--config` (outranks every config file).
 pub(crate) fn blanket_config_text(vendor_obj: &Path) -> io::Result<String> {
+    blanket_config_text_for(vendor_obj, &[])
+}
+
+/// The forced cargo config. Every git source in the plan gets its own
+/// `[source."git+…"]` stanza replaced by the vendor directory, because cargo
+/// matches these keys against the lockfile's source string verbatim; without
+/// them it would try to reach the network for a git dependency.
+pub(crate) fn blanket_config_text_for(
+    vendor_obj: &Path,
+    git_sources: &[CargoGitSource],
+) -> io::Result<String> {
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
-    Ok(format!(
+    let mut text = format!(
         "[source.crates-io]\n\
          replace-with = \"blanket-vendor\"\n\
          [source.blanket-vendor]\n\
-         directory = {vendor}\n\
-         [net]\n\
-         offline = true\n"
-    ))
+         directory = {vendor}\n"
+    );
+    let mut seen = BTreeSet::new();
+    for git in git_sources {
+        if !seen.insert(git.source.clone()) {
+            continue;
+        }
+        let key = serde_json::to_string(&git.source)?;
+        let url = serde_json::to_string(&git.inner.url)?;
+        let rev = serde_json::to_string(&git.inner.commit)?;
+        text.push_str(&format!(
+            "[source.{key}]\n\
+             git = {url}\n\
+             rev = {rev}\n\
+             replace-with = \"blanket-vendor\"\n"
+        ));
+    }
+    text.push_str("[net]\noffline = true\n");
+    Ok(text)
+}
+
+/// The git sources a plan needs stanzas for.
+pub(crate) fn plan_git_sources(plan: &CargoPlan) -> Vec<CargoGitSource> {
+    plan.crates.iter().filter_map(|krate| krate.git.clone()).collect()
+}
+
+/// The git sources named by a project's own Cargo.lock. Used where no plan is
+/// in hand (a sandboxed build); an unreadable or absent lock yields none, and
+/// the build then fails the same way it did before git sources existed.
+pub(crate) fn project_git_sources(project_dir: &Path) -> Vec<CargoGitSource> {
+    let Ok(text) = fs::read_to_string(project_dir.join("Cargo.lock")) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .map(|packages| {
+            packages
+                .iter()
+                .filter_map(|package| package.get("source")?.as_str())
+                .filter_map(parse_cargo_git_source)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A later `--config` outranks ours; letting one through would let a hostile
@@ -769,7 +960,11 @@ pub fn project_cargo_env(
     let config = cargo_home.join("blanket-config.toml");
     let wrapper = bin_dir.join("cargo");
 
-    write_atomic(&config, blanket_config_text(&vendor_obj)?.as_bytes(), None)?;
+    write_atomic(
+        &config,
+        blanket_config_text_for(&vendor_obj, &plan_git_sources(plan))?.as_bytes(),
+        None,
+    )?;
 
     let cargo_bin = rust_obj.join("bin/cargo");
     let rustc_bin = rust_obj.join("bin/rustc");
@@ -844,7 +1039,10 @@ pub fn build_sandboxed(
     let build_home = scratch.join("cargo-home");
     fs::create_dir_all(&build_home)?;
     let config = build_home.join("blanket-config.toml");
-    fs::write(&config, blanket_config_text(&vendor_obj)?)?;
+    fs::write(
+        &config,
+        blanket_config_text_for(&vendor_obj, &project_git_sources(&project_dir))?,
+    )?;
     let mut argv = vec![
         cargo_bin
             .to_str()
@@ -1441,6 +1639,7 @@ checksum = "{hash_b}"
                     version: "1.0.0".into(),
                     sha256: hash.clone(),
                     url: format!("file://{}", archive.display()),
+                    git: None,
                 }],
                 members: vec![],
             };
@@ -1475,6 +1674,7 @@ checksum = "{hash_b}"
                     version: "1.0.0".into(),
                     sha256: hash,
                     url: format!("file://{}", archive.display()),
+                    git: None,
                 }],
                 members: vec![],
             };
@@ -1581,5 +1781,71 @@ checksum = "{hash_b}"
                 "{bad}: {error}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod git_source_tests {
+    use super::*;
+
+    #[test]
+    fn cargo_git_sources_parse_only_when_pinned() {
+        let commit = "a".repeat(40);
+        for source in [
+            format!("git+https://github.com/o/r?rev={commit}#{commit}"),
+            format!("git+https://github.com/o/r?branch=main#{commit}"),
+            format!("git+https://github.com/o/r?tag=v1#{commit}"),
+            format!("git+https://github.com/o/r#{commit}"),
+        ] {
+            let parsed = parse_cargo_git_source(&source)
+                .unwrap_or_else(|| panic!("not parsed: {source}"));
+            assert_eq!(parsed.inner.commit, commit);
+            assert_eq!(parsed.inner.url, "https://github.com/o/r");
+            // The key must be the lock's exact string, or cargo will not match it.
+            assert_eq!(parsed.source, source);
+        }
+        assert!(parse_cargo_git_source("git+https://github.com/o/r?branch=main").is_none());
+        assert!(parse_cargo_git_source("registry+https://github.com/rust-lang/crates.io-index").is_none());
+    }
+
+    #[test]
+    fn the_config_replaces_each_git_source_verbatim() {
+        let commit = "b".repeat(40);
+        let source = format!("git+https://github.com/o/r?rev={commit}#{commit}");
+        let git = parse_cargo_git_source(&source).unwrap();
+        let text = blanket_config_text_for(Path::new("/store/vendor"), &[git.clone(), git])
+            .unwrap();
+        assert!(text.contains(&format!("[source.\"{source}\"]")), "{text}");
+        assert_eq!(text.matches("replace-with").count(), 2, "one per source plus crates-io: {text}");
+        assert!(text.contains("git = \"https://github.com/o/r\""), "{text}");
+        assert!(text.contains(&format!("rev = \"{commit}\"")), "{text}");
+        assert!(text.trim_end().ends_with("offline = true"), "{text}");
+    }
+
+    #[test]
+    fn a_git_crate_commits_to_its_commit_in_the_vendor_identity() {
+        let commit = "c".repeat(40);
+        let git = parse_cargo_git_source(&format!("git+https://github.com/o/r#{commit}")).unwrap();
+        let plan = |source: CargoGitSource| CargoPlan {
+            rust_version: "1.96.1".into(),
+            crates: vec![CargoCrate {
+                name: "dep".into(),
+                version: "1.0.0".into(),
+                sha256: String::new(),
+                url: "https://github.com/o/r".into(),
+                git: Some(source),
+            }],
+            members: vec![],
+        };
+        let (_, first) = vendor_identity(&plan(git.clone())).unwrap();
+        let other_commit =
+            parse_cargo_git_source(&format!("git+https://github.com/o/r#{}", "d".repeat(40)))
+                .unwrap();
+        let (_, second) = vendor_identity(&plan(other_commit)).unwrap();
+        assert_ne!(
+            first.object_id(),
+            second.object_id(),
+            "a different commit must be a different vendor object"
+        );
     }
 }

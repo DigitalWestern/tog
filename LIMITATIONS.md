@@ -138,8 +138,14 @@ sandbox, and uv fallback still delegates resolution.
   bare repository URL still fails closed as `npm_git_dep`, because the bytes
   it names can change. npm runs a git dependency's `prepare` script; blanket
   does not (it is unsandboxed build logic with its own dependency needs) and
-  records `git-dependency` naming the package. Python and Cargo git
-  dependencies are still unimplemented. Local `file:` links are projected when
+  records `git-dependency` naming the package. Python and Cargo git dependencies work the
+  same way: a python `pkg @ git+URL@<commit>` checkout is packed into a
+  deterministic sdist and built through the ordinary sdist path, and a cargo
+  `git+…#<commit>` source is vendored as a directory source whose commit is an
+  identity input. Cargo git dependencies are NOT re-verified against the
+  project's Cargo.lock at `blanket run` time: the config stanzas are rebuilt
+  from that lock, so a lock edited after a sync is caught by cargo, not by
+  blanket. Local `file:` links are projected when
   the lock records their project-relative target.
 - **Install scripts that need network for LOGIC** (not just artifacts) are
   permissive with exception `install-script-failed`; strict via policy.
