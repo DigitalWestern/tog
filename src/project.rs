@@ -205,6 +205,18 @@ pub fn closure_object(
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
 pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
+    realize_env_at_depth(store, platform, plan, 0)
+}
+
+/// Internal realization entry point used by sdist build environments. The
+/// depth is carried through nested build-requirement sdists so a malicious or
+/// pathological chain cannot recurse forever.
+pub(crate) fn realize_env_at_depth(
+    store: &Store,
+    platform: Platform,
+    plan: &Plan,
+    sdist_depth: usize,
+) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Python environment", "stage 2")?;
     let pin = python::lookup(platform, &plan.python_version)
         .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
@@ -270,7 +282,14 @@ pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result
             ArtifactKind::Wheel => download_verified(store, &p.url, &p.sha256)?,
             // sdist -> wheel via sandboxed derivation (network denied).
             ArtifactKind::Sdist => {
-                crate::build::build_sdist_wheel(store, platform, p, &pin.version)?
+                crate::build::build_sdist_wheel_at_depth(
+                    store,
+                    platform,
+                    p,
+                    &pin.version,
+                    Some(plan),
+                    sdist_depth + 1,
+                )?
             }
         };
         artifacts.push((p, wheel_file));

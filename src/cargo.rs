@@ -703,7 +703,7 @@ pub fn lock_digest(lock_toml: &str) -> String {
 
 /// The forced policy config: source replacement into the vendor object plus
 /// offline. Applied via CLI `--config` (outranks every config file).
-fn blanket_config_text(vendor_obj: &Path) -> io::Result<String> {
+pub(crate) fn blanket_config_text(vendor_obj: &Path) -> io::Result<String> {
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
     Ok(format!(
         "[source.crates-io]\n\

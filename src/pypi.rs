@@ -3,10 +3,12 @@
 //! fallback), cutting the pattern (Plan) the kernel realizes.
 
 use crate::platform::Platform;
+use crate::store::Store;
 use crate::types::{ArtifactKind, LockedPackage, Plan};
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::ffi::CStr;
 use std::io;
+use std::fs;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::os::raw::c_char;
 use std::process::Command;
@@ -598,6 +600,46 @@ pub fn plan_python(
         python_version: python_version.into(),
         packages,
     })
+}
+
+/// Resolve a small, temporary requirements text with the store-pinned uv.
+/// Callers own the resulting lock's cache key and persistence; this helper is
+/// deliberately just the reusable uv invocation shared by project and sdist
+/// planning.
+pub(crate) fn lock_requirement_text_with_uv(
+    store: &Store,
+    platform: Platform,
+    requirements_text: &str,
+    python_version: &str,
+) -> io::Result<String> {
+    let uv = crate::python::ensure_uv_for(store, platform)?.join("uv");
+    let scratch = store.stage()?;
+    let input = scratch.join("requirements.in");
+    let output = scratch.join("requirements.lock.txt");
+    let result = (|| {
+        fs::write(&input, requirements_text)?;
+        let status = Command::new(&uv)
+            .args([
+                "pip",
+                "compile",
+                "--generate-hashes",
+                "--python-version",
+                python_version,
+            ])
+            .arg(&input)
+            .args(["-o"])
+            .arg(&output)
+            .status()
+            .map_err(|e| {
+                io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
+            })?;
+        if !status.success() {
+            return Err(io::Error::other("uv pip compile failed"));
+        }
+        fs::read_to_string(&output)
+    })();
+    let _ = crate::store::remove_tree(&scratch);
+    result
 }
 
 #[cfg(test)]

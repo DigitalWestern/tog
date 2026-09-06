@@ -82,8 +82,18 @@ unsatisfiable constraints fail closed.
 - **Project-local/editable and direct Python requirements are skipped** with
   exception `requirement-skipped`; strict via policy. Other malformed
   requirements still fail closed.
-- **Sdists with dynamic build requirements** (PEP 517 get_requires jobs)
-  unsupported; setuptools-family only. Loud.
+- **Sdists with dynamic build requirements** (PEP 517
+  `get_requires_for_build_wheel`) are unsupported because inspection is
+  deliberately non-executing. Static PEP 517 backends including hatchling,
+  flit, and setuptools-rust are supported when their declared requirements
+  resolve. Loud.
+- **`setup_requires` in legacy `setup.py` is not handled**: pip would need
+  network access to discover/install it, which is denied in the build
+  sandbox. This is the explicit item-11 boundary; declare the dependency in
+  `pyproject.toml` instead. Loud.
+- **Rust sdists without a shipped `Cargo.lock`** use a store-Cargo-generated
+  lock in the scratch source and record `unattested_cargo_lock`; strict policy
+  rejects that exception.
 - **Immutable venvs are not drop-in venvs**: no activate scripts; pip
   can't mutate them (by design, but surprises tooling that shells out to
   pip). Loud-ish.

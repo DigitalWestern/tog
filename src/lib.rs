@@ -1,4 +1,5 @@
 pub mod build;
+pub(crate) mod build_requires;
 pub mod cargo;
 pub mod dirhash;
 pub mod dotnet;

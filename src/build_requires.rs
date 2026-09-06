@@ -1,0 +1,747 @@
+//! Static inspection and resolution of PEP 517 build requirements.
+//!
+//! Inspection reads only archive metadata and pyproject.toml. Source is
+//! executed only later, by pip inside the existing build sandbox.
+
+use crate::platform::Platform;
+use crate::store::Store;
+use crate::types::Plan;
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use zip::ZipArchive;
+
+const DEFAULT_REQUIRES: &[&str] = &["setuptools>=40.8.0", "wheel"];
+const DEFAULT_BACKEND: &str = "setuptools.build_meta:__legacy__";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArchiveInfo {
+    pub archive_root: String,
+    pub build_requires: Vec<String>,
+    pub build_backend: String,
+    /// Path relative to the extracted source root.
+    pub cargo_manifest: Option<PathBuf>,
+    pub rust_build: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    TarGz,
+    Zip,
+}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn archive_kind(path: &Path) -> io::Result<ArchiveKind> {
+    let name = path.to_string_lossy().to_ascii_lowercase();
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Ok(ArchiveKind::TarGz)
+    } else if name.ends_with(".zip") {
+        Ok(ArchiveKind::Zip)
+    } else {
+        // Verified artifact-cache entries are intentionally addressed by a
+        // bare sha256, so identify those by their archive signature.
+        let mut magic = [0u8; 4];
+        let mut file = File::open(path)?;
+        file.read_exact(&mut magic)?;
+        match magic {
+            [0x1f, 0x8b, ..] => Ok(ArchiveKind::TarGz),
+            [b'P', b'K', 0x03, 0x04] | [b'P', b'K', 0x05, 0x06] => Ok(ArchiveKind::Zip),
+            _ => Err(invalid(format!(
+                "unsupported sdist archive {}; expected .tar.gz, .tgz, or .zip",
+                path.display()
+            ))),
+        }
+    }
+}
+
+fn clean_entry(raw: &str) -> io::Result<Option<String>> {
+    let raw = raw.trim().trim_start_matches("./").trim_end_matches('/');
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = Vec::new();
+    for component in Path::new(raw).components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| invalid("sdist archive contains a non-UTF-8 path"))?;
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(invalid(format!(
+                    "sdist archive contains unsafe path {raw:?}"
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parts.join("/")))
+    }
+}
+
+fn tar_entries(path: &Path) -> io::Result<Vec<String>> {
+    let output = Command::new("/usr/bin/tar")
+        .args(["-tzf"])
+        .arg(path)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
+    if !output.status.success() {
+        return Err(invalid(format!(
+            "list {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let text = std::str::from_utf8(line)
+                .map_err(|_| invalid("sdist archive listing is not UTF-8"))?;
+            clean_entry(text)
+        })
+        .filter_map(|entry| entry.transpose())
+        .collect()
+}
+
+fn zip_entries(path: &Path) -> io::Result<Vec<String>> {
+    let file = File::open(path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
+        if let Some(name) = clean_entry(entry.name())? {
+            entries.push(name);
+        }
+    }
+    Ok(entries)
+}
+
+fn entries(path: &Path, kind: ArchiveKind) -> io::Result<Vec<String>> {
+    match kind {
+        ArchiveKind::TarGz => tar_entries(path),
+        ArchiveKind::Zip => zip_entries(path),
+    }
+}
+
+fn archive_root(entries: &[String], path: &Path) -> io::Result<String> {
+    let root = entries
+        .iter()
+        .find_map(|entry| entry.split('/').next().filter(|part| !part.is_empty()))
+        .ok_or_else(|| invalid(format!("sdist archive {} is empty", path.display())))?;
+    let root = root.to_string();
+    if entries.iter().any(|entry| {
+        entry
+            .split('/')
+            .next()
+            .map(|part| part != root)
+            .unwrap_or(false)
+    }) {
+        return Err(invalid(format!(
+            "sdist archive {} has multiple top-level roots",
+            path.display()
+        )));
+    }
+    Ok(root)
+}
+
+fn root_relative(entry: &str, root: &str) -> Option<String> {
+    entry
+        .strip_prefix(root)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .map(str::to_string)
+}
+
+fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<u8>> {
+    match kind {
+        ArchiveKind::TarGz => {
+            let output = Command::new("/usr/bin/tar")
+                .args(["-xOzf"])
+                .arg(path)
+                .arg(member)
+                .output()
+                .map_err(|e| io::Error::new(e.kind(), format!("read {member} from sdist: {e}")))?;
+            if !output.status.success() {
+                return Err(invalid(format!(
+                    "read {member} from {} failed: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            Ok(output.stdout)
+        }
+        ArchiveKind::Zip => {
+            let file = File::open(path)?;
+            let mut archive = ZipArchive::new(file)
+                .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
+            let mut entry = archive
+                .by_name(member)
+                .map_err(|e| invalid(format!("read {member} from zip: {e}")))?;
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }
+    }
+}
+
+fn parse_pyproject(
+    bytes: &[u8],
+    source: &str,
+) -> io::Result<(Vec<String>, String, Option<String>)> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| invalid(format!("{source}: pyproject.toml is not UTF-8: {e}")))?;
+    let value: toml::Value = toml::from_str(text)
+        .map_err(|e| invalid(format!("{source}: malformed pyproject.toml: {e}")))?;
+    let Some(build_system) = value.get("build-system") else {
+        return Ok((
+            DEFAULT_REQUIRES.iter().map(|s| (*s).to_string()).collect(),
+            DEFAULT_BACKEND.to_string(),
+            maturin_manifest(&value, source)?,
+        ));
+    };
+    let table = build_system
+        .as_table()
+        .ok_or_else(|| invalid(format!("{source}: build-system must be a table")))?;
+    let requires = table
+        .get("requires")
+        .ok_or_else(|| invalid(format!("{source}: build-system.requires is missing")))?
+        .as_array()
+        .ok_or_else(|| invalid(format!("{source}: build-system.requires must be a list")))?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                invalid(format!("{source}: every build-system.requires item must be a string"))
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let backend = table
+        .get("build-backend")
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                invalid(format!("{source}: build-system.build-backend must be a string"))
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(|| DEFAULT_BACKEND.to_string());
+    Ok((requires, backend, maturin_manifest(&value, source)?))
+}
+
+fn maturin_manifest(value: &toml::Value, source: &str) -> io::Result<Option<String>> {
+    let Some(maturin) = value
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|tool| tool.get("maturin"))
+    else {
+        return Ok(None);
+    };
+    let Some(table) = maturin.as_table() else {
+        return Err(invalid(format!("{source}: tool.maturin must be a table")));
+    };
+    let Some(value) = table.get("manifest-path") else {
+        return Ok(None);
+    };
+    let path = value.as_str().ok_or_else(|| {
+        invalid(format!("{source}: tool.maturin.manifest-path must be a string"))
+    })?;
+    let path = clean_entry(path)?.ok_or_else(|| invalid("empty maturin manifest-path"))?;
+    Ok(Some(path))
+}
+
+fn is_rust_backend(backend: &str) -> bool {
+    let backend = backend.to_ascii_lowercase();
+    backend.contains("maturin")
+        || backend.contains("setuptools_rust")
+        || backend.contains("setuptools-rust")
+}
+
+fn requirement_name(requirement: &str) -> Option<(&str, &str, bool)> {
+    let requirement = requirement.split(';').next()?.trim();
+    let mut end = requirement.len();
+    for (index, byte) in requirement.bytes().enumerate() {
+        if matches!(byte, b'<' | b'>' | b'=' | b'!' | b'~' | b'[' | b' ' | b'\t') {
+            end = index;
+            break;
+        }
+    }
+    let name = requirement[..end].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let extras = requirement[end..].trim_start().starts_with('[');
+    let spec = requirement[end..].trim();
+    Some((name, spec, extras))
+}
+
+fn normalized_name(name: &str) -> String {
+    name.to_ascii_lowercase().replace(['_', '.'], "-")
+}
+
+fn numeric_version(version: &str) -> Option<Vec<u64>> {
+    let mut result = Vec::new();
+    for component in version.trim().split('.') {
+        let digits = component
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if digits.is_empty() {
+            return None;
+        }
+        result.push(digits.parse().ok()?);
+    }
+    Some(result)
+}
+
+fn compare_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let mut left = numeric_version(left)?;
+    let mut right = numeric_version(right)?;
+    left.resize(left.len().max(right.len()), 0);
+    right.resize(right.len().max(left.len()), 0);
+    Some(left.cmp(&right))
+}
+
+fn admits_version(spec: &str, pinned: &str) -> bool {
+    let compact = spec
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>();
+    if compact.is_empty() {
+        return true;
+    }
+    compact.split(',').all(|part| {
+        let operators = ["===", "~=", ">=", "<=", "!=", "==", ">", "<"];
+        let Some(operator) = operators.iter().find(|operator| part.starts_with(**operator))
+        else {
+            return false;
+        };
+        let value = &part[operator.len()..];
+        if value.is_empty() {
+            return false;
+        }
+        if let Some(prefix) = value.strip_suffix(".*") {
+            return *operator == "=="
+                && pinned
+                    .split('.')
+                    .zip(prefix.split('.'))
+                    .all(|(actual, expected)| actual == expected);
+        }
+        let Some(ordering) = compare_versions(pinned, value) else {
+            return false;
+        };
+        match *operator {
+            "==" | "===" => ordering == std::cmp::Ordering::Equal,
+            "!=" => ordering != std::cmp::Ordering::Equal,
+            ">=" => ordering != std::cmp::Ordering::Less,
+            "<=" => ordering != std::cmp::Ordering::Greater,
+            ">" => ordering == std::cmp::Ordering::Greater,
+            "<" => ordering == std::cmp::Ordering::Less,
+            "~=" => {
+                let parts = numeric_version(value).unwrap_or_default();
+                let mut upper = parts.clone();
+                if upper.len() < 2 {
+                    upper.resize(2, 0);
+                }
+                let index = upper.len().saturating_sub(2);
+                upper[index] += 1;
+                let upper = upper
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                ordering != std::cmp::Ordering::Less
+                    && compare_versions(pinned, &upper)
+                        .is_some_and(|ordering| ordering == std::cmp::Ordering::Less)
+            }
+            _ => false,
+        }
+    })
+}
+
+pub(crate) fn fast_path(requires: &[String]) -> bool {
+    requires.iter().all(|requirement| {
+        let Some((name, spec, extras)) = requirement_name(requirement) else {
+            return false;
+        };
+        if extras {
+            return false;
+        }
+        let pinned = match normalized_name(name).as_str() {
+            "setuptools" => "84.0.0",
+            "wheel" => "0.48.0",
+            "pip" => "26.2.1",
+            _ => return false,
+        };
+        admits_version(spec, pinned)
+    })
+}
+
+pub(crate) fn numpy_constraint(runtime_plan: Option<&Plan>) -> Option<String> {
+    runtime_plan
+        .and_then(|plan| {
+            plan.packages
+                .iter()
+                .find(|pkg| normalized_name(&pkg.name) == "numpy")
+        })
+        .map(|pkg| format!("numpy=={}", pkg.version))
+}
+
+pub(crate) fn lock_cache_key(
+    platform: Platform,
+    python_version: &str,
+    requires: &[String],
+    numpy: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted = requires.to_vec();
+    sorted.sort();
+    let input = format!(
+        "{}\0{}\0{}\0{}",
+        platform.triple(),
+        python_version,
+        sorted.join("\n"),
+        numpy.unwrap_or("")
+    );
+    hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+pub(crate) fn resolve_build_plan(
+    store: &Store,
+    platform: Platform,
+    python_version: &str,
+    requires: &[String],
+    runtime_plan: Option<&Plan>,
+) -> io::Result<Plan> {
+    let numpy = numpy_constraint(runtime_plan);
+    let key = lock_cache_key(platform, python_version, requires, numpy.as_deref());
+    let lock_path = store.cache_path("build-lock", &key);
+    let plan_path = store.cache_path("build-plan", &key);
+    fs::create_dir_all(lock_path.parent().expect("cache parent"))?;
+    fs::create_dir_all(plan_path.parent().expect("cache parent"))?;
+    let lock = match fs::read_to_string(&lock_path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut requested = requires.to_vec();
+            requested.push("pip==26.2.1".into());
+            if let Some(numpy) = &numpy {
+                requested.push(numpy.clone());
+            }
+            let text = requested.join("\n") + "\n";
+            let lock = crate::pypi::lock_requirement_text_with_uv(
+                store,
+                platform,
+                &text,
+                python_version,
+            )?;
+            fs::write(&lock_path, &lock)?;
+            lock
+        }
+        Err(error) => return Err(error),
+    };
+    if let Ok(text) = fs::read_to_string(&plan_path) {
+        if let Ok(plan) = serde_json::from_str(&text) {
+            return Ok(plan);
+        }
+    }
+    // Cache selected URLs too: a warm build needs neither uv nor PyPI JSON.
+    let plan = crate::pypi::plan_python(platform, &lock, python_version)?;
+    fs::write(&plan_path, serde_json::to_vec(&plan)?)?;
+    Ok(plan)
+}
+
+pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
+    let kind = archive_kind(path)?;
+    let entries = entries(path, kind)?;
+    let root = archive_root(&entries, path)?;
+    let pyproject_member = format!("{root}/pyproject.toml");
+    let (requires, backend, explicit_manifest) =
+        if entries.iter().any(|entry| entry == &pyproject_member) {
+            parse_pyproject(
+                &archive_file(path, kind, &pyproject_member)?,
+                &pyproject_member,
+            )?
+        } else {
+            (
+                DEFAULT_REQUIRES.iter().map(|s| (*s).to_string()).collect(),
+                DEFAULT_BACKEND.to_string(),
+                None,
+            )
+        };
+    let explicit_manifest = explicit_manifest
+        .map(|manifest| {
+            if !entries
+                .iter()
+                .any(|entry| root_relative(entry, &root).as_deref() == Some(manifest.as_str()))
+            {
+                return Err(invalid(format!(
+                    "sdist build backend points to missing Cargo manifest {manifest}"
+                )));
+            }
+            Ok(PathBuf::from(manifest))
+        })
+        .transpose()?;
+    let cargo_manifest = explicit_manifest.or_else(|| {
+        ["Cargo.toml", "bindings/python/Cargo.toml"]
+            .iter()
+            .find(|candidate| {
+                entries
+                    .iter()
+                    .any(|entry| root_relative(entry, &root).as_deref() == Some(**candidate))
+            })
+            .map(PathBuf::from)
+    });
+    let rust_build = cargo_manifest.is_some()
+        || is_rust_backend(&backend)
+        || requires.iter().any(|requirement| {
+            requirement_name(requirement)
+                .map(|(name, _, _)| {
+                    matches!(
+                        normalized_name(name).as_str(),
+                        "maturin" | "setuptools-rust"
+                    )
+                })
+                .unwrap_or(false)
+        });
+    Ok(ArchiveInfo {
+        archive_root: root,
+        build_requires: requires,
+        build_backend: backend,
+        cargo_manifest,
+        rust_build,
+    })
+}
+
+pub(crate) fn extract_sdist(
+    path: &Path,
+    destination: &Path,
+    info: &ArchiveInfo,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(destination)?;
+    match archive_kind(path)? {
+        ArchiveKind::TarGz => {
+            let status = Command::new("/usr/bin/tar")
+                .args(["-xzf"])
+                .arg(path)
+                .args(["-C"])
+                .arg(destination)
+                .args([
+                    "--strip-components",
+                    "1",
+                    "--no-same-owner",
+                    "--no-same-permissions",
+                ])
+                .status()
+                .map_err(|e| {
+                    io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+                })?;
+            if !status.success() {
+                return Err(invalid(format!("extract {} failed", path.display())));
+            }
+        }
+        ArchiveKind::Zip => {
+            let file = File::open(path)?;
+            let mut archive = ZipArchive::new(file)
+                .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
+            for index in 0..archive.len() {
+                let mut entry = archive
+                    .by_index(index)
+                    .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
+                let Some(name) = clean_entry(entry.name())? else {
+                    continue;
+                };
+                let Some(relative) = root_relative(&name, &info.archive_root) else {
+                    continue;
+                };
+                let output = destination.join(&relative);
+                if entry.is_dir() {
+                    fs::create_dir_all(&output)?;
+                    continue;
+                }
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes)?;
+                fs::write(output, bytes)?;
+            }
+        }
+    }
+    let source = destination.canonicalize()?;
+    if let Some(manifest) = &info.cargo_manifest {
+        let path = source.join(manifest);
+        if !path.starts_with(&source) || !path.is_file() {
+            return Err(invalid(format!(
+                "extracted Cargo manifest is missing: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "blanket-build-requires-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn archive(path: &Path, format: ArchiveKind, pyproject: Option<&[u8]>) {
+        let root = path.parent().unwrap().join("example-1.0");
+        fs::create_dir_all(&root).unwrap();
+        if let Some(bytes) = pyproject {
+            fs::write(root.join("pyproject.toml"), bytes).unwrap();
+        }
+        match format {
+            ArchiveKind::TarGz => {
+                let status = Command::new("/usr/bin/tar")
+                    .args(["-czf"])
+                    .arg(path)
+                    .args(["-C"])
+                    .arg(path.parent().unwrap())
+                    .arg("example-1.0")
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            ArchiveKind::Zip => {
+                let file = File::create(path).unwrap();
+                let mut zip = zip::ZipWriter::new(file);
+                if let Some(bytes) = pyproject {
+                    zip.start_file(
+                        "example-1.0/pyproject.toml",
+                        zip::write::SimpleFileOptions::default(),
+                    )
+                    .unwrap();
+                    zip.write_all(bytes).unwrap();
+                } else {
+                    zip.add_directory(
+                        "example-1.0/",
+                        zip::write::SimpleFileOptions::default(),
+                    )
+                    .unwrap();
+                }
+                zip.finish().unwrap();
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extracts_present_build_system_from_tar_and_zip() {
+        let text = br#"[build-system]
+requires = ["hatchling>=1"]
+build-backend = "hatchling.build"
+"#;
+        for (name, format) in [
+            ("present.tar.gz", ArchiveKind::TarGz),
+            ("present.zip", ArchiveKind::Zip),
+        ] {
+            let dir = temp_dir("present");
+            let path = dir.join(name);
+            archive(&path, format, Some(text));
+            let info = inspect_sdist(&path).unwrap();
+            assert_eq!(info.build_requires, vec!["hatchling>=1"]);
+            assert_eq!(info.build_backend, "hatchling.build");
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn absent_build_system_uses_pep517_legacy_default() {
+        for (name, format) in [
+            ("absent.tar.gz", ArchiveKind::TarGz),
+            ("absent.zip", ArchiveKind::Zip),
+        ] {
+            let dir = temp_dir("absent");
+            let path = dir.join(name);
+            archive(&path, format, None);
+            let info = inspect_sdist(&path).unwrap();
+            assert_eq!(
+                info.build_requires,
+                vec!["setuptools>=40.8.0".to_string(), "wheel".to_string()]
+            );
+            assert_eq!(info.build_backend, DEFAULT_BACKEND);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_build_system_is_invalid_data_for_tar_and_zip() {
+        let text = b"[build-system]\nrequires = \"not-a-list\"\n";
+        for (name, format) in [
+            ("malformed.tar.gz", ArchiveKind::TarGz),
+            ("malformed.zip", ArchiveKind::Zip),
+        ] {
+            let dir = temp_dir("malformed");
+            let path = dir.join(name);
+            archive(&path, format, Some(text));
+            let error = inspect_sdist(&path).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn fast_path_predicate_covers_build_requirement_table() {
+        let cases = [
+            ("setuptools>=40.8.0", true),
+            ("setuptools<70", false),
+            ("Cython", false),
+            ("maturin>=1,<2", false),
+            ("pip==26.2.1", true),
+            ("wheel~=0.48", true),
+        ];
+        for (requirement, expected) in cases {
+            assert_eq!(fast_path(&[requirement.into()]), expected, "{requirement}");
+        }
+        assert!(is_rust_backend("maturin"));
+        assert!(is_rust_backend("setuptools_rust.build"));
+    }
+
+    #[test]
+    fn numpy_constraint_is_exact_runtime_version_only() {
+        let plan = Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: vec![crate::types::LockedPackage {
+                name: "NumPy".into(),
+                version: "1.26.4".into(),
+                filename: "numpy.whl".into(),
+                url: String::new(),
+                sha256: "a".repeat(64),
+                kind: crate::types::ArtifactKind::Wheel,
+            }],
+        };
+        assert_eq!(
+            numpy_constraint(Some(&plan)).as_deref(),
+            Some("numpy==1.26.4")
+        );
+        let without_numpy = Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: Vec::new(),
+        };
+        assert_eq!(numpy_constraint(Some(&without_numpy)), None);
+        assert_eq!(numpy_constraint(None), None);
+    }
+}

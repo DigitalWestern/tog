@@ -411,11 +411,15 @@ the file held two writers' interleaved bytes).
   whole-environment level. Per-package objects are a later optimization
   the identity scheme already permits.
 - **Sdists build in a sandbox** (macOS: sandbox-exec/Seatbelt; Linux: bubblewrap with user/net/pid/ipc/uts namespaces — same `BuildSpec` contract, see `src/sandbox.rs` and LINUX_PORT.md stage 3; deny-by-default, no
-  network) using a pinned hermetic pip/setuptools/wheel toolchain; the
-  built wheel is a derivation-style store object. v0 sandbox limitations,
-  eyes open: mach-lookup and process-exec are still broad (Seatbelt
-  hermeticity, not hostile-code containment), and macOS deployment-target
-  versions in wheel tags are not compared.
+  network). Blanket inspects the archive's `pyproject.toml` before any
+  build code runs. Legacy/setuptools-compatible requirements retain the
+  `sdist-build/2` derivation; other PEP 517 requirements are resolved into
+  one immutable Python build environment and use `sdist-build/3`, whose
+  inputs include that environment. Rust sdists additionally include the
+  pinned Rust and Cargo-vendor objects; a generated `Cargo.lock` is recorded
+  as unattested. The sandbox remains cooperative hermeticity (mach-lookup
+  and process-exec are broad), and host C/C++ SDK versions are not in the
+  identity.
 - **CPython pins are trust-on-first-use** (hashes computed at pin time).
   A signed provider manifest replaces the static table post-MVP.
 - **No solver**: blanket consumes existing hash-pinned lockfiles
