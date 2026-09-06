@@ -11,14 +11,14 @@ use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use zip::ZipArchive;
 
-pub const NATIVE_LIBS_VERSION: &str = "2";
+pub const NATIVE_LIBS_VERSION: &str = "3";
 const CONDA_BASE: &str = "https://conda.anaconda.org/conda-forge";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +137,8 @@ pub fn manifest_sha256(platform: Platform) -> io::Result<String> {
     Ok(hex::encode(Sha256::digest(manifest.as_bytes())))
 }
 
-fn identity(platform: Platform) -> io::Result<Identity> {
+fn identity(store: &Store, platform: Platform) -> io::Result<Identity> {
+    let store_root = store.root.canonicalize()?.to_string_lossy().into_owned();
     Ok(Identity {
         kind: "native-libs".into(),
         name: "libset".into(),
@@ -145,19 +146,20 @@ fn identity(platform: Platform) -> io::Result<Identity> {
         inputs: BTreeMap::from([
             ("platform".into(), platform.triple().into()),
             ("manifest_sha256".into(), manifest_sha256(platform)?),
+            ("store_root".into(), store_root),
         ]),
     })
 }
 
 /// Return the object id for the pinned native library set without realizing
-/// it. The manifest and platform are the complete identity input.
-pub fn object_id_for(platform: Platform) -> io::Result<String> {
-    Ok(identity(platform)?.object_id())
+/// it. The canonical store root, manifest, and platform are identity inputs.
+pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
+    Ok(identity(store, platform)?.object_id())
 }
 
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
     crate::platform::require_host(platform, "native library set", "stage 3")?;
-    let identity = identity(platform)?;
+    let identity = identity(store, platform)?;
     let id = identity.object_id();
     let object = store.object_path(&id);
     let manifest_sha256 = identity.inputs["manifest_sha256"].clone();
@@ -188,6 +190,7 @@ fn realize_staged(
     object: &Path,
     packages: &[NativePackage],
 ) -> io::Result<()> {
+    let mut placeholders = Vec::new();
     for (index, package) in packages.iter().enumerate() {
         let archive = download_verified(store, &package.url(), package.sha256).map_err(|e| {
             io::Error::new(e.kind(), format!("fetch native package {}: {e}", package.filename))
@@ -197,7 +200,12 @@ fn realize_staged(
         fs::create_dir_all(&package_root)?;
         fs::create_dir_all(&info_root)?;
         extract_package(&archive, package, &package_root, &info_root)?;
-        relocate_package(&package_root, &info_root, object)?;
+        let mut package_placeholders = prefix_placeholders(&info_root)?;
+        package_placeholders.extend(discover_payload_placeholders(&package_root)?);
+        package_placeholders.sort();
+        package_placeholders.dedup();
+        placeholders.extend(package_placeholders.iter().cloned());
+        relocate_package(&package_root, &info_root, object, &package_placeholders)?;
         let info = package_root.join("info");
         if info.exists() {
             crate::store::remove_tree(&info)?;
@@ -208,6 +216,9 @@ fn realize_staged(
         crate::store::remove_tree(&package_root)?;
         crate::store::remove_tree(&info_root)?;
     }
+    placeholders.sort();
+    placeholders.dedup();
+    scan_for_placeholders(work, &placeholders)?;
     Ok(())
 }
 
@@ -341,8 +352,222 @@ fn invalid_conda(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn relocate_package(package_root: &Path, info_root: &Path, object: &Path) -> io::Result<()> {
+fn prefix_placeholders(info_root: &Path) -> io::Result<Vec<String>> {
     let info = info_root.join("info");
+    let mut placeholders = Vec::new();
+    let paths = info.join("paths.json");
+    if paths.is_file() {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&paths)?).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("parse {}: {e}", paths.display()))
+        })?;
+        let entries = value["paths"].as_array().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("{} has no paths list", paths.display()))
+        })?;
+        placeholders.extend(
+            entries
+            .iter()
+            .filter_map(|entry| entry["prefix_placeholder"].as_str())
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        );
+    }
+
+    let has_prefix = info.join("has_prefix");
+    if has_prefix.is_file() {
+        for line in fs::read_to_string(&has_prefix)?.lines() {
+            let mut parts = line.split_whitespace();
+            let prefix = parts.next().ok_or_else(|| invalid_conda("malformed info/has_prefix"))?;
+            let _mode = parts.next().ok_or_else(|| invalid_conda("malformed info/has_prefix"))?;
+            let _relative = parts.next().ok_or_else(|| invalid_conda("malformed info/has_prefix"))?;
+            if parts.next().is_some() {
+                return Err(invalid_conda("malformed info/has_prefix path"));
+            }
+            placeholders.push(prefix.to_owned());
+        }
+    }
+    Ok(placeholders)
+}
+
+fn discover_payload_placeholders(root: &Path) -> io::Result<Vec<String>> {
+    const MARKER: &[u8] = b"placehold_placehold";
+    const BUILD_ARTIFACTS: &[u8] = b"/home/conda/feedstock_root/build_artifacts/";
+
+    fn discover(bytes: &[u8], placeholders: &mut Vec<String>) {
+        let mut string_start = 0;
+        while string_start <= bytes.len() {
+            let string_end = bytes[string_start..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|offset| string_start + offset)
+                .unwrap_or(bytes.len());
+            let string = &bytes[string_start..string_end];
+            let mut marker_search = 0;
+            while let Some(relative) = find_bytes(&string[marker_search..], MARKER) {
+                let marker = marker_search + relative;
+                let prefix_start = {
+                    let mut start = None;
+                    let mut search = 0;
+                    while let Some(relative) = find_bytes(&string[search..marker], BUILD_ARTIFACTS) {
+                        let candidate = search + relative;
+                        start = Some(candidate);
+                        search = candidate + 1;
+                    }
+                    start.unwrap_or(marker)
+                };
+                let suffix_start = string[marker..]
+                    .iter()
+                    .position(|byte| *byte == b'/')
+                    .map(|offset| marker + offset)
+                    .unwrap_or(string.len());
+                if suffix_start > prefix_start {
+                    if let Ok(placeholder) = std::str::from_utf8(&string[prefix_start..suffix_start]) {
+                        placeholders.push(placeholder.to_owned());
+                    }
+                }
+                // Skip the complete placeholder run. Looking for the next
+                // marker inside the same run would produce shorter nested
+                // candidates and attempt to replace the same bytes again.
+                marker_search = suffix_start;
+            }
+            if string_end == bytes.len() {
+                break;
+            }
+            string_start = string_end + 1;
+        }
+    }
+
+    fn walk(path: &Path, placeholders: &mut Vec<String>) -> io::Result<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                walk(&path, placeholders)?;
+            } else if metadata.is_file() {
+                discover(&fs::read(&path)?, placeholders);
+            }
+        }
+        Ok(())
+    }
+
+    let mut placeholders = Vec::new();
+    walk(root, &mut placeholders)?;
+    placeholders.sort();
+    placeholders.dedup();
+    Ok(placeholders)
+}
+
+fn scan_for_placeholders(root: &Path, placeholders: &[String]) -> io::Result<()> {
+    fn walk(root: &Path, path: &Path, placeholders: &[String]) -> io::Result<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                walk(root, &path, placeholders)?;
+            } else if metadata.is_file() {
+                let bytes = fs::read(&path)?;
+                if let Some(placeholder) = placeholders
+                    .iter()
+                    .find(|placeholder| find_bytes(&bytes, placeholder.as_bytes()).is_some())
+                {
+                    return Err(invalid_conda(format!(
+                        "prefix placeholder {:?} survived relocation in {}",
+                        placeholder,
+                        path.strip_prefix(root).unwrap_or(&path).display()
+                    )));
+                }
+                if find_bytes(&bytes, b"placehold_placehold").is_some()
+                    || find_bytes(&bytes, b"_h_env_placehold").is_some()
+                {
+                    return Err(invalid_conda(format!(
+                        "undeclared prefix placeholder survived relocation in {}",
+                        path.strip_prefix(root).unwrap_or(&path).display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(root, root, placeholders)
+}
+
+fn replace_pkg_config_wrapper(package_root: &Path) -> io::Result<()> {
+    let wrapper = package_root.join("bin/pkg-config");
+    let binary = package_root.join("bin/pkg-config.bin");
+    let Ok(metadata) = fs::symlink_metadata(&wrapper) else {
+        return Ok(());
+    };
+    if !metadata.file_type().is_file() || !binary.is_file() {
+        return Ok(());
+    }
+    let contents = fs::read(&wrapper)?;
+    if !contents.starts_with(b"#!") {
+        return Ok(());
+    }
+    // conda-forge's wrapper reconstructs PKG_CONFIG_LIBDIR from its build
+    // prefix and /usr. Keep the real binary but preserve the caller's
+    // already-isolated PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR instead.
+    fs::write(
+        wrapper,
+        b"#!/bin/sh\nexec \"$(dirname \"$0\")/pkg-config.bin\" \"$@\"\n",
+    )
+}
+
+fn rewrite_remaining_prefixes(
+    package_root: &Path,
+    placeholders: &[String],
+    object: &Path,
+) -> io::Result<()> {
+    fn walk(path: &Path, placeholders: &[String], object: &Path) -> io::Result<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                walk(&path, placeholders, object)?;
+            } else if metadata.is_file() {
+                let mut bytes = fs::read(&path)?;
+                for placeholder in placeholders {
+                    if find_bytes(&bytes, placeholder.as_bytes()).is_none() {
+                        continue;
+                    }
+                    if placeholder.starts_with("placehold") {
+                        rewrite_prefix_file_with_target(
+                            &path,
+                            placeholder,
+                            "$ORIGIN/..",
+                            bytes.contains(&0),
+                        )?;
+                    } else {
+                        rewrite_prefix_file(&path, placeholder, object, bytes.contains(&0))?;
+                    }
+                    bytes = fs::read(&path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(package_root, placeholders, object)
+}
+
+fn relocate_package(
+    package_root: &Path,
+    info_root: &Path,
+    object: &Path,
+    placeholders: &[String],
+) -> io::Result<()> {
+    let info = info_root.join("info");
+    let mut relocated = BTreeSet::new();
     let paths = info.join("paths.json");
     if paths.is_file() {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&paths)?).map_err(|e| {
@@ -359,6 +584,9 @@ fn relocate_package(package_root: &Path, info_root: &Path, object: &Path) -> io:
                 continue;
             };
             let mode = entry["file_mode"].as_str().unwrap_or("text");
+            if !relocated.insert(relative.to_owned()) {
+                continue;
+            }
             rewrite_prefix_file(
                 &package_root.join(safe_relative(relative)?),
                 prefix,
@@ -366,7 +594,6 @@ fn relocate_package(package_root: &Path, info_root: &Path, object: &Path) -> io:
                 mode == "binary",
             )?;
         }
-        return Ok(());
     }
 
     // Older conda tar.bz2 records use info/has_prefix. It has the same
@@ -381,6 +608,9 @@ fn relocate_package(package_root: &Path, info_root: &Path, object: &Path) -> io:
             if parts.next().is_some() {
                 return Err(invalid_conda("malformed info/has_prefix path"));
             }
+            if !relocated.insert(relative.to_owned()) {
+                continue;
+            }
             rewrite_prefix_file(
                 &package_root.join(safe_relative(relative)?),
                 prefix,
@@ -389,6 +619,8 @@ fn relocate_package(package_root: &Path, info_root: &Path, object: &Path) -> io:
             )?;
         }
     }
+    rewrite_remaining_prefixes(package_root, placeholders, object)?;
+    replace_pkg_config_wrapper(package_root)?;
     Ok(())
 }
 
@@ -411,49 +643,75 @@ pub(crate) fn rewrite_prefix_file(
     object: &Path,
     binary: bool,
 ) -> io::Result<()> {
-    if placeholder.is_empty() {
-        return Err(invalid_conda("empty conda prefix placeholder"));
-    }
     let target = object
         .to_str()
         .ok_or_else(|| invalid_conda("native object path is not UTF-8"))?;
+    rewrite_prefix_file_with_target(path, placeholder, target, binary)
+}
+
+fn rewrite_prefix_file_with_target(
+    path: &Path,
+    placeholder: &str,
+    target: &str,
+    binary: bool,
+) -> io::Result<()> {
+    if placeholder.is_empty() {
+        return Err(invalid_conda("empty conda prefix placeholder"));
+    }
     let old = placeholder.as_bytes();
     let replacement = target.as_bytes();
     let mut bytes = fs::read(path)?;
-    let mut changed = false;
-    let mut index = 0;
-    while let Some(relative) = find_bytes(&bytes[index..], old) {
-        let start = index + relative;
-        if binary {
-            // Conda's binary prefix entries reserve a fixed-width string,
-            // but the path after the prefix is part of that string too. Keep
-            // that complete suffix and use only the remaining slack for NULs.
-            let end = bytes[start..]
+    let changed = if binary {
+        let mut changed = false;
+        let mut string_start = 0;
+        while string_start <= bytes.len() {
+            let string_end = bytes[string_start..]
                 .iter()
                 .position(|byte| *byte == 0)
-                .map(|offset| start + offset)
+                .map(|offset| string_start + offset)
                 .unwrap_or(bytes.len());
-            let suffix = bytes[start + old.len()..end].to_vec();
-            let new_len = replacement.len() + suffix.len();
-            let original_len = end - start;
-            if new_len > original_len {
-                return Err(invalid_conda(format!(
-                    "rewritten native path {} is longer than original binary path",
-                    object.display()
-                )));
+            let string = bytes[string_start..string_end].to_vec();
+            if find_bytes(&string, old).is_some() {
+                let mut rewritten = Vec::with_capacity(string.len());
+                let mut cursor = 0;
+                while let Some(relative) = find_bytes(&string[cursor..], old) {
+                    let start = cursor + relative;
+                    rewritten.extend_from_slice(&string[cursor..start]);
+                    rewritten.extend_from_slice(replacement);
+                    cursor = start + old.len();
+                }
+                rewritten.extend_from_slice(&string[cursor..]);
+                if rewritten.len() > string.len() {
+                    return Err(invalid_conda(format!(
+                        "rewritten native path {} is longer than original binary string in {} (placeholder {:?}, string length {}, replacement length {})",
+                        target,
+                        path.display(),
+                        placeholder,
+                        string.len(),
+                        rewritten.len()
+                    )));
+                }
+                rewritten.resize(string.len(), 0);
+                bytes[string_start..string_end].copy_from_slice(&rewritten);
+                changed = true;
             }
-            let mut value = Vec::with_capacity(original_len);
-            value.extend_from_slice(replacement);
-            value.extend_from_slice(&suffix);
-            value.resize(original_len, 0);
-            bytes[start..end].copy_from_slice(&value);
-            index = end;
-        } else {
+            if string_end == bytes.len() {
+                break;
+            }
+            string_start = string_end + 1;
+        }
+        changed
+    } else {
+        let mut changed = false;
+        let mut index = 0;
+        while let Some(relative) = find_bytes(&bytes[index..], old) {
+            let start = index + relative;
             bytes.splice(start..start + old.len(), replacement.iter().copied());
             index = start + replacement.len();
+            changed = true;
         }
-        changed = true;
-    }
+        changed
+    };
     if !changed {
         return Err(invalid_conda(format!(
             "prefix placeholder is absent from {}",
@@ -464,7 +722,19 @@ pub(crate) fn rewrite_prefix_file(
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    let first = *needle.first()?;
+    let mut offset = 0;
+    while let Some(relative) = haystack[offset..].iter().position(|byte| *byte == first) {
+        let start = offset + relative;
+        if haystack[start..].starts_with(needle) {
+            return Some(start);
+        }
+        offset = start + 1;
+        if offset >= haystack.len() {
+            break;
+        }
+    }
+    None
 }
 
 fn merge_tree(source: &Path, destination: &Path) -> io::Result<()> {
@@ -626,11 +896,21 @@ mod tests {
         assert!(names.contains("libstdcxx-ng"));
         assert!(names.contains("libgcc-ng"));
         assert_eq!(manifest_sha256(Platform::X86_64UnknownLinuxGnu).unwrap().len(), 64);
-        assert_eq!(NATIVE_LIBS_VERSION, "2");
+        assert_eq!(NATIVE_LIBS_VERSION, "3");
+        let first = temp_dir("identity-first");
+        let second = temp_dir("identity-second");
+        let first_store = Store { root: first.canonicalize().unwrap() };
+        let second_store = Store { root: second.canonicalize().unwrap() };
         assert_eq!(
-            object_id_for(Platform::X86_64UnknownLinuxGnu).unwrap(),
-            object_id_for(Platform::X86_64UnknownLinuxGnu).unwrap()
+            object_id_for(&first_store, Platform::X86_64UnknownLinuxGnu).unwrap(),
+            object_id_for(&first_store, Platform::X86_64UnknownLinuxGnu).unwrap()
         );
+        assert_ne!(
+            object_id_for(&first_store, Platform::X86_64UnknownLinuxGnu).unwrap(),
+            object_id_for(&second_store, Platform::X86_64UnknownLinuxGnu).unwrap()
+        );
+        fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(second).unwrap();
         assert!(packages(Platform::Aarch64AppleDarwin).is_err());
     }
 
@@ -675,6 +955,53 @@ mod tests {
             fs::read(&path).unwrap(),
             b"prefix=/new/etc/fonts/fonts.conf\0\0\0\0\0\0\0\0trailing-bytes"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn binary_rewrite_replaces_every_placeholder_in_every_string() {
+        let root = temp_dir("binary-all");
+        let path = root.join("fontconfig-cache");
+        fs::write(
+            &path,
+            b"first=/old/prefix/a:/old/prefix/b\0second=/old/prefix/c\0tail",
+        )
+        .unwrap();
+        rewrite_prefix_file(&path, "/old/prefix", Path::new("/new"), true).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(!bytes.windows(b"/old/prefix".len()).any(|window| window == b"/old/prefix"));
+        assert!(bytes.windows(b"/new".len()).filter(|window| *window == b"/new").count() >= 3);
+        assert!(bytes.ends_with(b"tail"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_payload_embedded_placeholders_without_metadata() {
+        let root = temp_dir("discover-placeholders");
+        fs::write(
+            root.join("payload"),
+            b"/home/conda/feedstock_root/build_artifacts/pkg/_h_env_placehold_placehold_/lib\0placehold_placehold_placehold_/lib\0",
+        )
+        .unwrap();
+        let placeholders = discover_payload_placeholders(&root).unwrap();
+        assert!(placeholders.iter().any(|placeholder| {
+            placeholder == "/home/conda/feedstock_root/build_artifacts/pkg/_h_env_placehold_placehold_"
+        }));
+        assert!(placeholders.iter().any(|placeholder| placeholder == "placehold_placehold_placehold_"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pkg_config_wrapper_does_not_replace_isolation_variables() {
+        let root = temp_dir("pkg-config-wrapper");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("pkg-config"), b"#!/usr/bin/env bash\nPKG_CONFIG_LIBDIR=/usr/lib/pkgconfig exec ./pkg-config.bin\n").unwrap();
+        fs::write(bin.join("pkg-config.bin"), b"real binary").unwrap();
+        replace_pkg_config_wrapper(&root).unwrap();
+        let wrapper = fs::read_to_string(bin.join("pkg-config")).unwrap();
+        assert_eq!(wrapper, "#!/bin/sh\nexec \"$(dirname \"$0\")/pkg-config.bin\" \"$@\"\n");
+        assert!(!wrapper.contains("/usr/lib/pkgconfig"));
         fs::remove_dir_all(root).unwrap();
     }
 

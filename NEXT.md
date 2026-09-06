@@ -195,13 +195,19 @@ only the interpreter.
 ## 12. Pinned native libraries — DONE (2026-09-06)
 
 Implemented option (a), Linux first. `src/nativelibs.rs` realizes one
-input-addressed `native-libs/libset/1` object from a pinned conda-forge
-closure, relocates text/binary prefixes during staging, and exposes it
-read-only to compiled sdists and npm `node-gyp` builds. The native object id
-is recorded in the sdist/npm derivation and environment identities; Python
-and Node closure envelopes retain the reference for liveness/GC. Fast pure
-setuptools sdists do not mount it; archives with C/C++/Cython or `binding.gyp`
-and all isolated PEP 517 builds do.
+input-addressed `native-libs/libset/3` object from a pinned conda-forge
+closure, relocates every text/binary prefix occurrence during staging, and
+exposes it read-only to compiled sdists and npm `node-gyp` builds. The conda
+pkg-config wrapper is replaced with a direct real-binary launcher so the
+libset-only `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR` cannot be widened by host
+paths. Because relocation embeds the absolute object path, the canonical
+store root is also an identity input: different `BLANKET_STORE` roots produce
+different native ids. These wrapper, relocation, and identity changes are the
+libset v2 -> v3 bump. The native object id is recorded in the sdist/npm
+derivation and environment identities; Python and Node closure envelopes
+retain the reference for liveness/GC. Fast pure setuptools sdists do not
+mount it; archives with C/C++/Cython or `binding.gyp` and all isolated PEP 517
+builds do.
 
 The Linux pin is the 2022-era conda-forge closure listed in
 `src/nativelibs.rs` (legacy `.tar.bz2` records; the extractor also supports

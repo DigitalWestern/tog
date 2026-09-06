@@ -169,7 +169,7 @@ identity inputs, so the env object id changes with them.
 ## Pinned native libraries (Linux first)
 
 Compiled Python sdists and npm `node-gyp` builds that need C libraries get a
-single pinned `native-libs/libset/1` object. Version 1 is a fixed conda-forge
+single pinned `native-libs/libset/3` object. Version 3 is a fixed conda-forge
 closure for Linux x86_64: pkg-config, zlib, libffi, OpenSSL, expat, libpng,
 freetype, fontconfig, pixman, cairo, glib, harfbuzz, fribidi, pango, libxml2,
 libiconv, and the exact runtime closure recorded in the table in
@@ -179,16 +179,19 @@ supports modern `.conda` archives with `/usr/bin/zstd`.
 
 The object is staged at its final input-addressed path. Conda's
 `info/paths.json` or legacy `info/has_prefix` entries are rewritten there:
-text prefixes become the object path, while binary prefixes use a
-same-length null-padded replacement. Build sandboxes mount the object
-read-only and set `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR`, compiler include and
-link flags, an object `rpath`, and the object `bin` directory. The native set
-id is an input of every derivation that mounts it, including the Python and
-npm environment identities.
+text prefixes become the object path, while every binary-string occurrence
+uses a same-length null-padded replacement. Unlisted payload hardlinks are
+also swept, and staging rejects any declared placeholder that survives. The
+conda pkg-config wrapper is replaced with a direct real-binary launcher so
+the isolated `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR` cannot be widened. Build
+sandboxes mount the object read-only and set those variables, compiler include
+and link flags, an object `rpath`, and the object `bin` directory. The native
+set id includes the canonical store root and is an input of every derivation
+that mounts it, including the Python and npm environment identities.
 
 Extensions retain the object-library runpath, so `blanket run` does not need
 the host's library search path. Python and npm closure envelopes record the
-native object reference for liveness/GC. macOS arm64 has no v1 native pin yet;
+native object reference for liveness/GC. macOS arm64 has no v3 native pin yet;
 requests fail closed with the normal unsupported-platform error and do not
 touch the store or network.
 

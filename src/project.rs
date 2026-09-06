@@ -711,7 +711,7 @@ mod closure_platform_tests {
         let realized = environment_identity(&store, platform, &plan, &cpython_id).unwrap();
         assert_eq!(planned, realized.object_id());
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-            let native_id = crate::nativelibs::object_id_for(platform).unwrap();
+            let native_id = crate::nativelibs::object_id_for(&store, platform).unwrap();
             assert_eq!(
                 realized.inputs.get("native_libs").map(String::as_str),
                 Some(native_id.as_str())

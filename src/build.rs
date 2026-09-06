@@ -169,12 +169,13 @@ fn has_package(plan: &Plan, wanted: &str) -> bool {
 }
 
 fn native_libs_identity_id(
+    store: &Store,
     platform: Platform,
     native_build: bool,
     fast_requirements: bool,
 ) -> io::Result<Option<String>> {
     if (native_build || !fast_requirements) && native_libs_supported(platform) {
-        Ok(Some(crate::nativelibs::object_id_for(platform)?))
+        Ok(Some(crate::nativelibs::object_id_for(store, platform)?))
     } else {
         Ok(None)
     }
@@ -226,7 +227,7 @@ pub(crate) fn plan_sdist_identity_input(
         )?
     };
     let build_env_id = crate::project::planned_env_object_id(store, platform, &build_plan)?;
-    let native_libs_id = native_libs_identity_id(platform, info.native_build, fast_requirements)?;
+    let native_libs_id = native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
         let work = store.stage()?;
         let result: io::Result<Identity> = (|| {
@@ -571,7 +572,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
-        native_libs_identity_id(platform, info.native_build, fast_requirements)?;
+        native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
 
     let work = store.stage()?;
     let outdir = work.join("out");

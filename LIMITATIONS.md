@@ -19,6 +19,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel`.
   Pinning a C toolchain as a store object is the roadmap item that
   closes this for both platforms.
+- **Pinned native library objects are store-root-specific**: `native-libs/libset/3`
+  relocates absolute object paths into binaries/configuration and therefore
+  includes the canonical `BLANKET_STORE` root in its identity. Moving a store
+  requires re-realizing the libset (and its dependent builds), not copying the
+  object under the old id. The wrapper, relocation, and identity corrections
+  are the v2 -> v3 bump.
 - **Linux sandbox roots are canonical paths.** bubblewrap binds the
   canonicalized path of every declared root; a caller that declares a
   symlink alias and then refers to files through the alias will not see

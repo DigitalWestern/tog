@@ -576,12 +576,29 @@ fn tarball_has_binding_gyp(path: &Path) -> io::Result<bool> {
         .any(|entry| entry == "binding.gyp" || entry.ends_with("/binding.gyp")))
 }
 
+fn fetch_npm_tarballs<'a>(
+    store: &Store,
+    packages: &'a [NpmPackage],
+) -> io::Result<Vec<(&'a NpmPackage, PathBuf)>> {
+    packages
+        .iter()
+        .map(|p| {
+            let digest = Digest::from_sri(&p.integrity)?;
+            let tarball = download_verified_digest(store, &p.url, &digest).map_err(|e| {
+                io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+            })?;
+            Ok((p, tarball))
+        })
+        .collect()
+}
+
 fn native_libs_identity_id(
+    store: &Store,
     platform: Platform,
     has_native: bool,
 ) -> io::Result<Option<String>> {
     if has_native && matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-        Ok(Some(crate::nativelibs::object_id_for(platform)?))
+        Ok(Some(crate::nativelibs::object_id_for(store, platform)?))
     } else {
         Ok(None)
     }
@@ -597,7 +614,16 @@ pub fn realize_node_env(
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "node environment", "stage 2")?;
     let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
+    realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
+}
 
+fn node_env_identity(
+    store: &Store,
+    node_obj: &Path,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    native_libs_id: Option<&str>,
+) -> io::Result<Identity> {
     let mut inputs = BTreeMap::new();
     // /3: install scripts run sandboxed; name@version joined the per-pkg
     // identity (they reach scripts as npm_package_* env). Remaining known
@@ -645,36 +671,53 @@ pub fn realize_node_env(
             return Err(err(format!("duplicate artifact path: {}", a.path)));
         }
     }
-    // Fetch everything first.
-    let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
-    for p in &plan.packages {
-        let digest = Digest::from_sri(&p.integrity)?;
-        let t = download_verified_digest(store, &p.url, &digest).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
-        })?;
-        tarballs.push((p, t));
+    if let Some(native_libs_id) = native_libs_id {
+        inputs.insert("native_libs".into(), native_libs_id.into());
     }
-
-    // A native library set is a derivation input only when at least one
-    // package actually ships the binding.gyp that node-gyp will compile.
-    let mut has_native = false;
-    for (_, tarball) in &tarballs {
-        has_native |= tarball_has_binding_gyp(tarball)?;
-    }
-    let native_libs_id = native_libs_identity_id(platform, has_native)?;
-    if let Some(native_libs_id) = &native_libs_id {
-        inputs.insert("native_libs".into(), native_libs_id.clone());
-    }
-    let identity = Identity {
+    Ok(Identity {
         kind: "node-env".into(),
         name: "env".into(),
         version: plan.node_version.clone(),
         inputs,
+    })
+}
+
+fn realize_node_env_with_node_object(
+    store: &Store,
+    platform: Platform,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    node_obj: &Path,
+) -> io::Result<PathBuf> {
+    // Linux needs archive inspection to decide whether node-gyp will mount the
+    // native library set. Darwin deliberately does not: a warm environment
+    // must be cacheable from its identity before package tarballs are needed.
+    let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
+    let native_libs_id = if platform.is_macos() {
+        None
+    } else {
+        tarballs = fetch_npm_tarballs(store, &plan.packages)?;
+        // A native library set is a derivation input only when at least one
+        // package actually ships the binding.gyp that node-gyp will compile.
+        let has_native = tarballs
+            .iter()
+            .try_fold(false, |has_native, (_, tarball)| {
+                Ok::<_, io::Error>(has_native || tarball_has_binding_gyp(tarball)?)
+            })?;
+        native_libs_identity_id(store, platform, has_native)?
     };
+    let identity = node_env_identity(store, node_obj, plan, artifacts, native_libs_id.as_deref())?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
+    }
+
+    // On Darwin this is intentionally after the cache lookup. The package
+    // tarballs are still required for a cold realization, but not for a warm
+    // sync whose environment object already exists.
+    if tarballs.is_empty() && !plan.packages.is_empty() {
+        tarballs = fetch_npm_tarballs(store, &plan.packages)?;
     }
 
     let native_libs = if native_libs_id.is_some() {
@@ -1499,10 +1542,57 @@ mod tests {
 
     #[test]
     fn darwin_binding_gyp_keeps_legacy_identity_inputs() {
+        let store = Store {
+            root: PathBuf::from("/nonexistent/blanket-test-store"),
+        };
         assert_eq!(
-            native_libs_identity_id(Platform::Aarch64AppleDarwin, true).unwrap(),
+            native_libs_identity_id(&store, Platform::Aarch64AppleDarwin, true).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn darwin_warm_sync_does_not_fetch_package_tarballs() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-npm-darwin-warm-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store { root: root.canonicalize().unwrap() };
+        let node_obj = store.object_path("node-cache");
+        std::fs::create_dir_all(&node_obj).unwrap();
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "node_modules/unreachable".into(),
+                name: "unreachable".into(),
+                version: "1.0.0".into(),
+                url: "https://127.0.0.1:9/never-requested.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                optional: false,
+            }],
+            links: Vec::new(),
+        };
+        let identity = node_env_identity(&store, &node_obj, &plan, &[], None).unwrap();
+        let staged = store.stage().unwrap();
+        std::fs::create_dir_all(staged.join("node_modules")).unwrap();
+        let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
+
+        let realized = realize_node_env_with_node_object(
+            &store,
+            Platform::Aarch64AppleDarwin,
+            &plan,
+            &[],
+            &node_obj,
+        )
+        .unwrap();
+        assert_eq!(realized, expected);
+        assert_eq!(std::fs::read_dir(store.root.join("cache/sha256")).unwrap().count(), 0);
+        crate::store::remove_tree(&root).unwrap();
     }
 
     #[test]
