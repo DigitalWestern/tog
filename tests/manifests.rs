@@ -44,6 +44,7 @@ fn all_manifest_fixtures_sync_and_run() {
         ("proj-poetry", "six"),
         ("proj-pdm", "six"),
         ("proj-setuppy", "setuppkg"),
+        ("proj-setupcfg-call", "six"),
         ("proj-reqdir", "six"),
         ("proj-empty", "sys"),
     ] {

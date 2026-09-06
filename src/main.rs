@@ -465,7 +465,16 @@ fn locked_requirements(
 ) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
     let stamp_path = dir.join(".blanket/lock-source.hash");
-    let source_hash = lock_source_hash(pyver, source);
+    let source_hash = if compile_path.is_some_and(|path| {
+        !path.components().any(|component| component.as_os_str() == ".blanket")
+    })
+    {
+        let path = compile_path.expect("checked above");
+        let tree_hash = manifest::requirements_tree_hash(path)?;
+        lock_source_hash(pyver, &format!("{source}\0{tree_hash}"))
+    } else {
+        lock_source_hash(pyver, source)
+    };
     if let (Ok(stamp), Ok(lock)) = (
         std::fs::read_to_string(&stamp_path),
         std::fs::read_to_string(&lock_path),
