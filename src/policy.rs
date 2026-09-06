@@ -31,6 +31,9 @@ pub const LOCK_DISAGREEMENT: &str = "lock_disagreement";
 pub const UNATTESTED_CARGO_LOCK: &str = "unattested_cargo_lock";
 /// An install-time download was skipped; the artifact is not in the closure.
 pub const ARTIFACT_NOT_PROVISIONED: &str = "artifact_not_provisioned";
+/// blanket downloaded and verified an install-time artifact itself; the
+/// checksum source is upstream's own manifest (trust-on-first-use).
+pub const ARTIFACT_PROVISIONED: &str = "artifact_provisioned";
 /// A package that ships prebuilt binaries was compiled from source instead.
 pub const BUILT_FROM_SOURCE: &str = "built_from_source";
 
@@ -47,6 +50,7 @@ pub const KINDS: &[&str] = &[
     LOCK_DISAGREEMENT,
     UNATTESTED_CARGO_LOCK,
     ARTIFACT_NOT_PROVISIONED,
+    ARTIFACT_PROVISIONED,
     BUILT_FROM_SOURCE,
 ];
 

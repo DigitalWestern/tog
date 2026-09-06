@@ -11,6 +11,11 @@
 //! Every entry's environment variable was read out of the package's own
 //! source, not from memory; add entries the same way.
 
+use crate::platform::Platform;
+use crate::store::Store;
+use std::fs;
+use std::io;
+use std::path::Path;
 /// A package whose installer has a documented "do not download" switch.
 pub struct SkipDownload {
     pub name: &'static str,
@@ -82,9 +87,126 @@ pub fn source_build_envs() -> Vec<(String, String)> {
     ]
 }
 
+/// Provisioning: blanket downloads the artifact itself, verifies it, and puts
+/// it where the installer's own cache lookup finds it, so the package is
+/// really installed rather than skipped.
+///
+/// Electron first. Every detail below was read out of `@electron/get`'s
+/// published source rather than guessed:
+/// - `install.js` passes `cacheRoot: process.env.electron_config_cache`.
+/// - `Cache.getCacheDirectory(url)` is the sha256 of the download URL with its
+///   query and fragment cleared and its path replaced by the path's dirname —
+///   that is, the release directory URL.
+/// - the file is cached under its own name, and the zip is verified against a
+///   `SHASUMS256.txt` that `@electron/get` reads from the same cache, so both
+///   files must be present for an offline install.
+pub struct Provisioning {
+    pub envs: Vec<(String, String)>,
+    /// (subject, detail) pairs the caller records as policy exceptions.
+    pub records: Vec<(String, String)>,
+}
+
+fn electron_platform(platform: Platform) -> (&'static str, &'static str) {
+    match platform {
+        Platform::Aarch64AppleDarwin => ("darwin", "arm64"),
+        Platform::X86_64UnknownLinuxGnu => ("linux", "x64"),
+    }
+}
+
+/// The cache directory name `@electron/get` derives from a download URL.
+pub fn electron_cache_directory(release_url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(release_url.as_bytes()))
+}
+
+/// Download electron's zip and its checksum file into `scratch` so the
+/// package's own installer finds them with the network denied.
+pub fn provision(
+    store: &Store,
+    platform: Platform,
+    name: &str,
+    version: &str,
+    scratch: &Path,
+) -> io::Result<Option<Provisioning>> {
+    if name != "electron" {
+        return Ok(None);
+    }
+    let version = version.trim_start_matches('v');
+    if version.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok(None);
+    }
+    let (os, arch) = electron_platform(platform);
+    let release_url =
+        format!("https://github.com/electron/electron/releases/download/v{version}");
+    let zip_name = format!("electron-v{version}-{os}-{arch}.zip");
+    let sums_url = format!("{release_url}/SHASUMS256.txt");
+
+    // The checksum file is trust-on-first-use over HTTPS, exactly like the
+    // pinned toolchains: it is what upstream publishes for this release. The
+    // zip is then verified against it, so a corrupted or swapped zip fails.
+    let sums = crate::fetch::fetch_text(&sums_url).map_err(|e| {
+        io::Error::new(e.kind(), format!("electron {version}: fetch {sums_url}: {e}"))
+    })?;
+    let sha256 = sums
+        .lines()
+        .find_map(|line| {
+            let (hash, file) = line.split_once(char::is_whitespace)?;
+            (file.trim_start_matches('*') == zip_name).then(|| hash.trim().to_ascii_lowercase())
+        })
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "electron {version}: {zip_name} is not listed in SHASUMS256.txt"
+            ))
+        })?;
+    let zip = crate::fetch::download_verified(store, &format!("{release_url}/{zip_name}"), &sha256)?;
+
+    let cache_root = scratch.join(".cache/blanket-electron");
+    let dir = cache_root.join(electron_cache_directory(&release_url));
+    fs::create_dir_all(&dir)?;
+    fs::copy(&zip, dir.join(&zip_name))?;
+    fs::write(dir.join("SHASUMS256.txt"), sums.as_bytes())?;
+
+    Ok(Some(Provisioning {
+        envs: vec![(
+            "electron_config_cache".to_string(),
+            cache_root.display().to_string(),
+        )],
+        records: vec![(
+            format!("electron@{version}"),
+            format!("provisioned {zip_name} (sha256 {sha256}) from upstream SHASUMS256.txt"),
+        )],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_electron_cache_directory_matches_electron_gets_own_rule() {
+        // @electron/get hashes the download URL with query and fragment
+        // cleared and the path replaced by its dirname — i.e. the release
+        // directory URL. Golden computed independently:
+        //   sha256("https://github.com/electron/electron/releases/download/v39.0.0")
+        assert_eq!(
+            electron_cache_directory(
+                "https://github.com/electron/electron/releases/download/v39.0.0"
+            ),
+            "4085417ef19dc0c699e7ae20aa4c47fda5a93b6d7926668b0c472c4233ed07e0"
+        );
+    }
+
+    #[test]
+    fn electron_artifacts_are_named_per_platform() {
+        assert_eq!(
+            electron_platform(Platform::X86_64UnknownLinuxGnu),
+            ("linux", "x64")
+        );
+        assert_eq!(
+            electron_platform(Platform::Aarch64AppleDarwin),
+            ("darwin", "arm64")
+        );
+    }
 
     #[test]
     fn skip_table_is_unique_and_populated() {

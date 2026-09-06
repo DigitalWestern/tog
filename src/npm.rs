@@ -1741,6 +1741,31 @@ fn run_install_scripts_staged(
             .collect::<Vec<_>>()
             .join("\n");
         let declared_here = !artifacts.is_empty();
+        // Provisioning comes first: if blanket can supply the artifact, the
+        // package is really installed rather than skipped.
+        match crate::artifacts::provision(store, platform, &p.name, &p.version, &tmp) {
+            Ok(Some(provisioning)) => {
+                envs.extend(provisioning.envs);
+                for (subject, detail) in &provisioning.records {
+                    crate::policy::record(
+                        crate::policy::ARTIFACT_PROVISIONED,
+                        subject,
+                        detail,
+                    )?;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                // A provisioning failure is not fatal: the install script still
+                // runs and fails loudly on its own if it needs the artifact.
+                eprintln!("blanket: {}: could not provision its artifact: {error}", p.name);
+                crate::policy::record(
+                    crate::policy::ARTIFACT_NOT_PROVISIONED,
+                    &format!("{}@{}", p.name, p.version),
+                    &format!("provisioning failed: {error}"),
+                )?;
+            }
+        }
         if let Some(skip) = crate::artifacts::skip_download_for(&p.name) {
             for (key, value) in skip.envs {
                 envs.push(((*key).to_string(), (*value).to_string()));
