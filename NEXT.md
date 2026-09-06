@@ -25,11 +25,25 @@ and gc could not run — Codex hit its usage limit (resets 2026-09-12) — so
 those last fixes were verified against the findings and the gate by the
 supervising agent, not independently.
 
-**Open:** item 4 (git dependencies) and item 5 (built-in artifacts list) are
-not started. The optional stage-6 live shared-store check still wants both
-machines. On Linux run e2e gates with `TMPDIR` on a real disk. Delegation:
-Codex Luna implements, Astra reviews; unit tests `cargo test`, e2e
-`cargo test -- --ignored`.
+**Every item in this file is now merged** (PRs #5–#17). Items 4 and 5 were
+finished on 2026-09-06 morning: git dependencies are realized from their commit
+in npm, python and cargo, and electron's release zip is provisioned into the
+cache its own installer reads.
+
+**Open:** SBOM `vcs` external references for git components; more provisioning
+entries (sharp <0.33, node-sass, sentry-cli) when a real project needs them;
+the optional stage-6 live shared-store check, which wants both machines. On
+Linux run e2e gates with `TMPDIR` on a real disk.
+
+**Review debt (read this before trusting the last stretch):** Codex hit its
+usage limit at 03:18 on 2026-09-06 and resets 2026-09-12. The final review
+round for items 7, 10, 12 and gc, and all of items 4 and 5, was done by the
+supervising agent rather than by an independent adversarial reviewer. Astra
+found roughly seventy real defects across the reviewed rounds — several
+security-relevant — so that gap is worth closing when credits return.
+
+Delegation: Codex Luna implements, Astra reviews (Claude subagents when Codex
+is rate-limited); unit tests `cargo test`, e2e `cargo test -- --ignored`.
 
 **What actually matters, in order** (the rest of this file is the
 backlog; this paragraph is the priority): the product is "one command in
@@ -96,7 +110,7 @@ This strengthens the enterprise pitch: the manifest stops being
 "everything is verified" and becomes "here are exactly the 3 of 400 that
 aren't," which is where their risk actually lives.
 
-## 4. Git dependencies via commit hash — npm DONE (2026-09-06); python and cargo open
+## 4. Git dependencies via commit hash — DONE (2026-09-06, all three ecosystems)
 
 Done: `src/gitsrc.rs` realizes a git source as a store object whose identity is
 (normalized URL, full commit) — fetch by commit, submodules at their recorded
