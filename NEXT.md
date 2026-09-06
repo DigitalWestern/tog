@@ -115,9 +115,19 @@ hash, and hands it to the ordinary sdist path — so build-system inspection,
 isolated build environments, native libraries and derivation identity all work
 unchanged, and the archive hash is a pure function of the commit's tree.
 
-Open: **cargo** (vendor a git source as a directory source with
-`.cargo-checksum.json` plus the `[source."<url>"]` replacement stanza) and SBOM
-`vcs` external references for git components.
+Cargo is done too (2026-09-06): a lock `source = "git+<url>?rev=<ref>#<commit>"`
+(also `?branch=`/`?tag=`, or no query) is realized from its commit and vendored
+as a directory source with `{"files":{},"package":null}`, and the generated
+cargo config carries one `[source."git+…"]` stanza per source — keyed by the
+lockfile's exact string, which is what cargo matches — replaced by the vendor
+directory. The commit is an input of the vendor object's identity, so a
+different commit is a different object. An unpinned git source is refused,
+telling the user to add a `rev=` or regenerate the lock.
+
+Open: SBOM `vcs` external references for git components, and `blanket run`'s
+cargo path uses the project's own Cargo.lock to rebuild the stanzas (a plan is
+not in hand there); a lock that disagrees with the closure would be caught by
+cargo, not by blanket.
 
 
 Record repo plus exact commit, fetch, build from source in the sandbox
