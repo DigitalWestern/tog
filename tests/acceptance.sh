@@ -199,7 +199,10 @@ echo "== 10e. go: modcache projection + sandboxed build + offline rebuild"
 cp -R "$FIXTURES/go-hello" "$WORK/go"
 (cd "$WORK/go" && "$BLANKET" sync)
 (cd "$WORK/go" && "$BLANKET" build)
-OUT=$(cd "$WORK/go" && ./hello)
+# rsc.io/quote's Hello() picks its greeting from LC_ALL/LC_MESSAGES/LANG; an unset or
+# C/POSIX locale lands on the "pirate" entry ("Ahoy, world!"). Pin the locale so the
+# check does not depend on the calling shell (seen from a macOS agent shell, 2026-09-05).
+OUT=$(cd "$WORK/go" && LC_ALL=en_US.UTF-8 ./hello)
 [ "$OUT" = "Hello, world." ] && ok "go build + run ($OUT)" || bad "go output: $OUT"
 rm -f "$WORK/go/hello"
 if (cd "$WORK/go" && "$BLANKET" build go); then
