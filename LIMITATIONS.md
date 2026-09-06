@@ -72,7 +72,8 @@ say what breaks, for whom, and how it fails (loud/silent).
 ## Python
 
 - **RECORD files are left as shipped**: not verified on install, not
-  rewritten; importlib file listings can lie. Silent.
+  rewritten; importlib file listings can lie. Silent. Wheel `.data`
+  `purelib`, `platlib`, `headers`, `scripts`, and `data` schemes are routed.
 - **Project-local/editable and direct Python requirements are skipped** with
   exception `requirement-skipped`; strict via policy. Other malformed
   requirements still fail closed.

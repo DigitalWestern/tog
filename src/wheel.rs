@@ -6,20 +6,20 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
 
 /// Install one wheel into an environment being assembled (PEP 427,
-/// pragmatic subset). Routes `{name}.data/{purelib,platlib,scripts,data}`,
+/// pragmatic subset). Routes `{name}.data/{purelib,platlib,headers,scripts,data}`,
 /// rewrites `#!python` shebangs, generates console/gui-script launchers,
 /// guards against zip-slip/symlinks, and lets a later wheel win collisions.
-/// Known v0 gaps: RECORD is left as shipped (not verified or rewritten);
-/// `headers` .data scheme is rejected rather than implemented.
+/// Known v0 gap: RECORD is left as shipped (not verified or rewritten).
 pub fn install_wheel(
     wheel_path: &Path,
     site_packages: &Path,
     bin_dir: &Path,
+    python_minor: &str,
     python_exe: &Path,
     installed: &mut BTreeMap<std::path::PathBuf, String>,
 ) -> io::Result<()> {
@@ -60,10 +60,12 @@ pub fn install_wheel(
         .as_deref()
         .map(|name| format!("{}.data/", name.strip_suffix(".dist-info").unwrap_or(name)));
     let distribution_id = dist_info.clone().unwrap();
-    let distribution_name = distribution_id
+    let distribution_dir = distribution_id
         .strip_suffix(".dist-info")
         .and_then(|name| name.rsplit_once('-').map(|(name, _)| name))
         .unwrap_or(&distribution_id)
+        .to_string();
+    let distribution_name = distribution_dir
         .replace('_', "-");
     let entry_points = dist_info.as_deref().and_then(|name| {
         archive
@@ -86,6 +88,11 @@ pub fn install_wheel(
             bin_dir.display()
         ))
     })?;
+    validate_python_minor(python_minor)?;
+    let headers_dir = env_root
+        .join("include/site")
+        .join(format!("python{python_minor}"))
+        .join(&distribution_dir);
     let mut directory_modes = Vec::new();
 
     const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
@@ -101,6 +108,7 @@ pub fn install_wheel(
                 };
                 match kind {
                     "purelib" | "platlib" => (site_packages, relative, false),
+                    "headers" => (headers_dir.as_path(), relative, false),
                     "scripts" => (bin_dir, relative, true),
                     "data" => (env_root, relative, false),
                     other => {
@@ -116,7 +124,7 @@ pub fn install_wheel(
             (site_packages, name.as_str(), false)
         };
 
-        let destination = base.join(relative);
+        let destination = safe_destination(base, relative, env_root, &name)?;
         if entry.is_dir() {
             fs::create_dir_all(&destination)?;
             if let Some(mode) = entry.unix_mode() {
@@ -252,10 +260,79 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 }
 
 fn validate_entry_name(name: &str) -> io::Result<()> {
-    if name.starts_with('/') || name.split(['/', '\\']).any(|component| component == "..") {
+    if name
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| *byte == b'/' || *byte == b'\\')
+        || name.split(['/', '\\']).any(|component| component == "..")
+    {
         return Err(invalid_data(format!("unsafe zip entry: {name}")));
     }
+    let _ = normalized_relative_path(name)?;
     Ok(())
+}
+
+fn validate_python_minor(python_minor: &str) -> io::Result<()> {
+    let mut components = python_minor.split('.');
+    let valid = components.next().is_some_and(|part| {
+        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+    }) && components.next().is_some_and(|part| {
+        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+    }) && components.next().is_none();
+    if !valid {
+        return Err(invalid_data(format!(
+            "invalid Python minor version for wheel headers: {python_minor}"
+        )));
+    }
+    Ok(())
+}
+
+fn normalized_relative_path(name: &str) -> io::Result<PathBuf> {
+    let bytes = name.as_bytes();
+    let absolute = bytes
+        .first()
+        .is_some_and(|byte| *byte == b'/' || *byte == b'\\')
+        || (bytes.len() >= 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':');
+    if absolute {
+        return Err(invalid_data(format!("unsafe zip entry: {name}")));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in name.split(['/', '\\']) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if !normalized.pop() {
+                    return Err(invalid_data(format!("unsafe zip entry: {name}")));
+                }
+            }
+            component => normalized.push(component),
+        }
+    }
+    Ok(normalized)
+}
+
+fn safe_destination(
+    base: &Path,
+    relative: &str,
+    env_root: &Path,
+    entry_name: &str,
+) -> io::Result<PathBuf> {
+    if !base.starts_with(env_root) {
+        return Err(invalid_data(format!(
+            "wheel destination escapes environment root: {entry_name}"
+        )));
+    }
+    let relative = normalized_relative_path(relative)?;
+    let destination = base.join(relative);
+    if !destination.starts_with(env_root) {
+        return Err(invalid_data(format!(
+            "wheel destination escapes environment root: {entry_name}"
+        )));
+    }
+    Ok(destination)
 }
 
 fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> Vec<u8> {
@@ -393,12 +470,28 @@ mod tests {
                     "demo-1.0.data/scripts/demo-tool",
                     b"#!python\nprint('ok')\n",
                 ),
+                (
+                    "demo-1.0.data/scripts/demo-window",
+                    b"#!pythonw\nprint('window')\n",
+                ),
+                (
+                    "demo-1.0.data/scripts/no-shebang",
+                    b"print('plain')\n",
+                ),
                 ("demo-1.0.data/scripts/raw.bin", &[0, 1, 255]),
                 ("demo-1.0.data/data/share/demo.txt", b"shared\n"),
             ],
         );
 
-        install_wheel(&wheel, &site, &bin, &python, &mut BTreeMap::new()).unwrap();
+        install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &python,
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read(site.join("demo/__init__.py")).unwrap(),
@@ -413,6 +506,11 @@ mod tests {
             fs::read(bin.join("demo-tool")).unwrap(),
             format!("#!{}\nprint('ok')\n", python.display()).as_bytes()
         );
+        assert_eq!(
+            fs::read(bin.join("demo-window")).unwrap(),
+            format!("#!{}\nprint('window')\n", python.display()).as_bytes()
+        );
+        assert_eq!(fs::read(bin.join("no-shebang")).unwrap(), b"print('plain')\n");
         assert_eq!(fs::read(bin.join("raw.bin")).unwrap(), &[0, 1, 255]);
         assert_eq!(
             fs::read_to_string(bin.join("tool")).unwrap(),
@@ -438,6 +536,16 @@ mod tests {
                 & 0o777,
             0o755
         );
+        for script in ["demo-window", "no-shebang"] {
+            assert_eq!(
+                fs::metadata(bin.join(script))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
         assert_eq!(
             fs::metadata(bin.join("raw.bin"))
                 .unwrap()
@@ -474,6 +582,7 @@ mod tests {
             &wheel,
             &site,
             &bin,
+            "3.12",
             &bin.join("python"),
             &mut BTreeMap::new(),
         )
@@ -504,9 +613,123 @@ mod tests {
         let _ = crate::policy::drain();
         let mut installed = BTreeMap::new();
         for wheel in wheels {
-            install_wheel(&wheel, &site, &bin, &bin.join("python"), &mut installed).unwrap();
+            install_wheel(
+                &wheel,
+                &site,
+                &bin,
+                "3.12",
+                &bin.join("python"),
+                &mut installed,
+            )
+            .unwrap();
         }
         assert_eq!(fs::read_to_string(site.join("shared.py")).unwrap(), "second\n");
         assert_eq!(crate::policy::drain().len(), 1);
+    }
+
+    #[test]
+    fn installs_headers_in_venv_include_site() {
+        let temp = TempDir::new();
+        let site = temp.path().join("lib/python3.12/site-packages");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let wheel = temp.path().join("demo-1.0.whl");
+        write_wheel(
+            &wheel,
+            &[
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/headers/demo.h", b"#define DEMO 1\n"),
+                (
+                    "demo-1.0.data/headers/sub/x.h",
+                    b"#define DEMO_X 1\n",
+                ),
+            ],
+        );
+
+        install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+
+        let headers = temp.path().join("include/site/python3.12/demo");
+        assert_eq!(fs::read(headers.join("demo.h")).unwrap(), b"#define DEMO 1\n");
+        assert_eq!(
+            fs::read(headers.join("sub/x.h")).unwrap(),
+            b"#define DEMO_X 1\n"
+        );
+    }
+
+    #[test]
+    fn headers_preserve_underscore_in_distribution_name() {
+        let temp = TempDir::new();
+        let site = temp.path().join("lib/python3.12/site-packages");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let wheel = temp.path().join("foo_bar-1.0.whl");
+        write_wheel(
+            &wheel,
+            &[
+                ("foo_bar-1.0.dist-info/RECORD", b""),
+                ("foo_bar-1.0.data/headers/foo.h", b"/* foo_bar */\n"),
+            ],
+        );
+
+        install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(temp
+            .path()
+            .join("include/site/python3.12/foo_bar/foo.h")
+            .is_file());
+        assert!(!temp
+            .path()
+            .join("include/site/python3.12/foo-bar/foo.h")
+            .exists());
+    }
+
+    #[test]
+    fn rejects_absolute_and_escaping_data_destinations() {
+        let temp = TempDir::new();
+        let site = temp.path().join("lib/python3.12/site-packages");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+
+        for (index, data_entry) in [
+            ("absolute", "demo-1.0.data/data//outside.txt"),
+            ("escaping", "demo-1.0.data/data/sub/../../outside.txt"),
+        ] {
+            let wheel = temp.path().join(format!("bad-{index}.whl"));
+            write_wheel(
+                &wheel,
+                &[(data_entry, b"nope"), ("demo-1.0.dist-info/RECORD", b"")],
+            );
+
+            let error = install_wheel(
+                &wheel,
+                &site,
+                &bin,
+                "3.12",
+                &bin.join("python"),
+                &mut BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("unsafe zip entry"), "{error}");
+            assert!(!temp.path().join("outside.txt").exists());
+        }
     }
 }

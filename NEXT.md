@@ -143,18 +143,10 @@ cp312 wheel for faiss-cpu 1.7.4, reported as `py_uv_resolve_failed`).
   README's "passes acceptance on macOS" sentence is pre-refactor until
   the Mac run happens.
 
-## 9. Wheel `.data/headers` scheme — four repos, both platforms
+## 9. Wheel `.data/headers` scheme — DONE
 
-`unsupported wheel .data scheme 'headers'` (greenlet 3.5.5) misses
-ComfyUI and odysseus on Linux and crawl4ai and gpt_academic on macOS.
-greenlet sits under SQLAlchemy-async, gevent, and most web stacks, so
-this is a bug, not a corner. Install `headers` into
-`<env>/include/python3.X/<distribution>/` per sysconfig's `include`
-path; `scripts` and `data` schemes should be audited in the same pass
-(`data` maps to the env root; `scripts` must get the shebang rewrite
-that `bin/` entry points already get). Test with the greenlet wheel as a
-fixture on both platforms; the env id must not change for wheels that
-carry no `.data/`.
+- Implemented pip/uv-compatible `headers` placement, preserving raw metadata distribution names and existing collision behavior.
+- Audited `scripts`/`data` routing and containment, with unit coverage plus the ignored greenlet 3.5.5 sync/import e2e on both supported platforms.
 
 ## 10. Manifest coverage: poetry, PDM, setup.py, requirements dirs
 
