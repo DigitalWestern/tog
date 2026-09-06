@@ -94,6 +94,12 @@ pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython
         })
 }
 
+pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<String> {
+    let pin = lookup(platform, version)
+        .ok_or_else(|| no_pin(&format!("cpython {version}"), platform, "stage 2"))?;
+    Ok(cpython_identity(pin).object_id())
+}
+
 pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
     crate::platform::require_host(platform, "CPython", "stage 2")?;
     lookup(platform, version)

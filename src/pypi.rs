@@ -611,30 +611,58 @@ pub(crate) fn lock_requirement_text_with_uv(
     platform: Platform,
     requirements_text: &str,
     python_version: &str,
+    constraints: Option<&str>,
 ) -> io::Result<String> {
     let uv = crate::python::ensure_uv_for(store, platform)?.join("uv");
     let scratch = store.stage()?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");
+    let constraints_path = scratch.join("constraints.txt");
     let result = (|| {
         fs::write(&input, requirements_text)?;
-        let status = Command::new(&uv)
-            .args([
-                "pip",
-                "compile",
-                "--generate-hashes",
-                "--python-version",
-                python_version,
-            ])
+        if let Some(constraints) = constraints {
+            fs::write(&constraints_path, format!("{constraints}\n"))?;
+        }
+        let mut command = Command::new(&uv);
+        command.args([
+            "pip",
+            "compile",
+            "--generate-hashes",
+            "--python-version",
+            python_version,
+            // Build requirements are metadata inputs, not permission to run
+            // arbitrary backends. Build-only sdists fail loudly instead.
+            "--no-build",
+        ]);
+        if constraints.is_some() {
+            command.args(["-c", constraints_path.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "constraints path is not UTF-8")
+            })?]);
+        }
+        let uv_output = command
             .arg(&input)
             .args(["-o"])
             .arg(&output)
-            .status()
+            .output()
             .map_err(|e| {
                 io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
             })?;
-        if !status.success() {
-            return Err(io::Error::other("uv pip compile failed"));
+        if !uv_output.status.success() {
+            let names = requirements_text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(|line| {
+                    line.split(|ch: char| matches!(ch, '<' | '>' | '=' | '!' | '~' | '[' | ';' | ' ' | '\t'))
+                        .next()
+                        .unwrap_or(line)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let diagnostics = String::from_utf8_lossy(&uv_output.stderr).trim().to_string();
+            return Err(io::Error::other(format!(
+                "uv pip compile failed for build requirements ({names}); sdist-only build dependencies are unsupported during resolve-time metadata builds: {diagnostics}"
+            )));
         }
         fs::read_to_string(&output)
     })();

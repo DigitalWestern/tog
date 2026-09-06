@@ -91,25 +91,48 @@ fn isolated_sdist_identity(
     rust: Option<&Path>,
     vendor: Option<&Path>,
 ) -> io::Result<Identity> {
+    let build_env_id = object_id(build_env, "build environment")?;
+    let rust_id = rust.map(|path| object_id(path, "Rust object")).transpose()?;
+    let vendor_id = vendor
+        .map(|path| object_id(path, "Cargo vendor object"))
+        .transpose()?;
+    Ok(isolated_sdist_identity_from_ids(
+        platform,
+        pkg,
+        pin,
+        &build_env_id,
+        rust_id.as_deref(),
+        vendor_id.as_deref(),
+    ))
+}
+
+fn isolated_sdist_identity_from_ids(
+    platform: Platform,
+    pkg: &LockedPackage,
+    pin: &crate::python::PinnedPython,
+    build_env_id: &str,
+    rust_id: Option<&str>,
+    vendor_id: Option<&str>,
+) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".into(), "sdist-build/3".into()),
         ("sdist_sha256".into(), pkg.sha256.clone()),
         ("python".into(), format!("{}:{}", pin.version, pin.sha256)),
         ("platform".into(), platform.triple().into()),
-        ("build_env".into(), object_id(build_env, "build environment")?),
+        ("build_env".into(), build_env_id.into()),
     ]);
-    if let Some(rust) = rust {
-        inputs.insert("rust".into(), object_id(rust, "Rust object")?);
+    if let Some(rust_id) = rust_id {
+        inputs.insert("rust".into(), rust_id.into());
     }
-    if let Some(vendor) = vendor {
-        inputs.insert("vendor".into(), object_id(vendor, "Cargo vendor object")?);
+    if let Some(vendor_id) = vendor_id {
+        inputs.insert("vendor".into(), vendor_id.into());
     }
-    Ok(Identity {
+    Identity {
         kind: "sdist-build".into(),
         name: pkg.name.clone(),
         version: pkg.version.clone(),
         inputs,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +187,63 @@ fn has_package(plan: &Plan, wanted: &str) -> bool {
     })
 }
 
+/// Return the exact package input used by a parent Python environment. This
+/// performs only archive inspection plus deterministic input planning; the
+/// actual wheel build still happens in `build_sdist_wheel_at_depth`.
+pub(crate) fn sdist_identity_input(
+    store: &Store,
+    platform: Platform,
+    pkg: &LockedPackage,
+    python_version: &str,
+    runtime_plan: Option<&Plan>,
+) -> io::Result<String> {
+    let pin = crate::python::lookup(platform, python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
+    let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
+    let info = build_requires::inspect_sdist(&sdist)?;
+    let fast_requirements = build_requires::fast_path(&info.build_requires);
+    if fast_requirements && !info.rust_build {
+        return Ok(format!(
+            "Sdist:{}:{}",
+            pkg.sha256,
+            derivation_fingerprint()
+        ));
+    }
+
+    let build_plan = if fast_requirements {
+        build_toolchain_plan(&pin.version)
+    } else {
+        build_requires::resolve_build_plan(
+            store,
+            platform,
+            &pin.version,
+            &info.build_requires,
+            runtime_plan,
+        )?
+    };
+    let build_env_id = crate::project::planned_env_object_id(store, platform, &build_plan)?;
+    let identity = if info.rust_build {
+        let work = store.stage()?;
+        let result: io::Result<Identity> = (|| {
+            let source = build_requires::extract_sdist(&sdist, &work.join("source"), &info)?;
+            let rust = rust_plan_inputs(store, platform, &pkg.sha256, &source, &info, &work)?;
+            Ok(isolated_sdist_identity_from_ids(
+                platform,
+                pkg,
+                pin,
+                &build_env_id,
+                Some(&rust.rust_id),
+                Some(&rust.vendor_id),
+            ))
+        })();
+        let _ = crate::store::remove_tree(&work);
+        result?
+    } else {
+        isolated_sdist_identity_from_ids(platform, pkg, pin, &build_env_id, None, None)
+    };
+    Ok(format!("Sdist:{}:{}", pkg.sha256, identity.object_id()))
+}
+
 fn stderr_tail(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     let lines: Vec<_> = text.lines().collect();
@@ -173,6 +253,11 @@ fn stderr_tail(path: &Path) -> Option<String> {
 fn cargo_lock_for(source: &Path, manifest: &Path) -> Option<PathBuf> {
     [manifest.parent().map(|parent| parent.join("Cargo.lock")), Some(source.join("Cargo.lock"))]
         .into_iter().flatten().find(|path| path.is_file())
+}
+
+fn cargo_lock_cache_key(sdist_sha256: &str, rust_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(format!("{sdist_sha256}\0{rust_id}").as_bytes()))
 }
 
 fn generate_cargo_lock(
@@ -202,35 +287,72 @@ fn generate_cargo_lock(
     ))
 }
 
-fn prepare_rust(
+struct RustPlanInputs {
+    rust_version: String,
+    rust_id: String,
+    vendor_id: String,
+    lock_text: String,
+    generated_lock: bool,
+}
+
+fn rust_plan_inputs(
     store: &Store,
     platform: Platform,
+    sdist_sha256: &str,
     source: &Path,
     info: &ArchiveInfo,
     work: &Path,
-) -> io::Result<(PathBuf, PathBuf)> {
+) -> io::Result<RustPlanInputs> {
     let manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| io::Error::new(
         io::ErrorKind::InvalidData,
         "Rust build trigger found, but the sdist has no Cargo.toml",
     ))?;
     let manifest = source.join(manifest_rel);
-    let rust_version = crate::cargo::resolve_toolchain(platform, source)?;
-    let rust_obj = crate::cargo::ensure_rust_for(store, platform, rust_version)?;
-    let plan_home = work.join("cargo-plan-home");
-    let lock = match cargo_lock_for(source, &manifest) {
-        Some(path) => path,
-        None => {
-            let path = generate_cargo_lock(&rust_obj, &manifest, source, &plan_home)?;
-            crate::policy::record(
-                crate::policy::UNATTESTED_CARGO_LOCK,
-                &manifest.display().to_string(),
-                "Cargo.lock was generated by store Cargo outside the build sandbox",
-            )?;
-            path
-        }
+    let rust_version = crate::cargo::resolve_toolchain(platform, source)?.to_string();
+    let rust_id = crate::cargo::rust_object_id(platform, &rust_version)?;
+    let generated_path = store.cache_path(
+        "cargo-lock",
+        &cargo_lock_cache_key(sdist_sha256, &rust_id),
+    );
+    let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
+        (fs::read_to_string(path)?, false)
+    } else if let Ok(text) = fs::read_to_string(&generated_path) {
+        (text, true)
+    } else {
+        // This is the one cold path that must invoke Cargo. Persist the lock
+        // before any later wheel-cache lookup so warm rebuilds stay offline.
+        let rust_obj = crate::cargo::ensure_rust_for(store, platform, &rust_version)?;
+        let plan_home = work.join("cargo-plan-home");
+        let lock = generate_cargo_lock(&rust_obj, &manifest, source, &plan_home)?;
+        let text = fs::read_to_string(lock)?;
+        fs::create_dir_all(generated_path.parent().expect("cache parent"))?;
+        fs::write(&generated_path, &text)?;
+        (text, true)
     };
-    let lock_text = fs::read_to_string(&lock)?;
-    let cargo_plan = crate::cargo::plan_cargo(&lock_text, rust_version)?;
+    let cargo_plan = crate::cargo::plan_cargo(&lock_text, &rust_version)?;
+    let vendor_id = crate::cargo::vendor_object_id(&cargo_plan)?;
+    Ok(RustPlanInputs {
+        rust_version,
+        rust_id,
+        vendor_id,
+        lock_text,
+        generated_lock,
+    })
+}
+
+fn prepare_rust(
+    store: &Store,
+    platform: Platform,
+    info: &ArchiveInfo,
+    work: &Path,
+    inputs: &RustPlanInputs,
+) -> io::Result<(PathBuf, PathBuf)> {
+    let _manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Rust build trigger found, but the sdist has no Cargo.toml",
+    ))?;
+    let rust_obj = crate::cargo::ensure_rust_for(store, platform, &inputs.rust_version)?;
+    let cargo_plan = crate::cargo::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
     let vendor_obj = crate::cargo::realize_vendor(store, &cargo_plan)?;
     let cargo_home = work.join("cargo-home");
     fs::create_dir_all(&cargo_home)?;
@@ -367,6 +489,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
     let fast_requirements = build_requires::fast_path(&info.build_requires);
+    let fast_sdist = fast_requirements && !info.rust_build;
     let build_plan = if fast_requirements {
         build_toolchain_plan(&pin.version)
     } else {
@@ -405,22 +528,28 @@ pub(crate) fn build_sdist_wheel_at_depth(
     } else {
         None
     };
-    let (rust, vendor, cargo_home) = if let Some(source) = &source {
-        let (rust, vendor) = prepare_rust(store, platform, source, &info, &work)?;
-        (Some(rust), Some(vendor), Some(work.join("cargo-home")))
+    let rust_inputs = if let Some(source) = &source {
+        Some(rust_plan_inputs(
+            store,
+            platform,
+            &pkg.sha256,
+            source,
+            &info,
+            &work,
+        )?)
     } else {
-        (None, None, None)
+        None
     };
-    let identity = if let Some((rust, vendor)) = rust.as_ref().zip(vendor.as_ref()) {
-        isolated_sdist_identity(
+    let identity = if let Some(rust) = &rust_inputs {
+        isolated_sdist_identity_from_ids(
             platform,
             pkg,
             pin,
-            &build_env,
-            Some(rust),
-            Some(vendor),
-        )?
-    } else if fast_requirements {
+            &object_id(&build_env, "build environment")?,
+            Some(&rust.rust_id),
+            Some(&rust.vendor_id),
+        )
+    } else if fast_sdist {
         fast_identity
     } else {
         isolated_sdist_identity(platform, pkg, pin, &build_env, None, None)?
@@ -431,6 +560,27 @@ pub(crate) fn build_sdist_wheel_at_depth(
         let _ = crate::store::remove_tree(&work);
         return find_wheel(&store.object_path(&id));
     }
+
+    if let Some(rust) = &rust_inputs {
+        if rust.generated_lock {
+            let manifest = info
+                .cargo_manifest
+                .as_ref()
+                .expect("Rust source has a Cargo manifest");
+            crate::policy::record(
+                crate::policy::UNATTESTED_CARGO_LOCK,
+                &manifest.display().to_string(),
+                "Cargo.lock was generated by store Cargo outside the build sandbox",
+            )?;
+        }
+    }
+
+    let (rust, vendor, cargo_home) = if let Some(inputs) = &rust_inputs {
+        let (rust, vendor) = prepare_rust(store, platform, &info, &work, inputs)?;
+        (Some(rust), Some(vendor), Some(work.join("cargo-home")))
+    } else {
+        (None, None, None)
+    };
 
     let cpython_obj = crate::python::ensure_python_for(store, pin, platform)?;
     let input = source.as_deref().unwrap_or(&sdist_named);

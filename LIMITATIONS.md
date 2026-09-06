@@ -104,6 +104,10 @@ unsatisfiable constraints fail closed.
 - **Environment markers/extras in a pinned file trigger a full re-lock
   via uv** rather than direct consumption (universal locks get
   platform-re-locked; versions can shift). Semi-silent.
+- **Project-level `uv pip compile` in `src/main.rs` can still execute
+  resolve-time metadata builds outside the sandbox.** This pre-existing
+  exposure is tracked separately; sdist build-requirement resolution now
+  rejects build-time sdists instead.
 
 ## JavaScript / npm
 

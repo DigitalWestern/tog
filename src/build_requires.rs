@@ -4,6 +4,7 @@
 //! executed only later, by pip inside the existing build sandbox.
 
 use crate::platform::Platform;
+use crate::pyselect;
 use crate::store::Store;
 use crate::types::Plan;
 use std::fs::{self, File};
@@ -62,6 +63,11 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     let raw = raw.trim().trim_start_matches("./").trim_end_matches('/');
     if raw.is_empty() {
         return Ok(None);
+    }
+    if raw.starts_with('-') {
+        return Err(invalid(format!(
+            "sdist archive contains an option-like path {raw:?}"
+        )));
     }
     let mut parts = Vec::new();
     for component in Path::new(raw).components() {
@@ -171,6 +177,7 @@ fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<
             let output = Command::new("/usr/bin/tar")
                 .args(["-xOzf"])
                 .arg(path)
+                .arg("--")
                 .arg(member)
                 .output()
                 .map_err(|e| io::Error::new(e.kind(), format!("read {member} from sdist: {e}")))?;
@@ -289,86 +296,6 @@ fn normalized_name(name: &str) -> String {
     name.to_ascii_lowercase().replace(['_', '.'], "-")
 }
 
-fn numeric_version(version: &str) -> Option<Vec<u64>> {
-    let mut result = Vec::new();
-    for component in version.trim().split('.') {
-        let digits = component
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect::<String>();
-        if digits.is_empty() {
-            return None;
-        }
-        result.push(digits.parse().ok()?);
-    }
-    Some(result)
-}
-
-fn compare_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
-    let mut left = numeric_version(left)?;
-    let mut right = numeric_version(right)?;
-    left.resize(left.len().max(right.len()), 0);
-    right.resize(right.len().max(left.len()), 0);
-    Some(left.cmp(&right))
-}
-
-fn admits_version(spec: &str, pinned: &str) -> bool {
-    let compact = spec
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
-        .collect::<String>();
-    if compact.is_empty() {
-        return true;
-    }
-    compact.split(',').all(|part| {
-        let operators = ["===", "~=", ">=", "<=", "!=", "==", ">", "<"];
-        let Some(operator) = operators.iter().find(|operator| part.starts_with(**operator))
-        else {
-            return false;
-        };
-        let value = &part[operator.len()..];
-        if value.is_empty() {
-            return false;
-        }
-        if let Some(prefix) = value.strip_suffix(".*") {
-            return *operator == "=="
-                && pinned
-                    .split('.')
-                    .zip(prefix.split('.'))
-                    .all(|(actual, expected)| actual == expected);
-        }
-        let Some(ordering) = compare_versions(pinned, value) else {
-            return false;
-        };
-        match *operator {
-            "==" | "===" => ordering == std::cmp::Ordering::Equal,
-            "!=" => ordering != std::cmp::Ordering::Equal,
-            ">=" => ordering != std::cmp::Ordering::Less,
-            "<=" => ordering != std::cmp::Ordering::Greater,
-            ">" => ordering == std::cmp::Ordering::Greater,
-            "<" => ordering == std::cmp::Ordering::Less,
-            "~=" => {
-                let parts = numeric_version(value).unwrap_or_default();
-                let mut upper = parts.clone();
-                if upper.len() < 2 {
-                    upper.resize(2, 0);
-                }
-                let index = upper.len().saturating_sub(2);
-                upper[index] += 1;
-                let upper = upper
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(".");
-                ordering != std::cmp::Ordering::Less
-                    && compare_versions(pinned, &upper)
-                        .is_some_and(|ordering| ordering == std::cmp::Ordering::Less)
-            }
-            _ => false,
-        }
-    })
-}
-
 pub(crate) fn fast_path(requires: &[String]) -> bool {
     requires.iter().all(|requirement| {
         let Some((name, spec, extras)) = requirement_name(requirement) else {
@@ -383,7 +310,7 @@ pub(crate) fn fast_path(requires: &[String]) -> bool {
             "pip" => "26.2.1",
             _ => return false,
         };
-        admits_version(spec, pinned)
+        pyselect::matches_specifier(spec, pinned).unwrap_or(false)
     })
 }
 
@@ -407,7 +334,7 @@ pub(crate) fn lock_cache_key(
     let mut sorted = requires.to_vec();
     sorted.sort();
     let input = format!(
-        "{}\0{}\0{}\0{}",
+        "build-resolve/2\0{}\0{}\0{}\0{}",
         platform.triple(),
         python_version,
         sorted.join("\n"),
@@ -432,17 +359,13 @@ pub(crate) fn resolve_build_plan(
     let lock = match fs::read_to_string(&lock_path) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut requested = requires.to_vec();
-            requested.push("pip==26.2.1".into());
-            if let Some(numpy) = &numpy {
-                requested.push(numpy.clone());
-            }
-            let text = requested.join("\n") + "\n";
+            let text = requires_resolution_text(requires);
             let lock = crate::pypi::lock_requirement_text_with_uv(
                 store,
                 platform,
                 &text,
                 python_version,
+                numpy.as_deref(),
             )?;
             fs::write(&lock_path, &lock)?;
             lock
@@ -458,6 +381,12 @@ pub(crate) fn resolve_build_plan(
     let plan = crate::pypi::plan_python(platform, &lock, python_version)?;
     fs::write(&plan_path, serde_json::to_vec(&plan)?)?;
     Ok(plan)
+}
+
+fn requires_resolution_text(requires: &[String]) -> String {
+    let mut requested = requires.to_vec();
+    requested.push("pip==26.2.1".into());
+    requested.join("\n") + "\n"
 }
 
 pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
@@ -702,14 +631,46 @@ build-backend = "hatchling.build"
     }
 
     #[test]
+    fn rejects_option_like_tar_root_without_executing_it() {
+        let dir = temp_dir("tar-injection");
+        let root_name = "--checkpoint-action=exec=touch marker;#";
+        let root = dir.join(root_name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("pyproject.toml"), b"[build-system]\nrequires = []\n").unwrap();
+        let archive = dir.join("malicious.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&dir)
+            .arg("--")
+            .arg(root_name)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&root).unwrap();
+
+        let marker = std::env::current_dir().unwrap().join("marker");
+        let _ = fs::remove_file(&marker);
+        let error = inspect_sdist(&archive).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!marker.exists(), "tar option-like member was executed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn fast_path_predicate_covers_build_requirement_table() {
         let cases = [
-            ("setuptools>=40.8.0", true),
+            ("setuptools~=83.1", false),
+            ("setuptools>=40.8", true),
+            ("setuptools==84.0.0", true),
+            ("setuptools==84.0.0rc1", false),
             ("setuptools<70", false),
             ("Cython", false),
             ("maturin>=1,<2", false),
             ("pip==26.2.1", true),
             ("wheel~=0.48", true),
+            ("wheel!=0.48.0", false),
         ];
         for (requirement, expected) in cases {
             assert_eq!(fast_path(&[requirement.into()]), expected, "{requirement}");
@@ -743,5 +704,15 @@ build-backend = "hatchling.build"
         };
         assert_eq!(numpy_constraint(Some(&without_numpy)), None);
         assert_eq!(numpy_constraint(None), None);
+    }
+
+    #[test]
+    fn runtime_numpy_is_a_constraint_not_a_build_requirement() {
+        let requirements = requires_resolution_text(&["setuptools>=40.8".into()]);
+        assert!(requirements.lines().any(|line| line == "setuptools>=40.8"));
+        assert!(requirements.lines().any(|line| line == "pip==26.2.1"));
+        assert!(!requirements
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("numpy")));
     }
 }

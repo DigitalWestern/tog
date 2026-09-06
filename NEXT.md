@@ -194,6 +194,8 @@ only the interpreter.
 
 ## 12. Pinned native libraries — optional until a real project needs it
 
+Later: run uv's resolve-time metadata builds inside the sandbox.
+
 manimpango needs pango+cairo headers through pkg-config; nokogiri only
 needed host zlib. Two honest options, pick when the first real project
 asks: (a) a small pinned library set (pango, cairo, libffi, openssl,
