@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod build;
 pub(crate) mod build_requires;
 pub mod cargo;
+pub mod cli;
 pub mod dirhash;
 pub mod dotnet;
 pub mod elixir;
