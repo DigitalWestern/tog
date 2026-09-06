@@ -103,14 +103,28 @@ Record repo plus exact commit, fetch, build from source in the sandbox
 a missing feature, not a hole in the model. It's how bun does it.
 Unblocks private forks, unreleased fixes, and unpublished libraries.
 
-## 5. Built-in artifacts list
+## 5. Built-in artifacts list — PARTLY DONE (2026-09-06)
 
-Ship a table inside blanket of packages whose setup scripts download
-extra files: address, sha256, expected location. Electron first. Blanket
-downloads and verifies before running the script with network denied.
-Same bytes at the same moment as npm would download; the only change is
-who does it. A few dozen entries cover the famous cases; users should
-never write these themselves.
+Done (`src/artifacts.rs`): the two families that do not need blanket to host
+a download table. Packages with a documented skip switch (puppeteer,
+puppeteer-core, cypress) get it set and record an
+`artifact_not_provisioned` exception naming what to run later; prebuilt-binary
+downloaders (prebuild-install, node-pre-gyp, prebuildify) are detected from
+the install script and told to compile from source, recorded as
+`built_from_source`. Every environment variable in the table was read out of
+the published package's own source — add entries the same way, never from
+memory. Measured: django, earendil-works/pi and louislam/uptime-kuma all sync
+(canvas and sqlite3 compile against item 12's native library set).
+
+Still open — the original idea: **provisioning**, i.e. blanket downloads the
+artifact itself, verifies it, and plants it where the installer's cache lookup
+finds it, so the package really is installed rather than skipped. Electron
+first: the zip is at `https://github.com/electron/electron/releases/download/
+v{version}/electron-v{version}-{platform}.zip` with checksums in the same
+release's `SHASUMS256.txt`. The blocking detail is `@electron/get`'s cache
+layout, which must be verified against a real install rather than guessed.
+Then sharp (<0.33), node-sass, sentry-cli. The per-project escape hatch
+already exists: declare `blanket.artifacts` in package.json.
 
 ## 7. pnpm-lock.yaml (and yarn.lock) importer — DONE (2026-09-06)
 
