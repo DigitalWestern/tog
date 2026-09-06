@@ -1065,13 +1065,16 @@ fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32, precreate_shm: bool) -> 
         )));
     }
     if precreate_shm {
-        // Linux only (LINUX_PORT.md stage 4): CoreCLR creates `shm` by
-        // mkdtemp()-ing in /tmp and rename()-ing into place. Inside the
-        // bwrap sandbox /tmp is a private tmpfs and this directory is a
-        // separate bind mount, so that rename fails with EXDEV and every
-        // NuGet/MSBuild named mutex ("NuGet-Migrations") errors out. Creating
-        // it here, owned by us, lets the runtime skip that path. Not needed
-        // on macOS (single filesystem) and deliberately not done there.
+        // Both platforms (LINUX_PORT.md stage 4 + Mac verification round
+        // 2): CoreCLR creates `shm` by mkdtemp()-ing `/tmp/.coreclr.XXXXXX`
+        // and rename()-ing it into place. Inside the bwrap sandbox /tmp is
+        // a private tmpfs and this directory a separate bind mount, so the
+        // rename fails with EXDEV; under Seatbelt only this directory is
+        // writable, not /tmp itself, so the mkdtemp fails with EPERM. Either
+        // way every NuGet/MSBuild named mutex ("NuGet-Migrations") errors
+        // out. macOS periodically purges /private/tmp, so `shm` cannot be
+        // assumed to survive from an earlier run. Creating it here, owned by
+        // us with the runtime's expected 0700, lets CoreCLR skip that path.
         let shm = path.join("shm");
         match fs::symlink_metadata(&shm) {
             Ok(md) if md.file_type().is_symlink() || !md.is_dir() => {
@@ -1094,7 +1097,7 @@ fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32, precreate_shm: bool) -> 
 
 fn ensure_dotnet_tmp(platform: Platform) -> io::Result<PathBuf> {
     let path = dotnet_tmp_path(platform);
-    ensure_dotnet_tmp_at(&path, invoking_uid()?, !platform.is_macos())
+    ensure_dotnet_tmp_at(&path, invoking_uid()?, true)
 }
 
 fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Vec<PathBuf> {
@@ -1482,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_precreates_shm_under_the_dotnet_tmp_dir() {
+    fn precreates_shm_under_the_dotnet_tmp_dir_on_every_platform() {
         let temp = std::env::temp_dir().canonicalize().unwrap().join(format!("blanket-dotnet-shm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         let uid = invoking_uid().unwrap();

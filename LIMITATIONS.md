@@ -253,7 +253,10 @@ say what breaks, for whom, and how it fails (loud/silent).
   survives a failed publication.
 - **Machine-wide /tmp/.dotnet mutex dir is a sandbox write allowance**
   (bounded, local-only; still shared mutable state between sandboxed and
-  host dotnet processes).
+  host dotnet processes). blanket pre-creates its `shm` subdirectory on
+  both platforms because CoreCLR otherwise mkdtemp()s in `/tmp` itself,
+  which neither sandbox permits; macOS purges `/private/tmp`, so the
+  directory is re-created on every sync rather than assumed present.
 - **releases.json is a checksum channel, not signed metadata** — SDK
   pins are only as strong as HTTPS to Microsoft's CDN.
 - **Lock does not cover asset selection**: project.assets.json is
