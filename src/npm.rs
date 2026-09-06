@@ -223,9 +223,19 @@ pub struct NpmPackage {
     pub url: String,
     pub integrity: String, // SRI string
     pub bin: Vec<(String, String)>,
+    /// Verified pnpm patch applied to this package after extraction.
+    pub patch: Option<NpmPatch>,
     /// Install-script failures are kept by default; strict policy makes them
     /// fatal for both optional and required packages.
     pub optional: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NpmPatch {
+    /// Canonical absolute path to the patch file in the source project.
+    pub path: String,
+    /// The lockfile's verified patch hash, included in the environment id.
+    pub hash: String,
 }
 
 /// A workspace link: `node_modules/<name>` resolving to a source directory
@@ -244,6 +254,9 @@ pub struct NpmPlan {
     pub node_version: String,
     pub packages: Vec<NpmPackage>,
     pub links: Vec<NpmLink>,
+    /// Actual workspace importer paths. This must not be inferred from every
+    /// package placement because local file links can live below node_modules.
+    pub workspaces: Vec<String>,
     pub lock_source: String,
 }
 
@@ -448,6 +461,9 @@ fn bin_link_target(path: &str, bin: &str) -> PathBuf {
 }
 
 fn workspace_set(plan: &NpmPlan) -> Vec<String> {
+    if !plan.workspaces.is_empty() {
+        return plan.workspaces.clone();
+    }
     let mut workspaces = BTreeMap::<String, ()>::new();
     for path in plan
         .packages
@@ -501,7 +517,14 @@ fn managed_projection_symlink(path: &Path, project_dir: &Path, home: &Path) -> b
     } else {
         path.parent().unwrap_or(project_dir).join(target)
     };
+    // The link itself may have been created through a symlinked TMPDIR
+    // (`/tmp` -> `/private/tmp` on macOS). Canonicalize the ownership roots
+    // too, otherwise a real target never matches its logical root spelling.
     let target = target.canonicalize().unwrap_or(target);
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
     target.starts_with(home.join("forests"))
         || target.starts_with(home.join("store"))
         || target.starts_with(project_dir.join(".blanket/nm"))
@@ -800,6 +823,7 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
             url: resolved.to_string(),
             integrity: integrity.to_string(),
             bin,
+            patch: None,
             optional: entry["optional"].as_bool() == Some(true),
         });
     }
@@ -809,6 +833,7 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
         node_version: node.version.to_string(),
         packages: out,
         links,
+        workspaces: workspace_dirs.into_iter().map(str::to_string).collect(),
         lock_source: "package-lock.json".into(),
     })
 }
@@ -871,11 +896,12 @@ pub fn realize_node_env(
             .insert(
                 format!("pkg:{}", p.path),
                 format!(
-                    "{}:{}:{}@{}:bin[{}]",
+                    "{}:{}:{}@{}:patch[{}]:bin[{}]",
                     digest.algo(),
                     digest.hex(),
                     p.name,
                     p.version,
+                    p.patch.as_ref().map(|patch| patch.hash.as_str()).unwrap_or(""),
                     bins.join(",")
                 ),
             )
@@ -967,6 +993,45 @@ pub fn realize_node_env(
         normalize_modes(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path))
         })?;
+        if let Some(patch) = &p.patch {
+            let patch_path = Path::new(&patch.path);
+            let patch_bytes = fs::read(patch_path).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{}: read verified patch {}: {e}", p.path, patch.path),
+                )
+            })?;
+            use sha2::Digest as _;
+            let actual = hex::encode(sha2::Sha256::digest(&patch_bytes));
+            let expected = patch.hash.strip_prefix("sha256-").unwrap_or(&patch.hash);
+            if expected.len() != 64 || !expected.eq_ignore_ascii_case(&actual) {
+                return Err(err(format!(
+                    "{}: patch {} changed after lock verification (expected {}, got {})",
+                    p.path, patch.path, patch.hash, actual
+                )));
+            }
+            let file = fs::File::open(patch_path)?;
+            let status = Command::new("/usr/bin/patch")
+                .args(["-p1", "--batch", "--forward"])
+                .current_dir(&dest)
+                .stdin(file)
+                .status()
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("{}: spawn /usr/bin/patch for {}: {e}", p.path, patch.path),
+                    )
+                })?;
+            if !status.success() {
+                return Err(err(format!(
+                    "{}: applying patch {} failed",
+                    p.path, patch.path
+                )));
+            }
+            normalize_modes(&dest).map_err(|e| {
+                io::Error::new(e.kind(), format!("{}: normalize patched modes: {e}", p.path))
+            })?;
+        }
         if p.bin.is_empty() {
             if let Ok(manifest) = fs::read_to_string(dest.join("package.json")) {
                 p.bin = discover_package_bins(&manifest, &p.name, &dest)?;
@@ -1893,6 +1958,7 @@ mod tests {
             node_version: "24.20.0".into(),
             packages: Vec::new(),
             links: Vec::new(),
+            workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
         let host = Platform::host().unwrap();
@@ -1964,9 +2030,11 @@ mod tests {
                 url: "https://example.invalid/a.tgz".into(),
                 integrity: TEST_SRI.into(),
                 bin: Vec::new(),
+                patch: None,
                 optional: false,
             }],
             links: Vec::new(),
+            workspaces: Vec::new(),
             lock_source: "pnpm-lock.yaml".into(),
         };
         assert_eq!(workspace_set(&plan), vec!["packages/lib"]);
@@ -2009,6 +2077,7 @@ mod tests {
             url: "https://example.invalid/c.tgz".into(),
             integrity: TEST_SRI.into(),
             bin: Vec::new(),
+            patch: None,
             optional: false,
         };
         let first = NpmPlan {
@@ -2018,6 +2087,7 @@ mod tests {
                 package("packages/lib/node_modules/c", "2.0.0"),
             ],
             links: Vec::new(),
+            workspaces: Vec::new(),
             lock_source: "pnpm-lock.yaml".into(),
         };
         project_node_env(
@@ -2038,6 +2108,7 @@ mod tests {
             node_version: "24.20.0".into(),
             packages: vec![package("node_modules/c", "1.0.0")],
             links: Vec::new(),
+            workspaces: Vec::new(),
             lock_source: "pnpm-lock.yaml".into(),
         };
         project_node_env(
@@ -2050,6 +2121,29 @@ mod tests {
         )
         .unwrap();
         assert!(fs::symlink_metadata(&workspace_nm).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_workspace_ownership_canonicalizes_symlinked_temp_roots() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("blanket-npm-symlinked-tmp-{nonce}"));
+        let real = root.join("real");
+        let alias = root.join("alias");
+        let home = alias.join("home");
+        let project = alias.join("project");
+        let target = real.join("home/store/objects/env");
+        fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let workspace_nm = project.join("packages/lib/node_modules");
+        fs::create_dir_all(workspace_nm.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &workspace_nm).unwrap();
+
+        assert!(managed_projection_symlink(&workspace_nm, &project, &home));
         let _ = fs::remove_dir_all(root);
     }
 

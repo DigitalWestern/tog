@@ -6,13 +6,14 @@
 //! the npm tailor's literal node_modules paths before realization.
 
 use crate::fetch::Digest;
-use crate::npm::{NpmLink, NpmPackage, NpmPlan};
+use crate::npm::{NpmLink, NpmPackage, NpmPatch, NpmPlan};
 use crate::platform::Platform;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+use sha2::{Digest as Sha2Digest, Sha256};
 
 fn err(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -411,6 +412,7 @@ struct Node {
     cpu: Vec<String>,
     libc: Vec<String>,
     external: Option<String>,
+    patch: Option<NpmPatch>,
     deps: Vec<Dependency>,
 }
 
@@ -425,6 +427,125 @@ struct Graph {
     nodes: BTreeMap<String, Node>,
     roots: Vec<RootDependency>,
     workspace_roots: Vec<RootDependency>,
+    workspace_paths: BTreeSet<String>,
+    local_link_deps: BTreeMap<String, Vec<Dependency>>,
+}
+
+fn patch_path(project_dir: &Path, raw: &str) -> io::Result<PathBuf> {
+    let path = Path::new(raw);
+    if raw.is_empty()
+        || raw.starts_with('/')
+        || raw.starts_with('~')
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
+        return Err(err(format!(
+            "pnpm patch path {raw:?} must be a project-relative file"
+        )));
+    }
+    let root = project_dir.canonicalize()?;
+    let path = project_dir.join(path).canonicalize()?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err(err(format!(
+            "pnpm patch path {raw:?} is outside the project or is not a file"
+        )));
+    }
+    Ok(path)
+}
+
+fn verify_patch_hash(package: &str, path: &Path, declared: &str) -> io::Result<()> {
+    let bytes = fs::read(path)?;
+    let actual = hex::encode(Sha256::digest(&bytes));
+    let expected = declared.strip_prefix("sha256-").unwrap_or(declared);
+    if expected.len() != 64
+        || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !expected.eq_ignore_ascii_case(&actual)
+    {
+        return Err(err(format!(
+            "pnpm patch {package} hash mismatch for {} (expected {declared}, got {actual})",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn pnpm_patches(
+    root: &BTreeMap<String, YamlValue>,
+    project_dir: &Path,
+) -> io::Result<Vec<(String, NpmPatch)>> {
+    let Some(value) = root.get("patchedDependencies") else {
+        return Ok(Vec::new());
+    };
+    let patches = yaml_map(value, "pnpm patchedDependencies")?;
+    let mut result = Vec::new();
+    for (package, value) in patches {
+        // pnpm 9 writes the hash in the lockfile and uses the conventional
+        // patches/<package>@<version>.patch path. Also accept the explicit
+        // {path, hash} shape used by older/generated lockfile variants.
+        let (raw_path, hash) = if let Some(hash) = yaml_str(Some(value)) {
+            let escaped = format!("patches/{}.patch", package.replace('/', "__"));
+            let conventional = format!("patches/{package}.patch");
+            let raw_path = if project_dir.join(&escaped).is_file() {
+                escaped
+            } else {
+                conventional
+            };
+            (raw_path, hash)
+        } else {
+            let entry = yaml_map(value, &format!("pnpm patch {package}"))?;
+            let raw_path = yaml_str(entry.get("path")).ok_or_else(|| {
+                err(format!("pnpm patch {package} has no string path"))
+            })?;
+            let hash = yaml_str(entry.get("hash")).ok_or_else(|| {
+                err(format!("pnpm patch {package} has no string sha256 hash"))
+            })?;
+            (raw_path.to_string(), hash)
+        };
+        let path = patch_path(project_dir, &raw_path)?;
+        verify_patch_hash(package, &path, hash)?;
+        let identity = normalize_pnpm_snapshot_key(package).ok_or_else(|| {
+            err(format!("pnpm patch {package} has no package@version identity"))
+        })?;
+        result.push((
+            identity,
+            NpmPatch {
+                path: path.to_string_lossy().into_owned(),
+                hash: hash.to_string(),
+            },
+        ));
+    }
+    Ok(result)
+}
+
+fn attach_pnpm_patches(
+    nodes: &mut BTreeMap<String, Node>,
+    patches: &[(String, NpmPatch)],
+) -> io::Result<()> {
+    let mut applied = BTreeSet::new();
+    for node in nodes.values_mut() {
+        let Some((identity, patch)) = patches
+            .iter()
+            .find(|(identity, _)| identity_key_for_snapshot(identity) == identity_key_for_snapshot(&node.key))
+        else {
+            continue;
+        };
+        node.patch = Some(patch.clone());
+        applied.insert(identity);
+    }
+    if applied.len() != patches.len() {
+        let missing = patches
+            .iter()
+            .filter(|(identity, _)| !applied.contains(identity))
+            .map(|(identity, _)| identity)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(err(format!(
+            "pnpm patchedDependencies has no matching locked package: {missing}"
+        )));
+    }
+    Ok(())
 }
 
 fn integrity_policy(path: &str, integrity: &str) -> io::Result<()> {
@@ -577,7 +698,20 @@ fn target_for_ref(
             .split_once(':')
             .map(|(_, value)| value)
             .unwrap_or("");
-        return match workspace_target(project_dir, importer, raw) {
+        // pnpm v9 writes `file:` versions as project-relative paths even
+        // when the importer is nested, while `link:` versions remain
+        // importer-relative. Prefer the existing project-root target for the
+        // former and retain the importer-relative fallback for older locks.
+        let target = if local_reference.starts_with("file:") {
+            workspace_target(project_dir, ".", raw)
+                .ok()
+                .filter(|target| project_dir.join(target).exists())
+                .map(Ok)
+                .unwrap_or_else(|| workspace_target(project_dir, importer, raw))
+        } else {
+            workspace_target(project_dir, importer, raw)
+        };
+        return match target {
             Ok(target) => Target::Link(target),
             Err(error) => Target::External(format!(
                 "{error} (reference {reference:?}, importer {importer:?})"
@@ -613,6 +747,8 @@ fn importer_dependencies(
     snapshots: &BTreeMap<String, Node>,
     project_dir: &Path,
     catalogs: &BTreeMap<String, BTreeMap<String, String>>,
+    local_snapshots: &BTreeMap<String, Vec<Dependency>>,
+    local_link_deps: &mut BTreeMap<String, Vec<Dependency>>,
 ) -> io::Result<Vec<Dependency>> {
     let mut deps = BTreeMap::<String, Dependency>::new();
     for (field, optional) in [
@@ -640,11 +776,22 @@ fn importer_dependencies(
             let version = yaml_str(item.get("version")).ok_or_else(|| {
                 err(format!("importer {importer_name} dependency {name}: missing version"))
             })?;
+            let target = target_for_ref(name, version, importer_name, snapshots, project_dir);
+            if let Target::Link(target_path) = &target {
+                if let Some(dependencies) =
+                    local_snapshots.get(&normalize_pnpm_snapshot_key(&format!("{name}@{version}"))
+                        .unwrap_or_default())
+                {
+                    local_link_deps
+                        .entry(target_path.clone())
+                        .or_insert_with(|| dependencies.clone());
+                }
+            }
             deps.insert(
                 name.clone(),
                 Dependency {
                     name: name.clone(),
-                    target: target_for_ref(name, version, importer_name, snapshots, project_dir),
+                    target,
                     optional,
                 },
             );
@@ -706,11 +853,30 @@ fn snapshot_dependencies(
     Ok(deps.into_values().collect())
 }
 
+fn is_local_snapshot(snapshot_key: &str) -> bool {
+    normalize_pnpm_identity(snapshot_key)
+        .map(|(_, version)| version.starts_with("file:") || version.starts_with("link:"))
+        .unwrap_or(false)
+}
+
+fn local_snapshot_target(snapshot_key: &str, project_dir: &Path) -> io::Result<Option<String>> {
+    let Some((_, version)) = normalize_pnpm_identity(snapshot_key) else {
+        return Ok(None);
+    };
+    let Some(raw) = version
+        .strip_prefix("file:")
+        .or_else(|| version.strip_prefix("link:"))
+    else {
+        return Ok(None);
+    };
+    workspace_target(project_dir, ".", raw).map(Some)
+}
+
 fn pnpm_nodes(
     packages: &BTreeMap<String, YamlValue>,
     snapshots_value: Option<&YamlValue>,
     project_dir: &Path,
-) -> io::Result<BTreeMap<String, Node>> {
+) -> io::Result<(BTreeMap<String, Node>, BTreeMap<String, Vec<Dependency>>)> {
     // Keep one metadata record per canonical package key. These records are
     // tarball facts only; they are never graph nodes until a snapshot selects
     // them. This prevents a v6 `/a@1` package entry from shadowing the real
@@ -757,6 +923,7 @@ fn pnpm_nodes(
                     cpu: yaml_list(entry.get("cpu")),
                     libc: yaml_list(entry.get("libc")),
                     external,
+                    patch: None,
                     deps: Vec::new(),
                 },
             )
@@ -821,19 +988,27 @@ fn pnpm_nodes(
         // Some v9 lockfiles legitimately carry an empty snapshots map for a
         // graph with no package-to-package edges. The package entries are
         // then the complete set of real nodes, not metadata placeholders.
-        return Ok(package_nodes);
+        return Ok((package_nodes, BTreeMap::new()));
     }
 
+    let local_snapshots = snapshots
+        .iter()
+        .filter(|(snapshot_key, _)| is_local_snapshot(snapshot_key))
+        .map(|(snapshot_key, snapshot)| {
+            Ok((
+                snapshot_key.clone(),
+                snapshot_dependencies(snapshot, snapshot_key, &snapshot_metadata, project_dir)?,
+            ))
+        })
+        .collect::<io::Result<BTreeMap<_, _>>>()?;
     let mut nodes = BTreeMap::new();
     for (snapshot_key, snapshot) in snapshots {
         let Some(mut node) = snapshot_metadata.get(&snapshot_key).cloned() else {
-            let local_snapshot = normalize_pnpm_identity(&snapshot_key)
-                .map(|(_, version)| version.starts_with("file:") || version.starts_with("link:"))
-                .unwrap_or(false);
-            if local_snapshot {
+            if is_local_snapshot(&snapshot_key) {
                 // Local file/link snapshots are workspace source projections,
-                // not fetchable package nodes. Their importer edges already
-                // became Target::Link above.
+                // not fetchable package nodes. Empty local snapshots are
+                // represented by their importer Target::Link edges; their
+                // dependency edges are retained in local_snapshots below.
                 continue;
             }
             // A snapshot without package metadata cannot be fetched faithfully.
@@ -849,7 +1024,7 @@ fn pnpm_nodes(
         )?;
         nodes.insert(snapshot_key, node);
     }
-    Ok(nodes)
+    Ok((nodes, local_snapshots))
 }
 
 fn importer_map(
@@ -901,14 +1076,32 @@ pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io:
         "packages",
     )?;
     let snapshots = root.get("snapshots");
-    let nodes = pnpm_nodes(packages, snapshots, project_dir)?;
+    let patches = pnpm_patches(root, project_dir)?;
+    let (mut nodes, local_snapshots) = pnpm_nodes(packages, snapshots, project_dir)?;
+    attach_pnpm_patches(&mut nodes, &patches)?;
     let catalogs = pnpm_catalogs(root)?;
     let importers = importer_map(root)?;
     let root_importer = importers
         .get(".")
         .cloned()
         .unwrap_or_else(|| pnpm_legacy_root(root));
-    let mut roots = importer_dependencies(&root_importer, ".", &nodes, project_dir, &catalogs)?
+    let mut local_link_deps = BTreeMap::new();
+    for (snapshot_key, dependencies) in &local_snapshots {
+        if let Some(target) = local_snapshot_target(snapshot_key, project_dir)? {
+            local_link_deps
+                .entry(target)
+                .or_insert_with(|| dependencies.clone());
+        }
+    }
+    let mut roots = importer_dependencies(
+        &root_importer,
+        ".",
+        &nodes,
+        project_dir,
+        &catalogs,
+        &local_snapshots,
+        &mut local_link_deps,
+    )?
         .into_iter()
         .map(|dependency| RootDependency {
             dependency,
@@ -916,12 +1109,25 @@ pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io:
         })
         .collect::<Vec<_>>();
     let mut workspace_roots = Vec::new();
+    let workspace_paths = importers
+        .keys()
+        .filter(|name| name.as_str() != ".")
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for (importer_name, importer) in importers {
         if importer_name == "." {
             continue;
         }
         for dependency in
-            importer_dependencies(&importer, &importer_name, &nodes, project_dir, &catalogs)?
+            importer_dependencies(
+                &importer,
+                &importer_name,
+                &nodes,
+                project_dir,
+                &catalogs,
+                &local_snapshots,
+                &mut local_link_deps,
+            )?
         {
             workspace_roots.push(RootDependency {
                 dependency,
@@ -941,6 +1147,8 @@ pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io:
             nodes,
             roots,
             workspace_roots,
+            workspace_paths,
+            local_link_deps,
         },
         "pnpm-lock.yaml",
     )
@@ -1361,15 +1569,91 @@ fn yarn_workspace_manifests(
     Ok(workspaces)
 }
 
-fn version_tuple(value: &str) -> Option<(u64, u64, u64)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SemverIdentifier {
+    Numeric(u64),
+    Alpha(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Semver {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Vec<SemverIdentifier>,
+}
+
+fn parse_semver(value: &str, allow_partial: bool) -> Option<Semver> {
     let value = value.trim().trim_start_matches('v');
-    let value = value.split_once('-').map(|(value, _)| value).unwrap_or(value);
-    let mut parts = value.split('.');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next().unwrap_or("0").parse().ok()?,
-        parts.next().unwrap_or("0").parse().ok()?,
-    ))
+    let (value, _) = value.split_once('+').unwrap_or((value, ""));
+    let (core, prerelease) = value.split_once('-').unwrap_or((value, ""));
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.is_empty() || parts.len() > 3 || (!allow_partial && parts.len() != 3) {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    for part in &parts {
+        if part.is_empty() || (part.len() > 1 && part.starts_with('0')) {
+            return None;
+        }
+        numbers.push(part.parse::<u64>().ok()?);
+    }
+    while numbers.len() < 3 {
+        numbers.push(0);
+    }
+    let prerelease = if prerelease.is_empty() {
+        Vec::new()
+    } else {
+        prerelease
+            .split('.')
+            .map(|part| {
+                if part.is_empty()
+                    || !part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    || part.len() > 1 && part.starts_with('0') && part.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                if part.bytes().all(|byte| byte.is_ascii_digit()) {
+                    Some(SemverIdentifier::Numeric(part.parse().ok()?))
+                } else {
+                    Some(SemverIdentifier::Alpha(part.to_string()))
+                }
+            })
+            .collect::<Option<Vec<_>>>()?
+    };
+    Some(Semver {
+        major: numbers[0],
+        minor: numbers[1],
+        patch: numbers[2],
+        prerelease,
+    })
+}
+
+fn semver_cmp(left: &Semver, right: &Semver) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left.major, left.minor, left.patch).cmp(&(right.major, right.minor, right.patch)) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+    match (left.prerelease.is_empty(), right.prerelease.is_empty()) {
+        (true, true) | (false, false) => {}
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+    }
+    for (left, right) in left.prerelease.iter().zip(&right.prerelease) {
+        let ordering = match (left, right) {
+            (SemverIdentifier::Numeric(left), SemverIdentifier::Numeric(right)) => left.cmp(right),
+            (SemverIdentifier::Numeric(_), SemverIdentifier::Alpha(_)) => Ordering::Less,
+            (SemverIdentifier::Alpha(_), SemverIdentifier::Numeric(_)) => Ordering::Greater,
+            (SemverIdentifier::Alpha(left), SemverIdentifier::Alpha(right)) => left.cmp(right),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.prerelease.len().cmp(&right.prerelease.len())
 }
 
 fn yarn_workspace_spec_matches(specifier: &str, version: &str) -> bool {
@@ -1384,7 +1668,7 @@ fn yarn_workspace_spec_matches(specifier: &str, version: &str) -> bool {
     if matches!(specifier, "*" | "latest") {
         return true;
     }
-    let Some(candidate) = version_tuple(version) else {
+    let Some(candidate) = parse_semver(version, false) else {
         return false;
     };
     let (operator, requested) = if let Some(value) = specifier.strip_prefix('^') {
@@ -1394,17 +1678,26 @@ fn yarn_workspace_spec_matches(specifier: &str, version: &str) -> bool {
     } else {
         ('=', specifier)
     };
-    let Some(requested) = version_tuple(requested) else {
+    let Some(requested) = parse_semver(requested, true) else {
         return false;
     };
     match operator {
-        '=' => candidate == requested,
-        '~' => candidate >= requested && candidate.0 == requested.0 && candidate.1 == requested.1,
-        '^' if requested.0 != 0 => candidate >= requested && candidate.0 == requested.0,
-        '^' if requested.1 != 0 => {
-            candidate >= requested && candidate.0 == 0 && candidate.1 == requested.1
+        '=' => semver_cmp(&candidate, &requested) == std::cmp::Ordering::Equal,
+        '~' => {
+            semver_cmp(&candidate, &requested) != std::cmp::Ordering::Less
+                && candidate.major == requested.major
+                && candidate.minor == requested.minor
         }
-        '^' => candidate == requested,
+        '^' if requested.major != 0 => {
+            semver_cmp(&candidate, &requested) != std::cmp::Ordering::Less
+                && candidate.major == requested.major
+        }
+        '^' if requested.minor != 0 => {
+            semver_cmp(&candidate, &requested) != std::cmp::Ordering::Less
+                && candidate.major == 0
+                && candidate.minor == requested.minor
+        }
+        '^' => semver_cmp(&candidate, &requested) == std::cmp::Ordering::Equal,
         _ => false,
     }
 }
@@ -1468,6 +1761,7 @@ pub fn plan_yarn(
                 cpu: Vec::new(),
                 libc: Vec::new(),
                 external,
+                patch: None,
                 deps,
             },
         );
@@ -1492,13 +1786,27 @@ pub fn plan_yarn(
     }
 
     let workspaces = yarn_workspace_manifests(&package, project_dir)?;
-    let root_deps = yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
+    let mut root_deps: Vec<RootDependency> = yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
         .into_iter()
         .map(|dependency| RootDependency {
             dependency,
             workspace: None,
         })
         .collect();
+    // Yarn classic links every discovered workspace into the root, including
+    // members that no other manifest mentions. Keep these as root-local links
+    // so `require("member")` works from the repository root just as it does
+    // after a real Yarn install.
+    for workspace in &workspaces {
+        root_deps.push(RootDependency {
+            dependency: Dependency {
+                name: workspace.name.clone(),
+                target: Target::Link(workspace.path.clone()),
+                optional: false,
+            },
+            workspace: None,
+        });
+    }
     let mut workspace_roots = Vec::new();
     for workspace in &workspaces {
         for dependency in yarn_package_dependencies(
@@ -1517,6 +1825,8 @@ pub fn plan_yarn(
         nodes,
         roots: root_deps,
         workspace_roots,
+        workspace_paths: workspaces.iter().map(|workspace| workspace.path.clone()).collect(),
+        local_link_deps: BTreeMap::new(),
     };
     build_plan(platform, graph, "yarn.lock")
 }
@@ -1662,12 +1972,26 @@ fn parent_context(path: &str) -> String {
         .unwrap_or_default()
 }
 
+fn workspace_parent_context(path: &str, workspaces: &BTreeSet<String>) -> String {
+    workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace.len() < path.len()
+                && path.starts_with(workspace.as_str())
+                && path.as_bytes().get(workspace.len()) == Some(&b'/')
+        })
+        .max_by_key(|workspace| workspace.len())
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn existing_ancestor(
     parent: &str,
     name: &str,
     target: &Target,
     occupied: &BTreeMap<String, Occupied>,
     nodes: &BTreeMap<String, Node>,
+    workspaces: &BTreeSet<String>,
 ) -> Result<Option<String>, ()> {
     let mut context = parent.to_string();
     loop {
@@ -1684,11 +2008,16 @@ fn existing_ancestor(
         if context.is_empty() {
             return Ok(None);
         }
-        context = parent_context(&context);
+        context = if context.contains("/node_modules/") {
+            parent_context(&context)
+        } else {
+            workspace_parent_context(&context, workspaces)
+        };
     }
 }
 
 fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result<NpmPlan> {
+    let workspace_paths = graph.workspace_paths.clone();
     let mut occupied = BTreeMap::<String, Occupied>::new();
     let mut queue = VecDeque::<(String, Dependency, Option<String>)>::new();
     let enqueue_roots = |roots: Vec<RootDependency>, queue: &mut VecDeque<_>| {
@@ -1773,6 +2102,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                     &dependency.target,
                     &occupied,
                     &graph.nodes,
+                    &workspace_paths,
                 );
                 if let Ok(Some(path)) = &ancestor {
                     (path.clone(), true)
@@ -1914,6 +2244,14 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                     }
                 }
             }
+        } else if let Target::Link(target) = &dependency.target {
+            if expanded.insert((path.clone(), format!("link:{target}"))) {
+                if let Some(children) = graph.local_link_deps.get(target) {
+                    for child in children {
+                        queue.push_back((path.clone(), child.clone(), None));
+                    }
+                }
+            }
         }
     }
 
@@ -1932,6 +2270,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             url: node.url.clone(),
             integrity: node.integrity.clone(),
             bin: Vec::new(),
+            patch: node.patch.clone(),
             optional: node.optional,
         });
     }
@@ -1943,6 +2282,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
         node_version: crate::npm::node_pin(platform)?.version.to_string(),
         packages,
         links: links.into_values().collect(),
+        workspaces: workspace_paths.into_iter().collect(),
         lock_source: lock_source.to_string(),
     })
 }
@@ -2042,6 +2382,80 @@ packages:
             .packages
             .iter()
             .any(|package| package.name == "b"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn patched_dependencies_are_verified_and_change_the_package_identity() {
+        let dir = project();
+        let patch_path = dir.join("patches/foo@1.0.0.patch");
+        fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
+        let patch_bytes = b"diff --git a/index.js b/index.js\n";
+        fs::write(&patch_path, patch_bytes).unwrap();
+        let hash = hex::encode(Sha256::digest(patch_bytes));
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+patchedDependencies:
+  foo@1.0.0: {hash}
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  foo@1.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert_eq!(
+            plan.packages[0].patch.as_ref().map(|patch| patch.hash.as_str()),
+            Some(hash.as_str())
+        );
+        fs::write(&patch_path, b"changed patch").unwrap();
+        let error = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap_err();
+        assert!(error.to_string().contains("patch foo@1.0.0 hash mismatch"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_snapshot_dependencies_are_traversed_from_the_source_link() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      parent:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  parent@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  parent@1.0.0:
+    dependencies:
+      a: file:vendor/a
+  a@file:vendor/a:
+    dependencies:
+      b: 1.0.0
+  b@1.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan
+            .links
+            .iter()
+            .any(|link| link.target == "vendor/a"));
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.path == "node_modules/b" && package.name == "b"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2274,6 +2688,47 @@ snapshots:
     }
 
     #[test]
+    fn nested_workspace_uses_an_explicit_placement_past_an_intervening_workspace() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      c:
+        specifier: 1.0.0
+        version: 1.0.0
+  p:
+    dependencies:
+      c:
+        specifier: 2.0.0
+        version: 2.0.0
+  p/child:
+    dependencies:
+      c:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  c@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  c@2.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  c@1.0.0: {{}}
+  c@2.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert!(plan.packages.iter().any(|package| {
+            package.path == "p/node_modules/c" && package.version == "2.0.0"
+        }));
+        assert!(plan.packages.iter().any(|package| {
+            package.path == "p/child/node_modules/c" && package.version == "1.0.0"
+        }));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn yarn_v1_multi_key_sha1_and_berry_rejection() {
         let dir = project();
         let lock = "\
@@ -2345,6 +2800,67 @@ dep@1.0.0:
             .iter()
             .any(|link| link.path == "node_modules/@fixture/lib" && link.target == "packages/lib"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn yarn_links_every_discovered_member_at_the_root() {
+        let dir = project();
+        fs::create_dir_all(dir.join("packages/a")).unwrap();
+        fs::create_dir_all(dir.join("packages/b")).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("packages/a/package.json"),
+            r#"{"name":"workspace-a","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("packages/b/package.json"),
+            r#"{"name":"workspace-b","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let package = fs::read_to_string(dir.join("package.json")).unwrap();
+        let plan = plan_yarn(
+            Platform::X86_64UnknownLinuxGnu,
+            "# yarn lockfile v1\n",
+            &package,
+            &dir,
+        )
+        .unwrap();
+        assert!(plan.links.iter().any(|link| {
+            link.path == "node_modules/workspace-a" && link.target == "packages/a"
+        }));
+        assert!(plan.links.iter().any(|link| {
+            link.path == "node_modules/workspace-b" && link.target == "packages/b"
+        }));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn semver_ordering_preserves_prereleases_and_ignores_build_metadata() {
+        let ordered = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ];
+        for pair in ordered.windows(2) {
+            let left = parse_semver(pair[0], false).unwrap();
+            let right = parse_semver(pair[1], false).unwrap();
+            assert_eq!(semver_cmp(&left, &right), std::cmp::Ordering::Less);
+        }
+        let release = parse_semver("1.0.0", false).unwrap();
+        let built = parse_semver("1.0.0+ci.7", false).unwrap();
+        assert_eq!(semver_cmp(&release, &built), std::cmp::Ordering::Equal);
+        assert!(!yarn_workspace_spec_matches("1.0.0-beta.1", "1.0.0"));
+        assert!(yarn_workspace_spec_matches("1.0.0-beta.1", "1.0.0-beta.1"));
     }
 
     #[test]

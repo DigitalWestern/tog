@@ -102,9 +102,11 @@ fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
             url: format!("file://{}", tarball.display()),
             integrity: sri.into(),
             bin: vec![],
+            patch: None,
             optional: false,
         }],
         links: vec![],
+        workspaces: vec![],
     }
 }
 
