@@ -241,6 +241,7 @@ pub struct NpmPlan {
     pub node_version: String,
     pub packages: Vec<NpmPackage>,
     pub links: Vec<NpmLink>,
+    pub lock_source: String,
 }
 
 fn add_node_env_layout_input(inputs: &mut BTreeMap<String, String>, packages: &[NpmPackage]) {
@@ -533,6 +534,7 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
         node_version: node.version.to_string(),
         packages: out,
         links,
+        lock_source: "package-lock.json".into(),
     })
 }
 
@@ -1314,6 +1316,7 @@ pub fn project_node_env(
         "workspace_links": plan.links.iter().map(|l| {
             serde_json::json!({"path": l.path, "target": l.target})
         }).collect::<Vec<_>>(),
+        "lock_source": plan.lock_source,
         "packages": plan.packages.iter().map(|p| {
             serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
         }).collect::<Vec<_>>(),
@@ -1460,6 +1463,7 @@ mod tests {
             node_version: "24.20.0".into(),
             packages: Vec::new(),
             links: Vec::new(),
+            lock_source: "package-lock.json".into(),
         };
         let host = Platform::host().unwrap();
         let foreign = *Platform::ALL.iter().find(|platform| **platform != host).unwrap();

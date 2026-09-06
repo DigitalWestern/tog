@@ -365,15 +365,20 @@ packages.config files fail closed.
   blanket runs the STORE-pinned uv
   (`uv pip compile --generate-hashes`) into `requirements.lock.txt`
   (staleness-stamped, regenerated when the source changes).
-- `package.json` with no `package-lock.json` (bun/yarn/pnpm projects) →
-  blanket runs the store node's bundled npm (`npm install
-  --package-lock-only`).
+- JavaScript lock selection is `package-lock.json` first, then a pnpm
+  `pnpm-lock.yaml` importer (v9 and the compatible v6 importer shape), then a
+  Yarn classic v1 `yarn.lock`; these are parsed directly into the npm plan.
+  The pnpm subset uses a dependency-free strict 2-space YAML parser;
+  workspace links stay project-local and the closure records `lock_source`.
+  A package.json with none of those lockfiles falls back to the store node's
+  bundled npm (`npm install --package-lock-only`).
 - Missing `Cargo.lock` → the store cargo runs `generate-lockfile`.
 
-All three resolvers come from the store (uv is a pinned single-binary
-artifact like CPython/Node) — a bare machine needs nothing installed
-besides blanket itself. Proven with a scrubbed-PATH (`/usr/bin:/bin`)
-sync + run on both ecosystems, 2026-08-31.
+Delegated resolvers come from the store (uv and npm are pinned toolchain
+components like CPython/Node), while existing npm lockfiles are parsed
+locally — a bare machine needs nothing installed besides blanket itself.
+Proven with a scrubbed-PATH (`/usr/bin:/bin`) sync + run on both ecosystems,
+2026-08-31.
 
 Planning may touch the network with the ecosystem's own resolver; every
 byte that reaches an environment still goes through the verified cache and

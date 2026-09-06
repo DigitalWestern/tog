@@ -272,3 +272,24 @@ dependency).
   never distinguished them, so treat the macOS `ok` as an upper bound.
 - Wall time on the 12-core box was well under the 600 s cap for every
   repo that did not hit a build wall; re-measure here, not on the Mac.
+### NEXT item 7 measurement — 2026-09-05
+
+Command: `python3 tests/hitrate.py --repos $HOME/scratch/tmp/nx7-repos.tsv
+--work $HOME/scratch/tmp/nx7-hr --out $HOME/scratch/tmp/nx7-hr.csv
+--timeout 900 --only npm` after `cargo build --release`.
+
+| repo | result | class | one-line reason |
+|---|---|---|---|
+| vuejs/vue | fail | npm_ws_nested | `@types/estree` 0.0.39 vs 0.0.48 would need a nested workspace install in `packages/compiler-sfc` |
+| deepseek-ai/deepseek-harness | fail | npm_ws_nested | `commander` 8.3.0 vs 15.0.0 would need a nested workspace install in `apps/cli` |
+| shadcn-ui/ui | fail | npm_ws_nested | `@typescript-eslint/parser` 8.54.0 vs 8.39.0 would need a nested workspace install in `apps/v4` |
+| tailwindlabs/tailwindcss | fail | npm_ws_nested | `@emnapi/core` 2.0.0-alpha.3 vs 1.11.3 would need a nested workspace install in `crates/node` |
+| sveltejs/svelte | fail | npm_ws_nested | `esbuild` 0.27.7 vs 0.28.1 would need a nested workspace install in `packages/svelte` |
+| vitejs/vite | fail | npm_ws_nested | `magic-string` 0.30.21 vs 1.2.3 would need a nested workspace install in `packages/plugin-legacy` |
+| hoppscotch/hoppscotch | fail | npm_ws_nested | `rollup` 2.80.0 vs 4.59.0 would need a nested workspace install in `packages/codemirror-lang-graphql` |
+| Eugeny/tabby | fail | npm_script_failed | Yarn’s `@electron/node-gyp` GitHub tarball did not match its lock hash during realization |
+
+This run is 0/8, below the requested 5/8 target. The seven workspace
+failures are the deliberately fail-closed branch required when the existing
+forest cannot project a package-local `node_modules`; the Yarn miss is an
+artifact/hash failure after direct import, not npm re-resolution.

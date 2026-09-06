@@ -67,11 +67,13 @@ Use `blanket sync --strict` or `BLANKET_STRICT=1` to deny every exception.
 
 `sync` meets projects where they are: a ranged `requirements.txt` or
 `pyproject.toml` project dependency table is locked via uv
-(`requirements.lock.txt`, hash-pinned, auto-refreshed); a
-`package.json` without `package-lock.json` (bun/yarn projects) gets one
-via npm; an existing real `node_modules`/`.venv` is moved aside to
-`~/.blanket/backups/`. Resolution belongs to the ecosystem's tools —
-realization, verification, and provenance belong to blanket.
+(`requirements.lock.txt`, hash-pinned, auto-refreshed). For JavaScript,
+`package-lock.json` wins; otherwise pnpm v9 (and the compatible v6 importer
+shape) or Yarn classic v1 is imported directly, including workspace links.
+Only a lockfile-less project is resolved by the store npm. An existing real
+`node_modules`/`.venv` is moved aside to `~/.blanket/backups/`. Resolution
+belongs to the ecosystem's tools — realization, verification, and provenance
+belong to blanket.
 
 Python uses the explicit `.python-version` request when present; otherwise
 it intersects `requires-python`/`python_requires` metadata and selects the

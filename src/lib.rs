@@ -6,6 +6,7 @@ pub mod elixir;
 pub mod fetch;
 pub mod golang;
 pub mod npm;
+pub mod npm_lock_import;
 pub mod policy;
 pub mod platform;
 pub mod project;

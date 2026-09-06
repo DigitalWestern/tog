@@ -117,8 +117,12 @@ unsatisfiable constraints fail closed.
   policy.
 - **Process-tree quiescence after scripts not enforced** (a daemon
   started by postinstall can outlive realization).
-- **bun/yarn/pnpm lockfiles are re-resolved via npm** — versions may
-  differ from the original lock. Loud note printed, but versions shift.
+- **Yarn Berry is not imported**: its cache-zip checksums are not tarball
+  integrity values, so item 7 rejects it loudly and names the npm/pnpm
+  conversion path. pnpm/yarn classic imports do not currently read pnpm's
+  `hasBin` flag back from the realized package.json; lockfiles without a bin
+  map therefore do not get new `.bin` entries. Lockfile-less projects still
+  fall back to npm resolution.
 
 ## Rust / cargo
 

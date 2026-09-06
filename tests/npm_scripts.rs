@@ -94,6 +94,7 @@ fn b64(data: &[u8]) -> String {
 fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
     NpmPlan {
         node_version: "24.20.0".into(),
+        lock_source: "package-lock.json".into(),
         packages: vec![NpmPackage {
             path: "node_modules/fixture-pkg".into(),
             name: "fixture-pkg".into(),
