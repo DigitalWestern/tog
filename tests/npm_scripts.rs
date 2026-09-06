@@ -152,6 +152,14 @@ fn plan_named(tarball: &std::path::Path, sri: &str, name: &str) -> NpmPlan {
     plan
 }
 
+/// `policy`'s pending-exception list is process-global, so tests that record
+/// exceptions must not overlap: one test's exception would otherwise land in
+/// another's closure. Every test here that realizes an env holds this.
+fn policy_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn store_at(dir: &std::path::Path) -> Store {
     let root = dir.join("store");
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
@@ -254,6 +262,7 @@ fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
 #[test]
 #[ignore]
 fn network_access_during_install_script_fails() {
+    let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("BLANKET_NPM_STRICT_CHILD") {
         policy::init(std::path::Path::new(&dir), false).unwrap();
@@ -308,6 +317,7 @@ fn network_access_during_install_script_fails() {
 #[test]
 #[ignore]
 fn permissive_install_script_is_cached_but_rejected_strict() {
+    let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("BLANKET_NPM_CACHED_CHILD") {
         policy::init(std::path::Path::new(&dir), false).unwrap();
@@ -389,6 +399,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
 #[test]
 #[ignore]
 fn benign_install_script_runs_and_output_is_captured() {
+    let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
     let dir = std::env::temp_dir().join(format!("blanket-good-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -413,6 +424,7 @@ fn benign_install_script_runs_and_output_is_captured() {
 #[test]
 #[ignore]
 fn linux_npm_roundtrip() {
+    let _policy_guard = policy_guard();
     if !cfg!(target_os = "linux") {
         eprintln!("linux_npm_roundtrip skipped: supported Linux only");
         return;
@@ -590,6 +602,7 @@ console.log('linux-npm-roundtrip-ok');
 #[test]
 #[ignore]
 fn skip_download_switch_is_injected_and_recorded() {
+    let _policy_guard = policy_guard();
     // puppeteer's installer reads PUPPETEER_SKIP_DOWNLOAD (verified against the
     // package's own getConfiguration.js). The script here asserts the switch is
     // visible to the lifecycle process, which is what makes the real installer
@@ -616,6 +629,7 @@ fn skip_download_switch_is_injected_and_recorded() {
 #[test]
 #[ignore]
 fn prebuilt_downloader_is_told_to_build_from_source() {
+    let _policy_guard = policy_guard();
     // A prebuild-install style script: with the network denied the download can
     // never succeed, so blanket asks for the source build up front.
     let platform = Platform::host().expect("host platform");
