@@ -1,27 +1,35 @@
 # Blanket — next actions (2026-09-05)
 
-**Status for a fresh agent (2026-09-05, evening):** blanket is a Rust
-package-manager kernel (read ARCHITECTURE.md). **Linux x86_64 landed
-today** on branch `linux-port`, PR #1 → `main`: all seven ecosystems pass
-`tests/acceptance.sh` (35/35) on Fedora 44 with a bubblewrap sandbox, 158
-offline unit tests, every ignored e2e gate green with
-`BLANKET_SANDBOX_TESTS=required`. LINUX_PORT.md is the changelog. Hit rate
-on the same 60 pinned repos: **python Linux 16/30 vs macOS 18/30; npm
-21/30 on both** (HITRATE.md). Two adversarial reviews (Claude, GPT-6
-Astra) returned MERGE-AFTER-FIXES; their fixes are listed at the top of
-item 8. **Mac verification is done** (2026-09-05, dbf7ac4): `cargo test`,
-`bash tests/acceptance.sh` 35/35, and cold-then-warm syncs of the
-python/go/node fixtures (warm runs re-project the same objects in ~10 ms
-with no fetch/plan/lock/build lines). The three rounds found a
-locale-dependent Go fixture and a latent macOS dotnet bug, both fixed.
-Only the optional stage-6 live shared-store check (rsync a Mac store onto
-the Linux box) remains undone. On Linux run e2e gates with `TMPDIR` on a
-real disk. Items
-1–3 are done; 4, 5, 7 are not started; **items 8–12 are the Python
-coverage plan** written from the actual misses, with the specimen repo
-for every edge case so nobody has to rediscover them. Delegation: Codex
-Luna implements, Astra reviews (Claude subagents when Codex is
-rate-limited); unit tests `cargo test`, e2e `cargo test -- --ignored`.
+**Status for a fresh agent (2026-09-06, early morning):** blanket is a Rust
+package-manager kernel (read ARCHITECTURE.md). It runs on macOS arm64 and
+Linux x86_64; LINUX_PORT.md is the port's changelog and the Mac verification
+is complete (acceptance 35/35 on both platforms).
+
+**Everything in this file is merged except items 4 and 5.** In one overnight
+session (PRs #5–#12): item 9 wheel `.data` schemes, item 8 interpreter
+selection with CPython 3.10/3.11/3.14 pins, item 11 build isolation for
+compiled sdists (PEP 517 build requires, Rust toolchain + vendored crates),
+item 12 the pinned native library set (Linux), item 7 pnpm/yarn lockfile
+importers with per-workspace `node_modules`, item 10 manifest coverage
+(poetry/PDM/uv/hatch/setup.py/requirements dirs) with one shared PEP 440
+implementation in `src/pep440.rs`, and item 13 `blanket gc`.
+
+Measured effects: the 8 pnpm/yarn monorepo misses went 0/8 → 5/8; 3b1b/manim
+now syncs (native libraries); vllm stopped reporting a false success and now
+fails loudly. Each item went through Codex Luna implementation and one to five
+GPT-6 Astra adversarial review rounds; roughly seventy findings were fixed,
+several of them security-relevant (tar argument injection, escaping archive
+links, a resolver executing build backends outside the sandbox, gc deleting a
+pre-registry project's objects). The final review round for items 7, 10, 12
+and gc could not run — Codex hit its usage limit (resets 2026-09-12) — so
+those last fixes were verified against the findings and the gate by the
+supervising agent, not independently.
+
+**Open:** item 4 (git dependencies) and item 5 (built-in artifacts list) are
+not started. The optional stage-6 live shared-store check still wants both
+machines. On Linux run e2e gates with `TMPDIR` on a real disk. Delegation:
+Codex Luna implements, Astra reviews; unit tests `cargo test`, e2e
+`cargo test -- --ignored`.
 
 **What actually matters, in order** (the rest of this file is the
 backlog; this paragraph is the priority): the product is "one command in
