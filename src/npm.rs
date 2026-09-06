@@ -557,6 +557,25 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn tarball_has_binding_gyp(path: &Path) -> io::Result<bool> {
+    let output = Command::new("/usr/bin/tar")
+        .args(["-tzf"])
+        .arg(path)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("list npm tarball {}: {e}", path.display())))?;
+    if !output.status.success() {
+        return Err(err(format!(
+            "list npm tarball {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|entry| entry.trim_end_matches('/'))
+        .any(|entry| entry == "binding.gyp" || entry.ends_with("/binding.gyp")))
+}
+
 /// Realize the node_modules tree as an immutable store object.
 /// Object content root contains exactly `node_modules/`.
 pub fn realize_node_env(
@@ -615,6 +634,30 @@ pub fn realize_node_env(
             return Err(err(format!("duplicate artifact path: {}", a.path)));
         }
     }
+    // Fetch everything first.
+    let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
+    for p in &plan.packages {
+        let digest = Digest::from_sri(&p.integrity)?;
+        let t = download_verified_digest(store, &p.url, &digest).map_err(|e| {
+            io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+        })?;
+        tarballs.push((p, t));
+    }
+
+    // A native library set is a derivation input only when at least one
+    // package actually ships the binding.gyp that node-gyp will compile.
+    let mut has_native = false;
+    for (_, tarball) in &tarballs {
+        has_native |= tarball_has_binding_gyp(tarball)?;
+    }
+    let native_libs = if has_native {
+        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+    } else {
+        None
+    };
+    if let Some(native_libs) = &native_libs {
+        inputs.insert("native_libs".into(), native_libs.id.clone());
+    }
     let identity = Identity {
         kind: "node-env".into(),
         name: "env".into(),
@@ -625,16 +668,6 @@ pub fn realize_node_env(
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
-    }
-
-    // Fetch everything first.
-    let mut tarballs: Vec<(&NpmPackage, PathBuf)> = Vec::new();
-    for p in &plan.packages {
-        let digest = Digest::from_sri(&p.integrity)?;
-        let t = download_verified_digest(store, &p.url, &digest).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
-        })?;
-        tarballs.push((p, t));
     }
 
     let staged = store.stage()?;
@@ -754,7 +787,15 @@ pub fn realize_node_env(
         }
     }
 
-    run_install_scripts(store, platform, &staged, &node_obj, plan, artifacts)?;
+    run_install_scripts(
+        store,
+        platform,
+        &staged,
+        &node_obj,
+        plan,
+        artifacts,
+        native_libs.as_ref().map(|set| set.path.as_path()),
+    )?;
 
     let candidate = crate::policy::object_exceptions();
     let (object, applied) = store
@@ -803,6 +844,7 @@ fn run_install_scripts(
     node_obj: &Path,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
+    native_libs: Option<&Path>,
 ) -> io::Result<()> {
     // Scratch stage dirs (tool shims, per-package HOMEs, snapshots) are
     // removed on every exit, including the fatal Unsupported paths (missing
@@ -815,6 +857,7 @@ fn run_install_scripts(
         node_obj,
         plan,
         artifacts,
+        native_libs,
         &mut cleanup,
     );
     for t in cleanup {
@@ -830,6 +873,7 @@ fn run_install_scripts_staged(
     node_obj: &Path,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
+    native_libs: Option<&Path>,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     // Deepest first: nested deps build before their dependents.
@@ -973,9 +1017,21 @@ fn run_install_scripts_staged(
             envs.push(("CC".into(), "gcc".into()));
             envs.push(("CXX".into(), "g++".into()));
         }
+        envs.push(("PATH".into(), path_env.clone()));
+        if let Some(native_libs) = native_libs {
+            envs = crate::nativelibs::compose_env(native_libs, &envs);
+        }
+        let path_env = envs
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("/usr/bin:/bin");
         // Tools dir is readable+executable but NOT writable in-sandbox.
         let sandbox = crate::sandbox::Sandbox {
-            read: vec![staged, node_obj, &python, &tools_dir],
+            read: vec![staged, node_obj, &python, &tools_dir]
+                .into_iter()
+                .chain(native_libs)
+                .collect(),
             write: vec![&pkg_dir, &tmp],
         };
         for (phase, script) in &phases {
@@ -1296,11 +1352,13 @@ pub fn project_node_env(
         .filter(|p| mutable.iter().any(|m| *m == p.name))
         .map(|p| p.path.as_str())
         .collect();
+    let native_reference = crate::nativelibs::env_reference(env_obj)?;
 
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
     let body = serde_json::json!({
         "env_object": env_obj,
+        "native_libs": native_reference,
         "projection_schema": "node-forest/1",
         "projection_id": proj_id,
         "node_version": plan.node_version,

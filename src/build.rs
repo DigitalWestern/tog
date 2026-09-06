@@ -90,6 +90,7 @@ fn isolated_sdist_identity(
     build_env: &Path,
     rust: Option<&Path>,
     vendor: Option<&Path>,
+    native_libs: Option<&Path>,
 ) -> io::Result<Identity> {
     let mut inputs = BTreeMap::from([
         ("schema".into(), "sdist-build/3".into()),
@@ -103,6 +104,12 @@ fn isolated_sdist_identity(
     }
     if let Some(vendor) = vendor {
         inputs.insert("vendor".into(), object_id(vendor, "Cargo vendor object")?);
+    }
+    if let Some(native_libs) = native_libs {
+        inputs.insert(
+            "native_libs".into(),
+            object_id(native_libs, "native library object")?,
+        );
     }
     Ok(Identity {
         kind: "sdist-build".into(),
@@ -249,6 +256,7 @@ fn run_sdist_build(
     rust: Option<&Path>,
     vendor: Option<&Path>,
     cargo_home: Option<&Path>,
+    native_libs: Option<&Path>,
     build_plan: &Plan,
 ) -> io::Result<()> {
     let py = build_env.join("bin/python");
@@ -273,11 +281,14 @@ fn run_sdist_build(
     if has_package(build_plan, "ninja") {
         envs.push(("CMAKE_GENERATOR".into(), "Ninja".into()));
     }
-    let mut path = format!("{}:", build_env.join("bin").display());
-    if let Some(rust) = rust {
-        path.push_str(&format!("{}:", rust.join("bin").display()));
-    }
-    path.push_str("/usr/bin:/bin");
+    let base_path = {
+        let mut path = format!("{}:", build_env.join("bin").display());
+        if let Some(rust) = rust {
+            path.push_str(&format!("{}:", rust.join("bin").display()));
+        }
+        path.push_str("/usr/bin:/bin");
+        path
+    };
     if let Some(cargo_home) = cargo_home {
         envs.push(("CARGO_HOME".into(), cargo_home.display().to_string()));
         envs.push(("CARGO_NET_OFFLINE".into(), "true".into()));
@@ -288,11 +299,21 @@ fn run_sdist_build(
         // interpreter is CPython 3.12.
         envs.push(("PYO3_USE_ABI3_FORWARD_COMPATIBILITY".into(), "1".into()));
     }
+    envs.push(("PATH".into(), base_path));
+    if let Some(native_libs) = native_libs {
+        envs = crate::nativelibs::compose_env(native_libs, &envs);
+    }
+    let path = envs
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("/usr/bin:/bin");
     let sb = Sandbox {
         read: vec![build_env, cpython_obj]
             .into_iter()
             .chain(rust)
             .chain(vendor)
+            .chain(native_libs)
             .collect(),
         write: vec![work],
     };
@@ -353,20 +374,18 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let pin = crate::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
 
-    // A schema-2 cache hit stays valid even if the source is no longer
-    // available to inspect.
     let fast_identity = sdist_identity(platform, pkg, pin);
     let fast_id = fast_identity.object_id();
-    if store.has(&fast_id) {
-        crate::policy::check_cached(store, &fast_id)?;
-        return find_wheel(&store.object_path(&fast_id));
-    }
 
     let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist(&sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
     let fast_requirements = build_requires::fast_path(&info.build_requires);
+    if fast_requirements && !info.native_build && store.has(&fast_id) {
+        crate::policy::check_cached(store, &fast_id)?;
+        return find_wheel(&store.object_path(&fast_id));
+    }
     let build_plan = if fast_requirements {
         build_toolchain_plan(&pin.version)
     } else {
@@ -379,6 +398,15 @@ pub(crate) fn build_sdist_wheel_at_depth(
         )?
     };
     let build_env = project::realize_env_at_depth(store, platform, &build_plan, depth)?;
+    // Non-fast builds are isolated PEP 517 builds; they may generate C/C++
+    // sources during the backend step, so give every one the same pinned
+    // native set. The fast setuptools path stays lean unless its archive
+    // visibly contains a native source/binding.gyp.
+    let native_libs = if info.native_build || !fast_requirements {
+        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+    } else {
+        None
+    };
 
     let work = store.stage()?;
     let outdir = work.join("out");
@@ -419,11 +447,22 @@ pub(crate) fn build_sdist_wheel_at_depth(
             &build_env,
             Some(rust),
             Some(vendor),
+            native_libs.as_ref().map(|set| set.path.as_path()),
+        )?
+    } else if let Some(native_libs) = native_libs.as_ref() {
+        isolated_sdist_identity(
+            platform,
+            pkg,
+            pin,
+            &build_env,
+            None,
+            None,
+            Some(native_libs.path.as_path()),
         )?
     } else if fast_requirements {
         fast_identity
     } else {
-        isolated_sdist_identity(platform, pkg, pin, &build_env, None, None)?
+        isolated_sdist_identity(platform, pkg, pin, &build_env, None, None, None)?
     };
     let id = identity.object_id();
     if store.has(&id) {
@@ -445,6 +484,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         rust.as_deref(),
         vendor.as_deref(),
         cargo_home.as_deref(),
+        native_libs.as_ref().map(|set| set.path.as_path()),
         &build_plan,
     )?;
 
@@ -532,6 +572,7 @@ mod tests {
             &pkg,
             pin,
             Path::new("build-env-id"),
+            None,
             None,
             None,
         )

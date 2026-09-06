@@ -23,6 +23,10 @@ pub(crate) struct ArchiveInfo {
     /// Path relative to the extracted source root.
     pub cargo_manifest: Option<PathBuf>,
     pub rust_build: bool,
+    /// The archive contains a source form that commonly triggers a native
+    /// compile. This is deliberately a cheap archive-name heuristic: the
+    /// native library object is mounted only for these builds.
+    pub native_build: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +505,17 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
             })
             .map(PathBuf::from)
     });
+    let native_build = entries.iter().any(|entry| {
+        let Some(relative) = root_relative(entry, &root) else {
+            return false;
+        };
+        let path = Path::new(&relative);
+        path.file_name().and_then(|name| name.to_str()) == Some("binding.gyp")
+            || matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("c") | Some("cc") | Some("pyx")
+            )
+    });
     let rust_build = cargo_manifest.is_some()
         || is_rust_backend(&backend)
         || requires.iter().any(|requirement| {
@@ -519,6 +534,7 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
         build_backend: backend,
         cargo_manifest,
         rust_build,
+        native_build,
     })
 }
 

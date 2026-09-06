@@ -235,6 +235,32 @@ pub(crate) fn realize_env_at_depth(
         }
     }
 
+    // Inspect sdists before deriving the environment identity. Native build
+    // inputs belong to the environment's closure as well as to the individual
+    // sdist wheel derivation; otherwise a project can build against a libset
+    // and then publish an env that does not keep that object live.
+    let native_libs = if packages.iter().any(|p| p.kind == ArtifactKind::Sdist) {
+        let mut needs_native_libs = false;
+        for p in &packages {
+            if p.kind != ArtifactKind::Sdist {
+                continue;
+            }
+            let sdist = download_verified(store, &p.url, &p.sha256)?;
+            let info = crate::build_requires::inspect_sdist(&sdist)?;
+            if info.native_build || !crate::build_requires::fast_path(&info.build_requires) {
+                needs_native_libs = true;
+                break;
+            }
+        }
+        if needs_native_libs {
+            Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mut inputs = BTreeMap::new();
     inputs.insert("schema".to_string(), "python-env/2".to_string());
     inputs.insert(
@@ -262,6 +288,9 @@ pub(crate) fn realize_env_at_depth(
             ),
         };
         inputs.insert(format!("pkg:{}", p.name), value);
+    }
+    if let Some(native_libs) = &native_libs {
+        inputs.insert("native_libs".into(), native_libs.id.clone());
     }
     let identity = Identity {
         kind: "python-env".into(),
@@ -441,11 +470,13 @@ fn project_env_inner(
                 "constraint_source": serde_json::Value::Null,
             })
         });
+    let native_reference = crate::nativelibs::env_reference(env_obj)?;
     write_closure(
         project_dir,
         "python",
         serde_json::json!({
             "env_object": env_obj,
+            "native_libs": native_reference,
             "plan": plan,
             "python": python,
         }),

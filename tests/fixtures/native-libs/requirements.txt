@@ -1,0 +1,2 @@
+manimpango==0.6.1 \
+    --hash=sha256:59a00bbf8e99dab5f94341087c88e609fe946e79724627429cf59da84cbd40bf
