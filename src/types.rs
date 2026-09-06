@@ -39,6 +39,13 @@ pub struct LockedPackage {
     pub url: String,
     pub sha256: String,
     pub kind: ArtifactKind,
+    /// A git dependency pinned to a commit (NEXT.md item 4). The checkout is
+    /// packed into a deterministic sdist before building, so everything
+    /// downstream — build-system inspection, isolated build envs, identity —
+    /// is the ordinary sdist path. Absent for registry packages, so plans
+    /// written before this field stay readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::gitsrc::GitSource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

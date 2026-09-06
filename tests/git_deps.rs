@@ -130,3 +130,64 @@ fn an_unpinned_git_reference_is_refused() {
 }
 
 fn _unused(_: NpmPlan) {}
+
+/// A minimal installable Python package in a local repository.
+fn python_fixture_repo(root: &Path) -> (String, String) {
+    let repo = root.join("py-repo");
+    std::fs::create_dir_all(repo.join("gitdep")).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["config", "user.email", "t@example.invalid"], &repo);
+    git(&["config", "user.name", "t"], &repo);
+    std::fs::write(
+        repo.join("pyproject.toml"),
+        "[build-system]\nrequires = [\"setuptools>=40.8.0\", \"wheel\"]\nbuild-backend = \"setuptools.build_meta\"\n\n[project]\nname = \"gitdep\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("gitdep/__init__.py"),
+        "VALUE = 'from-git-python'\n",
+    )
+    .unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-qm", "one"], &repo);
+    let commit = git(&["rev-parse", "HEAD"], &repo);
+    (format!("git+file://{}", repo.display()), commit)
+}
+
+#[test]
+#[ignore]
+fn python_git_dependency_builds_a_wheel_from_its_commit() {
+    let platform = Platform::host().expect("host platform");
+    let root = temp("py");
+    let (url, commit) = python_fixture_repo(&root.0);
+    let store = store_at(&root.0);
+    policy::clear();
+
+    let requirement = format!("gitdep @ {url}@{commit}");
+    let reqs = blanket::pypi::parse_requirements(&requirement).expect("parse");
+    let packages = blanket::pypi::lock_requirements(
+        platform,
+        blanket::pypi::Glibc(0, 0),
+        &reqs,
+        "cp312",
+    )
+    .expect("lock");
+    assert_eq!(packages.len(), 1);
+    assert!(packages[0].git.is_some(), "the package carries its git source");
+
+    let plan = blanket::types::Plan {
+        ecosystem: "python".into(),
+        python_version: "3.12.14".into(),
+        packages,
+    };
+    let env = blanket::project::realize_env(&store, platform, &plan).expect("realize");
+    let site = env.join("lib/python3.12/site-packages/gitdep/__init__.py");
+    assert_eq!(
+        std::fs::read_to_string(&site).unwrap(),
+        "VALUE = 'from-git-python'\n"
+    );
+
+    // The commit determines the environment: realizing again is a cache hit.
+    let again = blanket::project::realize_env(&store, platform, &plan).expect("second realize");
+    assert_eq!(env, again);
+}
