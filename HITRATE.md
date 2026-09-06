@@ -318,3 +318,9 @@ The measurement exceeded the requested 5/8 target. The tailwind failure is
 not a workspace-placement failure; its exact script-side operation remains
 unverified beyond the sandbox's permission diagnostic. The hoppscotch and
 Tabby misses are intentional future git-source coverage.
+
+**Stale since 2026-09-06:** item 4 shipped after this run (git dependencies are
+realized from their commit in npm, python and cargo, PRs #14–#16), so the
+`npm_git_dep` blocker behind the hoppscotch and Tabby rows no longer exists.
+Neither repo has been re-measured — the rows above are what was true on the
+day, not what is true now. Re-run before quoting this table's hit rate.

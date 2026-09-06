@@ -1,10 +1,11 @@
 # Blanket CLI — the plan for levels one and two
 
-*Written 2026-09-06. Status: design, nothing below is merged. Level one has
-an uncommitted draft in the working tree (`src/cli.rs`); level two is not
-started. Level three (blanket standing in for pip/npm/cargo in the shell,
-shims, activation) is deliberately out of scope here and gets its own
-document when we come back to it.*
+*Written 2026-09-06. Status: levels one and two are implemented on branch
+`cli/levels-1-2` (PR #20) and not yet merged to main; this document is the
+spec they were built against, kept as written so the two can be compared.
+Unreviewed — see REVIEW.md entry 1. Level three (blanket standing in for
+pip/npm/cargo in the shell, shims, activation) is deliberately out of scope
+here and gets its own document when we come back to it.*
 
 The thesis, one line: **blanket wins by being the easiest tool in the room,
 and the CLI is where easy is decided.** Every verb below is judged by one

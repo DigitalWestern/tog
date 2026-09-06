@@ -486,18 +486,51 @@ the file held two writers' interleaved bytes).
 
 ## Layout
 
+Command surface (`cli.rs` is pure; everything it decides is unit-testable):
+
     src/cli.rs      command grammar + help (pure, unit-tested; see CLI.md)
+    src/main.rs     dispatcher + per-ecosystem orchestration
     src/ui.rs       output conventions: quiet/verbose/color, error channel
     src/inspect.rs  status / ls / doctor: read-only views over closures + store
-    src/main.rs     dispatcher + per-ecosystem orchestration
+    src/deps.rs     add / remove / update, delegated to each ecosystem's tool
+    src/xrun.rs     blanket x: run a registry tool without adding it to a project
+
+Kernel — identity, the store, and how anything becomes an object:
+
     src/types.rs    Identity, Plan, LockedPackage
     src/store.rs    immutable store: stage/commit/cache
     src/fetch.rs    verified downloads
-    src/python.rs   pinned CPython provisioning
+    src/gitsrc.rs   git sources realized by commit (NEXT.md item 4)
+    src/project.rs  env realization + projection
     src/policy.rs   permissive/strict exception policy
+    src/gc.rs       store garbage collection
+    src/sbom.rs     CycloneDX 1.5 JSON from the closure envelopes
+    src/platform.rs the only module that knows the host
+    src/sandbox.rs  hermetic build sandbox (Seatbelt / bubblewrap)
+    src/build.rs    sandboxed sdist-to-wheel builds
+    src/build_requires.rs  static inspection of PEP 517 build requirements
+    src/nativelibs.rs      pinned, relocatable native libraries for Linux builds
+    src/artifacts.rs       install-time artifact policy (NEXT.md item 5)
+
+Python:
+
     src/pypi.rs     Python planner (adapter)
     src/wheel.rs    PEP 427 wheel installer
-    src/project.rs  env realization + projection
+    src/python.rs   pinned CPython provisioning
+    src/pyselect.rs CPython constraint parsing and selection
+    src/pep440.rs   dependency-free PEP 440 parser and specifier evaluator
+    src/manifest.rs Python manifest discovery and normalization
+
+Ecosystem tailors — each imports a lockfile and plans a closure:
+
+    src/npm.rs             npm planner, projection, lifecycle scripts
+    src/npm_lock_import.rs pnpm and Yarn classic lockfile importers
+    src/cargo.rs           Cargo.lock importer + registry vendor realization
+    src/golang.rs          module closure via the pinned Go toolchain
+    src/ruby.rs            Bundler-delegated planning, blanket-verified gems
+    src/elixir.rs          Mix/Hex, AST-validated lockfile
+    src/dotnet.rs          NuGet packages.lock.json (blanket-mandatory)
+
     tests/acceptance.sh   end-to-end checklist against real PyPI
 
 ## Roadmap
@@ -507,11 +540,11 @@ M4 (done): npm tailor — lockfile importer, pinned Node, forest projection.
 M4.5 (done): real-project compatibility — hermetic lifecycle scripts,
     declared artifacts, workspaces (link entries), uv/npm resolution
     delegation, mutable-package projections, store concurrency locks.
-    Known remaining npm gaps: per-workspace nested node_modules (version
-    conflicts inside workspaces are rejected with a hoisting hint), git/file
-    `resolved` URLs, install scripts that need network for logic (not just
-    artifacts) — those retain the package with `install-script-failed`;
-    strict policy refuses them.
+    Known remaining npm gaps: install scripts that need network for logic
+    (not just artifacts) — those retain the package with
+    `install-script-failed`; strict policy refuses them. (Nested
+    per-workspace node_modules landed with item 7, and git `resolved` URLs
+    with item 4.)
 M5: hardening pass — RECORD verification/rewrite, Mach-service allowlist in
     the sandbox, macOS deployment-target tag comparison, reproducibility
     checks (rebuild + compare), garbage collection (`blanket gc` — forests

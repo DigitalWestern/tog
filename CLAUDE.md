@@ -1,12 +1,20 @@
 # blanket
 
 Rust workspace: universal package-manager kernel. Read ARCHITECTURE.md first;
-design history in blanket-notes.md.
+design history in blanket-notes.md. What is built is in NEXT.md; what has not
+been independently reviewed is in REVIEW.md — check it before trusting a
+recent feature.
 
 - Build: `cargo build` · unit tests: `cargo test` (offline)
 - Heavy integration tests (network + real PyPI): `cargo test -- --ignored`
   or the full checklist: `bash tests/acceptance.sh`
-- Never point `BLANKET_STORE` at a real store in tests — use a temp dir.
+- `cargo test | tail` reports the exit code of `tail`, so a failing suite looks
+  green. Use `set -o pipefail`, or do not pipe.
+- Never point `BLANKET_STORE` at a real store in tests — use a temp dir. It is
+  process-global, so a test that sets or clears it must hold
+  `store::STORE_ENV_LOCK`, or it will redirect a concurrent test to the real
+  store. Tests that record policy exceptions take the matching guard around
+  `policy::clear()`.
 - Store objects are immutable and input-addressed; changing what goes INTO
   an object (inputs map in `Identity`) changes its id — never mutate an
   existing object's semantics without a new identity field.

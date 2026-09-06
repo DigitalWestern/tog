@@ -6,8 +6,9 @@ content-addressed store, project an environment, run your code.
 
 Nix's model, without Nix's interface. See [ARCHITECTURE.md](ARCHITECTURE.md)
 for how it works, [ROADMAP.md](ROADMAP.md) for where it's pointed
-(enterprise supply-chain security + the four pillars), and
-[blanket-notes.md](blanket-notes.md) for the design history.
+(enterprise supply-chain security + the four pillars),
+[blanket-notes.md](blanket-notes.md) for the design history, and
+[REVIEW.md](REVIEW.md) for what has not yet been independently reviewed.
 
 The vocabulary: each language gets a **tailor** (adapter) that cuts its
 ecosystem's packages into a **pattern** (locked plan), which blanket

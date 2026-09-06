@@ -25,7 +25,7 @@ and gc could not run — Codex hit its usage limit (resets 2026-09-12) — so
 those last fixes were verified against the findings and the gate by the
 supervising agent, not independently.
 
-**Every item in this file is now merged** (PRs #5–#17). Items 4 and 5 were
+**Every item in this file is now merged** (PRs #5–#19). Items 4 and 5 were
 finished on 2026-09-06 morning: git dependencies are realized from their commit
 in npm, python and cargo, and electron's release zip is provisioned into the
 cache its own installer reads.
@@ -34,20 +34,23 @@ cache its own installer reads.
 per CLI.md levels one and two — validated grammar with help/version/-C/-q/-v,
 bare `blanket` = sync, `blanket <script>`, `status`, `ls`, `doctor`,
 `completions`, `add`/`remove`/`update` (evidence ladder + delegation table),
-and `x`. Merged with main at PR #19. Needs: review, the Mac run, and the
-ignored per-ecosystem e2e tests for `add`.
+and `x`. Open as PR #20, carrying main up to PR #19; not merged. Needs:
+independent review (REVIEW.md entry 1), the Mac run, and the ignored
+per-ecosystem e2e tests for `add`. Unit tests pass: 342, none ignored-and-run.
 
 **Open:** SBOM `vcs` external references for git components; more provisioning
 entries (sharp <0.33, node-sass, sentry-cli) when a real project needs them;
 the optional stage-6 live shared-store check, which wants both machines. On
 Linux run e2e gates with `TMPDIR` on a real disk.
 
-**Review debt (read this before trusting the last stretch):** Codex hit its
-usage limit at 03:18 on 2026-09-06 and resets 2026-09-12. The final review
-round for items 7, 10, 12 and gc, and all of items 4 and 5, was done by the
-supervising agent rather than by an independent adversarial reviewer. Astra
-found roughly seventy real defects across the reviewed rounds — several
-security-relevant — so that gap is worth closing when credits return.
+**Review debt (read this before trusting the last stretch):** the queue lives
+in **REVIEW.md** — what has not been independently reviewed, why each entry
+matters, and where to look. In short: items 4 and 5 and the whole CLI branch
+have had no independent adversarial review, and the final round for items 7,
+10, 12 and gc was verified by the supervising agent rather than by Astra.
+Codex hit its usage limit at 03:18 on 2026-09-06 and resets 2026-09-12. Astra
+found roughly seventy real defects across the rounds that did run, several
+security-relevant, which is the measure of what an unreviewed stretch is worth.
 
 Delegation: Codex Luna implements, Astra reviews (Claude subagents when Codex
 is rate-limited); unit tests `cargo test`, e2e `cargo test -- --ignored`.
@@ -195,7 +198,8 @@ workspace-local links and `.bin` maps, package.json bin discovery, platform
 filtering, and closure `lock_source`; Berry is rejected with an item-7
 diagnostic. Round 2 measured 5/8 on the pinned eight-repo npm slice; the
 remaining three are a native/install-script permission failure and two git
-sources deferred to item 4. See the dated table in HITRATE.md.
+sources deferred to item 4 (which has since shipped; those two repos have not
+been re-measured). See the dated table in HITRATE.md.
 
 ## 8. Interpreter selection + CPython 3.10/3.11/3.14 pins — DONE (2026-09-05)
 
