@@ -9,6 +9,7 @@
 use crate::store::Store;
 use crate::types::Identity;
 use std::collections::BTreeMap;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +28,51 @@ pub struct GitSource {
 
 fn err(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
+}
+
+/// Schemes git may be asked to fetch. Anything else — or a value that could be
+/// read as an option — is refused before it reaches the git command line,
+/// because lockfile URLs are attacker-editable.
+const ALLOWED_SCHEMES: &[&str] = &["https://", "ssh://", "git://", "file://"];
+
+/// A name or version safe to use as a path component and an archive member.
+pub fn is_safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('-')
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'+')
+}
+
+/// Refuse a source git must not be handed: an unknown scheme, an
+/// option-looking URL, or a malformed commit.
+pub fn validate_source(source: &GitSource) -> io::Result<()> {
+    if !is_full_commit(&source.commit) {
+        return Err(err(format!(
+            "{}: git sources must be pinned to a full commit, got {:?}",
+            source.url, source.commit
+        )));
+    }
+    if source.url.starts_with('-') || !ALLOWED_SCHEMES.iter().any(|s| source.url.starts_with(s)) {
+        return Err(err(format!(
+            "refusing git URL {:?}: expected one of {}",
+            source.url,
+            ALLOWED_SCHEMES.join(", ")
+        )));
+    }
+    if let Some(subdirectory) = &source.subdirectory {
+        if subdirectory.starts_with('/')
+            || subdirectory.split(['/', '\\']).any(|part| part == "..")
+        {
+            return Err(err(format!(
+                "refusing git subdirectory {subdirectory:?}: it escapes the checkout"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn is_full_commit(value: &str) -> bool {
@@ -136,6 +182,12 @@ pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
         return Ok(reference.to_ascii_lowercase());
     }
     let url = normalize_url(url);
+    if url.starts_with('-') || !ALLOWED_SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return Err(err(format!("refusing git URL {url:?}")));
+    }
+    if reference.starts_with('-') || reference.contains(char::is_whitespace) {
+        return Err(err(format!("refusing git ref {reference:?}")));
+    }
     let out = git_ok(
         &["ls-remote", &url, reference],
         None,
@@ -179,12 +231,7 @@ fn remove_git_dirs(root: &Path) -> io::Result<()> {
 
 /// Realize a git source in the store and return its object path.
 pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBuf> {
-    if !is_full_commit(&source.commit) {
-        return Err(err(format!(
-            "{}: git sources must be pinned to a full commit, got {:?}",
-            source.url, source.commit
-        )));
-    }
+    validate_source(source)?;
     let identity = identity(source);
     let id = identity.object_id();
     if store.has(&id) {
@@ -406,40 +453,115 @@ mod realization_tests {
 /// hash, and that hash is what the wheel's identity commits to.
 pub fn pack_checkout(
     store: &Store,
+    platform: crate::platform::Platform,
     source_root: &Path,
     name: &str,
     version: &str,
 ) -> io::Result<(String, String)> {
+    if !is_safe_component(name) || !is_safe_component(version) {
+        return Err(err(format!(
+            "refusing to pack {name:?}-{version:?}: names and versions must be [A-Za-z0-9._+-]"
+        )));
+    }
     let work = store.stage()?;
     let prefix = format!("{name}-{version}");
     let filename = format!("{prefix}.tar.gz");
+    // Copy under the final prefix directory so the archive needs no name
+    // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
+    // would take a rewrite expression built from these strings.
+    let staged = work.join(&prefix);
+    crate::project::clone_tree(source_root, &staged)?;
+    normalize_for_packing(&staged)?;
+
+    // Determinism, portably: an explicit sorted file list (both tars accept
+    // -T), the ustar header format, zeroed mtimes and owners, and gzip -n so
+    // the container carries no timestamp either.
+    let mut files = Vec::new();
+    collect_files(&staged, &work, &mut files)?;
+    files.sort();
+    let list = work.join(".blanket-filelist");
+    fs::write(&list, files.join("\n") + "\n")?;
+
     let archive = work.join(&filename);
-    let output = Command::new("/usr/bin/tar")
-        .args([
-            "--sort=name",
-            "--mtime=@0",
-            "--owner=0",
-            "--group=0",
-            "--numeric-owner",
-            "--mode=go-w",
-            "--format=gnu",
-        ])
-        .arg(format!("--transform=s,^\\.,{prefix},"))
-        .arg("-czf")
-        .arg(&archive)
+    let owner_flags: &[&str] = if platform.is_macos() {
+        // bsdtar
+        &["--uid", "0", "--gid", "0", "--numeric-owner"]
+    } else {
+        // GNU tar
+        &["--owner=0", "--group=0", "--numeric-owner"]
+    };
+    let tar = Command::new("/usr/bin/tar")
+        .args(["-cf", "-", "--format=ustar"])
+        .args(owner_flags)
         .arg("-C")
-        .arg(source_root)
-        .arg(".")
+        .arg(&work)
+        .arg("-T")
+        .arg(&list)
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let gzip = Command::new("/usr/bin/gzip")
+        .args(["-n", "-9", "-c"])
+        .stdin(tar.stdout.ok_or_else(|| err("tar produced no output"))?)
+        .stdout(fs::File::create(&archive)?)
         .output()?;
-    if !output.status.success() {
+    if !gzip.status.success() {
         let _ = crate::store::remove_tree(&work);
         return Err(err(format!(
             "packing {} failed: {}",
             source_root.display(),
-            String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("")
+            String::from_utf8_lossy(&gzip.stderr).lines().next().unwrap_or("")
         )));
     }
     let (sha256, _) = crate::fetch::cache_insert(store, &archive)?;
     let _ = crate::store::remove_tree(&work);
     Ok((sha256, filename))
+}
+
+/// Zero every mtime and give every entry a fixed mode, so two machines packing
+/// the same commit produce the same bytes.
+fn normalize_for_packing(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let epoch = std::time::SystemTime::UNIX_EPOCH;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+                stack.push(path);
+                continue;
+            }
+            let executable = fs::metadata(&path)?.permissions().mode() & 0o111 != 0;
+            fs::set_permissions(
+                &path,
+                fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+            )?;
+            fs::File::options().write(true).open(&path)?.set_modified(epoch)?;
+        }
+    }
+    fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// Every regular file under `root`, as a path relative to `base`.
+fn collect_files(root: &Path, base: &Path, out: &mut Vec<String>) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_files(&path, base, out)?;
+        } else if file_type.is_file() {
+            let relative = path
+                .strip_prefix(base)
+                .map_err(|_| err("packed file escaped the staging directory"))?;
+            out.push(relative.to_string_lossy().into_owned());
+        }
+    }
+    Ok(())
 }

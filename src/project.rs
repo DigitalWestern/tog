@@ -288,7 +288,7 @@ fn environment_identity(
                 // archive's hash (a pure function of the commit's tree).
                 let owned;
                 let p = if p.git.is_some() {
-                    owned = crate::build::git_sdist_package(store, p)?;
+                    owned = crate::build::git_sdist_package(store, platform, p)?;
                     &owned
                 } else {
                     p
@@ -382,7 +382,7 @@ pub(crate) fn realize_env_at_depth(
             ArtifactKind::Sdist => {
                 let owned;
                 let source = if p.git.is_some() {
-                    owned = crate::build::git_sdist_package(store, p)?;
+                    owned = crate::build::git_sdist_package(store, platform, p)?;
                     &owned
                 } else {
                     p

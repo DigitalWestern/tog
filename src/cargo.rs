@@ -390,8 +390,20 @@ pub struct CargoCrate {
 pub struct CargoGitSource {
     /// The lockfile's `source` value, e.g. `git+https://host/o/r?rev=<sha>#<sha>`.
     pub source: String,
+    /// The git reference the lock names: cargo keys source replacement on the
+    /// SourceId (url plus reference kind), so a `?branch=`/`?tag=` source must
+    /// be replaced with the same kind, not with `rev`.
+    pub reference: CargoGitReference,
     #[serde(skip)]
     pub inner: crate::gitsrc::GitSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum CargoGitReference {
+    Branch(String),
+    Tag(String),
+    Rev(String),
+    Default,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -540,9 +552,26 @@ pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
     if !crate::gitsrc::is_full_commit(commit) {
         return None;
     }
-    let url = locator.split_once('?').map(|(before, _)| before).unwrap_or(locator);
+    let (url, query) = match locator.split_once('?') {
+        Some((before, query)) => (before, Some(query)),
+        None => (locator, None),
+    };
+    let reference = query
+        .and_then(|query| {
+            query.split('&').find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                match key {
+                    "branch" => Some(CargoGitReference::Branch(value.to_string())),
+                    "tag" => Some(CargoGitReference::Tag(value.to_string())),
+                    "rev" => Some(CargoGitReference::Rev(value.to_string())),
+                    _ => None,
+                }
+            })
+        })
+        .unwrap_or(CargoGitReference::Default);
     Some(CargoGitSource {
         source: source.to_string(),
+        reference,
         inner: crate::gitsrc::GitSource {
             url: crate::gitsrc::normalize_url(url),
             commit: commit.to_ascii_lowercase(),
@@ -885,11 +914,19 @@ pub(crate) fn blanket_config_text_for(
         }
         let key = serde_json::to_string(&git.source)?;
         let url = serde_json::to_string(&git.inner.url)?;
-        let rev = serde_json::to_string(&git.inner.commit)?;
+        let reference = match &git.reference {
+            CargoGitReference::Branch(branch) => {
+                format!("branch = {}\n", serde_json::to_string(branch)?)
+            }
+            CargoGitReference::Tag(tag) => format!("tag = {}\n", serde_json::to_string(tag)?),
+            CargoGitReference::Rev(rev) => format!("rev = {}\n", serde_json::to_string(rev)?),
+            // No reference in the lock means cargo's default branch.
+            CargoGitReference::Default => String::new(),
+        };
         text.push_str(&format!(
             "[source.{key}]\n\
              git = {url}\n\
-             rev = {rev}\n\
+             {reference}\
              replace-with = \"blanket-vendor\"\n"
         ));
     }
@@ -1819,6 +1856,18 @@ mod git_source_tests {
         assert_eq!(text.matches("replace-with").count(), 2, "one per source plus crates-io: {text}");
         assert!(text.contains("git = \"https://github.com/o/r\""), "{text}");
         assert!(text.contains(&format!("rev = \"{commit}\"")), "{text}");
+
+        // cargo matches on the SourceId, so a branch/tag source must be
+        // replaced with the same reference kind, not with rev.
+        let branch_source = format!("git+https://github.com/o/r?branch=main#{commit}");
+        let branch = parse_cargo_git_source(&branch_source).unwrap();
+        let branch_text = blanket_config_text_for(Path::new("/store/vendor"), &[branch]).unwrap();
+        assert!(branch_text.contains("branch = \"main\""), "{branch_text}");
+        assert!(!branch_text.contains("rev = "), "{branch_text}");
+        let tag_source = format!("git+https://github.com/o/r?tag=v1#{commit}");
+        let tag = parse_cargo_git_source(&tag_source).unwrap();
+        let tag_text = blanket_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
+        assert!(tag_text.contains("tag = \"v1\""), "{tag_text}");
         assert!(text.trim_end().ends_with("offline = true"), "{text}");
     }
 

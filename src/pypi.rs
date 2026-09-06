@@ -117,8 +117,14 @@ pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
     if !crate::gitsrc::is_full_commit(commit) {
         return None;
     }
+    let name = normalize_name(name);
+    // The name becomes a path component and an archive member, so it must be
+    // a plain component — normalize_name alone still admits '/' and ','.
+    if !crate::gitsrc::is_safe_component(&name) {
+        return None;
+    }
     Some(Requirement {
-        name: normalize_name(name),
+        name,
         // A git requirement has no release version; the commit names it.
         version: format!("0+git.{}", &commit[..12]),
         sha256s: Vec::new(),

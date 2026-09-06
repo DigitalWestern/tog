@@ -121,6 +121,76 @@ pub fn electron_cache_directory(release_url: &str) -> String {
 
 /// Download electron's zip and its checksum file into `scratch` so the
 /// package's own installer finds them with the network denied.
+/// Resolve electron's zip name and sha256 for this platform, caching the
+/// release's checksum manifest in the store.
+///
+/// The result is an identity input (a GitHub release asset can be replaced,
+/// so the version alone does not determine the bytes), which is why this is
+/// separate from placement and why the manifest is cached: an environment
+/// identity must not need the network on a warm store.
+fn resolve_electron(
+    store: &Store,
+    platform: Platform,
+    version: &str,
+) -> io::Result<(String, String, String, String)> {
+    let (os, arch) = electron_platform(platform);
+    let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
+    let zip_name = format!("electron-v{version}-{os}-{arch}.zip");
+    let cached = store
+        .root
+        .join("cache/electron-shasums")
+        .join(electron_cache_directory(&release_url));
+    let sums = match fs::read_to_string(cached.join("SHASUMS256.txt")) {
+        Ok(text) => text,
+        Err(_) => {
+            let sums_url = format!("{release_url}/SHASUMS256.txt");
+            // Trust-on-first-use over HTTPS, exactly like the pinned toolchain
+            // tables: this IS the checksum source. The zip is then verified
+            // against it, so a corrupted or swapped zip fails.
+            let text = crate::fetch::fetch_text(&sums_url).map_err(|e| {
+                io::Error::new(e.kind(), format!("electron {version}: fetch {sums_url}: {e}"))
+            })?;
+            fs::create_dir_all(&cached)?;
+            fs::write(cached.join("SHASUMS256.txt"), text.as_bytes())?;
+            text
+        }
+    };
+    let sha256 = sums
+        .lines()
+        .find_map(|line| {
+            let (hash, file) = line.split_once(char::is_whitespace)?;
+            (file.trim_start_matches('*') == zip_name).then(|| hash.trim().to_ascii_lowercase())
+        })
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "electron {version}: {zip_name} is not listed in SHASUMS256.txt"
+            ))
+        })?;
+    Ok((sha256, sums, release_url, zip_name))
+}
+
+/// The identity input a provisioned artifact contributes, if any. Returns None
+/// for packages blanket does not provision.
+pub fn provisioned_identity_input(
+    store: &Store,
+    platform: Platform,
+    name: &str,
+    version: &str,
+) -> io::Result<Option<String>> {
+    if name != "electron" {
+        return Ok(None);
+    }
+    let version = version.trim_start_matches('v');
+    if !version.starts_with(|c: char| c.is_ascii_digit())
+        || !crate::gitsrc::is_safe_component(version)
+    {
+        return Ok(None);
+    }
+    let (sha256, _, _, zip_name) = resolve_electron(store, platform, version)?;
+    Ok(Some(format!("{zip_name}:{sha256}")))
+}
+
 pub fn provision(
     store: &Store,
     platform: Platform,
@@ -132,38 +202,33 @@ pub fn provision(
         return Ok(None);
     }
     let version = version.trim_start_matches('v');
-    if version.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+    // The version comes from a lockfile, which is attacker-editable. It is
+    // interpolated into the release URL and into a filename, so anything but a
+    // plain version string is refused before either is built: otherwise
+    // `1/../../../someone/else/releases/download/v1` resolves to another
+    // repository's release (self-consistent zip AND checksum manifest), and a
+    // `/../` in the filename writes the fetched bytes outside the cache dir.
+    if !version.starts_with(|c: char| c.is_ascii_digit())
+        || !crate::gitsrc::is_safe_component(version)
+    {
         return Ok(None);
     }
-    let (os, arch) = electron_platform(platform);
-    let release_url =
-        format!("https://github.com/electron/electron/releases/download/v{version}");
-    let zip_name = format!("electron-v{version}-{os}-{arch}.zip");
-    let sums_url = format!("{release_url}/SHASUMS256.txt");
-
-    // The checksum file is trust-on-first-use over HTTPS, exactly like the
-    // pinned toolchains: it is what upstream publishes for this release. The
-    // zip is then verified against it, so a corrupted or swapped zip fails.
-    let sums = crate::fetch::fetch_text(&sums_url).map_err(|e| {
-        io::Error::new(e.kind(), format!("electron {version}: fetch {sums_url}: {e}"))
-    })?;
-    let sha256 = sums
-        .lines()
-        .find_map(|line| {
-            let (hash, file) = line.split_once(char::is_whitespace)?;
-            (file.trim_start_matches('*') == zip_name).then(|| hash.trim().to_ascii_lowercase())
-        })
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "electron {version}: {zip_name} is not listed in SHASUMS256.txt"
-            ))
-        })?;
+    let (sha256, sums, release_url, zip_name) = resolve_electron(store, platform, version)?;
     let zip = crate::fetch::download_verified(store, &format!("{release_url}/{zip_name}"), &sha256)?;
 
     let cache_root = scratch.join(".cache/blanket-electron");
     let dir = cache_root.join(electron_cache_directory(&release_url));
     fs::create_dir_all(&dir)?;
-    fs::copy(&zip, dir.join(&zip_name))?;
+    // Belt and braces: the destination must still be inside the cache dir.
+    let zip_dest = dir.join(&zip_name);
+    if zip_dest.parent() != Some(dir.as_path()) {
+        return Err(io::Error::other(format!(
+            "refusing to write {} outside {}",
+            zip_dest.display(),
+            dir.display()
+        )));
+    }
+    fs::copy(&zip, &zip_dest)?;
     fs::write(dir.join("SHASUMS256.txt"), sums.as_bytes())?;
 
     Ok(Some(Provisioning {

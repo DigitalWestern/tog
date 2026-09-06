@@ -547,6 +547,7 @@ pub fn build_sdist_wheel_with_runtime_plan(
 /// always produces the same wheel identity.
 pub(crate) fn git_sdist_package(
     store: &Store,
+    platform: Platform,
     pkg: &LockedPackage,
 ) -> io::Result<LockedPackage> {
     let source = pkg.git.as_ref().ok_or_else(|| {
@@ -582,7 +583,7 @@ pub(crate) fn git_sdist_package(
         ));
     }
     let (sha256, filename) =
-        crate::gitsrc::pack_checkout(store, &root, &pkg.name, &pkg.version)?;
+        crate::gitsrc::pack_checkout(store, platform, &root, &pkg.name, &pkg.version)?;
     Ok(LockedPackage {
         name: pkg.name.clone(),
         version: pkg.version.clone(),
