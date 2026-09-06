@@ -32,6 +32,15 @@ enum ArchiveKind {
     Zip,
 }
 
+#[derive(Debug, Clone)]
+struct ArchiveEntry {
+    /// The name as stored in the archive.  Archive readers need this exact
+    /// spelling (notably tar members prefixed with `./`).
+    original: String,
+    /// The validated, normalized spelling used for root and member checks.
+    normalized: String,
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -93,7 +102,7 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     }
 }
 
-fn tar_entries(path: &Path) -> io::Result<Vec<String>> {
+fn tar_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
     let output = Command::new("/usr/bin/tar")
         .args(["-tzf"])
         .arg(path)
@@ -113,13 +122,16 @@ fn tar_entries(path: &Path) -> io::Result<Vec<String>> {
         .map(|line| {
             let text = std::str::from_utf8(line)
                 .map_err(|_| invalid("sdist archive listing is not UTF-8"))?;
-            clean_entry(text)
+            Ok(clean_entry(text)?.map(|normalized| ArchiveEntry {
+                original: text.to_string(),
+                normalized,
+            }))
         })
         .filter_map(|entry| entry.transpose())
         .collect()
 }
 
-fn zip_entries(path: &Path) -> io::Result<Vec<String>> {
+fn zip_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)
         .map_err(|e| invalid(format!("read {} as zip: {e}", path.display())))?;
@@ -128,28 +140,38 @@ fn zip_entries(path: &Path) -> io::Result<Vec<String>> {
         let entry = archive
             .by_index(index)
             .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
-        if let Some(name) = clean_entry(entry.name())? {
-            entries.push(name);
+        if let Some(normalized) = clean_entry(entry.name())? {
+            entries.push(ArchiveEntry {
+                original: entry.name().to_string(),
+                normalized,
+            });
         }
     }
     Ok(entries)
 }
 
-fn entries(path: &Path, kind: ArchiveKind) -> io::Result<Vec<String>> {
+fn entries(path: &Path, kind: ArchiveKind) -> io::Result<Vec<ArchiveEntry>> {
     match kind {
         ArchiveKind::TarGz => tar_entries(path),
         ArchiveKind::Zip => zip_entries(path),
     }
 }
 
-fn archive_root(entries: &[String], path: &Path) -> io::Result<String> {
+fn archive_root(entries: &[ArchiveEntry], path: &Path) -> io::Result<String> {
     let root = entries
         .iter()
-        .find_map(|entry| entry.split('/').next().filter(|part| !part.is_empty()))
+        .find_map(|entry| {
+            entry
+                .normalized
+                .split('/')
+                .next()
+                .filter(|part| !part.is_empty())
+        })
         .ok_or_else(|| invalid(format!("sdist archive {} is empty", path.display())))?;
     let root = root.to_string();
     if entries.iter().any(|entry| {
         entry
+            .normalized
             .split('/')
             .next()
             .map(|part| part != root)
@@ -394,10 +416,13 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
     let entries = entries(path, kind)?;
     let root = archive_root(&entries, path)?;
     let pyproject_member = format!("{root}/pyproject.toml");
+    let pyproject_entry = entries
+        .iter()
+        .find(|entry| entry.normalized == pyproject_member);
     let (requires, backend, explicit_manifest) =
-        if entries.iter().any(|entry| entry == &pyproject_member) {
+        if let Some(entry) = pyproject_entry {
             parse_pyproject(
-                &archive_file(path, kind, &pyproject_member)?,
+                &archive_file(path, kind, &entry.original)?,
                 &pyproject_member,
             )?
         } else {
@@ -411,7 +436,9 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
         .map(|manifest| {
             if !entries
                 .iter()
-                .any(|entry| root_relative(entry, &root).as_deref() == Some(manifest.as_str()))
+                .any(|entry| {
+                    root_relative(&entry.normalized, &root).as_deref() == Some(manifest.as_str())
+                })
             {
                 return Err(invalid(format!(
                     "sdist build backend points to missing Cargo manifest {manifest}"
@@ -426,7 +453,9 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
             .find(|candidate| {
                 entries
                     .iter()
-                    .any(|entry| root_relative(entry, &root).as_deref() == Some(**candidate))
+                    .any(|entry| {
+                        root_relative(&entry.normalized, &root).as_deref() == Some(**candidate)
+                    })
             })
             .map(PathBuf::from)
     });
@@ -459,6 +488,11 @@ pub(crate) fn extract_sdist(
     fs::create_dir_all(destination)?;
     match archive_kind(path)? {
         ArchiveKind::TarGz => {
+            // Validate archive member paths before tar gets a chance to
+            // materialize anything.  The same check is performed by
+            // inspect_sdist, but extract_sdist is also used directly in the
+            // Rust planning path.
+            let _ = entries(path, ArchiveKind::TarGz)?;
             let status = Command::new("/usr/bin/tar")
                 .args(["-xzf"])
                 .arg(path)
@@ -486,6 +520,12 @@ pub(crate) fn extract_sdist(
                 let mut entry = archive
                     .by_index(index)
                     .map_err(|e| invalid(format!("read zip entry {index}: {e}")))?;
+                if entry.is_symlink() {
+                    return Err(invalid(format!(
+                        "sdist archive contains a symlink entry: {}",
+                        entry.name()
+                    )));
+                }
                 let Some(name) = clean_entry(entry.name())? else {
                     continue;
                 };
@@ -507,6 +547,7 @@ pub(crate) fn extract_sdist(
         }
     }
     let source = destination.canonicalize()?;
+    validate_extracted_links(&source)?;
     if let Some(manifest) = &info.cargo_manifest {
         let path = source.join(manifest);
         if !path.starts_with(&source) || !path.is_file() {
@@ -517,6 +558,117 @@ pub(crate) fn extract_sdist(
         }
     }
     Ok(source)
+}
+
+fn validate_extracted_links(root: &Path) -> io::Result<()> {
+    fn walk(root: &Path, path: &Path) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            let target = fs::read_link(path)?;
+            if target.is_absolute() || !link_target_within(root, path, &target)? {
+                return Err(invalid(format!(
+                    "extracted sdist link escapes the source root: {} -> {}",
+                    path.display(),
+                    target.display()
+                )));
+            }
+            return Ok(());
+        }
+        if file_type.is_dir() {
+            for entry in fs::read_dir(path)? {
+                walk(root, &entry?.path())?;
+            }
+            return Ok(());
+        }
+        if file_type.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() > 1 {
+                    return Err(invalid(format!(
+                        "extracted sdist contains a hard link: {}",
+                        path.display()
+                    )));
+                }
+            }
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "extracted sdist contains a special file: {}",
+            path.display()
+        )))
+    }
+
+    walk(root, root)
+}
+
+/// Resolve a link lexically while following existing symlinks.  This also
+/// catches a relative link whose apparent target is inside the tree but which
+/// passes through another symlink to outside it.  Missing final targets are
+/// allowed as long as their lexical path remains inside the root.
+fn link_target_within(root: &Path, link: &Path, target: &Path) -> io::Result<bool> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+
+    if target.is_absolute() {
+        return Ok(false);
+    }
+    let candidate = link
+        .parent()
+        .ok_or_else(|| invalid("extracted sdist link has no parent"))?
+        .join(target);
+    let relative = candidate
+        .strip_prefix(root)
+        .map_err(|_| invalid("extracted sdist link is outside its source root"))?;
+    let mut pending: VecDeque<OsString> = relative
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect();
+    let mut current = root.to_path_buf();
+    let mut symlink_count = 0;
+    while let Some(component) = pending.pop_front() {
+        if component == "." {
+            continue;
+        }
+        if component == ".." {
+            if current == root || !current.pop() {
+                return Ok(false);
+            }
+            continue;
+        }
+        let next = current.join(&component);
+        match fs::symlink_metadata(&next) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                symlink_count += 1;
+                if symlink_count > 40 {
+                    return Err(invalid("extracted sdist contains a symlink loop"));
+                }
+                let nested = fs::read_link(&next)?;
+                if nested.is_absolute() {
+                    return Ok(false);
+                }
+                let mut replacement: VecDeque<OsString> = nested
+                    .components()
+                    .map(|component| component.as_os_str().to_os_string())
+                    .collect();
+                replacement.append(&mut pending);
+                pending = replacement;
+            }
+            Ok(_) => current = next,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // There cannot be a symlink below a missing component.  Keep
+                // processing the remaining components so `..` still cannot
+                // cross the root boundary.
+                current = next;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(current.starts_with(root))
 }
 
 #[cfg(test)]
@@ -655,6 +807,72 @@ build-backend = "hatchling.build"
         let error = inspect_sdist(&archive).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!marker.exists(), "tar option-like member was executed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tar_member_with_dot_prefix_is_inspected() {
+        let dir = temp_dir("dot-prefix");
+        let root = dir.join("example-1.0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            b"[build-system]\nrequires = [\"hatchling>=1\"]\nbuild-backend = \"hatchling.build\"\n",
+        )
+        .unwrap();
+        let path = dir.join("dot-prefix.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&path)
+            .args(["-C"])
+            .arg(&dir)
+            .arg("./example-1.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&root).unwrap();
+
+        let info = inspect_sdist(&path).unwrap();
+        assert_eq!(info.build_requires, vec!["hatchling>=1"]);
+        assert_eq!(info.build_backend, "hatchling.build");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_archive_symlink_escape_before_cargo_work() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink-escape");
+        let root = dir.join("example-1.0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            b"[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "blanket-escape-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&outside);
+        symlink(&outside, root.join("Cargo.lock")).unwrap();
+        let path = dir.join("symlink-escape.tar.gz");
+        let status = Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&path)
+            .args(["-C"])
+            .arg(&dir)
+            .arg("example-1.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(&root).unwrap();
+
+        let info = inspect_sdist(&path).unwrap();
+        let error = extract_sdist(&path, &dir.join("source"), &info).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!outside.exists(), "extraction created a file outside scratch");
         fs::remove_dir_all(dir).unwrap();
     }
 

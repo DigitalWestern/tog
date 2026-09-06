@@ -260,6 +260,12 @@ fn cargo_lock_cache_key(sdist_sha256: &str, rust_id: &str) -> String {
     hex::encode(Sha256::digest(format!("{sdist_sha256}\0{rust_id}").as_bytes()))
 }
 
+fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
+    source
+        .join(manifest.parent().unwrap_or_else(|| Path::new("")))
+        .join("Cargo.lock")
+}
+
 fn generate_cargo_lock(
     rust_obj: &Path,
     manifest: &Path,
@@ -317,6 +323,23 @@ fn rust_plan_inputs(
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
         (fs::read_to_string(path)?, false)
     } else if let Ok(text) = fs::read_to_string(&generated_path) {
+        let lock_path = generated_cargo_lock_path(source, manifest_rel);
+        if fs::symlink_metadata(&lock_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cached Cargo.lock would overwrite an extracted symlink: {}",
+                    lock_path.display()
+                ),
+            ));
+        }
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&lock_path, &text)?;
         (text, true)
     } else {
         // This is the one cold path that must invoke Cargo. Persist the lock
@@ -475,21 +498,20 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let pin = crate::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
 
-    // A schema-2 cache hit stays valid even if the source is no longer
-    // available to inspect.
-    let fast_identity = sdist_identity(platform, pkg, pin);
-    let fast_id = fast_identity.object_id();
-    if store.has(&fast_id) {
-        crate::policy::check_cached(store, &fast_id)?;
-        return find_wheel(&store.object_path(&fast_id));
-    }
-
     let sdist = download_verified(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist(&sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
     let fast_requirements = build_requires::fast_path(&info.build_requires);
     let fast_sdist = fast_requirements && !info.rust_build;
+    let fast_identity = sdist_identity(platform, pkg, pin);
+    if fast_sdist {
+        let fast_id = fast_identity.object_id();
+        if store.has(&fast_id) {
+            crate::policy::check_cached(store, &fast_id)?;
+            return find_wheel(&store.object_path(&fast_id));
+        }
+    }
     let build_plan = if fast_requirements {
         build_toolchain_plan(&pin.version)
     } else {
