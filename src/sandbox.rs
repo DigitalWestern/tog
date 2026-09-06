@@ -525,6 +525,9 @@ fn mark_fds_cloexec_with_fcntl(fds: &[RawFd]) -> io::Result<()> {
 }
 
 fn bwrap_command(path: &Path) -> io::Result<Command> {
+    // Only the Linux block below mutates `command`; without the attribute macOS
+    // builds warn about an unused `mut`.
+    #[allow(unused_mut)]
     let mut command = Command::new(path);
     #[cfg(target_os = "linux")]
     {

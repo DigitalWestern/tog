@@ -210,6 +210,32 @@ real macOS test regression. Applied in this round:
   PR). Still owed on the Mac: `cargo test`, `bash tests/acceptance.sh`,
   a warm-project resync, the stage-6 shared-store check.
 
+### 2026-09-05 (Mac verification, round 1) — first run on macOS arm64 after the merge
+
+Run by the user's macOS terminal agent on macOS 26.6.2 / arm64 / cargo
+1.96.1 at merge commit d857378. `cargo test`: 156 passed, 0 failed, 15
+ignored (the Linux-only sandbox checks print their skip line). Acceptance
+stopped at one failure, section 10e: the Go fixture printed
+`Ahoy, world!` instead of `Hello, world.`
+
+- **Not a port regression — a locale-dependent fixture.** `rsc.io/quote`'s
+  `Hello()` calls `rsc.io/sampler`, which picks the greeting from
+  `LC_ALL`/`LC_MESSAGES`/`LANG`; its table's "Pirate" row has an
+  unparseable tag, so a C/POSIX/`C.UTF-8` locale (what the agent's shell
+  runs with) matches it. Reproduced on m6-fedora: `LANG=C.UTF-8 ./hello`
+  prints `Ahoy, world!`, `LANG=en_US.UTF-8` prints `Hello, world.`
+  Fix: `tests/acceptance.sh` runs the binary with `LC_ALL=en_US.UTF-8`.
+  Every earlier pass (both machines) ran from an `en_US.UTF-8` shell.
+- macOS build warned `unused_mut` in `bwrap_command` (the only mutation
+  is inside the Linux `cfg` block). Silenced with `#[allow(unused_mut)]`;
+  no behavior change.
+- Sections 10f (ruby) and 10g (elixir) passed before the run was stopped;
+  10h (dotnet) onward and the warm-project resync are still owed. Two
+  harmless diagnostics recorded for the ledger: `xcrun` cannot write its
+  cache under the agent's sandboxed `TMPDIR` (Rust builds still succeed),
+  and Mix cannot subscribe to its TCP event bus inside Seatbelt (`:eperm`,
+  expected — network is denied).
+
 ---
 
 ## Surface inventory (what is actually macOS-specific)
