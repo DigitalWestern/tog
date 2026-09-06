@@ -14,6 +14,13 @@ say what breaks, for whom, and how it fails (loud/silent).
   (`blanket build -- -h`). `--verbose` shows subprocess command lines only
   for the subprocesses `main.rs` starts (uv, npm, cargo lock generation);
   the tailors' own subprocesses are not yet traced. See CLI.md.
+- **`blanket status` compares recorded inputs only.** Python and Node
+  closures written since 2026-09-06 record the root manifest and lock files
+  (`inputs`); `-r` includes, `requirements/` directory members, and
+  workspace-member package.json files are not recorded, so an edit there is
+  reported as synced. Cargo, Go, Ruby, Elixir and .NET compare the lock
+  hash only, not the manifest. Closures from before the field exists show
+  as "synced (unchecked)" until the next sync.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

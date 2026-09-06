@@ -1,6 +1,6 @@
 use blanket::{
-    cargo, cli, dotnet, elixir, gc, golang, manifest, npm, npm_lock_import, platform::Platform,
-    policy, project, pypi, pyselect, python, ruby, sbom, store, types, ui,
+    cargo, cli, dotnet, elixir, gc, golang, inspect, manifest, npm, npm_lock_import,
+    platform::Platform, policy, project, pypi, pyselect, python, ruby, sbom, store, types, ui,
 };
 
 use std::io;
@@ -31,20 +31,39 @@ fn planner_input_hash(
     ))
 }
 
+/// What argv asked for, once the grammar has had its say.
+enum Pending {
+    Command(cli::Command),
+    /// Bare `blanket`: sync inside a project, usage outside.
+    Implicit,
+    /// An unknown first word: a package.json script if one matches.
+    Script {
+        name: String,
+        args: Vec<String>,
+        message: String,
+    },
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let invocation = match cli::parse(&args) {
-        Ok(cli::Parsed::Run(invocation)) => invocation,
+    let (options, pending) = match cli::parse(&args) {
+        Ok(cli::Parsed::Run(invocation)) => (invocation.options, Pending::Command(invocation.command)),
         Ok(cli::Parsed::Print(text)) => {
             print!("{text}");
             exit(0);
         }
+        Ok(cli::Parsed::Implicit(options)) => (options, Pending::Implicit),
+        Ok(cli::Parsed::Script {
+            options,
+            name,
+            args,
+            message,
+        }) => (options, Pending::Script { name, args, message }),
         Err(error) => {
             eprint!("{}", error.render());
             exit(cli::EXIT_USAGE);
         }
     };
-    let options = &invocation.options;
     if let Err(error) = ui::init(options.quiet, options.verbose, options.no_color) {
         ui::error(&format!("cannot set up output: {error}"));
         exit(cli::EXIT_FAILURE);
@@ -59,7 +78,14 @@ fn main() {
         }
         ui::trace(&format!("working directory: {}", dir.display()));
     }
-    let code = match dispatch(invocation.command) {
+    let command = match resolve(pending) {
+        Ok(command) => command,
+        Err(error) => {
+            ui::error(&error.to_string());
+            exit(cli::EXIT_FAILURE);
+        }
+    };
+    let code = match dispatch(command) {
         Ok(()) => 0,
         Err(error) => {
             ui::error(&error.to_string());
@@ -67,6 +93,60 @@ fn main() {
         }
     };
     exit(code);
+}
+
+/// CLI.md 2.1 and 2.2: a bare `blanket` inside a project is `sync`; an
+/// unknown first word that names a package.json script runs it. Anything
+/// else is the usage error the grammar already prepared (exit 2).
+fn resolve(pending: Pending) -> io::Result<cli::Command> {
+    match pending {
+        Pending::Command(command) => Ok(command),
+        Pending::Implicit => {
+            let cwd = project_dir();
+            if !inspect::detected(&cwd)?.is_empty() {
+                ui::trace("no command given inside a project: running sync");
+                return Ok(cli::Command::Sync {
+                    fresh: false,
+                    strict: false,
+                });
+            }
+            eprint!(
+                "blanket: no project in {}: nothing to sync here.\n\n{}",
+                cwd.display(),
+                cli::usage()
+            );
+            exit(cli::EXIT_USAGE);
+        }
+        Pending::Script {
+            name,
+            args,
+            message,
+        } => {
+            let cwd = project_dir();
+            let root = projected_root(&cwd);
+            let package_json = root.join("package.json");
+            let has_package_json = package_json.is_file();
+            let is_script = has_package_json
+                && std::fs::read_to_string(&package_json)
+                    .ok()
+                    .and_then(|json| npm::script_commands_from_package(&json, &name, &[]).ok())
+                    .flatten()
+                    .is_some();
+            if is_script {
+                ui::trace(&format!("'{name}' is a package.json script: running it"));
+                let mut command = vec![name];
+                command.extend(args);
+                return Ok(cli::Command::Run { command });
+            }
+            let message = if has_package_json {
+                format!("{message} (no package.json script named '{name}' here)")
+            } else {
+                message
+            };
+            eprint!("{}", cli::render_usage_error(&message, None));
+            exit(cli::EXIT_USAGE);
+        }
+    }
 }
 
 fn dispatch(command: cli::Command) -> io::Result<()> {
@@ -78,6 +158,25 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
         Gc(args) => return run_gc(&args),
         StoreRoots => return run_store_roots(),
         StorePath => return store::Store::open().map(|s| println!("{}", s.root.display())),
+        Completions { shell } => {
+            print!("{}", cli::completions(shell));
+            return Ok(());
+        }
+        Doctor { json } => {
+            let checks = inspect::doctor(&project_dir());
+            print!("{}", inspect::render_doctor(&checks, json)?);
+            if checks.iter().any(|check| check.level == inspect::Level::Fail) {
+                exit(cli::EXIT_FAILURE);
+            }
+            return Ok(());
+        }
+        Ls { ref ecosystem, json } => {
+            print!(
+                "{}",
+                inspect::ls(&project_dir(), ecosystem.as_deref(), json, ui::verbose())?
+            );
+            return Ok(());
+        }
         _ => {}
     }
     // Real subcommands validate the host once before any store-touching work.
@@ -88,7 +187,24 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
         Build { args } => run_build(platform, &args),
         Run { command } => run_run(platform, &command),
         Sbom { output } => run_sbom(output.as_deref()),
-        Gc(_) | StorePath | StoreRoots => unreachable!("handled above"),
+        Status { json } => {
+            let dir = project_dir();
+            let rows = inspect::status(platform, &dir)?;
+            if rows.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no project in {}: nothing to report", dir.display()),
+                ));
+            }
+            print!("{}", inspect::render_status(&dir, &rows, json)?);
+            if !rows.iter().all(inspect::EcosystemStatus::is_synced) {
+                exit(cli::EXIT_FAILURE);
+            }
+            Ok(())
+        }
+        Gc(_) | StorePath | StoreRoots | Completions { .. } | Doctor { .. } | Ls { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -246,10 +362,37 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
 /// used. The manifest layer may only learn the constraint after a sandboxed
 /// `setup.py egg_info`, so the selection is made here and handed back to the
 /// caller: planning, realization and the closure all use this one value.
-fn read_plan(
-    platform: Platform,
+/// The Python plan, the interpreter selection it was made with, and the
+/// project files it was computed from (recorded in the closure for status).
+type PythonPlan = (types::Plan, pyselect::PythonSelection, Vec<project::InputRecord>);
+
+/// Candidate input files for the status record: the manifest that won, the
+/// interpreter request, and every lock blanket reads or writes.
+fn python_input_records(
     dir: &Path,
-) -> io::Result<(types::Plan, pyselect::PythonSelection)> {
+    manifest: &manifest::Manifest,
+) -> io::Result<Vec<project::InputRecord>> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    match &manifest.source_path {
+        Some(path) => candidates.push(path.clone()),
+        None => candidates.push(dir.join(&manifest.input)),
+    }
+    for extra in [
+        ".python-version",
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
+        "requirements.lock.txt",
+        "uv.lock",
+        "poetry.lock",
+        "pdm.lock",
+    ] {
+        candidates.push(dir.join(extra));
+    }
+    project::input_records(dir, &candidates)
+}
+
+fn read_plan(platform: Platform, dir: &Path) -> io::Result<PythonPlan> {
     let mut manifest = manifest::discover(platform, dir)?;
     let mut selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
     if manifest.requires_setup() {
@@ -309,6 +452,7 @@ fn read_plan(
     // A found manifest may intentionally declare no dependencies. Keep the
     // interpreter-only plan on the normal realization/projection path, but do
     // not ask uv to compile an empty setup.cfg or requirements file.
+    let inputs = python_input_records(dir, &manifest)?;
     if manifest.is_empty() {
         return Ok((
             types::Plan {
@@ -317,6 +461,7 @@ fn read_plan(
                 packages: Vec::new(),
             },
             selection,
+            inputs,
         ));
     }
 
@@ -328,6 +473,7 @@ fn read_plan(
                 packages,
             },
             selection,
+            inputs,
         ));
     }
 
@@ -399,13 +545,15 @@ fn read_plan(
     } else {
         pypi::Glibc(0, 0)
     };
+    // The lock may have just been (re)written above: hash it now.
+    let inputs = python_input_records(dir, &manifest)?;
     let input_hash = planner_input_hash(platform, pin.version, &text, glibc);
     let cache_path = dir.join(".blanket/plan.json");
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
             if v["input_hash"] == input_hash.as_str() {
                 if let Ok(plan) = serde_json::from_value::<types::Plan>(v["plan"].clone()) {
-                    return Ok((plan, selection));
+                    return Ok((plan, selection, inputs));
                 }
             }
         }
@@ -420,7 +568,7 @@ fn read_plan(
             "plan": plan,
         }))?,
     )?;
-    Ok((plan, selection))
+    Ok((plan, selection, inputs))
 }
 
 fn record_skippable_specs(input: &str, source: &str) -> io::Result<()> {
@@ -577,7 +725,7 @@ fn run_plan(platform: Platform) -> io::Result<()> {
     ensure_npm_lock(platform, &dir)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let (plan, _selection) = read_plan(platform, &dir)?;
+        let (plan, _selection, _inputs) = read_plan(platform, &dir)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
@@ -769,9 +917,9 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     ensure_npm_lock(platform, &dir)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let (plan, selection) = read_plan(platform, &dir)?;
+        let (plan, selection, inputs) = read_plan(platform, &dir)?;
         let env = project::realize_env(&store, platform, &plan)?;
-        project::project_env_with_selection(&dir, &env, &plan, &selection)?;
+        project::project_env_with_inputs(&dir, &env, &plan, &selection, &inputs)?;
         ui::synced(".venv", &env);
         any = true;
     }
@@ -787,7 +935,19 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
             config = npm::parse_blanket_config(&pkg)?;
         }
         let env = npm::realize_node_env(&store, platform, &plan, &config.artifacts)?;
-        npm::project_node_env(&dir, &env, platform, &plan, &config.mutable_packages, fresh)?;
+        let inputs = project::input_records(
+            &dir,
+            &[dir.join("package.json"), dir.join(&plan.lock_source)],
+        )?;
+        npm::project_node_env_recorded(
+            &dir,
+            &env,
+            platform,
+            &plan,
+            &config.mutable_packages,
+            fresh,
+            &inputs,
+        )?;
         ui::synced("node_modules", &env);
         any = true;
     }

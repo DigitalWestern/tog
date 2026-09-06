@@ -41,7 +41,8 @@ Fedora's default). SELinux enforcing is fine.
 cargo build --release
 
 cd your-project     # an EXISTING project works as-is:
-blanket sync        # realize + project -> ./.venv and/or ./node_modules
+blanket             # realize + project -> ./.venv and/or ./node_modules
+blanket sync        # the same, spelled out (also: blanket install)
 blanket run python app.py       # run inside the projected env(s)
 blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
@@ -50,6 +51,11 @@ blanket store path              # where the store lives
 blanket store roots             # registered project roots
 blanket gc --dry-run            # preview unreferenced store/cache cleanup
 blanket sync --fresh            # rebuild the projection (drops caches)
+blanket dev                     # a package.json script, like 'npm run dev'
+blanket status                  # are .venv/node_modules current with the lock? (CI gate)
+blanket ls                      # what is installed, per ecosystem (--json)
+blanket doctor                  # host prerequisites, sandbox, store, free space
+blanket completions zsh         # shell completion script (bash | zsh | fish)
 blanket help sync               # per-command help (also: blanket sync --help)
 blanket -C path/to/project sync # run as if started there
 blanket --version

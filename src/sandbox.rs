@@ -571,6 +571,28 @@ fn find_socket_without_following_symlinks(path: &Path) -> io::Result<Option<Path
     Ok(None)
 }
 
+/// `blanket doctor`: is the build sandbox usable on this host? Runs the
+/// same preflight the real sandbox runs, so a green answer here means a
+/// green sandboxed build.
+pub fn probe(platform: Platform) -> io::Result<String> {
+    match platform {
+        Platform::X86_64UnknownLinuxGnu => {
+            bwrap_preflight().map(|path| format!("bubblewrap at {}", path.display()))
+        }
+        Platform::Aarch64AppleDarwin => {
+            let seatbelt = Path::new("/usr/bin/sandbox-exec");
+            if seatbelt.is_file() {
+                Ok("sandbox-exec (Seatbelt) at /usr/bin/sandbox-exec".to_string())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "/usr/bin/sandbox-exec not found",
+                ))
+            }
+        }
+    }
+}
+
 fn bwrap_preflight() -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     match PREFLIGHT.get_or_init(|| {

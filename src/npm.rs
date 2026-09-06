@@ -1893,6 +1893,20 @@ pub fn project_node_env(
     mutable: &[String],
     fresh: bool,
 ) -> io::Result<()> {
+    project_node_env_recorded(project_dir, env_obj, platform, plan, mutable, fresh, &[])
+}
+
+/// `project_node_env` plus the input files recorded for `blanket status`
+/// (package.json and the lockfile the plan came from).
+pub fn project_node_env_recorded(
+    project_dir: &Path,
+    env_obj: &Path,
+    platform: Platform,
+    plan: &NpmPlan,
+    mutable: &[String],
+    fresh: bool,
+    inputs: &[crate::project::InputRecord],
+) -> io::Result<()> {
     if !mutable.is_empty() {
         crate::policy::record(
             crate::policy::UNATTESTED_MUTABLE_STATE,
@@ -2111,6 +2125,7 @@ pub fn project_node_env(
             serde_json::json!({"path": l.path, "target": l.target})
         }).collect::<Vec<_>>(),
         "lock_source": plan.lock_source,
+        "inputs": inputs,
         "packages": plan.packages.iter().map(|p| {
             serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
         }).collect::<Vec<_>>(),

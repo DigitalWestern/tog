@@ -11,7 +11,10 @@
 //! - `run` and `build` pass their arguments through to the program untouched
 //!   (only a leading `-h`/`--help` is blanket's; `--` forces pass-through);
 //! - `-C <dir>` runs the command as if started in `<dir>`; `-q`, `-v` and
-//!   `--no-color` set the output conventions (see `ui`).
+//!   `--no-color` set the output conventions (see `ui`);
+//! - a bare `blanket` and an unknown first word are *not* decided here: the
+//!   dispatcher turns them into `sync` inside a project and into a
+//!   package.json script run when one matches (CLI.md 2.1, 2.2).
 //!
 //! Exit status contract: 0 success, 1 the command failed, 2 usage error.
 
@@ -31,9 +34,20 @@ pub enum Command {
     /// The program (or package.json script) and its arguments.
     Run { command: Vec<String> },
     Sbom { output: Option<PathBuf> },
+    Status { json: bool },
+    Ls { ecosystem: Option<String>, json: bool },
+    Doctor { json: bool },
     Gc(GcArgs),
     StorePath,
     StoreRoots,
+    Completions { shell: Shell },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -65,27 +79,34 @@ pub struct Invocation {
     pub command: Command,
 }
 
-/// What `main` does with argv: run a command, or print text and exit 0.
+/// What `main` does with argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     Run(Invocation),
+    /// Print to stdout and exit 0 (help, version).
     Print(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UsageError {
-    /// `blanket` with nothing after it: the full usage goes to stderr.
-    NoCommand,
-    Invalid {
+    /// `blanket` with no command: `sync` inside a project, usage outside.
+    Implicit(Options),
+    /// A first word that is not a command: a package.json script if one
+    /// matches, otherwise the usage error in `message`.
+    Script {
+        options: Options,
+        name: String,
+        args: Vec<String>,
         message: String,
-        /// The command whose help is relevant (`None` → top-level usage).
-        command: Option<&'static str>,
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageError {
+    pub message: String,
+    /// The command whose help is relevant (`None` → top-level usage).
+    pub command: Option<&'static str>,
+}
+
 impl UsageError {
-    fn invalid(message: impl Into<String>, command: Option<&'static str>) -> Self {
-        UsageError::Invalid {
+    fn new(message: impl Into<String>, command: Option<&'static str>) -> Self {
+        UsageError {
             message: message.into(),
             command,
         }
@@ -93,17 +114,16 @@ impl UsageError {
 
     /// The text `main` writes to stderr before exiting with `EXIT_USAGE`.
     pub fn render(&self) -> String {
-        match self {
-            UsageError::NoCommand => usage(),
-            UsageError::Invalid { message, command } => {
-                let hint = match command {
-                    Some(name) => format!("Run 'blanket help {name}' for usage."),
-                    None => "Run 'blanket --help' for usage.".to_string(),
-                };
-                format!("blanket: error: {message}\n{hint}\n")
-            }
-        }
+        render_usage_error(&self.message, self.command)
     }
+}
+
+pub fn render_usage_error(message: &str, command: Option<&str>) -> String {
+    let hint = match command {
+        Some(name) => format!("Run 'blanket help {name}' for usage."),
+        None => "Run 'blanket --help' for usage.".to_string(),
+    };
+    format!("blanket: error: {message}\n{hint}\n")
 }
 
 impl std::fmt::Display for UsageError {
@@ -114,30 +134,48 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// Static description of one command: drives both parsing suggestions and
-/// the help text, so the two can never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Everyday,
+    Inspect,
+    Maintain,
+}
+
+/// Static description of one command: drives parsing suggestions, the help
+/// text, and shell completions, so none of them can disagree.
 pub struct Spec {
     pub name: &'static str,
+    pub group: Group,
     pub summary: &'static str,
     pub usage: &'static str,
     pub description: &'static str,
-    /// `(flag spelling, description)`; the spelling's first token (before a
-    /// space or `=`) is what suggestions match against.
+    /// `(flag spelling, description)`; each comma-separated spelling's
+    /// first token (before a space or `=`) is what suggestions match.
     pub options: &'static [(&'static str, &'static str)],
+    /// Fixed positional words, for completion (`store path|roots`).
+    pub words: &'static [&'static str],
 }
 
 const HELP_OPTION: (&str, &str) = ("-h, --help", "print this help");
+const JSON_OPTION: (&str, &str) = ("--json", "machine-readable output on stdout");
+
+pub const ECOSYSTEM_WORDS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
+pub const BUILD_WORDS: &[&str] = &["cargo", "go", "elixir", "dotnet"];
+pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
+pub const SYNC_ALIASES: &[&str] = &["install", "i"];
 
 pub const COMMANDS: &[Spec] = &[
     Spec {
         name: "sync",
+        group: Group::Everyday,
         summary: "realize and project the environment(s) from the project's inputs",
-        usage: "blanket sync [--fresh] [--strict]",
+        usage: "blanket sync [--fresh] [--strict]        (alias: install, i)",
         description: "\
 Discovers every ecosystem present in the current directory (see PROJECT
 INPUTS in 'blanket --help'), realizes each locked plan into the immutable
 store, and projects it into the project (.venv, node_modules, .blanket/...).
-A found manifest with no dependencies syncs an interpreter-only environment.
+A bare 'blanket' inside a project does the same. A found manifest with no
+dependencies syncs an interpreter-only environment.
 Policy exceptions (unattested inputs, failed install scripts, ...) are
 recorded in .blanket/closures/*.json and summarized at the end; --strict, a
 BLANKET_STRICT=1 environment, or a .blanket/policy.toml deny list refuses
@@ -147,19 +185,27 @@ them instead.",
             ("--strict", "refuse every policy exception (same as BLANKET_STRICT=1)"),
             HELP_OPTION,
         ],
+        words: &[],
     },
     Spec {
-        name: "plan",
-        summary: "print the locked plan(s) as JSON",
-        usage: "blanket plan",
+        name: "run",
+        group: Group::Everyday,
+        summary: "run a command or package.json script inside the projected env(s)",
+        usage: "blanket run [--] <command> [<args>...]",
         description: "\
-Prints one JSON document per ecosystem found here, exactly what 'blanket
-sync' would realize. Planning may resolve missing lockfiles with the store's
-own uv/npm/cargo and cache the result under .blanket/.",
+Executes <command> with PATH and the ecosystem variables of the nearest
+projected root (the closest ancestor with .blanket/closures/). When the
+project has a package.json and <command> names one of its scripts, the
+script runs (pre/name/post, npm environment, exit code passed through) and
+wins over a same-named executable on PATH; 'blanket <script>' is the short
+form when the script name is not a blanket command. Everything after
+<command> is passed through unchanged.",
         options: &[HELP_OPTION],
+        words: &[],
     },
     Spec {
         name: "build",
+        group: Group::Everyday,
         summary: "sandboxed, network-denied build (cargo | go | elixir | dotnet)",
         usage: "blanket build [<ecosystem>] [--] [<tool args>...]",
         description: "\
@@ -171,23 +217,52 @@ Every argument after the ecosystem is handed to the tool unchanged, so
 'blanket build --release' works; use '--' if the first tool argument is
 '-h' or '--help'.",
         options: &[HELP_OPTION],
+        words: BUILD_WORDS,
     },
     Spec {
-        name: "run",
-        summary: "run a command or package.json script inside the projected env(s)",
-        usage: "blanket run [--] <command> [<args>...]",
+        name: "status",
+        group: Group::Inspect,
+        summary: "is the projection current with the manifest and the lock?",
+        usage: "blanket status [--json]",
         description: "\
-Executes <command> with PATH and the ecosystem variables of the nearest
-projected root (the closest ancestor with .blanket/closures/). When the
-project has a package.json and <command> names one of its scripts, the
-script runs (pre/name/post, npm environment, exit code passed through) and
-wins over a same-named executable on PATH. Everything after <command> is
-passed through unchanged.",
+For every ecosystem found here: 'synced' when the last sync's inputs are
+byte-identical to the files on disk and the projection is in place;
+otherwise which file changed, that the projection is missing, or that the
+closure was synced on another platform. Offline and read-only. Exit status
+0 only when everything is synced, so CI can use it as a 'did you commit the
+lock' gate.",
+        options: &[JSON_OPTION, HELP_OPTION],
+        words: &[],
+    },
+    Spec {
+        name: "ls",
+        group: Group::Inspect,
+        summary: "list what is installed, per ecosystem",
+        usage: "blanket ls [<ecosystem>] [--json]",
+        description: "\
+Name and version of every package in each synced closure, with the
+toolchain each runs on; -v adds the artifact and store object. Read from
+.blanket/closures/*.json, no store access. Ecosystems: python, node,
+cargo, go, ruby, elixir, dotnet.",
+        options: &[JSON_OPTION, HELP_OPTION],
+        words: ECOSYSTEM_WORDS,
+    },
+    Spec {
+        name: "plan",
+        group: Group::Inspect,
+        summary: "print the locked plan(s) as JSON",
+        usage: "blanket plan",
+        description: "\
+Prints one JSON document per ecosystem found here, exactly what 'blanket
+sync' would realize. Planning may resolve missing lockfiles with the store's
+own uv/npm/cargo and cache the result under .blanket/.",
         options: &[HELP_OPTION],
+        words: &[],
     },
     Spec {
         name: "sbom",
-        summary: "CycloneDX 1.5 SBOM from the synced closures",
+        group: Group::Inspect,
+        summary: "CycloneDX 1.5 SBOM of the synced closures",
         usage: "blanket sbom [--output <file>]",
         description: "\
 Emits a CycloneDX 1.5 document covering every ecosystem closure recorded by
@@ -197,9 +272,25 @@ stdout unless --output is given.",
             ("-o, --output <file>", "write the document to <file> instead of stdout"),
             HELP_OPTION,
         ],
+        words: &[],
+    },
+    Spec {
+        name: "doctor",
+        group: Group::Inspect,
+        summary: "check host prerequisites, the sandbox, and the store",
+        usage: "blanket doctor [--json]",
+        description: "\
+The first-five-minutes command. Checks the platform, the store (path,
+writable, free space), the build sandbox (bubblewrap and user namespaces on
+Linux, sandbox-exec on macOS), the host C toolchain native builds need, the
+toolchains already realized, and the project in the current directory. Each
+line is ok, warn, or fail with the fix; exit status 1 on any fail.",
+        options: &[JSON_OPTION, HELP_OPTION],
+        words: &[],
     },
     Spec {
         name: "gc",
+        group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
         usage: "blanket gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--register <dir>...]",
         description: "\
@@ -223,15 +314,34 @@ and backups. Usable on a copied store from any host.",
             ),
             HELP_OPTION,
         ],
+        words: &[],
     },
     Spec {
         name: "store",
-        summary: "inspect the store: 'store path', 'store roots'",
+        group: Group::Maintain,
+        summary: "'store path', 'store roots'",
         usage: "blanket store <path | roots>",
         description: "\
   path    print the store root (~/.blanket/store unless BLANKET_STORE is set)
   roots   list the project directories registered with this store",
         options: &[HELP_OPTION],
+        words: &["path", "roots"],
+    },
+    Spec {
+        name: "completions",
+        group: Group::Maintain,
+        summary: "print a shell completion script (bash | zsh | fish)",
+        usage: "blanket completions <bash | zsh | fish>",
+        description: "\
+Generated from the same command table as this help, so it cannot drift.
+Install:
+  bash   blanket completions bash > ~/.local/share/bash-completion/completions/blanket
+  zsh    blanket completions zsh  > \"${fpath[1]}/_blanket\"   (then: compinit)
+  fish   blanket completions fish > ~/.config/fish/completions/blanket.fish
+Package.json script names complete after 'blanket run' and as the first
+word when a package.json is in the current directory.",
+        options: &[HELP_OPTION],
+        words: SHELL_WORDS,
     },
 ];
 
@@ -260,17 +370,41 @@ ENVIRONMENT:
   BLANKET_STORE           store root (default ~/.blanket/store)
   BLANKET_STRICT=1        refuse every policy exception, like --strict
   BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
+  NO_COLOR                plain output, like --no-color
 ";
 
 pub fn spec(name: &str) -> Option<&'static Spec> {
+    let name = canonical_name(name);
     COMMANDS.iter().find(|spec| spec.name == name)
 }
 
-/// Top-level help: the command list, global options, project inputs.
+/// `install` and `i` are `sync`.
+pub fn canonical_name(name: &str) -> &str {
+    if SYNC_ALIASES.contains(&name) {
+        "sync"
+    } else {
+        name
+    }
+}
+
+const GLOBAL_OPTIONS: &str = "\
+OPTIONS:
+  -C, --directory <dir>  run as if blanket had been started in <dir>
+  -q, --quiet            no narration: only errors and results on stdout
+  -v, --verbose          show every decision and subprocess command line
+      --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
+  -h, --help             print help ('blanket help <command>' for one command)
+  -V, --version          print the version
+";
+
+/// Top-level help: the command list by group, global options, inputs.
 pub fn usage() -> String {
     let mut text = format!(
-        "blanket {VERSION} — universal realization & environment kernel\n\n\
-         USAGE:\n  blanket [-C <dir>] <command> [<args>...]\n\nCOMMANDS:\n"
+        "blanket {VERSION} — one command for every package manager\n\n\
+         USAGE:\n  \
+         blanket [<options>] <command> [<args>...]\n  \
+         blanket                      in a project: the same as 'blanket sync'\n  \
+         blanket <script> [<args>...] run a package.json script (like 'npm run')\n"
     );
     let width = COMMANDS
         .iter()
@@ -278,26 +412,32 @@ pub fn usage() -> String {
         .max()
         .unwrap_or(0)
         .max("version".len());
-    for spec in COMMANDS {
-        text.push_str(&format!("  {:width$}  {}\n", spec.name, spec.summary));
+    for (group, title) in [
+        (Group::Everyday, "EVERYDAY"),
+        (Group::Inspect, "INSPECT"),
+        (Group::Maintain, "MAINTAIN"),
+    ] {
+        text.push_str(&format!("\n{title}:\n"));
+        for spec in COMMANDS.iter().filter(|spec| spec.group == group) {
+            text.push_str(&format!("  {:width$}  {}\n", spec.name, spec.summary));
+        }
+        if group == Group::Maintain {
+            text.push_str(&format!(
+                "  {:width$}  show help for a command\n  {:width$}  print the version\n",
+                "help", "version"
+            ));
+        }
     }
-    text.push_str(&format!(
-        "  {:width$}  show help for a command\n  {:width$}  print the version\n",
-        "help", "version"
-    ));
-    text.push_str(
-        "\nOPTIONS:\n  \
-         -C, --directory <dir>  run as if blanket had been started in <dir>\n  \
-         -q, --quiet            no narration: only errors and results on stdout\n  \
-         -v, --verbose          show every decision and subprocess command line\n      \
-         --no-color             plain output (also: NO_COLOR, or a non-tty stderr)\n  \
-         -h, --help             print help ('blanket help <command>' for one command)\n  \
-         -V, --version          print the version\n\n",
-    );
+    text.push('\n');
+    text.push_str(GLOBAL_OPTIONS);
+    text.push('\n');
     text.push_str(PROJECT_INPUTS);
     text.push('\n');
     text.push_str(ENVIRONMENT);
-    text.push_str("\nExit status: 0 success, 1 failure, 2 usage error.\n");
+    text.push_str(
+        "\nExit status: 0 success, 1 failure, 2 usage error; 'run' passes the\n\
+         program's status through.\n",
+    );
     text
 }
 
@@ -341,9 +481,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         }
         match arg {
             "-C" | "--directory" => {
-                let value = args.get(index + 1).ok_or_else(|| {
-                    UsageError::invalid(format!("{arg} needs a directory"), None)
-                })?;
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| UsageError::new(format!("{arg} needs a directory"), None))?;
                 options.directory = Some(PathBuf::from(value));
                 index += 2;
             }
@@ -377,7 +517,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                     "--help",
                     "--version",
                 ];
-                return Err(UsageError::invalid(
+                return Err(UsageError::new(
                     with_suggestion(
                         format!("unknown option '{arg}'"),
                         flag_name(arg),
@@ -389,21 +529,29 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             _ => break,
         }
     }
-    let Some(name) = args.get(index).map(String::as_str) else {
-        return Err(UsageError::NoCommand);
+    let Some(word) = args.get(index).map(String::as_str) else {
+        return Ok(Parsed::Implicit(options));
     };
     let rest = &args[index + 1..];
+    let name = canonical_name(word);
     let command = match name {
         "sync" => parse_sync(rest)?,
         "plan" => parse_plan(rest)?,
         "build" => parse_passthrough(rest, "build")?,
         "run" => parse_passthrough(rest, "run")?,
         "sbom" => parse_sbom(rest)?,
+        "status" => parse_json_only(rest, "status")?.map(|json| Command::Status { json }),
+        "ls" => parse_ls(rest)?,
+        "doctor" => parse_json_only(rest, "doctor")?.map(|json| Command::Doctor { json }),
         "gc" => parse_gc(rest)?,
         "store" => parse_store(rest)?,
+        "completions" => parse_completions(rest)?,
         other => {
-            return Err(UsageError::invalid(
-                with_suggestion(
+            return Ok(Parsed::Script {
+                options,
+                name: other.to_string(),
+                args: rest.to_vec(),
+                message: with_suggestion(
                     format!("unknown command '{other}'"),
                     other,
                     COMMANDS
@@ -411,8 +559,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                         .map(|spec| spec.name)
                         .chain(["help", "version"]),
                 ),
-                None,
-            ))
+            });
         }
     };
     let command = match command {
@@ -428,7 +575,7 @@ fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
         Some(name) if HELP_WORDS.contains(&name) => Ok(usage()),
         Some(name) if VERSION_WORDS.contains(&name) => Ok(version_text()),
         Some(name) => spec(name).map(help).ok_or_else(|| {
-            UsageError::invalid(
+            UsageError::new(
                 with_suggestion(
                     format!("no help for '{name}': not a blanket command"),
                     name,
@@ -463,6 +610,54 @@ fn parse_plan(args: &[String]) -> Result<Option<Command>, UsageError> {
     }
 }
 
+/// Commands whose only option is `--json`. `Ok(Some(json))`.
+fn parse_json_only(args: &[String], name: &'static str) -> Result<Option<bool>, UsageError> {
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "-h" | "--help" => return Ok(None),
+            other => return Err(reject(name, other)),
+        }
+    }
+    Ok(Some(json))
+}
+
+fn parse_ls(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut json = false;
+    let mut ecosystem = None;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "-h" | "--help" => return Ok(None),
+            other if other.starts_with('-') => return Err(reject("ls", other)),
+            other => {
+                if ecosystem.is_some() {
+                    return Err(UsageError::new(
+                        format!("ls: unexpected argument '{other}' (one ecosystem at most)"),
+                        Some("ls"),
+                    ));
+                }
+                if !ECOSYSTEM_WORDS.contains(&other) {
+                    return Err(UsageError::new(
+                        with_suggestion(
+                            format!(
+                                "ls: unknown ecosystem '{other}' (one of: {})",
+                                ECOSYSTEM_WORDS.join(", ")
+                            ),
+                            other,
+                            ECOSYSTEM_WORDS.iter().copied(),
+                        ),
+                        Some("ls"),
+                    ));
+                }
+                ecosystem = Some(other.to_string());
+            }
+        }
+    }
+    Ok(Some(Command::Ls { ecosystem, json }))
+}
+
 /// `run` and `build` own only a leading help flag; `--` forces pass-through
 /// of a program argument that happens to be `-h`.
 fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Command>, UsageError> {
@@ -472,7 +667,7 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
         _ => args,
     };
     if name == "run" && args.is_empty() {
-        return Err(UsageError::invalid("run: no command given", Some("run")));
+        return Err(UsageError::new("run: no command given", Some("run")));
     }
     let args = args.to_vec();
     Ok(Some(match name {
@@ -488,9 +683,9 @@ fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
         match arg {
             "-h" | "--help" => return Ok(None),
             "-o" | "--output" => {
-                let value = args.get(index + 1).ok_or_else(|| {
-                    UsageError::invalid(format!("{arg} needs a file path"), Some("sbom"))
-                })?;
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| UsageError::new(format!("{arg} needs a file path"), Some("sbom")))?;
                 output = Some(PathBuf::from(value));
                 index += 1;
             }
@@ -521,7 +716,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
                     index += 1;
                 }
                 if first == index {
-                    return Err(UsageError::invalid(
+                    return Err(UsageError::new(
                         "--register needs at least one project directory",
                         Some("gc"),
                     ));
@@ -535,7 +730,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--keep-days" => {
                 let value = args
                     .get(index + 1)
-                    .ok_or_else(|| UsageError::invalid("--keep-days needs <n>", Some("gc")))?;
+                    .ok_or_else(|| UsageError::new("--keep-days needs <n>", Some("gc")))?;
                 gc.keep_days = Some(parse_days(value)?);
                 index += 1;
             }
@@ -551,7 +746,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
 
 fn parse_days(value: &str) -> Result<u64, UsageError> {
     value.parse().map_err(|_| {
-        UsageError::invalid(
+        UsageError::new(
             format!("--keep-days expects a whole number of days, got '{value}'"),
             Some("gc"),
         )
@@ -564,13 +759,13 @@ fn parse_store(args: &[String]) -> Result<Option<Command>, UsageError> {
         Some("roots") => Command::StoreRoots,
         Some("-h" | "--help") => return Ok(None),
         None => {
-            return Err(UsageError::invalid(
+            return Err(UsageError::new(
                 "store needs a subcommand: 'store path' or 'store roots'",
                 Some("store"),
             ))
         }
         Some(other) => {
-            return Err(UsageError::invalid(
+            return Err(UsageError::new(
                 with_suggestion(
                     format!("unknown store subcommand '{other}'"),
                     other,
@@ -581,12 +776,44 @@ fn parse_store(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
     };
     if let Some(extra) = args.get(1) {
-        return Err(UsageError::invalid(
+        return Err(UsageError::new(
             format!("store {}: unexpected argument '{extra}'", args[0]),
             Some("store"),
         ));
     }
     Ok(Some(command))
+}
+
+fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let shell = match args.first().map(String::as_str) {
+        Some("bash") => Shell::Bash,
+        Some("zsh") => Shell::Zsh,
+        Some("fish") => Shell::Fish,
+        Some("-h" | "--help") => return Ok(None),
+        None => {
+            return Err(UsageError::new(
+                "completions needs a shell: bash, zsh, or fish",
+                Some("completions"),
+            ))
+        }
+        Some(other) => {
+            return Err(UsageError::new(
+                with_suggestion(
+                    format!("unsupported shell '{other}' (bash, zsh, or fish)"),
+                    other,
+                    SHELL_WORDS.iter().copied(),
+                ),
+                Some("completions"),
+            ))
+        }
+    };
+    if let Some(extra) = args.get(1) {
+        return Err(UsageError::new(
+            format!("completions: unexpected argument '{extra}'"),
+            Some("completions"),
+        ));
+    }
+    Ok(Some(Command::Completions { shell }))
 }
 
 fn non_empty(
@@ -595,7 +822,7 @@ fn non_empty(
     command: Option<&'static str>,
 ) -> Result<PathBuf, UsageError> {
     if value.is_empty() {
-        return Err(UsageError::invalid(format!("{flag}= needs a value"), command));
+        return Err(UsageError::new(format!("{flag}= needs a value"), command));
     }
     Ok(PathBuf::from(value))
 }
@@ -612,11 +839,11 @@ fn reject(name: &'static str, arg: &str) -> UsageError {
     } else {
         format!("{name}: unexpected argument '{arg}'")
     };
-    UsageError::invalid(message, Some(name))
+    UsageError::new(message, Some(name))
 }
 
 /// `"-o, --output <file>"` → `["-o", "--output"]`.
-fn option_spellings(flag: &'static str) -> impl Iterator<Item = &'static str> {
+pub fn option_spellings(flag: &'static str) -> impl Iterator<Item = &'static str> {
     flag.split(", ")
         .map(|part| part.split([' ', '=']).next().unwrap_or(part))
 }
@@ -645,7 +872,11 @@ fn with_suggestion<'a>(
 /// become "did you mean -h".
 pub fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let word = word.to_ascii_lowercase();
-    let budget = if word.len() >= 4 { (word.len() / 3).max(1) } else { 0 };
+    let budget = if word.len() >= 4 {
+        (word.len() / 3).max(1)
+    } else {
+        0
+    };
     let mut best: Option<(usize, &str)> = None;
     for candidate in candidates {
         let lower = candidate.to_ascii_lowercase();
@@ -691,6 +922,249 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len() * width + b.len()]
 }
 
+// ---------------------------------------------------------------------------
+// Shell completions, generated from the command table.
+
+/// Every option spelling a command accepts, `--help` included.
+fn command_flags(spec: &Spec) -> Vec<&'static str> {
+    spec.options
+        .iter()
+        .flat_map(|(flag, _)| option_spellings(flag))
+        .collect()
+}
+
+fn all_command_words() -> Vec<&'static str> {
+    COMMANDS
+        .iter()
+        .map(|spec| spec.name)
+        .chain(SYNC_ALIASES.iter().copied())
+        .chain(["help", "version"])
+        .collect()
+}
+
+const GLOBAL_FLAGS: &[&str] = &[
+    "-C",
+    "--directory",
+    "-q",
+    "--quiet",
+    "-v",
+    "--verbose",
+    "--no-color",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
+/// The one-liner every shell uses to read script names out of package.json.
+/// Deliberately a sed/grep pipeline: completion must not need jq or node.
+const SCRIPTS_PIPELINE: &str = r#"sed -n '/"scripts"[[:space:]]*:/,/}/p' package.json | grep -oE '^[[:space:]]*"[^"]+"[[:space:]]*:' | tr -d ' \t":'"#;
+
+pub fn completions(shell: Shell) -> String {
+    match shell {
+        Shell::Bash => bash_completions(),
+        Shell::Zsh => zsh_completions(),
+        Shell::Fish => fish_completions(),
+    }
+}
+
+fn bash_completions() -> String {
+    let mut out = String::from(
+        "# bash completion for blanket — generated by 'blanket completions bash'\n\
+         _blanket_scripts() {\n    [[ -f package.json ]] || return 0\n    ",
+    );
+    out.push_str(SCRIPTS_PIPELINE);
+    out.push_str(
+        "\n}\n\n_blanket() {\n    local cur cmd=\"\" i\n    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n    \
+         for ((i = 1; i < COMP_CWORD; i++)); do\n        case \"${COMP_WORDS[i]}\" in\n            \
+         -C|--directory) ((i++)) ;;\n            -*) ;;\n            *) cmd=\"${COMP_WORDS[i]}\"; break ;;\n        \
+         esac\n    done\n    if [[ -z \"$cmd\" ]]; then\n        if [[ \"$cur\" == -* ]]; then\n            ",
+    );
+    out.push_str(&format!(
+        "COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )\n",
+        GLOBAL_FLAGS.join(" ")
+    ));
+    out.push_str(&format!(
+        "        else\n            COMPREPLY=( $(compgen -W \"{} $(_blanket_scripts)\" -- \"$cur\") )\n        fi\n        return\n    fi\n    case \"$cmd\" in\n",
+        all_command_words().join(" ")
+    ));
+    for spec in COMMANDS {
+        let mut words: Vec<&str> = spec.words.to_vec();
+        words.extend(command_flags(spec));
+        let pattern = if spec.name == "sync" {
+            "sync|install|i".to_string()
+        } else {
+            spec.name.to_string()
+        };
+        match spec.name {
+            "run" => out.push_str(
+                "        run)\n            if [[ $i -eq $((COMP_CWORD - 1)) ]]; then\n                \
+                 COMPREPLY=( $(compgen -W \"$(_blanket_scripts)\" -c -- \"$cur\") )\n            else\n                \
+                 COMPREPLY=( $(compgen -f -- \"$cur\") )\n            fi ;;\n",
+            ),
+            "build" => out.push_str(&format!(
+                "        build)\n            if [[ $i -eq $((COMP_CWORD - 1)) ]]; then\n                \
+                 COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )\n            else\n                \
+                 COMPREPLY=( $(compgen -f -- \"$cur\") )\n            fi ;;\n",
+                words.join(" ")
+            )),
+            _ => out.push_str(&format!(
+                "        {pattern}) COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") ) ;;\n",
+                words.join(" ")
+            )),
+        }
+    }
+    out.push_str(&format!(
+        "        help) COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") ) ;;\n        *) COMPREPLY=() ;;\n    esac\n}}\n\ncomplete -F _blanket blanket\n",
+        COMMANDS.iter().map(|spec| spec.name).collect::<Vec<_>>().join(" ")
+    ));
+    out
+}
+
+fn zsh_quote(text: &str) -> String {
+    text.replace('\'', "'\\''")
+        .replace(':', "\\:")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
+fn zsh_completions() -> String {
+    let mut out = String::from(
+        "#compdef blanket\n# zsh completion for blanket — generated by 'blanket completions zsh'\n\n\
+         _blanket_scripts() {\n    [[ -f package.json ]] || return 1\n    local -a scripts\n    scripts=(${(f)\"$(",
+    );
+    out.push_str(SCRIPTS_PIPELINE);
+    out.push_str(")\"})\n    (( ${#scripts} )) && _describe -t scripts 'package.json script' scripts\n}\n\n_blanket() {\n    local -a commands\n    commands=(\n");
+    for spec in COMMANDS {
+        out.push_str(&format!(
+            "        '{}:{}'\n",
+            spec.name,
+            zsh_quote(spec.summary)
+        ));
+    }
+    out.push_str("        'install:alias for sync'\n        'help:show help for a command'\n        'version:print the version'\n    )\n    local curcontext=\"$curcontext\" state line\n    _arguments -C \\\n        '(-C --directory)'{-C,--directory}'[run as if started in <dir>]:directory:_files -/' \\\n        '(-q --quiet)'{-q,--quiet}'[no narration]' \\\n        '(-v --verbose)'{-v,--verbose}'[show every decision and subprocess]' \\\n        '--no-color[plain output]' \\\n        '(-h --help)'{-h,--help}'[print help]' \\\n        '(-V --version)'{-V,--version}'[print the version]' \\\n        '1: :->command' \\\n        '*:: :->args'\n    case $state in\n        command)\n            _describe -t commands 'blanket command' commands\n            _blanket_scripts\n            ;;\n        args)\n            case $words[1] in\n");
+    for spec in COMMANDS {
+        let pattern = if spec.name == "sync" {
+            "sync|install|i".to_string()
+        } else {
+            spec.name.to_string()
+        };
+        if spec.name == "run" {
+            out.push_str("                run)\n                    if (( CURRENT == 2 )); then\n                        _blanket_scripts\n                        _command_names -e\n                    else\n                        _files\n                    fi\n                    ;;\n");
+            continue;
+        }
+        let mut specs: Vec<String> = spec
+            .options
+            .iter()
+            .flat_map(|(flag, description)| {
+                option_spellings(flag).map(move |spelling| {
+                    format!("'{spelling}[{}]'", zsh_quote(description))
+                })
+            })
+            .collect();
+        if !spec.words.is_empty() {
+            specs.push(format!("'1:word:({})'", spec.words.join(" ")));
+        }
+        if spec.name == "build" || spec.name == "gc" {
+            specs.push("'*:file:_files'".to_string());
+        }
+        out.push_str(&format!(
+            "                {pattern})\n                    _arguments {}\n                    ;;\n",
+            specs.join(" ")
+        ));
+    }
+    out.push_str(&format!(
+        "                help)\n                    _values 'command' {}\n                    ;;\n                *)\n                    _files\n                    ;;\n            esac\n            ;;\n    esac\n}}\n\n_blanket \"$@\"\n",
+        COMMANDS.iter().map(|spec| spec.name).collect::<Vec<_>>().join(" ")
+    ));
+    out
+}
+
+fn fish_quote(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn fish_completions() -> String {
+    let mut out = String::from(
+        "# fish completion for blanket — generated by 'blanket completions fish'\n\
+         function __blanket_scripts\n    test -f package.json; or return\n    ",
+    );
+    out.push_str(SCRIPTS_PIPELINE);
+    out.push_str("\nend\n\ncomplete -c blanket -f\n");
+    let globals: &[(&str, &str, &str, bool)] = &[
+        ("C", "directory", "run as if started in <dir>", true),
+        ("q", "quiet", "no narration", false),
+        ("v", "verbose", "show every decision and subprocess", false),
+        ("", "no-color", "plain output", false),
+        ("h", "help", "print help", false),
+        ("V", "version", "print the version", false),
+    ];
+    for (short, long, description, takes_value) in globals {
+        let mut line = String::from("complete -c blanket -n '__fish_use_subcommand'");
+        if !short.is_empty() {
+            line.push_str(&format!(" -s {short}"));
+        }
+        line.push_str(&format!(" -l {long}"));
+        if *takes_value {
+            line.push_str(" -r -a '(__fish_complete_directories)'");
+        }
+        line.push_str(&format!(" -d '{}'\n", fish_quote(description)));
+        out.push_str(&line);
+    }
+    for spec in COMMANDS {
+        out.push_str(&format!(
+            "complete -c blanket -n '__fish_use_subcommand' -a {} -d '{}'\n",
+            spec.name,
+            fish_quote(spec.summary)
+        ));
+    }
+    out.push_str("complete -c blanket -n '__fish_use_subcommand' -a install -d 'alias for sync'\n");
+    out.push_str("complete -c blanket -n '__fish_use_subcommand' -a help -d 'show help for a command'\n");
+    out.push_str("complete -c blanket -n '__fish_use_subcommand' -a version -d 'print the version'\n");
+    out.push_str("complete -c blanket -n '__fish_use_subcommand' -a '(__blanket_scripts)' -d 'package.json script'\n");
+    for spec in COMMANDS {
+        let seen = if spec.name == "sync" {
+            "sync install i".to_string()
+        } else {
+            spec.name.to_string()
+        };
+        for (flag, description) in spec.options {
+            for spelling in option_spellings(flag) {
+                let (kind, name) = if let Some(long) = spelling.strip_prefix("--") {
+                    ("-l", long)
+                } else {
+                    ("-s", &spelling[1..])
+                };
+                let value = if flag.contains('<') { " -r" } else { "" };
+                out.push_str(&format!(
+                    "complete -c blanket -n '__fish_seen_subcommand_from {seen}' {kind} {name}{value} -d '{}'\n",
+                    fish_quote(description)
+                ));
+            }
+        }
+        if !spec.words.is_empty() {
+            out.push_str(&format!(
+                "complete -c blanket -n '__fish_seen_subcommand_from {seen}' -a '{}'\n",
+                spec.words.join(" ")
+            ));
+        }
+        if spec.name == "run" {
+            out.push_str("complete -c blanket -n '__fish_seen_subcommand_from run' -a '(__blanket_scripts)' -d 'package.json script'\n");
+            out.push_str("complete -c blanket -n '__fish_seen_subcommand_from run' -a '(__fish_complete_command)'\n");
+        }
+        if spec.name == "build" || spec.name == "gc" {
+            out.push_str(&format!(
+                "complete -c blanket -n '__fish_seen_subcommand_from {seen}' -F\n"
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "complete -c blanket -n '__fish_seen_subcommand_from help' -a '{}'\n",
+        COMMANDS.iter().map(|spec| spec.name).collect::<Vec<_>>().join(" ")
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,7 +1176,7 @@ mod tests {
     fn run(words: &[&str]) -> Invocation {
         match parse(&argv(words)).unwrap() {
             Parsed::Run(invocation) => invocation,
-            Parsed::Print(text) => panic!("expected a command, got text:\n{text}"),
+            other => panic!("expected a command, got {other:?}"),
         }
     }
 
@@ -713,27 +1187,61 @@ mod tests {
     fn printed(words: &[&str]) -> String {
         match parse(&argv(words)).unwrap() {
             Parsed::Print(text) => text,
-            Parsed::Run(invocation) => panic!("expected text, got {invocation:?}"),
+            other => panic!("expected text, got {other:?}"),
         }
     }
 
-    fn error(words: &[&str]) -> UsageError {
-        parse(&argv(words)).unwrap_err()
-    }
-
     fn message(words: &[&str]) -> String {
-        match error(words) {
-            UsageError::Invalid { message, .. } => message,
-            UsageError::NoCommand => panic!("expected an invalid-usage error"),
+        match parse(&argv(words)) {
+            Err(error) => error.message,
+            Ok(Parsed::Script { message, .. }) => message,
+            Ok(other) => panic!("expected an error, got {other:?}"),
         }
     }
 
     #[test]
-    fn no_arguments_is_a_usage_error_that_prints_usage() {
-        assert_eq!(error(&[]), UsageError::NoCommand);
-        assert_eq!(UsageError::NoCommand.render(), usage());
-        // -C alone never counts as a command.
-        assert_eq!(error(&["-C", "/tmp"]), UsageError::NoCommand);
+    fn no_command_is_implicit_and_keeps_the_options() {
+        assert_eq!(parse(&[]), Ok(Parsed::Implicit(Options::default())));
+        assert_eq!(
+            parse(&argv(&["-C", "/tmp", "-q"])),
+            Ok(Parsed::Implicit(Options {
+                directory: Some(PathBuf::from("/tmp")),
+                quiet: true,
+                ..Options::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn unknown_first_word_is_a_script_candidate() {
+        assert_eq!(
+            parse(&argv(&["-v", "dev", "--port", "3000"])),
+            Ok(Parsed::Script {
+                options: Options {
+                    verbose: true,
+                    ..Options::default()
+                },
+                name: "dev".into(),
+                args: argv(&["--port", "3000"]),
+                message: "unknown command 'dev'".into(),
+            })
+        );
+        assert_eq!(
+            message(&["snyc"]),
+            "unknown command 'snyc'; did you mean 'sync'?"
+        );
+        assert_eq!(message(&["sy"]), "unknown command 'sy'; did you mean 'sync'?");
+        assert_eq!(message(&["gcc"]), "unknown command 'gcc'; did you mean 'gc'?");
+        assert_eq!(message(&["deploy"]), "unknown command 'deploy'");
+        assert_eq!(
+            render_usage_error("unknown command 'deploy'", None),
+            "blanket: error: unknown command 'deploy'\nRun 'blanket --help' for usage.\n"
+        );
+        assert_eq!(message(&["--fresh", "sync"]), "unknown option '--fresh'");
+        assert_eq!(
+            message(&["--dir", "x", "sync"]),
+            "unknown option '--dir'; did you mean '--directory'?"
+        );
     }
 
     #[test]
@@ -749,9 +1257,9 @@ mod tests {
             assert_eq!(printed(&[spec.name, "--help"]), help(spec), "{} --help", spec.name);
             assert_eq!(printed(&[spec.name, "-h"]), help(spec), "{} -h", spec.name);
         }
-        // Help flags mixed into a flag-taking command still win.
+        assert_eq!(printed(&["help", "install"]), help(spec("sync").unwrap()));
+        assert_eq!(printed(&["i", "--help"]), help(spec("sync").unwrap()));
         assert_eq!(printed(&["gc", "--dry-run", "--help"]), help(spec("gc").unwrap()));
-        // Global options before the command are honored around help.
         assert_eq!(printed(&["-C", "/tmp", "--help"]), usage());
         assert!(message(&["help", "snyc"]).contains("did you mean 'sync'?"));
     }
@@ -759,6 +1267,9 @@ mod tests {
     #[test]
     fn usage_lists_every_command_with_its_help() {
         let text = usage();
+        for title in ["EVERYDAY:", "INSPECT:", "MAINTAIN:", "OPTIONS:", "ENVIRONMENT:"] {
+            assert!(text.contains(title), "usage lacks {title}");
+        }
         for spec in COMMANDS {
             assert!(text.contains(&format!("  {}", spec.name)), "usage lacks {}", spec.name);
             let help = help(spec);
@@ -770,20 +1281,21 @@ mod tests {
         }
         assert!(text.contains("BLANKET_STORE"));
         assert!(text.contains("requirements.txt"));
-        assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error."));
+        assert!(text.contains("blanket <script> [<args>...]"));
+        assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
     }
 
     #[test]
-    fn sync_flags_are_validated() {
+    fn sync_flags_and_aliases() {
+        let plain = Command::Sync {
+            fresh: false,
+            strict: false,
+        };
+        assert_eq!(command(&["sync"]), plain);
+        assert_eq!(command(&["install"]), plain);
+        assert_eq!(command(&["i"]), plain);
         assert_eq!(
-            command(&["sync"]),
-            Command::Sync {
-                fresh: false,
-                strict: false
-            }
-        );
-        assert_eq!(
-            command(&["sync", "--strict", "--fresh"]),
+            command(&["install", "--strict", "--fresh"]),
             Command::Sync {
                 fresh: true,
                 strict: true
@@ -794,12 +1306,12 @@ mod tests {
             "sync: unknown option '--fersh'; did you mean '--fresh'?"
         );
         assert_eq!(
-            message(&["sync", "--strict=1"]),
+            message(&["i", "--strict=1"]),
             "sync: unknown option '--strict=1'; did you mean '--strict'?"
         );
         assert_eq!(message(&["sync", "now"]), "sync: unexpected argument 'now'");
         assert_eq!(
-            error(&["sync", "now"]).render(),
+            parse(&argv(&["sync", "now"])).unwrap_err().render(),
             "blanket: error: sync: unexpected argument 'now'\nRun 'blanket help sync' for usage.\n"
         );
     }
@@ -809,6 +1321,40 @@ mod tests {
         assert_eq!(command(&["plan"]), Command::Plan);
         assert_eq!(message(&["plan", "--json"]), "plan: unknown option '--json'");
         assert_eq!(message(&["plan", "x"]), "plan: unexpected argument 'x'");
+    }
+
+    #[test]
+    fn inspect_commands() {
+        assert_eq!(command(&["status"]), Command::Status { json: false });
+        assert_eq!(command(&["status", "--json"]), Command::Status { json: true });
+        assert_eq!(message(&["status", "-j"]), "status: unknown option '-j'");
+        assert_eq!(command(&["doctor", "--json"]), Command::Doctor { json: true });
+        assert_eq!(
+            command(&["ls"]),
+            Command::Ls {
+                ecosystem: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            command(&["ls", "node", "--json"]),
+            Command::Ls {
+                ecosystem: Some("node".into()),
+                json: true
+            }
+        );
+        assert_eq!(
+            message(&["ls", "npm"]),
+            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet)"
+        );
+        assert_eq!(
+            message(&["ls", "pyhton"]),
+            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet); did you mean 'python'?"
+        );
+        assert_eq!(
+            message(&["ls", "node", "python"]),
+            "ls: unexpected argument 'python' (one ecosystem at most)"
+        );
     }
 
     #[test]
@@ -836,8 +1382,6 @@ mod tests {
                 args: argv(&["--help"])
             }
         );
-        // `blanket build --release` must keep working: only a LEADING help
-        // flag belongs to blanket.
         assert_eq!(
             command(&["build", "--release"]),
             Command::Build {
@@ -922,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn store_subcommands() {
+    fn store_and_completions_words() {
         assert_eq!(command(&["store", "path"]), Command::StorePath);
         assert_eq!(command(&["store", "roots"]), Command::StoreRoots);
         assert_eq!(
@@ -937,28 +1481,21 @@ mod tests {
             message(&["store", "path", "x"]),
             "store path: unexpected argument 'x'"
         );
-    }
-
-    #[test]
-    fn unknown_commands_get_suggestions() {
         assert_eq!(
-            message(&["snyc"]),
-            "unknown command 'snyc'; did you mean 'sync'?"
-        );
-        assert_eq!(message(&["sy"]), "unknown command 'sy'; did you mean 'sync'?");
-        assert_eq!(message(&["gcc"]), "unknown command 'gcc'; did you mean 'gc'?");
-        assert_eq!(message(&["install"]), "unknown command 'install'");
-        assert_eq!(
-            error(&["install"]).render(),
-            "blanket: error: unknown command 'install'\nRun 'blanket --help' for usage.\n"
+            command(&["completions", "zsh"]),
+            Command::Completions { shell: Shell::Zsh }
         );
         assert_eq!(
-            message(&["--fresh", "sync"]),
-            "unknown option '--fresh'"
+            message(&["completions"]),
+            "completions needs a shell: bash, zsh, or fish"
         );
         assert_eq!(
-            message(&["--dir", "x", "sync"]),
-            "unknown option '--dir'; did you mean '--directory'?"
+            message(&["completions", "powershell"]),
+            "unsupported shell 'powershell' (bash, zsh, or fish)"
+        );
+        assert_eq!(
+            message(&["completions", "bas"]),
+            "unsupported shell 'bas' (bash, zsh, or fish); did you mean 'bash'?"
         );
     }
 
@@ -985,7 +1522,6 @@ mod tests {
         assert_eq!(run(&["plan"]).options, Options::default());
         assert_eq!(message(&["-C"]), "-C needs a directory");
         assert_eq!(message(&["--directory="]), "--directory= needs a value");
-        // After the command, -C belongs to the command (run passes it on).
         assert_eq!(
             command(&["run", "make", "-C", "sub"]),
             Command::Run {
@@ -1005,15 +1541,13 @@ mod tests {
                 no_color: true,
             }
         );
-        assert_eq!(run(&["--quiet", "--verbose", "plan"]).options.quiet, true);
+        assert!(run(&["--quiet", "--verbose", "plan"]).options.quiet);
         assert_eq!(
             message(&["--quite", "plan"]),
             "unknown option '--quite'; did you mean '--quiet'?"
         );
-        // -v is verbose, -V is version: both exist, neither is a typo of the other.
         assert_eq!(printed(&["-V"]), format!("blanket {VERSION}\n"));
         assert!(run(&["-v", "plan"]).options.verbose);
-        // After the command they belong to the command.
         assert_eq!(message(&["sync", "-q"]), "sync: unknown option '-q'");
         assert_eq!(
             command(&["run", "pytest", "-q"]),
@@ -1026,13 +1560,11 @@ mod tests {
     #[test]
     fn suggestions_are_conservative() {
         let commands = || COMMANDS.iter().map(|spec| spec.name);
-        // An exact match is a suggestion too: it is how `--strict=1` learns
-        // that `--strict` takes no value.
         assert_eq!(suggest("sync", commands()), Some("sync"));
         assert_eq!(suggest("SYNC", commands()), Some("sync"));
-        assert_eq!(suggest("s", commands()), None); // one letter is not a typo
-        assert_eq!(suggest("gcx", commands()), Some("gc")); // prefix relation
-        assert_eq!(suggest("gxc", commands()), None); // short words: no edit guesses
+        assert_eq!(suggest("s", commands()), None);
+        assert_eq!(suggest("gcx", commands()), Some("gc"));
+        assert_eq!(suggest("gxc", commands()), None);
         assert_eq!(suggest("-q", ["-h", "-v"].into_iter()), None);
         assert_eq!(suggest("stor", commands()), Some("store"));
         assert_eq!(suggest("bulid", commands()), Some("build"));
@@ -1042,5 +1574,34 @@ mod tests {
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("snyc", "sync"), 1);
         assert_eq!(edit_distance("ab", "ba"), 1);
+    }
+
+    #[test]
+    fn completions_cover_every_command_and_option() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let script = completions(shell);
+            for spec in COMMANDS {
+                assert!(script.contains(spec.name), "{shell:?} lacks {}", spec.name);
+                for flag in command_flags(spec) {
+                    // fish spells `--json` as `-l json` and `-o` as `-s o`.
+                    let spelled = match (shell, flag.strip_prefix("--")) {
+                        (Shell::Fish, Some(long)) => format!("-l {long}"),
+                        (Shell::Fish, None) => format!("-s {}", &flag[1..]),
+                        _ => flag.to_string(),
+                    };
+                    assert!(script.contains(&spelled), "{shell:?} lacks {} {spelled}", spec.name);
+                }
+                for word in spec.words {
+                    assert!(script.contains(word), "{shell:?} lacks {} {word}", spec.name);
+                }
+            }
+            assert!(script.contains("install"), "{shell:?} lacks the sync alias");
+            assert!(script.contains("package.json"), "{shell:?} lacks script completion");
+        }
+        assert!(completions(Shell::Bash).ends_with("complete -F _blanket blanket\n"));
+        assert!(completions(Shell::Zsh).starts_with("#compdef blanket\n"));
+        assert!(completions(Shell::Fish).contains("complete -c blanket -f\n"));
+        assert_eq!(zsh_quote("a:b [c]"), "a\\:b \\[c\\]");
+        assert_eq!(fish_quote("it's"), "it\\'s");
     }
 }

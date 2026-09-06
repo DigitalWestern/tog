@@ -9,6 +9,7 @@ pub mod elixir;
 pub mod fetch;
 pub mod gc;
 pub mod golang;
+pub mod inspect;
 pub mod npm;
 pub mod manifest;
 pub mod nativelibs;

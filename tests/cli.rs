@@ -68,7 +68,7 @@ fn help_goes_to_stdout_and_exits_0() {
         assert_eq!(out.status.code(), Some(0), "{args:?}");
         assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
         let stdout = text(&out.stdout);
-        assert!(stdout.contains("COMMANDS:"), "{args:?}: {stdout}");
+        assert!(stdout.contains("EVERYDAY:"), "{args:?}: {stdout}");
         assert!(stdout.contains("BLANKET_STORE"), "{args:?}: {stdout}");
     }
     for args in [&["help", "sync"][..], &["sync", "--help"], &["sync", "-h"]] {
@@ -193,4 +193,99 @@ fn store_path_honors_the_store_variable() {
     let out = blanket(&home.0, &home.0, &["store", "roots"]);
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty());
+}
+
+// --- CLI.md level two: bare `blanket`, aliases, script shortcut, inspect ---
+
+#[test]
+fn bare_blanket_outside_a_project_prints_usage() {
+    let home = TempDir::new("bare");
+    let out = blanket(&home.0, &home.0, &[]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert!(stderr.starts_with("blanket: no project in "), "{stderr}");
+    assert!(stderr.contains("USAGE:"), "{stderr}");
+}
+
+#[test]
+fn install_alias_reaches_sync() {
+    let home = TempDir::new("alias");
+    let project = TempDir::new("alias-project");
+    for args in [&["install"][..], &["i"], &["sync"]] {
+        let out = blanket(&project.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(text(&out.stderr).contains("no_manifest"), "{args:?}");
+    }
+}
+
+#[test]
+fn unknown_first_word_runs_a_package_json_script_or_errors() {
+    let home = TempDir::new("script");
+    let project = TempDir::new("script-project");
+    std::fs::write(
+        project.0.join("package.json"),
+        r#"{"name": "p", "scripts": {"dev": "echo hi", "build": "echo built"}}"#,
+    )
+    .unwrap();
+    // A script name resolves to `run`: the only failure is the missing
+    // projection, which is a runtime error (1), not a usage error (2).
+    let out = blanket(&project.0, &home.0, &["dev", "--port", "3000"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("no environment projected here"));
+    // A built-in verb always wins over a same-named script.
+    let out = blanket(&project.0, &home.0, &["build"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("blanket build requires"), "{}", text(&out.stderr));
+    // Not a script, not a verb: usage error naming the package.json.
+    let out = blanket(&project.0, &home.0, &["deploy"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "blanket: error: unknown command 'deploy' (no package.json script named 'deploy' here)\nRun 'blanket --help' for usage.\n"
+    );
+    // Without a package.json the message stays plain.
+    let out = blanket(&home.0, &home.0, &["deploy"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "blanket: error: unknown command 'deploy'\nRun 'blanket --help' for usage.\n"
+    );
+}
+
+#[test]
+fn inspect_verbs_offline() {
+    let home = TempDir::new("inspect");
+    let project = TempDir::new("inspect-project");
+
+    let out = blanket(&project.0, &home.0, &["status"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no project in"));
+    let out = blanket(&project.0, &home.0, &["ls"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("nothing synced here; run 'blanket sync' first"));
+
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let out = blanket(&project.0, &home.0, &["status"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stdout).contains("python  not synced  run 'blanket sync'"), "{}", text(&out.stdout));
+    let out = blanket(&project.0, &home.0, &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["synced"], false);
+    assert_eq!(value["ecosystems"][0]["state"], "not-synced");
+
+    let out = blanket(&project.0, &home.0, &["doctor"]);
+    let stdout = text(&out.stdout);
+    for name in ["platform", "store", "sandbox", "c-toolchain", "project"] {
+        assert!(stdout.contains(&format!("  {name}")), "{stdout}");
+    }
+    assert!(stdout.contains("python found; not synced yet"), "{stdout}");
+    let out = blanket(&project.0, &home.0, &["doctor", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value["checks"].is_array());
+
+    let out = blanket(&project.0, &home.0, &["completions", "bash"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stdout).contains("complete -F _blanket blanket"));
+    let out = blanket(&project.0, &home.0, &["completions", "powershell"]);
+    assert_eq!(out.status.code(), Some(2));
 }

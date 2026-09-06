@@ -140,14 +140,12 @@ roots`, `build <ecosystem>`. Script names from package.json complete under
 time). This is the cheapest "easy to use" feature there is once the table is
 data.
 
-### Status of the draft
+### Status
 
-`src/cli.rs` + the `main.rs` rewire exist uncommitted and build. Done: rules
-1–7 minus quiet/verbose/color, plus unit tests for every argv shape. Not
-done: `tests/cli.rs` against the binary, `-q`/`-v`/`--no-color`,
-completions, doc updates (README "Use", ARCHITECTURE layout line, ROADMAP's
-"Friendlier CLI errors" item, LIMITATIONS note on the gc/sbom exit-code
-change from 1 to 2).
+Level one is implemented (branch `cli/levels-1-2`, 2026-09-06): rules 1–7,
+`-q`/`-v`/`--no-color`, `tests/cli.rs` against the binary, docs. Verbose
+traces the subprocesses `main.rs` starts; the tailors' own subprocesses are
+a follow-up. Completions shipped with level two.
 
 ### Acceptance
 
@@ -319,6 +317,14 @@ availability (`bwrap` and user namespaces on Linux, `sandbox-exec` on macOS)
 with the install hint from README, host C toolchain presence for native
 builds, free disk under the store, pinned toolchains already realized. Each
 line is `ok`, `warn`, or `fail` with the fix. Exit 1 on any `fail`.
+
+### Status of level two (2026-09-06)
+
+Phase B is implemented on the same branch: bare `blanket` → sync, `install`
+/ `i`, `blanket <script>`, `status`, `ls`, `doctor`, `completions`. Python
+and Node closures now carry an additive `inputs` field (root manifest and
+lock file hashes) that `status` compares. Phases C (`add`/`remove`/`update`)
+and D (`x`) are next.
 
 ### 2.8 Deferred within level two
 

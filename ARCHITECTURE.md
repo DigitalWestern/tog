@@ -488,6 +488,7 @@ the file held two writers' interleaved bytes).
 
     src/cli.rs      command grammar + help (pure, unit-tested; see CLI.md)
     src/ui.rs       output conventions: quiet/verbose/color, error channel
+    src/inspect.rs  status / ls / doctor: read-only views over closures + store
     src/main.rs     dispatcher + per-ecosystem orchestration
     src/types.rs    Identity, Plan, LockedPackage
     src/store.rs    immutable store: stage/commit/cache
