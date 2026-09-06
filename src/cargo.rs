@@ -97,10 +97,7 @@ fn rust_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
     Ok(pins)
 }
 
-fn rust_component<'a>(
-    components: &'a [&'static RustComponent],
-    name: &str,
-) -> &'a RustComponent {
+fn rust_component<'a>(components: &'a [&'static RustComponent], name: &str) -> &'a RustComponent {
     components
         .iter()
         .find(|component| component.component == name)
@@ -123,9 +120,7 @@ fn rust_identity(platform: Platform, components: &[&'static RustComponent]) -> I
             ("platform".to_string(), platform.triple().to_string()),
             (
                 "rust_std_sha256".to_string(),
-                rust_component(components, "rust-std")
-                    .sha256
-                    .to_string(),
+                rust_component(components, "rust-std").sha256.to_string(),
             ),
             (
                 "rustc_sha256".to_string(),
@@ -155,11 +150,7 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
     ensure_rust_for(store, Platform::host()?, version)
 }
 
-pub fn ensure_rust_for(
-    store: &Store,
-    platform: Platform,
-    version: &str,
-) -> io::Result<PathBuf> {
+pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
     let components = rust_components(platform)?;
     if version != RUST_VERSION {
@@ -176,7 +167,11 @@ pub fn ensure_rust_for(
 
     let mut tarballs = Vec::new();
     for component in &components {
-        tarballs.push(download_verified_held(store, component.url, component.sha256)?);
+        tarballs.push(download_verified_held(
+            store,
+            component.url,
+            component.sha256,
+        )?);
     }
 
     let staged = store.stage()?;
@@ -213,7 +208,10 @@ fn extract_rust_components(
                 )
             })?;
         if !status.success() {
-            return Err(err(format!("{} tarball extraction failed", component.component)));
+            return Err(err(format!(
+                "{} tarball extraction failed",
+                component.component
+            )));
         }
     }
     validate_rust_layout(staged, platform)
@@ -271,9 +269,8 @@ fn resolve_toolchain_file(
     path: &Path,
     legacy: bool,
 ) -> io::Result<&'static str> {
-    let text = fs::read_to_string(path).map_err(|e| {
-        io::Error::new(e.kind(), format!("read {}: {e}", path.display()))
-    })?;
+    let text = fs::read_to_string(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
     if legacy {
         if let Ok(document) = toml::from_str::<ToolchainDocument>(&text) {
             if let Some(spec) = document.toolchain {
@@ -326,11 +323,7 @@ fn resolve_toolchain_spec(
     resolve_channel(platform, path, channel.trim())
 }
 
-fn resolve_channel(
-    platform: Platform,
-    path: &Path,
-    channel: &str,
-) -> io::Result<&'static str> {
+fn resolve_channel(platform: Platform, path: &Path, channel: &str) -> io::Result<&'static str> {
     if channel == "stable" {
         let pin = newest_pin(platform)?;
         eprintln!(
@@ -588,7 +581,11 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
     fn package_name(manifest: &Path) -> Option<String> {
         let text = fs::read_to_string(manifest).ok()?;
         let value: toml::Value = toml::from_str(&text).ok()?;
-        value.get("package")?.get("name")?.as_str().map(str::to_string)
+        value
+            .get("package")?
+            .get("name")?
+            .as_str()
+            .map(str::to_string)
     }
     fn package_info(manifest: &Path) -> Option<(String, String)> {
         let text = fs::read_to_string(manifest).ok()?;
@@ -667,7 +664,10 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
 fn reject_workspace_inheritance(crate_dir: &Path, name: &str) -> io::Result<()> {
     let manifest = crate_dir.join("Cargo.toml");
     let value: toml::Value = toml::from_str(&fs::read_to_string(&manifest)?).map_err(|e| {
-        err(format!("git crate {name}: parse {}: {e}", manifest.display()))
+        err(format!(
+            "git crate {name}: parse {}: {e}",
+            manifest.display()
+        ))
     })?;
     fn contains_workspace_true(value: &toml::Value) -> bool {
         match value {
@@ -705,7 +705,10 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
             let object = crate::gitsrc::ensure_git_source(store, &git.inner).map_err(|e| {
                 io::Error::new(
                     e.kind(),
-                    format!("{}@{}: git source {}: {e}", krate.name, krate.version, git.inner.url),
+                    format!(
+                        "{}@{}: git source {}: {e}",
+                        krate.name, krate.version, git.inner.url
+                    ),
                 )
             })?;
             crate::policy::record(
@@ -756,17 +759,20 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         .map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("{}@{}: write .cargo-checksum.json: {e}", krate.name, krate.version),
+                format!(
+                    "{}@{}: write .cargo-checksum.json: {e}",
+                    krate.name, krate.version
+                ),
             )
         })?;
     }
     for (krate, archive) in crates.iter().filter(|k| k.git.is_none()).zip(archives) {
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         fs::create_dir_all(&crate_dir).map_err(|e| {
-            io::Error::new(e.kind(), format!(
-                "{}@{}: create staging dir: {e}",
-                krate.name, krate.version
-            ))
+            io::Error::new(
+                e.kind(),
+                format!("{}@{}: create staging dir: {e}", krate.name, krate.version),
+            )
         })?;
         let status = Command::new("/usr/bin/tar")
             .args(["-xzf"])
@@ -806,10 +812,13 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
             ))
         })?;
         fs::write(crate_dir.join(".cargo-checksum.json"), json).map_err(|e| {
-            io::Error::new(e.kind(), format!(
-                "{}@{}: write .cargo-checksum.json: {e}",
-                krate.name, krate.version
-            ))
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{}@{}: write .cargo-checksum.json: {e}",
+                    krate.name, krate.version
+                ),
+            )
         })?;
     }
 
@@ -1011,7 +1020,10 @@ pub(crate) fn blanket_config_text_for(
 
 /// The git sources a plan needs stanzas for.
 pub(crate) fn plan_git_sources(plan: &CargoPlan) -> Vec<CargoGitSource> {
-    plan.crates.iter().filter_map(|krate| krate.git.clone()).collect()
+    plan.crates
+        .iter()
+        .filter_map(|krate| krate.git.clone())
+        .collect()
 }
 
 /// The git sources named by a project's own Cargo.lock. Used where no plan is
@@ -1507,7 +1519,10 @@ checksum = "{hash_b}"
         let root = project.parent().unwrap();
 
         fs::write(root.join("rust-toolchain"), "1.96\n").unwrap();
-        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::write(
@@ -1515,7 +1530,10 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\nprofile = \"minimal\"\n",
         )
         .unwrap();
-        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
 
         fs::write(root.join("rust-toolchain"), "1.96.1\n").unwrap();
         fs::write(
@@ -1523,11 +1541,17 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"beta\"\n",
         )
         .unwrap();
-        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::write(root.join("rust-toolchain"), "stable\n").unwrap();
-        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
 
         fs::write(root.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
         let error = resolve_toolchain(Platform::Aarch64AppleDarwin, &project)
@@ -1546,11 +1570,17 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
         )
         .unwrap();
-        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
 
         fs::remove_file(root.join("rust-toolchain")).unwrap();
         fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
-        assert_eq!(resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(), "1.96.1");
+        assert_eq!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
+            "1.96.1"
+        );
     }
 
     #[test]
@@ -1629,7 +1659,9 @@ checksum = "{hash_b}"
             .map(|component| {
                 let root_name = format!(
                     "{}-{}-{}",
-                    component.component, RUST_VERSION, platform.triple()
+                    component.component,
+                    RUST_VERSION,
+                    platform.triple()
                 );
                 let root = dir.join(&root_name);
                 let package = match component.component {
@@ -1692,12 +1724,7 @@ checksum = "{hash_b}"
             .is_dir());
 
         let missing = TempDir::new("blanket-rust-layout-missing");
-        let archives = make_component_archives(
-            missing.path(),
-            &components,
-            platform,
-            None,
-        );
+        let archives = make_component_archives(missing.path(), &components, platform, None);
         let staged = missing.path().join("staged");
         fs::create_dir(&staged).unwrap();
         assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
@@ -1908,15 +1935,18 @@ mod git_source_tests {
             format!("git+https://github.com/o/r?tag=v1#{commit}"),
             format!("git+https://github.com/o/r#{commit}"),
         ] {
-            let parsed = parse_cargo_git_source(&source)
-                .unwrap_or_else(|| panic!("not parsed: {source}"));
+            let parsed =
+                parse_cargo_git_source(&source).unwrap_or_else(|| panic!("not parsed: {source}"));
             assert_eq!(parsed.inner.commit, commit);
             assert_eq!(parsed.inner.url, "https://github.com/o/r");
             // The key must be the lock's exact string, or cargo will not match it.
             assert_eq!(parsed.source, source);
         }
         assert!(parse_cargo_git_source("git+https://github.com/o/r?branch=main").is_none());
-        assert!(parse_cargo_git_source("registry+https://github.com/rust-lang/crates.io-index").is_none());
+        assert!(
+            parse_cargo_git_source("registry+https://github.com/rust-lang/crates.io-index")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1924,10 +1954,14 @@ mod git_source_tests {
         let commit = "b".repeat(40);
         let source = format!("git+https://github.com/o/r?rev={commit}#{commit}");
         let git = parse_cargo_git_source(&source).unwrap();
-        let text = blanket_config_text_for(Path::new("/store/vendor"), &[git.clone(), git])
-            .unwrap();
+        let text =
+            blanket_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
         assert!(text.contains(&format!("[source.\"{source}\"]")), "{text}");
-        assert_eq!(text.matches("replace-with").count(), 2, "one per source plus crates-io: {text}");
+        assert_eq!(
+            text.matches("replace-with").count(),
+            2,
+            "one per source plus crates-io: {text}"
+        );
         assert!(text.contains("git = \"https://github.com/o/r\""), "{text}");
         assert!(text.contains(&format!("rev = \"{commit}\"")), "{text}");
 
@@ -1970,8 +2004,8 @@ mod git_source_tests {
             second.object_id(),
             "a different commit must be a different vendor object"
         );
-        let other_url = parse_cargo_git_source(&format!("git+https://github.com/o/other#{commit}"))
-            .unwrap();
+        let other_url =
+            parse_cargo_git_source(&format!("git+https://github.com/o/other#{commit}")).unwrap();
         let (_, other) = vendor_identity(&plan(other_url)).unwrap();
         assert_ne!(
             first.object_id(),
@@ -2029,7 +2063,11 @@ mod git_source_tests {
             .to_string();
         assert!(error.contains("inherits workspace"), "{error}");
 
-        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"linked\"\nversion = \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"linked\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
         std::os::unix::fs::symlink("../../outside", root.join("escape")).unwrap();
         assert!(crate::gitsrc::validate_symlinks(&root).is_err());
         let _ = crate::store::remove_tree(&root);

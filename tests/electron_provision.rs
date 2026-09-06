@@ -17,7 +17,9 @@ fn store_at(root: &Path) -> Store {
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         std::fs::create_dir_all(store_root.join(sub)).unwrap();
     }
-    Store { root: store_root.canonicalize().unwrap() }
+    Store {
+        root: store_root.canonicalize().unwrap(),
+    }
 }
 
 #[test]
@@ -39,9 +41,10 @@ fn electron_is_provisioned_where_its_installer_looks() {
 
     // A real, published release.
     let version = "39.0.0";
-    let provisioning = blanket::artifacts::provision(&store, platform, "electron", version, &scratch)
-        .expect("provision")
-        .expect("electron is provisioned");
+    let provisioning =
+        blanket::artifacts::provision(&store, platform, "electron", version, &scratch)
+            .expect("provision")
+            .expect("electron is provisioned");
 
     let cache_root = provisioning
         .envs
@@ -49,8 +52,7 @@ fn electron_is_provisioned_where_its_installer_looks() {
         .find(|(key, _)| key == "electron_config_cache")
         .map(|(_, value)| PathBuf::from(value))
         .expect("the installer's cache variable is set");
-    let release_url =
-        format!("https://github.com/electron/electron/releases/download/v{version}");
+    let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
     let dir = cache_root.join(blanket::artifacts::electron_cache_directory(&release_url));
     let (os, arch) = match platform {
         Platform::Aarch64AppleDarwin => ("darwin", "arm64"),
@@ -58,8 +60,15 @@ fn electron_is_provisioned_where_its_installer_looks() {
     };
     let zip = dir.join(format!("electron-v{version}-{os}-{arch}.zip"));
     let sums = dir.join("SHASUMS256.txt");
-    assert!(zip.is_file(), "the zip must be in the cache at {}", zip.display());
-    assert!(sums.is_file(), "@electron/get verifies against SHASUMS256.txt from the same cache");
+    assert!(
+        zip.is_file(),
+        "the zip must be in the cache at {}",
+        zip.display()
+    );
+    assert!(
+        sums.is_file(),
+        "@electron/get verifies against SHASUMS256.txt from the same cache"
+    );
     assert!(
         std::fs::metadata(&zip).unwrap().len() > 10 << 20,
         "the zip should be a real release artifact"

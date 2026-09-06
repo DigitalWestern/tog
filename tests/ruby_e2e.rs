@@ -31,7 +31,10 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         // Committed store objects are read-only trees; restore write bits so
         // the fresh store is actually removed instead of leaking under /tmp.
-        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&self.0).status();
+        let _ = Command::new("chmod")
+            .args(["-R", "u+w"])
+            .arg(&self.0)
+            .status();
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -162,7 +165,10 @@ fn pinned_ruby(ruby: &Path, cwd: &Path, script: &str, label: &str) -> String {
     let output = Command::new(ruby.join("bin/ruby"))
         .current_dir(cwd)
         .env_clear()
-        .env("PATH", format!("{}:/usr/bin:/bin", ruby.join("bin").display()))
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", ruby.join("bin").display()),
+        )
         .env("HOME", cwd)
         .env("TMPDIR", cwd)
         .env("BUNDLE_IGNORE_CONFIG", "1")
@@ -319,10 +325,20 @@ puts JSON.generate(out)
             "RbConfig::{key}={value} is outside the object {}",
             ruby_obj.display()
         );
-        assert!(Path::new(&value).is_dir(), "RbConfig::{key}={value} missing");
+        assert!(
+            Path::new(&value).is_dir(),
+            "RbConfig::{key}={value} missing"
+        );
         assert_no_forbidden_prefix(&value, staging, key);
     }
-    for key in ["arch", "CC", "CXX", "LDSHARED", "LIBRUBYARG", "ENABLE_SHARED"] {
+    for key in [
+        "arch",
+        "CC",
+        "CXX",
+        "LDSHARED",
+        "LIBRUBYARG",
+        "ENABLE_SHARED",
+    ] {
         let value = text(key);
         assert!(!value.is_empty(), "RbConfig::{key} is empty");
         assert_no_forbidden_prefix(&value, staging, key);
@@ -331,7 +347,10 @@ puts JSON.generate(out)
     assert_eq!(text("gem_ruby"), ruby_binary.to_string_lossy());
     // configure_args retains build provenance (Homebrew Cellar prefix,
     // portable-* dependency dirs). Recorded separately; not an active path.
-    eprintln!("RbConfig::configure_args (historical)={}", text("configure_args"));
+    eprintln!(
+        "RbConfig::configure_args (historical)={}",
+        text("configure_args")
+    );
     let static_stdlib = config["static_stdlib"].as_array().unwrap();
     assert_eq!(
         static_stdlib.len(),
@@ -368,7 +387,11 @@ puts JSON.generate(out)
             "pkg-config {module} cflags do not reference the object: {cflags}"
         );
         assert_no_forbidden_prefix(&cflags, staging, "pkg-config cflags");
-        eprintln!("pkg-config {module}: prefix={} cflags={}", prefix.trim(), cflags.trim());
+        eprintln!(
+            "pkg-config {module}: prefix={} cflags={}",
+            prefix.trim(),
+            cflags.trim()
+        );
     }
 
     // Native compilation finds the pinned headers via mkmf + host cc (the
@@ -392,7 +415,11 @@ puts JSON.generate(out)
     // Launchers: RubyGems' sh-prelude wrappers exec the sibling ruby.
     for launcher in ["bin/gem", "bin/bundle", "bin/bundler"] {
         let body = std::fs::read_to_string(ruby_obj.join(launcher)).unwrap();
-        assert!(body.starts_with("#!/bin/sh\n"), "{launcher} shebang: {:?}", body.lines().next());
+        assert!(
+            body.starts_with("#!/bin/sh\n"),
+            "{launcher} shebang: {:?}",
+            body.lines().next()
+        );
         assert!(
             body.contains("exec \"$bindir/ruby\""),
             "{launcher} does not exec the sibling interpreter"
@@ -440,9 +467,16 @@ puts JSON.generate("digest" => digest, "zlib" => "ok", "openssl" => OpenSSL::OPE
 fn assert_stdlib_probe(output: &str, label: &str) {
     let probe: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
     assert_eq!(probe["zlib"], "ok", "{label}: {output}");
-    assert_eq!(probe["digest"].as_str().map(str::len), Some(64), "{label}: {output}");
+    assert_eq!(
+        probe["digest"].as_str().map(str::len),
+        Some(64),
+        "{label}: {output}"
+    );
     assert!(
-        probe["openssl"].as_str().unwrap_or_default().starts_with("OpenSSL "),
+        probe["openssl"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("OpenSSL "),
         "{label}: {output}"
     );
     eprintln!("{label}: {}", output.trim());
@@ -510,7 +544,12 @@ fn ruby_sync_native_ext_and_run() {
             platform_local,
             "plan ruby_platform must be the pinned interpreter's Gem::Platform.local"
         );
-        let stdlib = pinned_ruby(&ruby_obj, &project, STDLIB_PROBE, "pinned Ruby stdlib probe");
+        let stdlib = pinned_ruby(
+            &ruby_obj,
+            &project,
+            STDLIB_PROBE,
+            "pinned Ruby stdlib probe",
+        );
         assert_stdlib_probe(&stdlib, "Toolchain-object stdlib probe");
     }
 
@@ -531,7 +570,9 @@ fn ruby_sync_native_ext_and_run() {
             "gem object was not built from source nokogiri: {inputs:?}"
         );
         assert!(
-            !inputs.keys().any(|key| key.starts_with("gem:nokogiri-1.18.10-")),
+            !inputs
+                .keys()
+                .any(|key| key.starts_with("gem:nokogiri-1.18.10-")),
             "a platform nokogiri gem leaked into the object: {inputs:?}"
         );
         assert_eq!(
@@ -546,19 +587,29 @@ fn ruby_sync_native_ext_and_run() {
     if let Ok(entries) = std::fs::read_dir(&staging) {
         for entry in entries {
             let path = entry.unwrap().path();
-            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&path).status();
+            let _ = Command::new("chmod")
+                .args(["-R", "u+w"])
+                .arg(&path)
+                .status();
             let _ = std::fs::remove_dir_all(&path);
             let _ = std::fs::remove_file(&path);
         }
     }
     assert!(
-        std::fs::read_dir(&staging).map(|mut d| d.next().is_none()).unwrap_or(true),
+        std::fs::read_dir(&staging)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
         "staging directory still populated"
     );
 
     if linux {
         let stdlib = assert_ok(
-            blanket(&binary, &project, &store, &["run", "ruby", "-e", STDLIB_PROBE]),
+            blanket(
+                &binary,
+                &project,
+                &store,
+                &["run", "ruby", "-e", STDLIB_PROBE],
+            ),
             "committed Ruby stdlib probe",
         );
         assert_stdlib_probe(&stdlib, "Projected-env stdlib probe");
@@ -572,7 +623,12 @@ fn ruby_sync_native_ext_and_run() {
             &binary,
             &project,
             &store,
-            &["run", "ruby", "-e", "require \"racc/parser\"; require \"rake\"; puts \"ok \" + Rake::VERSION"],
+            &[
+                "run",
+                "ruby",
+                "-e",
+                "require \"racc/parser\"; require \"rake\"; puts \"ok \" + Rake::VERSION",
+            ],
         ),
         "run",
     );
@@ -581,7 +637,12 @@ fn ruby_sync_native_ext_and_run() {
     // /usr/bin fallback (Sol review 5: symlink binstubs dangled after the
     // commit rename and the old assertion passed via host rake).
     let which = assert_ok(
-        blanket(&binary, &project, &store, &["run", "sh", "-c", "command -v rake"]),
+        blanket(
+            &binary,
+            &project,
+            &store,
+            &["run", "sh", "-c", "command -v rake"],
+        ),
         "which rake",
     );
     let which = which.trim().to_string();
@@ -597,7 +658,12 @@ fn ruby_sync_native_ext_and_run() {
     // The wrapper itself must execute (relocatable, not a dangling link).
     // Pass the absolute store path as argv[0]; no shell that could quietly
     // fall back to /usr/bin/rake.
-    let direct = blanket(&binary, &project, &store, &["run", which.as_str(), "--version"]);
+    let direct = blanket(
+        &binary,
+        &project,
+        &store,
+        &["run", which.as_str(), "--version"],
+    );
     let version = assert_ok(direct, "store binstub direct exec");
     assert!(version.contains("13."), "{version}");
 
@@ -636,7 +702,10 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
         assert_eq!(nokogiri["libxml_source"], "packaged", "{nokogiri}");
         assert_eq!(nokogiri["libxslt_source"], "packaged", "{nokogiri}");
         let native = nokogiri["native"].as_str().unwrap();
-        assert!(native.ends_with(".so"), "not a Linux native library: {native}");
+        assert!(
+            native.ends_with(".so"),
+            "not a Linux native library: {native}"
+        );
         assert!(
             Path::new(native).starts_with(gems_obj.canonicalize().unwrap()),
             "nokogiri loaded outside the committed gem object: {native}"

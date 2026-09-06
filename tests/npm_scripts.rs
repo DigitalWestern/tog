@@ -113,11 +113,7 @@ fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
 
 /// Same as `make_pkg_tarball`, but the package can be named: the item-5 policy
 /// table is keyed by package name.
-fn make_named_pkg_tarball(
-    dir: &std::path::Path,
-    name: &str,
-    script: &str,
-) -> (PathBuf, String) {
+fn make_named_pkg_tarball(dir: &std::path::Path, name: &str, script: &str) -> (PathBuf, String) {
     let pkg = dir.join("package");
     let _ = std::fs::remove_dir_all(&pkg);
     std::fs::create_dir_all(&pkg).unwrap();
@@ -207,12 +203,8 @@ fn make_fixture_tarball(
 
 fn seed_verified_fixture(store: &Store, tarball: &Path, sri: &str) {
     let digest = Digest::from_sri(sri).unwrap();
-    fetch::download_verified_digest(
-        store,
-        &format!("file://{}", tarball.display()),
-        &digest,
-    )
-    .unwrap();
+    fetch::download_verified_digest(store, &format!("file://{}", tarball.display()), &digest)
+        .unwrap();
 }
 
 fn add_fixture_dependency(project: &Path, package_name: &str, sri: &str) {
@@ -226,21 +218,17 @@ fn add_fixture_dependency(project: &Path, package_name: &str, sri: &str) {
     let mut lock: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
     lock["packages"][""]["dependencies"][package_name] = serde_json::json!("1.0.0");
-    lock["packages"]
-        .as_object_mut()
-        .unwrap()
-        .insert(
-            format!("node_modules/{package_name}"),
-            serde_json::json!({
-                "name": package_name,
-                "version": "1.0.0",
-                "resolved": format!("https://fixture.invalid/{package_name}-1.0.0.tgz"),
-                "integrity": sri,
-            }),
-        );
+    lock["packages"].as_object_mut().unwrap().insert(
+        format!("node_modules/{package_name}"),
+        serde_json::json!({
+            "name": package_name,
+            "version": "1.0.0",
+            "resolved": format!("https://fixture.invalid/{package_name}-1.0.0.tgz"),
+            "integrity": sri,
+        }),
+    );
     assert_eq!(
-        package["dependencies"],
-        lock["packages"][""]["dependencies"],
+        package["dependencies"], lock["packages"][""]["dependencies"],
         "package.json and package-lock.json root dependencies diverged"
     );
     std::fs::write(&lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
@@ -274,12 +262,7 @@ fn network_access_during_install_script_fails() {
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let result = npm::realize_node_env(
-            &store,
-            platform,
-            &plan_for(&tarball, &sri),
-            &[],
-        );
+        let result = npm::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]);
         let err = result.expect_err("install script reaching the network must fail");
         assert!(
             err.to_string().contains("network-denied"),
@@ -329,12 +312,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let err = npm::realize_node_env(
-            &store,
-            platform,
-            &plan_for(&tarball, &sri),
-            &[],
-        )
+        let err = npm::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
             .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
         assert!(err
@@ -353,26 +331,12 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let store = store_at(&dir);
     policy::init(&dir, false).unwrap();
     let plan = plan_for(&tarball, &sri);
-    let env = npm::realize_node_env(
-        &store,
-        platform,
-        &plan,
-        &[],
-    )
-    .expect("permissive realize");
+    let env = npm::realize_node_env(&store, platform, &plan, &[]).expect("permissive realize");
     let package_dir = env.join("node_modules/fixture-pkg");
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    npm::project_node_env(
-        &dir,
-        &env,
-        platform,
-        &plan,
-        &[],
-        false,
-    )
-    .expect("project");
+    npm::project_node_env(&dir, &env, platform, &plan, &[], false).expect("project");
     let closure = project::read_closure(&dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
     assert_eq!(exceptions.len(), 1);
@@ -414,13 +378,8 @@ fn benign_install_script_runs_and_output_is_captured() {
         "node -e \"require('fs').writeFileSync('built.txt','ok')\"",
     );
     let store = store_at(&dir);
-    let env = npm::realize_node_env(
-        &store,
-        platform,
-        &plan_for(&tarball, &sri),
-        &[],
-    )
-    .expect("realize");
+    let env =
+        npm::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]).expect("realize");
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
     let _ = std::fs::remove_dir_all(&dir);
@@ -455,7 +414,14 @@ fn linux_npm_roundtrip() {
     let npm_lock = Command::new(node.join("bin/npm"))
         .current_dir(project)
         .env("BLANKET_STORE", &store_root)
-        .env("PATH", format!("{}:{}", node_bin.display(), std::env::var("PATH").unwrap_or_default()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                node_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .args([
             "install",
             "--package-lock-only",
@@ -509,7 +475,10 @@ static napi_value init(napi_env env, napi_value exports) {
 NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 "#,
             ),
-            ("index.js", b"module.exports = require('./build/Release/addon.node');\n"),
+            (
+                "index.js",
+                b"module.exports = require('./build/Release/addon.node');\n",
+            ),
         ],
     );
     let containment_script = "node -e \"const fs=require('fs');fs.writeFileSync('generated.txt','captured');let denied=false;try{fs.writeFileSync('../escape.txt','escaped')}catch(_){denied=true}if(!denied)process.exit(23)\"";
@@ -549,16 +518,14 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     assert!(package_paths.contains(&"node_modules/@esbuild/linux-x64"));
     assert!(!package_paths.contains(&"node_modules/@esbuild/darwin-arm64"));
     let exceptions = closure["exceptions"].as_array().unwrap();
-    assert!(exceptions.iter().all(|exception| {
-        exception["kind"].as_str() != Some("install-script-failed")
-    }));
+    assert!(exceptions
+        .iter()
+        .all(|exception| { exception["kind"].as_str() != Some("install-script-failed") }));
 
     let env_object = PathBuf::from(closure["env_object"].as_str().unwrap());
     assert_eq!(
-        std::fs::read_to_string(
-            env_object.join("node_modules/fixture-script/generated.txt")
-        )
-        .unwrap(),
+        std::fs::read_to_string(env_object.join("node_modules/fixture-script/generated.txt"))
+            .unwrap(),
         "captured"
     );
     assert!(!env_object.join("node_modules/escape.txt").exists());
@@ -578,7 +545,12 @@ if (addon.answer() !== 42) process.exit(13);
 esbuild.transformSync('const answer = 42', {loader: 'js'});
 console.log('linux-npm-roundtrip-ok');
 "#;
-    let run = blanket(binary, project, &store_root, &["run", "node", "-e", node_check]);
+    let run = blanket(
+        binary,
+        project,
+        &store_root,
+        &["run", "node", "-e", node_check],
+    );
     assert_success(&run, "blanket run Node/esbuild/addon check");
     assert!(String::from_utf8_lossy(&run.stdout).contains("linux-npm-roundtrip-ok"));
 
@@ -591,16 +563,25 @@ console.log('linux-npm-roundtrip-ok');
             std::fs::remove_file(path).unwrap();
         }
     }
-    assert_eq!(std::fs::read_dir(store_root.join("cache/sha512")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(store_root.join("cache/sha512"))
+            .unwrap()
+            .count(),
+        0
+    );
     let repeated = blanket(binary, project, &store_root, &["sync", "--strict"]);
     assert_success(&repeated, "offline warm sync --strict");
     let repeated_closure = project::read_closure(project, "node").unwrap();
     assert_eq!(
-        repeated_closure["env_object"],
-        closure["env_object"],
+        repeated_closure["env_object"], closure["env_object"],
         "identical inputs produced a different node environment object"
     );
-    let repeated_run = blanket(binary, project, &store_root, &["run", "node", "-e", node_check]);
+    let repeated_run = blanket(
+        binary,
+        project,
+        &store_root,
+        &["run", "node", "-e", node_check],
+    );
     assert_success(&repeated_run, "repeat blanket run Node/esbuild/addon check");
 }
 
@@ -622,8 +603,13 @@ fn skip_download_switch_is_injected_and_recorded() {
         "node -e \"if(process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){process.exit(3)};require('fs').writeFileSync('skipped.txt','ok')\"",
     );
     let store = store_at(&dir);
-    let env = npm::realize_node_env(&store, platform, &plan_named(&tarball, &sri, "puppeteer"), &[])
-        .expect("realize");
+    let env = npm::realize_node_env(
+        &store,
+        platform,
+        &plan_named(&tarball, &sri, "puppeteer"),
+        &[],
+    )
+    .expect("realize");
     assert_eq!(
         std::fs::read_to_string(env.join("node_modules/puppeteer/skipped.txt")).unwrap(),
         "ok"

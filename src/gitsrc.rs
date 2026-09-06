@@ -65,8 +65,7 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
         )));
     }
     if let Some(subdirectory) = &source.subdirectory {
-        if subdirectory.starts_with('/')
-            || subdirectory.split(['/', '\\']).any(|part| part == "..")
+        if subdirectory.starts_with('/') || subdirectory.split(['/', '\\']).any(|part| part == "..")
         {
             return Err(err(format!(
                 "refusing git subdirectory {subdirectory:?}: it escapes the checkout"
@@ -108,7 +107,10 @@ pub fn normalize_url(raw: &str) -> String {
         let authority = if scheme.eq_ignore_ascii_case("ssh") {
             authority
         } else {
-            authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority)
+            authority
+                .rsplit_once('@')
+                .map(|(_, host)| host)
+                .unwrap_or(authority)
         };
         url = format!("{scheme}://{authority}{path}");
     }
@@ -131,9 +133,19 @@ fn slug(url: &str) -> String {
     let joined = parts.join("-");
     let cleaned: String = joined
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
-    if cleaned.is_empty() { "repo".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "repo".to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn identity(source: &GitSource) -> Identity {
@@ -178,9 +190,9 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output
     // A prompt would hang a background sync forever.
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env("GIT_ASKPASS", "/bin/true");
-    command.output().map_err(|e| {
-        io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" ")))
-    })
+    command
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
 }
 
 fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
@@ -221,7 +233,9 @@ pub fn resolve_ref(url: &str, reference: &str) -> io::Result<String> {
         .and_then(|line| line.split_whitespace().next())
         .ok_or_else(|| err(format!("{url}: ref {reference} not found")))?;
     if !is_full_commit(commit) {
-        return Err(err(format!("{url}: ref {reference} resolved to {commit:?}")));
+        return Err(err(format!(
+            "{url}: ref {reference} resolved to {commit:?}"
+        )));
     }
     Ok(commit.to_ascii_lowercase())
 }
@@ -338,7 +352,9 @@ fn resolve_target_components(
                     }
                     current = resolve_target_components(
                         root,
-                        candidate.parent().ok_or_else(|| err("symlink has no parent"))?,
+                        candidate
+                            .parent()
+                            .ok_or_else(|| err("symlink has no parent"))?,
                         &nested,
                         seen,
                     )?;
@@ -373,16 +389,24 @@ fn validate_checkout_tree_at(root: &Path, depth: usize) -> io::Result<()> {
     if !output.status.success() {
         return Err(err("git ls-files failed while validating the checkout"));
     }
-    for record in output.stdout.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
         let tab = record
             .iter()
             .position(|byte| *byte == b'\t')
             .ok_or_else(|| err("malformed git index entry"))?;
-        let metadata = std::str::from_utf8(&record[..tab])
-            .map_err(|_| err("git index entry is not UTF-8"))?;
+        let metadata =
+            std::str::from_utf8(&record[..tab]).map_err(|_| err("git index entry is not UTF-8"))?;
         let mut fields = metadata.split_whitespace();
-        let mode = fields.next().ok_or_else(|| err("git index entry has no mode"))?;
-        let expected = fields.next().ok_or_else(|| err("git index entry has no hash"))?;
+        let mode = fields
+            .next()
+            .ok_or_else(|| err("git index entry has no mode"))?;
+        let expected = fields
+            .next()
+            .ok_or_else(|| err("git index entry has no hash"))?;
         let path = std::ffi::OsString::from_vec(record[tab + 1..].to_vec());
         let path = root.join(path);
         if mode == "160000" {
@@ -436,11 +460,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
 
     let work = store.stage()?;
     let result = (|| -> io::Result<()> {
-        git_ok(
-            &["init", "-q", "--template="],
-            Some(&work),
-            "git init",
-        )?;
+        git_ok(&["init", "-q", "--template="], Some(&work), "git init")?;
         // Besides naming the fetched repository, origin is what Git uses to
         // resolve relative URLs in .gitmodules. Without it, a submodule such
         // as `../shared.git` is resolved against the temporary worktree.
@@ -452,7 +472,14 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
         // A reachable-sha fetch is the cheap path; servers that refuse it
         // (uploadpack.allowReachableSHA1InWant off) need the full history.
         let shallow = run_git(
-            &["fetch", "--depth", "1", "--quiet", &source.url, &source.commit],
+            &[
+                "fetch",
+                "--depth",
+                "1",
+                "--quiet",
+                &source.url,
+                &source.commit,
+            ],
             Some(&work),
         )?;
         if !shallow.status.success() {
@@ -573,11 +600,20 @@ mod tests {
         };
         // The subdirectory selects part of the tree; it does not change the
         // tree's bytes, so it must not change the object id.
-        let with_subdir = GitSource { subdirectory: Some("packages/x".into()), ..base.clone() };
+        let with_subdir = GitSource {
+            subdirectory: Some("packages/x".into()),
+            ..base.clone()
+        };
         assert_eq!(object_id(&base), object_id(&with_subdir));
-        let other_commit = GitSource { commit: "b".repeat(40), ..base.clone() };
+        let other_commit = GitSource {
+            commit: "b".repeat(40),
+            ..base.clone()
+        };
         assert_ne!(object_id(&base), object_id(&other_commit));
-        let other_url = GitSource { url: "https://github.com/owner/other".into(), ..base.clone() };
+        let other_url = GitSource {
+            url: "https://github.com/owner/other".into(),
+            ..base.clone()
+        };
         assert_ne!(object_id(&base), object_id(&other_url));
         assert!(object_id(&base).ends_with(&format!("-owner-repo-{}", "a".repeat(40))));
     }
@@ -646,7 +682,12 @@ mod realization_tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git_ok(&["init", "-q", "-b", "main"], Some(&repo), "init").unwrap();
-        git_ok(&["config", "user.email", "t@example.invalid"], Some(&repo), "cfg").unwrap();
+        git_ok(
+            &["config", "user.email", "t@example.invalid"],
+            Some(&repo),
+            "cfg",
+        )
+        .unwrap();
         git_ok(&["config", "user.name", "t"], Some(&repo), "cfg").unwrap();
         std::fs::write(repo.join("index.js"), "module.exports = 42;\n").unwrap();
         std::fs::create_dir_all(repo.join("sub")).unwrap();
@@ -662,7 +703,9 @@ mod realization_tests {
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        crate::store::Store { root: store_root.canonicalize().unwrap() }
+        crate::store::Store {
+            root: store_root.canonicalize().unwrap(),
+        }
     }
 
     #[test]
@@ -670,14 +713,24 @@ mod realization_tests {
         let root = temp("realize");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
-        let source = GitSource { url: normalize_url(&url), commit: commit.clone(), subdirectory: None };
+        let source = GitSource {
+            url: normalize_url(&url),
+            commit: commit.clone(),
+            subdirectory: None,
+        };
         let object = ensure_git_source(&store, &source).unwrap();
         assert_eq!(
             std::fs::read_to_string(object.join("index.js")).unwrap(),
             "module.exports = 42;\n"
         );
-        assert_eq!(std::fs::read_to_string(object.join("sub/thing.txt")).unwrap(), "deep\n");
-        assert!(!object.join(".git").exists(), "the .git directory must not be stored");
+        assert_eq!(
+            std::fs::read_to_string(object.join("sub/thing.txt")).unwrap(),
+            "deep\n"
+        );
+        assert!(
+            !object.join(".git").exists(),
+            "the .git directory must not be stored"
+        );
         // Second call is a cache hit on the same object.
         let again = ensure_git_source(&store, &source).unwrap();
         assert_eq!(object, again);
@@ -694,7 +747,10 @@ mod realization_tests {
             subdirectory: None,
         };
         let error = ensure_git_source(&store, &source).unwrap_err().to_string();
-        assert!(error.contains("fetch") || error.contains("checkout"), "{error}");
+        assert!(
+            error.contains("fetch") || error.contains("checkout"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -707,7 +763,9 @@ mod realization_tests {
             commit: "main".into(),
             subdirectory: None,
         };
-        let error = ensure_git_source(&store, &unpinned).unwrap_err().to_string();
+        let error = ensure_git_source(&store, &unpinned)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("full commit"), "{error}");
         assert_eq!(resolve_ref(&normalize_url(&url), "main").unwrap(), commit);
         assert_eq!(resolve_ref(&normalize_url(&url), &commit).unwrap(), commit);
@@ -719,7 +777,12 @@ mod realization_tests {
         let repo = root.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
         git_ok(&["init", "-q", "-b", "main"], Some(&repo), "init").unwrap();
-        git_ok(&["config", "user.email", "t@example.invalid"], Some(&repo), "cfg").unwrap();
+        git_ok(
+            &["config", "user.email", "t@example.invalid"],
+            Some(&repo),
+            "cfg",
+        )
+        .unwrap();
         git_ok(&["config", "user.name", "t"], Some(&repo), "cfg").unwrap();
         fs::write(repo.join(".gitattributes"), b"*.txt text eol=crlf\n").unwrap();
         fs::write(repo.join("line.txt"), b"line\n").unwrap();
@@ -731,7 +794,9 @@ mod realization_tests {
             commit,
             subdirectory: None,
         };
-        let error = ensure_git_source(&store_at(&root.0), &source).unwrap_err().to_string();
+        let error = ensure_git_source(&store_at(&root.0), &source)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("transformed"), "{error}");
     }
 
@@ -755,7 +820,11 @@ mod realization_tests {
             .arg(&unpacked)
             .output()
             .unwrap();
-        assert!(extracted.status.success(), "{}", String::from_utf8_lossy(&extracted.stderr));
+        assert!(
+            extracted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
         assert!(unpacked.join("pkg-1.0/empty").is_dir());
         assert!(unpacked.join("pkg-1.0/safe-link").is_symlink());
         assert_eq!(
@@ -793,7 +862,10 @@ mod realization_tests {
         assert!(!fits(format!("{}/{}", seg(156), seg(100)), false));
         assert!(!fits(format!("{}/{}", seg(155), seg(101)), false));
         assert!(fits(format!("{}/{}/{}", seg(60), seg(94), seg(100)), false));
-        assert!(!fits(format!("{}/{}/{}", seg(60), seg(95), seg(100)), false));
+        assert!(!fits(
+            format!("{}/{}/{}", seg(60), seg(95), seg(100)),
+            false
+        ));
         // No separator to split on, however long.
         assert!(!fits(seg(200), false));
     }
@@ -820,9 +892,15 @@ mod realization_tests {
         fs::create_dir_all(&link_checkout).unwrap();
         fs::write(link_checkout.join("target"), b"content\n").unwrap();
         std::os::unix::fs::symlink("x".repeat(101), link_checkout.join("link")).unwrap();
-        let error = pack_checkout(&store_at(&link_root.0), platform, &link_checkout, "pkg", "1.0")
-            .expect_err("overlong symlink target must fail packing")
-            .to_string();
+        let error = pack_checkout(
+            &store_at(&link_root.0),
+            platform,
+            &link_checkout,
+            "pkg",
+            "1.0",
+        )
+        .expect_err("overlong symlink target must fail packing")
+        .to_string();
         assert!(error.contains("packing"), "{error}");
     }
 }
@@ -961,9 +1039,9 @@ pub fn pack_checkout(
             } else {
                 &tar_error
             })
-                .lines()
-                .next()
-                .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("")
         )));
     }
     let (sha256, _) = crate::fetch::cache_insert(store, &archive)?;
@@ -994,7 +1072,10 @@ fn normalize_for_packing(root: &Path) -> io::Result<()> {
                 &path,
                 fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
             )?;
-            fs::File::options().write(true).open(&path)?.set_modified(epoch)?;
+            fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(epoch)?;
         }
     }
     fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
@@ -1012,8 +1093,14 @@ fn set_mtime_epoch(path: &Path) -> io::Result<()> {
     let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| err(format!("path contains NUL: {}", path.display())))?;
     let times = [
-        libc::timespec { tv_sec: 0, tv_nsec: 0 },
-        libc::timespec { tv_sec: 0, tv_nsec: 0 },
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
     ];
     let result = unsafe {
         libc::utimensat(
@@ -1041,8 +1128,7 @@ fn set_mtime_epoch(path: &Path) -> io::Result<()> {
 /// the whole tree.
 fn ustar_fits(path: &[u8], is_dir: bool) -> bool {
     let len = path.len() + usize::from(is_dir);
-    len <= 100
-        || (1..path.len().min(156)).any(|i| path[i] == b'/' && len - i - 1 <= 100)
+    len <= 100 || (1..path.len().min(156)).any(|i| path[i] == b'/' && len - i - 1 <= 100)
 }
 
 /// Every tree entry under `root`, including directories and symlinks, as a

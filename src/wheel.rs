@@ -65,8 +65,7 @@ pub fn install_wheel(
         .and_then(|name| name.rsplit_once('-').map(|(name, _)| name))
         .unwrap_or(&distribution_id)
         .to_string();
-    let distribution_name = distribution_dir
-        .replace('_', "-");
+    let distribution_name = distribution_dir.replace('_', "-");
     let entry_points = dist_info.as_deref().and_then(|name| {
         archive
             .by_name(&format!("{name}/entry_points.txt"))
@@ -274,11 +273,13 @@ fn validate_entry_name(name: &str) -> io::Result<()> {
 
 fn validate_python_minor(python_minor: &str) -> io::Result<()> {
     let mut components = python_minor.split('.');
-    let valid = components.next().is_some_and(|part| {
-        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-    }) && components.next().is_some_and(|part| {
-        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-    }) && components.next().is_none();
+    let valid = components
+        .next()
+        .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && components
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && components.next().is_none();
     if !valid {
         return Err(invalid_data(format!(
             "invalid Python minor version for wheel headers: {python_minor}"
@@ -292,9 +293,7 @@ fn normalized_relative_path(name: &str) -> io::Result<PathBuf> {
     let absolute = bytes
         .first()
         .is_some_and(|byte| *byte == b'/' || *byte == b'\\')
-        || (bytes.len() >= 2
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':');
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
     if absolute {
         return Err(invalid_data(format!("unsafe zip entry: {name}")));
     }
@@ -478,24 +477,13 @@ mod tests {
                     "demo-1.0.data/scripts/demo-window",
                     b"#!pythonw\nprint('window')\n",
                 ),
-                (
-                    "demo-1.0.data/scripts/no-shebang",
-                    b"print('plain')\n",
-                ),
+                ("demo-1.0.data/scripts/no-shebang", b"print('plain')\n"),
                 ("demo-1.0.data/scripts/raw.bin", &[0, 1, 255]),
                 ("demo-1.0.data/data/share/demo.txt", b"shared\n"),
             ],
         );
 
-        install_wheel(
-            &wheel,
-            &site,
-            &bin,
-            "3.12",
-            &python,
-            &mut BTreeMap::new(),
-        )
-        .unwrap();
+        install_wheel(&wheel, &site, &bin, "3.12", &python, &mut BTreeMap::new()).unwrap();
 
         assert_eq!(
             fs::read(site.join("demo/__init__.py")).unwrap(),
@@ -514,7 +502,10 @@ mod tests {
             fs::read(bin.join("demo-window")).unwrap(),
             format!("#!{}\nprint('window')\n", python.display()).as_bytes()
         );
-        assert_eq!(fs::read(bin.join("no-shebang")).unwrap(), b"print('plain')\n");
+        assert_eq!(
+            fs::read(bin.join("no-shebang")).unwrap(),
+            b"print('plain')\n"
+        );
         assert_eq!(fs::read(bin.join("raw.bin")).unwrap(), &[0, 1, 255]);
         assert_eq!(
             fs::read_to_string(bin.join("tool")).unwrap(),
@@ -542,11 +533,7 @@ mod tests {
         );
         for script in ["demo-window", "no-shebang"] {
             assert_eq!(
-                fs::metadata(bin.join(script))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
+                fs::metadata(bin.join(script)).unwrap().permissions().mode() & 0o777,
                 0o755
             );
         }
@@ -627,7 +614,10 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(fs::read_to_string(site.join("shared.py")).unwrap(), "second\n");
+        assert_eq!(
+            fs::read_to_string(site.join("shared.py")).unwrap(),
+            "second\n"
+        );
         assert_eq!(crate::policy::drain().len(), 1);
     }
 
@@ -637,7 +627,10 @@ mod tests {
             normalized_relative_path("demo/a\\b.txt").unwrap(),
             PathBuf::from("demo/a\\b.txt")
         );
-        assert_eq!(normalized_relative_path("./demo//x.py").unwrap(), PathBuf::from("demo/x.py"));
+        assert_eq!(
+            normalized_relative_path("./demo//x.py").unwrap(),
+            PathBuf::from("demo/x.py")
+        );
         assert!(normalized_relative_path("/abs").is_err());
         assert!(normalized_relative_path("../up").is_err());
         assert!(normalized_relative_path("demo/../../up").is_err());
@@ -656,10 +649,7 @@ mod tests {
             &[
                 ("demo-1.0.dist-info/RECORD", b""),
                 ("demo-1.0.data/headers/demo.h", b"#define DEMO 1\n"),
-                (
-                    "demo-1.0.data/headers/sub/x.h",
-                    b"#define DEMO_X 1\n",
-                ),
+                ("demo-1.0.data/headers/sub/x.h", b"#define DEMO_X 1\n"),
             ],
         );
 
@@ -674,7 +664,10 @@ mod tests {
         .unwrap();
 
         let headers = temp.path().join("include/site/python3.12/demo");
-        assert_eq!(fs::read(headers.join("demo.h")).unwrap(), b"#define DEMO 1\n");
+        assert_eq!(
+            fs::read(headers.join("demo.h")).unwrap(),
+            b"#define DEMO 1\n"
+        );
         assert_eq!(
             fs::read(headers.join("sub/x.h")).unwrap(),
             b"#define DEMO_X 1\n"

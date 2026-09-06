@@ -568,7 +568,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(released, "the gc lock was not released when the lease was dropped");
+        assert!(
+            released,
+            "the gc lock was not released when the lease was dropped"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

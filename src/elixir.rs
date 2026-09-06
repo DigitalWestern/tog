@@ -104,7 +104,10 @@ fn beam_identity_with(
         let root = store_root
             .to_str()
             .ok_or_else(|| err("BEAM store root is not valid UTF-8"))?;
-        inputs.insert("relocation_schema".to_string(), relocation_schema.to_string());
+        inputs.insert(
+            "relocation_schema".to_string(),
+            relocation_schema.to_string(),
+        );
         inputs.insert("store_root".to_string(), root.to_string());
     }
     Ok(Identity {
@@ -141,13 +144,19 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// A short fingerprint of the whole BEAM toolchain, used to qualify build
 /// paths and identities (stale _build across toolchains is a real hazard).
 pub fn beam_fingerprint(platform: Platform) -> io::Result<String> {
-    Ok(beam_fingerprint_with(otp_pin(platform)?, LINUX_RELOCATION_SCHEMA))
+    Ok(beam_fingerprint_with(
+        otp_pin(platform)?,
+        LINUX_RELOCATION_SCHEMA,
+    ))
 }
 
 fn beam_fingerprint_with(pin: &OtpPin, relocation_schema: &str) -> String {
     let joined = if pin.platform.is_macos() {
         // Darwin: byte-for-byte the pre-Linux formula (golden c35290f692496d51).
-        format!("{}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}", pin.sha256)
+        format!(
+            "{}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}",
+            pin.sha256
+        )
     } else {
         format!(
             "{}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}:{relocation_schema}",
@@ -289,7 +298,13 @@ fn validate_otp_pre_install(otp_root: &Path) -> io::Result<OtpLayout> {
     let installer = read_text(&install, "Install script")?;
     // The recipe depends on these exact mechanisms; a script without them
     // is not the artifact this recipe was written against.
-    for needle in ["#!", "-cross)", "-minimal)", "TARGET_ERL_ROOT", "%FINAL_ROOTDIR%"] {
+    for needle in [
+        "#!",
+        "-cross)",
+        "-minimal)",
+        "TARGET_ERL_ROOT",
+        "%FINAL_ROOTDIR%",
+    ] {
         if !installer.contains(needle) {
             return Err(err(format!(
                 "OTP Install script at {} lacks {needle:?}; layout not understood by recipe {LINUX_RELOCATION_SCHEMA}",
@@ -322,11 +337,23 @@ fn validate_otp_pre_install(otp_root: &Path) -> io::Result<OtpLayout> {
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("erts-"))
-        .ok_or_else(|| err(format!("unexpected OTP erts directory {}", erts_dir.display())))?
+        .ok_or_else(|| {
+            err(format!(
+                "unexpected OTP erts directory {}",
+                erts_dir.display()
+            ))
+        })?
         .to_string();
     let erts_bin = erts_dir.join("bin");
     require_directory(&erts_bin, "ERTS bin directory")?;
-    for file in ["beam.smp", "erlexec", "epmd", "erl.src", "start.src", "start_erl.src"] {
+    for file in [
+        "beam.smp",
+        "erlexec",
+        "epmd",
+        "erl.src",
+        "start.src",
+        "start_erl.src",
+    ] {
         require_regular(&erts_bin.join(file), &format!("ERTS {file}"))?;
     }
     for file in INSTALL_COPIED_BIN
@@ -335,7 +362,10 @@ fn validate_otp_pre_install(otp_root: &Path) -> io::Result<OtpLayout> {
     {
         require_regular(&erts_bin.join(file), &format!("ERTS {file}"))?;
     }
-    for (template, token) in [("erl.src", "%FINAL_ROOTDIR%"), ("start.src", "%FINAL_ROOTDIR%")] {
+    for (template, token) in [
+        ("erl.src", "%FINAL_ROOTDIR%"),
+        ("start.src", "%FINAL_ROOTDIR%"),
+    ] {
         if !read_text(&erts_bin.join(template), template)?.contains(token) {
             return Err(err(format!(
                 "OTP {template} lacks the {token} template token; relocation recipe does not apply"
@@ -353,7 +383,12 @@ fn validate_otp_pre_install(otp_root: &Path) -> io::Result<OtpLayout> {
             version.trim()
         )));
     }
-    for file in ["start_clean.boot", "start_clean.script", "no_dot_erlang.boot", "start.boot"] {
+    for file in [
+        "start_clean.boot",
+        "start_clean.script",
+        "no_dot_erlang.boot",
+        "start.boot",
+    ] {
         require_regular(&release_dir.join(file), &format!("release {file}"))?;
     }
     let releases_src = read_text(&otp_root.join("releases/RELEASES.src"), "RELEASES.src")?;
@@ -382,7 +417,10 @@ fn check_embeddable_prefix(prefix: &Path) -> io::Result<&str> {
     let text = prefix
         .to_str()
         .ok_or_else(|| err("OTP final prefix is not valid UTF-8"))?;
-    if let Some(bad) = text.chars().find(|c| matches!(c, ';' | '&' | '\\' | '\n' | '\r' | '"' | '$' | '`')) {
+    if let Some(bad) = text
+        .chars()
+        .find(|c| matches!(c, ';' | '&' | '\\' | '\n' | '\r' | '"' | '$' | '`'))
+    {
         return Err(err(format!(
             "OTP final prefix contains {bad:?}, which Install's sed/sh templating cannot embed safely: {text}"
         )));
@@ -582,7 +620,9 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
     }
     let releases = read_text(&otp_root.join("releases/RELEASES"), "release metadata")?;
     if releases.contains("%ERL_ROOT%") || !releases.contains("\"29\"") {
-        return Err(err("OTP releases/RELEASES is not the installed release metadata"));
+        return Err(err(
+            "OTP releases/RELEASES is not the installed release metadata",
+        ));
     }
     let data = read_text(&otp_root.join("releases/start_erl.data"), "start_erl.data")?;
     if data.trim() != format!("{} 29", layout.erts_vsn) {
@@ -593,13 +633,19 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
         )));
     }
     for file in INSTALL_COPIED_BIN {
-        require_regular(&otp_root.join("bin").join(file), &format!("installed bin/{file}"))?;
+        require_regular(
+            &otp_root.join("bin").join(file),
+            &format!("installed bin/{file}"),
+        )?;
     }
     let epmd = otp_root.join("bin/epmd");
     let md = fs::symlink_metadata(&epmd)
         .map_err(|e| io::Error::new(e.kind(), format!("OTP epmd link missing: {e}")))?;
     if !md.file_type().is_symlink() {
-        return Err(err(format!("OTP epmd at {} is not a symlink", epmd.display())));
+        return Err(err(format!(
+            "OTP epmd at {} is not a symlink",
+            epmd.display()
+        )));
     }
     let expected = PathBuf::from(format!("../erts-{}/bin/epmd", layout.erts_vsn));
     let target = fs::read_link(&epmd)?;
@@ -652,7 +698,9 @@ fn probe_otp_runtime(otp_root: &Path, scratch: &Path) -> io::Result<()> {
     let release = lines.next().unwrap_or_default();
     let root = lines.next().unwrap_or_default();
     if release != "29" {
-        return Err(err(format!("staged OTP reports release {release:?}, expected 29")));
+        return Err(err(format!(
+            "staged OTP reports release {release:?}, expected 29"
+        )));
     }
     if Path::new(root) != otp_root.canonicalize()? {
         return Err(err(format!(
@@ -1202,9 +1250,8 @@ pub fn realize_deps(
             "https://repo.hex.pm/tarballs/{}-{}.tar",
             d.package, d.version
         );
-        let tar = download_verified_held(store, &url, &d.outer_sha256).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: {e}", d.app))
-        })?;
+        let tar = download_verified_held(store, &url, &d.outer_sha256)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", d.app)))?;
         // Unpack the OUTER tar (VERSION, metadata.config, contents.tar.gz,
         // CHECKSUM) into scratch.
         let outer_dir = scratch.join(format!("outer-{}", d.app));
@@ -1222,13 +1269,12 @@ pub fn realize_deps(
         let mut hasher = Sha256::new();
         for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
             let p = outer_dir.join(part);
-            let md = fs::symlink_metadata(&p)
-                .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!("{}: missing {part} in tarball: {e}", d.app),
-                    )
-                })?;
+            let md = fs::symlink_metadata(&p).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{}: missing {part} in tarball: {e}", d.app),
+                )
+            })?;
             if !md.file_type().is_file() {
                 return Err(err(format!("{}: {part} is not a regular file", d.app)));
             }
@@ -1398,10 +1444,7 @@ pub fn project_elixir_env(
 /// Build root, qualified by the toolchain fingerprint (stale BEAM/native
 /// artifacts across OTP/Elixir upgrades are a real hazard — Sol).
 pub fn build_root(platform: Platform, project_dir: &Path) -> io::Result<PathBuf> {
-    Ok(project_dir.join(format!(
-        "_build/blanket-{}",
-        beam_fingerprint(platform)?
-    )))
+    Ok(project_dir.join(format!("_build/blanket-{}", beam_fingerprint(platform)?)))
 }
 
 /// Sandboxed `mix compile`: network denied, writes only the qualified
@@ -1448,11 +1491,14 @@ pub fn build_sandboxed(
         path: beam_path(&beam_obj),
     };
     let result = crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
-        io::Error::new(e.kind(), format!(
-            "mix compile failed: {e}\n(network is denied during builds; deps \
+        io::Error::new(
+            e.kind(),
+            format!(
+                "mix compile failed: {e}\n(network is denied during builds; deps \
              needing network at compile time or absent host libraries are \
              unsupported in v0)"
-        ))
+            ),
+        )
     });
     let _ = crate::store::remove_tree(&scratch);
     result
@@ -1463,7 +1509,8 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    const DARWIN_OBJECT_ID: &str = "7859ae4c9aa35b6c24bd08c2ad7989ab13313a8b-beam-29.0.5-elixir1.20.4";
+    const DARWIN_OBJECT_ID: &str =
+        "7859ae4c9aa35b6c24bd08c2ad7989ab13313a8b-beam-29.0.5-elixir1.20.4";
     const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
@@ -1504,9 +1551,13 @@ mod tests {
         assert!(!identity.inputs.contains_key("relocation_schema"));
         assert!(!identity.inputs.contains_key("store_root"));
         // Neither the recipe revision nor the store root moves Darwin.
-        let other_schema = beam_identity_with(pin, Path::new("/x"), "otp-install-cross-minimal/99").unwrap();
+        let other_schema =
+            beam_identity_with(pin, Path::new("/x"), "otp-install-cross-minimal/99").unwrap();
         assert_eq!(other_schema.object_id(), DARWIN_OBJECT_ID);
-        assert_eq!(beam_fingerprint_with(pin, "otp-install-cross-minimal/99"), DARWIN_FINGERPRINT);
+        assert_eq!(
+            beam_fingerprint_with(pin, "otp-install-cross-minimal/99"),
+            DARWIN_FINGERPRINT
+        );
     }
 
     #[test]
@@ -1546,10 +1597,16 @@ mod tests {
             "7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46"
         );
         assert_eq!(HEX_VERSION, "2.5.1");
-        assert_eq!(HEX_URL, "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez");
+        assert_eq!(
+            HEX_URL,
+            "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez"
+        );
         assert_eq!(HEX_SHA512, "6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7");
         assert_eq!(REBAR3_VERSION, "3.25.1");
-        assert_eq!(REBAR3_URL, "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28");
+        assert_eq!(
+            REBAR3_URL,
+            "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28"
+        );
         assert_eq!(REBAR3_SHA512, "992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24");
         assert!(preflight_platform(Platform::host().unwrap()).is_ok());
     }
@@ -1573,7 +1630,8 @@ mod tests {
         let other_root = beam_identity(otp_pin(LINUX).unwrap(), Path::new("/other/store")).unwrap();
         assert_ne!(other_root.object_id(), linux.object_id());
         let other_schema =
-            beam_identity_with(otp_pin(LINUX).unwrap(), root, "otp-install-cross-minimal/2").unwrap();
+            beam_identity_with(otp_pin(LINUX).unwrap(), root, "otp-install-cross-minimal/2")
+                .unwrap();
         assert_ne!(other_schema.object_id(), linux.object_id());
         assert!(beam_identity(otp_pin(LINUX).unwrap(), Path::new("relative")).is_err());
     }
@@ -1589,7 +1647,10 @@ mod tests {
         );
         let linux_root = build_root(LINUX, Path::new("/p")).unwrap();
         let darwin_root = build_root(DARWIN, Path::new("/p")).unwrap();
-        assert_eq!(linux_root, Path::new("/p").join(format!("_build/blanket-{linux}")));
+        assert_eq!(
+            linux_root,
+            Path::new("/p").join(format!("_build/blanket-{linux}"))
+        );
         assert_eq!(
             darwin_root,
             Path::new("/p").join(format!("_build/blanket-{DARWIN_FINGERPRINT}"))
@@ -1630,7 +1691,10 @@ mod tests {
         extract_otp_archive(&linux_tar, &linux_out, LINUX).unwrap();
         assert!(linux_out.join("Install").is_file());
         assert!(linux_out.join("erts-17.0.5/bin/erl.src").is_file());
-        assert!(!linux_out.join("bin/erl").exists(), "pre-install: no bin/erl yet");
+        assert!(
+            !linux_out.join("bin/erl").exists(),
+            "pre-install: no bin/erl yet"
+        );
         // Darwin-shaped: installed tree.
         let darwin_tree = temp.0.join("darwin-tree");
         fs::create_dir_all(darwin_tree.join("bin")).unwrap();
@@ -1713,20 +1777,36 @@ exit 0
         )
         .unwrap();
         fs::write(erts_bin.join("start_erl.src"), "#!/bin/sh\nEMU=%EMU%\n").unwrap();
-        for elf in ["beam.smp", "erlexec", "epmd", "erlc", "erl_call", "dialyzer", "typer", "ct_run", "escript", "run_erl", "to_erl"] {
+        for elf in [
+            "beam.smp", "erlexec", "epmd", "erlc", "erl_call", "dialyzer", "typer", "ct_run",
+            "escript", "run_erl", "to_erl",
+        ] {
             // Binary-looking payload: NUL bytes, no prefix.
             fs::write(erts_bin.join(elf), format!("\x7fELF\0\0{elf}\0")).unwrap();
             fs::set_permissions(erts_bin.join(elf), fs::Permissions::from_mode(0o755)).unwrap();
         }
         fs::create_dir_all(otp_root.join("lib/kernel-11.0.3/ebin")).unwrap();
-        fs::write(otp_root.join("lib/kernel-11.0.3/ebin/kernel.app"), "{application,kernel,[]}.\n").unwrap();
+        fs::write(
+            otp_root.join("lib/kernel-11.0.3/ebin/kernel.app"),
+            "{application,kernel,[]}.\n",
+        )
+        .unwrap();
         let rel = otp_root.join("releases/29");
         fs::create_dir_all(&rel).unwrap();
         fs::write(rel.join("OTP_VERSION"), "29.0.5\n").unwrap();
-        for boot in ["start_clean.boot", "start_sasl.boot", "no_dot_erlang.boot", "start.boot"] {
+        for boot in [
+            "start_clean.boot",
+            "start_sasl.boot",
+            "no_dot_erlang.boot",
+            "start.boot",
+        ] {
             fs::write(rel.join(boot), b"\x83boot\0").unwrap();
         }
-        fs::write(rel.join("start_clean.script"), "%% script\n{script,{\"Erlang/OTP\",\"29\"},[]}.\n").unwrap();
+        fs::write(
+            rel.join("start_clean.script"),
+            "%% script\n{script,{\"Erlang/OTP\",\"29\"},[]}.\n",
+        )
+        .unwrap();
         fs::write(
             otp_root.join("releases/RELEASES.src"),
             "[{release,\"Erlang/OTP\",\"29\",\"17.0.5\",[{kernel,\"11.0.3\",\"%ERL_ROOT%/lib/kernel-11.0.3\"}],permanent}].\n",
@@ -1751,7 +1831,12 @@ exit 0
         fs::create_dir_all(&scratch).unwrap();
         fake_release_tree(&otp_root, install_script);
         let final_root = store.join("objects/abc-beam-29.0.5-elixir1.20.4/otp");
-        Fixture { _temp: temp, otp_root, final_root, scratch }
+        Fixture {
+            _temp: temp,
+            otp_root,
+            final_root,
+            scratch,
+        }
     }
 
     #[test]
@@ -1775,7 +1860,15 @@ exit 0
         assert_eq!(spec.path, "/usr/bin:/bin");
         assert!(spec.argv[4].contains("store root"), "spaces are embeddable");
         // Characters Install's unescaped sed/sh templating cannot carry.
-        for bad in ["/a;b", "/a&b", "/a\\b", "/a\nb", "/a\"b", "/a$b", "relative/otp"] {
+        for bad in [
+            "/a;b",
+            "/a&b",
+            "/a\\b",
+            "/a\nb",
+            "/a\"b",
+            "/a$b",
+            "relative/otp",
+        ] {
             assert!(
                 otp_install_spec(&fx.otp_root, Path::new(bad), &fx.scratch).is_err(),
                 "{bad:?}"
@@ -1798,7 +1891,10 @@ exit 0
         let e = validate_otp_pre_install(&fx.otp_root).unwrap_err();
         assert!(e.to_string().contains("RELEASES.src"), "{e}");
         // An Install without -cross is not this recipe's artifact.
-        let fx2 = fixture("pre2", "#!/bin/sh\nTARGET_ERL_ROOT=x %FINAL_ROOTDIR% -minimal)\n");
+        let fx2 = fixture(
+            "pre2",
+            "#!/bin/sh\nTARGET_ERL_ROOT=x %FINAL_ROOTDIR% -minimal)\n",
+        );
         let e = validate_otp_pre_install(&fx2.otp_root).unwrap_err();
         assert!(e.to_string().contains("-cross"), "{e}");
         // An already-installed tree is rejected as pre-install input.
@@ -1812,19 +1908,31 @@ exit 0
     fn cross_install_embeds_final_prefix_and_leaves_no_staging_prefix() {
         let fx = fixture("cross", &fake_install(""));
         let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
-        run_otp_install_with(&fx.otp_root, &fx.final_root, &fx.scratch, run_installer_spec).unwrap();
+        run_otp_install_with(
+            &fx.otp_root,
+            &fx.final_root,
+            &fx.scratch,
+            run_installer_spec,
+        )
+        .unwrap();
         verify_otp_install(&fx.otp_root, &fx.final_root, &layout).unwrap();
 
         let final_prefix = fx.final_root.to_str().unwrap();
         let staging_dir = fx.otp_root.parent().unwrap().to_str().unwrap();
         for launcher in prefix_bearing_launchers(&fx.otp_root, &layout) {
             let text = fs::read_to_string(&launcher).unwrap();
-            assert!(text.contains(&format!("\"{final_prefix}\"")), "{}: {text}", launcher.display());
+            assert!(
+                text.contains(&format!("\"{final_prefix}\"")),
+                "{}: {text}",
+                launcher.display()
+            );
             assert!(!text.contains(staging_dir), "{}", launcher.display());
             assert!(!text.contains("%FINAL_ROOTDIR%"));
             assert_eq!(mode_of(&launcher).unwrap(), 0o755, "{}", launcher.display());
         }
-        assert!(!fs::read_to_string(fx.otp_root.join("bin/start")).unwrap().contains("%VSN%"));
+        assert!(!fs::read_to_string(fx.otp_root.join("bin/start"))
+            .unwrap()
+            .contains("%VSN%"));
         assert_eq!(
             fs::read_to_string(fx.otp_root.join("releases/start_erl.data")).unwrap(),
             "17.0.5 29\n"
@@ -1853,32 +1961,65 @@ exit 0
         let leaky = fake_install("echo \"# built in $ERL_ROOT\" >> \"$ERL_ROOT/bin/erl\"");
         let fx = fixture("leak", &leaky);
         let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
-        run_otp_install_with(&fx.otp_root, &fx.final_root, &fx.scratch, run_installer_spec).unwrap();
+        run_otp_install_with(
+            &fx.otp_root,
+            &fx.final_root,
+            &fx.scratch,
+            run_installer_spec,
+        )
+        .unwrap();
         let e = verify_otp_install(&fx.otp_root, &fx.final_root, &layout).unwrap_err();
         assert!(e.to_string().contains("staging directory"), "{e}");
         assert!(e.to_string().contains("bin/erl"), "{e}");
 
         // ...or into a symlink target.
-        let fx = fixture("leaklink", &fake_install("ln -s \"$ERL_ROOT/erts-17.0.5/bin/heart\" \"$ERL_ROOT/bin/heart\""));
+        let fx = fixture(
+            "leaklink",
+            &fake_install("ln -s \"$ERL_ROOT/erts-17.0.5/bin/heart\" \"$ERL_ROOT/bin/heart\""),
+        );
         let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
-        run_otp_install_with(&fx.otp_root, &fx.final_root, &fx.scratch, run_installer_spec).unwrap();
+        run_otp_install_with(
+            &fx.otp_root,
+            &fx.final_root,
+            &fx.scratch,
+            run_installer_spec,
+        )
+        .unwrap();
         let e = verify_otp_install(&fx.otp_root, &fx.final_root, &layout).unwrap_err();
         assert!(e.to_string().contains("symlink"), "{e}");
 
         // A symlink escaping the tree is rejected even without the prefix.
-        let fx = fixture("escape", &fake_install("ln -s /etc/passwd \"$ERL_ROOT/bin/escape\""));
+        let fx = fixture(
+            "escape",
+            &fake_install("ln -s /etc/passwd \"$ERL_ROOT/bin/escape\""),
+        );
         let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
-        run_otp_install_with(&fx.otp_root, &fx.final_root, &fx.scratch, run_installer_spec).unwrap();
+        run_otp_install_with(
+            &fx.otp_root,
+            &fx.final_root,
+            &fx.scratch,
+            run_installer_spec,
+        )
+        .unwrap();
         let e = verify_otp_install(&fx.otp_root, &fx.final_root, &layout).unwrap_err();
         assert!(e.to_string().contains("does not resolve inside"), "{e}");
 
         // Wrong embedded prefix (as if -cross were dropped) is caught too.
         let fx = fixture("nocross", &fake_install(""));
         let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
-        let elsewhere = fx.final_root.parent().unwrap().parent().unwrap().join("other/otp");
+        let elsewhere = fx
+            .final_root
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("other/otp");
         run_otp_install_with(&fx.otp_root, &elsewhere, &fx.scratch, run_installer_spec).unwrap();
         let e = verify_otp_install(&fx.otp_root, &fx.final_root, &layout).unwrap_err();
-        assert!(e.to_string().contains("does not embed the final prefix"), "{e}");
+        assert!(
+            e.to_string().contains("does not embed the final prefix"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1886,7 +2027,13 @@ exit 0
         // Nonzero exit from the real runner: status and stderr surface.
         let fx = fixture("fail", "#!/bin/sh\n# TARGET_ERL_ROOT %FINAL_ROOTDIR% -cross) -minimal)\necho boom >&2\nexit 7\n");
         validate_otp_pre_install(&fx.otp_root).unwrap();
-        let e = run_otp_install_with(&fx.otp_root, &fx.final_root, &fx.scratch, run_installer_spec).unwrap_err();
+        let e = run_otp_install_with(
+            &fx.otp_root,
+            &fx.final_root,
+            &fx.scratch,
+            run_installer_spec,
+        )
+        .unwrap_err();
         let text = e.to_string();
         assert!(text.contains("Install -cross -minimal failed"), "{text}");
         assert!(text.contains("7") && text.contains("boom"), "{text}");
@@ -1964,7 +2111,11 @@ exit 0
         assert!(validate_plan(&dup).is_err());
         let mut manager = base.clone();
         manager.managers = vec!["curl".into()];
-        assert!(validate_plan(&ElixirPlan { deps: vec![manager], ..ok.clone() }).is_err());
+        assert!(validate_plan(&ElixirPlan {
+            deps: vec![manager],
+            ..ok.clone()
+        })
+        .is_err());
     }
 
     #[test]
@@ -1989,8 +2140,11 @@ exit 0
     fn build_root_is_beam_qualified() {
         let root = build_root(Platform::Aarch64AppleDarwin, Path::new("/p")).unwrap();
         assert!(root.display().to_string().contains("_build/blanket-"));
-        assert_eq!(beam_fingerprint(Platform::Aarch64AppleDarwin)
-            .unwrap()
-            .len(), 16);
+        assert_eq!(
+            beam_fingerprint(Platform::Aarch64AppleDarwin)
+                .unwrap()
+                .len(),
+            16
+        );
     }
 }

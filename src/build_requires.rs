@@ -256,7 +256,9 @@ fn parse_pyproject(
         .iter()
         .map(|value| {
             value.as_str().map(str::to_string).ok_or_else(|| {
-                invalid(format!("{source}: every build-system.requires item must be a string"))
+                invalid(format!(
+                    "{source}: every build-system.requires item must be a string"
+                ))
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -264,7 +266,9 @@ fn parse_pyproject(
         .get("build-backend")
         .map(|value| {
             value.as_str().map(str::to_string).ok_or_else(|| {
-                invalid(format!("{source}: build-system.build-backend must be a string"))
+                invalid(format!(
+                    "{source}: build-system.build-backend must be a string"
+                ))
             })
         })
         .transpose()?
@@ -287,7 +291,9 @@ fn maturin_manifest(value: &toml::Value, source: &str) -> io::Result<Option<Stri
         return Ok(None);
     };
     let path = value.as_str().ok_or_else(|| {
-        invalid(format!("{source}: tool.maturin.manifest-path must be a string"))
+        invalid(format!(
+            "{source}: tool.maturin.manifest-path must be a string"
+        ))
     })?;
     let path = clean_entry(path)?.ok_or_else(|| invalid("empty maturin manifest-path"))?;
     Ok(Some(path))
@@ -423,27 +429,23 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
     let pyproject_entry = entries
         .iter()
         .find(|entry| entry.normalized == pyproject_member);
-    let (requires, backend, explicit_manifest) =
-        if let Some(entry) = pyproject_entry {
-            parse_pyproject(
-                &archive_file(path, kind, &entry.original)?,
-                &pyproject_member,
-            )?
-        } else {
-            (
-                DEFAULT_REQUIRES.iter().map(|s| (*s).to_string()).collect(),
-                DEFAULT_BACKEND.to_string(),
-                None,
-            )
-        };
+    let (requires, backend, explicit_manifest) = if let Some(entry) = pyproject_entry {
+        parse_pyproject(
+            &archive_file(path, kind, &entry.original)?,
+            &pyproject_member,
+        )?
+    } else {
+        (
+            DEFAULT_REQUIRES.iter().map(|s| (*s).to_string()).collect(),
+            DEFAULT_BACKEND.to_string(),
+            None,
+        )
+    };
     let explicit_manifest = explicit_manifest
         .map(|manifest| {
-            if !entries
-                .iter()
-                .any(|entry| {
-                    root_relative(&entry.normalized, &root).as_deref() == Some(manifest.as_str())
-                })
-            {
+            if !entries.iter().any(|entry| {
+                root_relative(&entry.normalized, &root).as_deref() == Some(manifest.as_str())
+            }) {
                 return Err(invalid(format!(
                     "sdist build backend points to missing Cargo manifest {manifest}"
                 )));
@@ -455,11 +457,9 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
         ["Cargo.toml", "bindings/python/Cargo.toml"]
             .iter()
             .find(|candidate| {
-                entries
-                    .iter()
-                    .any(|entry| {
-                        root_relative(&entry.normalized, &root).as_deref() == Some(**candidate)
-                    })
+                entries.iter().any(|entry| {
+                    root_relative(&entry.normalized, &root).as_deref() == Some(**candidate)
+                })
             })
             .map(PathBuf::from)
     });
@@ -471,12 +471,7 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
         path.file_name().and_then(|name| name.to_str()) == Some("binding.gyp")
             || matches!(
                 path.extension().and_then(|extension| extension.to_str()),
-                Some("c")
-                    | Some("cc")
-                    | Some("cpp")
-                    | Some("cxx")
-                    | Some("C")
-                    | Some("pyx")
+                Some("c") | Some("cc") | Some("cpp") | Some("cxx") | Some("C") | Some("pyx")
             )
     });
     let rust_build = cargo_manifest.is_some()
@@ -736,11 +731,8 @@ mod tests {
                     .unwrap();
                     zip.write_all(bytes).unwrap();
                 } else {
-                    zip.add_directory(
-                        "example-1.0/",
-                        zip::write::SimpleFileOptions::default(),
-                    )
-                    .unwrap();
+                    zip.add_directory("example-1.0/", zip::write::SimpleFileOptions::default())
+                        .unwrap();
                 }
                 zip.finish().unwrap();
             }
@@ -809,7 +801,11 @@ build-backend = "hatchling.build"
         let root_name = "--checkpoint-action=exec=touch marker;#";
         let root = dir.join(root_name);
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("pyproject.toml"), b"[build-system]\nrequires = []\n").unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            b"[build-system]\nrequires = []\n",
+        )
+        .unwrap();
         let archive = dir.join("malicious.tar.gz");
         let status = Command::new("/usr/bin/tar")
             .args(["-czf"])
@@ -872,10 +868,7 @@ build-backend = "hatchling.build"
             b"[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
-        let outside = std::env::temp_dir().join(format!(
-            "blanket-escape-{}",
-            std::process::id()
-        ));
+        let outside = std::env::temp_dir().join(format!("blanket-escape-{}", std::process::id()));
         let _ = fs::remove_file(&outside);
         symlink(&outside, root.join("Cargo.lock")).unwrap();
         let path = dir.join("symlink-escape.tar.gz");
@@ -893,7 +886,10 @@ build-backend = "hatchling.build"
         let info = inspect_sdist(&path).unwrap();
         let error = extract_sdist(&path, &dir.join("source"), &info).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(!outside.exists(), "extraction created a file outside scratch");
+        assert!(
+            !outside.exists(),
+            "extraction created a file outside scratch"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -39,7 +39,11 @@ pub(crate) const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
 ];
 
 fn build_toolchain_fingerprint() -> String {
-    BUILD_TOOLCHAIN.iter().map(|tool| tool.4).collect::<Vec<_>>().join(",")
+    BUILD_TOOLCHAIN
+        .iter()
+        .map(|tool| tool.4)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // The native library set is mounted into sdist builds through environment
@@ -66,7 +70,11 @@ pub fn derivation_fingerprint() -> String {
     format!("sdist-build/2;toolchain:{}", build_toolchain_fingerprint())
 }
 
-fn sdist_identity(platform: Platform, pkg: &LockedPackage, pin: &crate::python::PinnedPython) -> Identity {
+fn sdist_identity(
+    platform: Platform,
+    pkg: &LockedPackage,
+    pin: &crate::python::PinnedPython,
+) -> Identity {
     Identity {
         kind: "sdist-build".into(),
         name: pkg.name.clone(),
@@ -86,7 +94,12 @@ fn object_id(path: &Path, label: &str) -> io::Result<String> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} has no object id")))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{label} has no object id"),
+            )
+        })
 }
 
 fn isolated_sdist_identity_from_ids(
@@ -155,21 +168,25 @@ fn build_toolchain_plan(python_version: &str) -> Plan {
     Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
-        packages: BUILD_TOOLCHAIN.iter().map(|(name, version, filename, url, sha)| LockedPackage {
-            name: (*name).into(),
-            version: (*version).into(),
-            filename: (*filename).into(),
-            url: (*url).into(),
-            sha256: (*sha).into(),
-            kind: ArtifactKind::Wheel,
+        packages: BUILD_TOOLCHAIN
+            .iter()
+            .map(|(name, version, filename, url, sha)| LockedPackage {
+                name: (*name).into(),
+                version: (*version).into(),
+                filename: (*filename).into(),
+                url: (*url).into(),
+                sha256: (*sha).into(),
+                kind: ArtifactKind::Wheel,
                 git: None,
-        }).collect(),
+            })
+            .collect(),
     }
 }
 
 fn has_package(plan: &Plan, wanted: &str) -> bool {
     plan.packages.iter().any(|pkg| {
-        pkg.name.chars()
+        pkg.name
+            .chars()
             .map(|ch| if ch == '_' || ch == '.' { '-' } else { ch })
             .collect::<String>()
             .eq_ignore_ascii_case(wanted)
@@ -238,7 +255,8 @@ pub(crate) fn plan_sdist_identity_input(
     // the same GC lock.
     drop(sdist);
     let build_env_id = crate::project::planned_env_object_id(store, platform, &build_plan)?;
-    let native_libs_id = native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
+    let native_libs_id =
+        native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
         let work = store.stage()?;
         let result: io::Result<Identity> = (|| {
@@ -293,13 +311,20 @@ fn stderr_tail(path: &Path) -> Option<String> {
 }
 
 fn cargo_lock_for(source: &Path, manifest: &Path) -> Option<PathBuf> {
-    [manifest.parent().map(|parent| parent.join("Cargo.lock")), Some(source.join("Cargo.lock"))]
-        .into_iter().flatten().find(|path| path.is_file())
+    [
+        manifest.parent().map(|parent| parent.join("Cargo.lock")),
+        Some(source.join("Cargo.lock")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.is_file())
 }
 
 fn cargo_lock_cache_key(sdist_sha256: &str, rust_id: &str) -> String {
     use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(format!("{sdist_sha256}\0{rust_id}").as_bytes()))
+    hex::encode(Sha256::digest(
+        format!("{sdist_sha256}\0{rust_id}").as_bytes(),
+    ))
 }
 
 fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
@@ -318,21 +343,31 @@ fn generate_cargo_lock(
     let cargo = rust_obj.join("bin/cargo");
     let path_var = format!("{}:/usr/bin:/bin", rust_obj.join("bin").display());
     let status = Command::new(&cargo)
-        .args(["generate-lockfile", "--manifest-path"]).arg(manifest)
+        .args(["generate-lockfile", "--manifest-path"])
+        .arg(manifest)
         .current_dir(source)
         .env("CARGO_HOME", cargo_home)
         .env("PATH", path_var)
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN")
         .status()
-        .map_err(|e| io::Error::new(e.kind(), format!("run store cargo to generate Cargo.lock: {e}")))?;
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("run store cargo to generate Cargo.lock: {e}"),
+            )
+        })?;
     if !status.success() {
-        return Err(io::Error::other("store cargo generate-lockfile failed for the sdist"));
+        return Err(io::Error::other(
+            "store cargo generate-lockfile failed for the sdist",
+        ));
     }
-    cargo_lock_for(source, manifest).ok_or_else(|| io::Error::new(
-        io::ErrorKind::InvalidData,
-        "store cargo generated no Cargo.lock next to the sdist manifest",
-    ))
+    cargo_lock_for(source, manifest).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "store cargo generated no Cargo.lock next to the sdist manifest",
+        )
+    })
 }
 
 struct RustPlanInputs {
@@ -351,17 +386,17 @@ fn rust_plan_inputs(
     info: &ArchiveInfo,
     work: &Path,
 ) -> io::Result<RustPlanInputs> {
-    let manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| io::Error::new(
-        io::ErrorKind::InvalidData,
-        "Rust build trigger found, but the sdist has no Cargo.toml",
-    ))?;
+    let manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Rust build trigger found, but the sdist has no Cargo.toml",
+        )
+    })?;
     let manifest = source.join(manifest_rel);
     let rust_version = crate::cargo::resolve_toolchain(platform, source)?.to_string();
     let rust_id = crate::cargo::rust_object_id(platform, &rust_version)?;
-    let generated_path = store.cache_path(
-        "cargo-lock",
-        &cargo_lock_cache_key(sdist_sha256, &rust_id),
-    );
+    let generated_path =
+        store.cache_path("cargo-lock", &cargo_lock_cache_key(sdist_sha256, &rust_id));
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
         (fs::read_to_string(path)?, false)
     } else if let Ok(text) = fs::read_to_string(&generated_path) {
@@ -412,10 +447,12 @@ fn prepare_rust(
     work: &Path,
     inputs: &RustPlanInputs,
 ) -> io::Result<(PathBuf, PathBuf)> {
-    let _manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| io::Error::new(
-        io::ErrorKind::InvalidData,
-        "Rust build trigger found, but the sdist has no Cargo.toml",
-    ))?;
+    let _manifest_rel = info.cargo_manifest.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Rust build trigger found, but the sdist has no Cargo.toml",
+        )
+    })?;
     let rust_obj = crate::cargo::ensure_rust_for(store, platform, &inputs.rust_version)?;
     let cargo_plan = crate::cargo::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
     let vendor_obj = crate::cargo::realize_vendor(store, &cargo_plan)?;
@@ -424,7 +461,10 @@ fn prepare_rust(
     // An sdist's vendored crates can themselves come from git sources.
     fs::write(
         cargo_home.join("config.toml"),
-        crate::cargo::blanket_config_text_for(&vendor_obj, &crate::cargo::plan_git_sources(&cargo_plan))?,
+        crate::cargo::blanket_config_text_for(
+            &vendor_obj,
+            &crate::cargo::plan_git_sources(&cargo_plan),
+        )?,
     )?;
     Ok((rust_obj, vendor_obj))
 }
@@ -460,7 +500,9 @@ fn run_sdist_build(
         input.to_string_lossy().into_owned(),
     ];
     let mut envs = sdist_build_env(platform);
-    let cores = std::thread::available_parallelism().map(|value| value.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
     envs.push(("MAKEFLAGS".into(), format!("-j{cores}")));
     if has_package(build_plan, "ninja") {
         envs.push(("CMAKE_GENERATOR".into(), "Ninja".into()));
@@ -527,14 +569,7 @@ pub fn build_sdist_wheel_with_runtime_plan(
     python_version: &str,
     runtime_plan: &Plan,
 ) -> io::Result<PathBuf> {
-    build_sdist_wheel_at_depth(
-        store,
-        platform,
-        pkg,
-        python_version,
-        Some(runtime_plan),
-        0,
-    )
+    build_sdist_wheel_at_depth(store, platform, pkg, python_version, Some(runtime_plan), 0)
 }
 
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
@@ -577,8 +612,7 @@ pub(crate) fn git_sdist_package(
             io::ErrorKind::InvalidData,
             format!(
                 "{}: git source at {} has no pyproject.toml, setup.py or setup.cfg",
-                pkg.name,
-                source.commit
+                pkg.name, source.commit
             ),
         ));
     }
@@ -858,7 +892,7 @@ mod tests {
             url: format!("file://{}", archive.display()),
             sha256,
             kind: ArtifactKind::Sdist,
-                git: None,
+            git: None,
         }
     }
 
@@ -893,23 +927,12 @@ mod tests {
     fn darwin_native_sdist_identity_does_not_realize_native_libs() {
         let store = test_store("darwin-native");
         let pkg = local_native_sdist(&store, "darwin-native");
-        let planned = plan_sdist_identity_input(
-            &store,
-            Platform::Aarch64AppleDarwin,
-            &pkg,
-            "3.12.14",
-            None,
-        )
-        .unwrap();
+        let planned =
+            plan_sdist_identity_input(&store, Platform::Aarch64AppleDarwin, &pkg, "3.12.14", None)
+                .unwrap();
         assert_eq!(
-            sdist_identity_input(
-                &store,
-                Platform::Aarch64AppleDarwin,
-                &pkg,
-                "3.12.14",
-                None,
-            )
-            .unwrap(),
+            sdist_identity_input(&store, Platform::Aarch64AppleDarwin, &pkg, "3.12.14", None,)
+                .unwrap(),
             planned.input
         );
         assert!(planned.native_libs_id.is_none());
@@ -929,7 +952,7 @@ mod tests {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
-                git: None,
+            git: None,
         };
         let pin = crate::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
         let identity = isolated_sdist_identity_from_ids(
@@ -958,7 +981,7 @@ mod tests {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
-                git: None,
+            git: None,
         };
         let pin = crate::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
         let identity = isolated_sdist_identity_from_ids(
@@ -983,10 +1006,12 @@ mod tests {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
-                git: None,
+            git: None,
         };
         let error = build_sdist_wheel_at_depth(
-            &Store { root: PathBuf::from("/does/not/matter") },
+            &Store {
+                root: PathBuf::from("/does/not/matter"),
+            },
             Platform::Aarch64AppleDarwin,
             &pkg,
             "3.12.14",
@@ -1006,7 +1031,7 @@ mod tests {
             url: "https://example.invalid/example.tar.gz".into(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
-                git: None,
+            git: None,
         };
         let error = wrap_sandbox_build_error(
             &pkg,

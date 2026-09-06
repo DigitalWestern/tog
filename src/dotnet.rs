@@ -925,24 +925,27 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::sandbox::run_build_spec_on(platform, &BuildSpec {
-        argv: vec![
-            sdk_obj.join("dotnet").display().to_string(),
-            "restore".to_string(),
-            "--locked-mode".to_string(),
-            "--no-cache".to_string(),
-            "--disable-build-servers".to_string(),
-            "--configfile".to_string(),
-            config.display().to_string(),
-            "-noAutoResponse".to_string(),
-        ],
-        cwd: verifier.clone(),
-        env: forced_env(&sdk_obj, &staged, &scratch),
-        read: vec![sdk_obj.to_path_buf(), feed.clone(), verifier.clone()],
-        write: dotnet_write_roots(platform, vec![staged.clone()])?,
-        scratch: scratch.clone(),
-        path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
-    });
+    let result = crate::sandbox::run_build_spec_on(
+        platform,
+        &BuildSpec {
+            argv: vec![
+                sdk_obj.join("dotnet").display().to_string(),
+                "restore".to_string(),
+                "--locked-mode".to_string(),
+                "--no-cache".to_string(),
+                "--disable-build-servers".to_string(),
+                "--configfile".to_string(),
+                config.display().to_string(),
+                "-noAutoResponse".to_string(),
+            ],
+            cwd: verifier.clone(),
+            env: forced_env(&sdk_obj, &staged, &scratch),
+            read: vec![sdk_obj.to_path_buf(), feed.clone(), verifier.clone()],
+            write: dotnet_write_roots(platform, vec![staged.clone()])?,
+            scratch: scratch.clone(),
+            path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
+        },
+    );
     if let Err(e) = result {
         let _ = crate::store::remove_tree(&scratch);
         let _ = crate::store::remove_tree(&staged);
@@ -1018,7 +1021,11 @@ fn invoking_uid() -> io::Result<u32> {
         .map_err(|_| err("could not determine current uid"))
 }
 
-fn ensure_dotnet_tmp_at(path: &Path, expected_uid: u32, precreate_shm: bool) -> io::Result<PathBuf> {
+fn ensure_dotnet_tmp_at(
+    path: &Path,
+    expected_uid: u32,
+    precreate_shm: bool,
+) -> io::Result<PathBuf> {
     let created = match fs::symlink_metadata(&path) {
         Ok(md) => {
             if md.file_type().is_symlink() || !md.is_dir() {
@@ -1106,7 +1113,10 @@ fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Ve
 }
 
 fn dotnet_write_roots(platform: Platform, roots: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
-    Ok(add_dotnet_tmp_write_root(roots, ensure_dotnet_tmp(platform)?))
+    Ok(add_dotnet_tmp_write_root(
+        roots,
+        ensure_dotnet_tmp(platform)?,
+    ))
 }
 
 fn validate_build_args(args: &[String]) -> io::Result<()> {
@@ -1309,11 +1319,14 @@ pub fn build_sandboxed(
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
     crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
-        io::Error::new(e.kind(), format!(
-            "offline locked restore failed: {e}; network is denied — \
+        io::Error::new(
+            e.kind(),
+            format!(
+                "offline locked restore failed: {e}; network is denied — \
                      packages outside the lock, framework packs, or workloads \
                      are unsupported in v0"
-        ))
+            ),
+        )
     })?;
     if !objdir.join("project.assets.json").is_file() {
         let _ = crate::store::remove_tree(&scratch);
@@ -1344,9 +1357,10 @@ pub fn build_sandboxed(
     };
     if let Err(e) = crate::sandbox::run_build_spec_on(platform, &spec) {
         let _ = crate::store::remove_tree(&scratch);
-        return Err(io::Error::new(e.kind(), format!(
-            "dotnet build failed: {e}\n(network is denied during builds)"
-        )));
+        return Err(io::Error::new(
+            e.kind(),
+            format!("dotnet build failed: {e}\n(network is denied during builds)"),
+        ));
     }
     let after = fs::read(objdir.join("project.assets.json"))?;
     if hex::encode(Sha256::digest(&after)) != assets_sha256 {
@@ -1382,7 +1396,10 @@ mod tests {
         assert_eq!(SDK_PINS.len(), Platform::ALL.len());
         for &platform in Platform::ALL {
             assert_eq!(
-                SDK_PINS.iter().filter(|pin| pin.platform == platform).count(),
+                SDK_PINS
+                    .iter()
+                    .filter(|pin| pin.platform == platform)
+                    .count(),
                 1
             );
         }
@@ -1400,7 +1417,10 @@ mod tests {
     fn sdk_identities_and_fingerprints_are_platform_specific() {
         let darwin = sdk_pin(Platform::Aarch64AppleDarwin).unwrap();
         let linux = sdk_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
-        assert_ne!(sdk_identity(darwin).object_id(), sdk_identity(linux).object_id());
+        assert_ne!(
+            sdk_identity(darwin).object_id(),
+            sdk_identity(linux).object_id()
+        );
         assert_ne!(
             sdk_fingerprint(Platform::Aarch64AppleDarwin).unwrap(),
             sdk_fingerprint(Platform::X86_64UnknownLinuxGnu).unwrap()
@@ -1424,10 +1444,7 @@ mod tests {
             identity.object_id(),
             "aebf0bc6741c81b414dfe7825ed9115ccc60f085-dotnet-sdk-9.0.317"
         );
-        assert_eq!(
-            sdk_fingerprint(platform).unwrap(),
-            "3a532efac27c3140"
-        );
+        assert_eq!(sdk_fingerprint(platform).unwrap(), "3a532efac27c3140");
     }
 
     #[test]
@@ -1478,7 +1495,9 @@ mod tests {
 
         let mismatch = base.join("mismatch");
         fs::create_dir(&mismatch).unwrap();
-        let error = ensure_dotnet_tmp_at(&mismatch, uid ^ 1, false).unwrap_err().to_string();
+        let error = ensure_dotnet_tmp_at(&mismatch, uid ^ 1, false)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("is owned by uid"), "{error}");
 
         let _ = crate::store::remove_tree(&base);
@@ -1486,13 +1505,19 @@ mod tests {
 
     #[test]
     fn precreates_shm_under_the_dotnet_tmp_dir_on_every_platform() {
-        let temp = std::env::temp_dir().canonicalize().unwrap().join(format!("blanket-dotnet-shm-{}", std::process::id()));
+        let temp = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("blanket-dotnet-shm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         let uid = invoking_uid().unwrap();
         let dir = ensure_dotnet_tmp_at(&temp, uid, true).unwrap();
         let shm = dir.join("shm");
         assert!(shm.is_dir());
-        assert_eq!(fs::metadata(&shm).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(&shm).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         // idempotent, and a symlinked shm is refused
         ensure_dotnet_tmp_at(&temp, uid, true).unwrap();
         fs::remove_dir(&shm).unwrap();

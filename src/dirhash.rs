@@ -76,16 +76,27 @@ fn hash1(mut files: Vec<(String, String)>) -> String {
 
 /// Minimal RFC 4648 standard-alphabet base64 encoder (with padding).
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let acc = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(ALPHABET[(acc >> 18) as usize & 63] as char);
         out.push(ALPHABET[(acc >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(acc >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[acc as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(acc >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[acc as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -96,7 +107,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/go-dirhash")
+            .join(name)
     }
 
     #[test]
@@ -116,10 +129,8 @@ mod tests {
     fn wrong_module_prefix_rejected_and_tamper_changes_hash() {
         assert!(hash_zip(&fixture("quote-v1.5.2.zip"), "rsc.io/other", "v1.5.2").is_err());
 
-        let tampered = std::env::temp_dir().join(format!(
-            "blanket-dirhash-tamper-{}.mod",
-            std::process::id()
-        ));
+        let tampered =
+            std::env::temp_dir().join(format!("blanket-dirhash-tamper-{}.mod", std::process::id()));
         let mut content = fs::read(fixture("quote-v1.5.2.mod")).unwrap();
         content[0] ^= 1;
         fs::write(&tampered, content).unwrap();

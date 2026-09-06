@@ -69,7 +69,11 @@ fn all_manifest_fixtures_sync_and_run() {
             .args(["run", "python", "-c", &format!("import {package}")])
             .output()
             .unwrap();
-        assert!(run.status.success(), "{name} run failed: {}", String::from_utf8_lossy(&run.stderr));
+        assert!(
+            run.status.success(),
+            "{name} run failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
     let _ = std::fs::remove_dir_all(root);
 }

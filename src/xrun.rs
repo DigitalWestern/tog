@@ -49,7 +49,13 @@ fn default_bin(package: &str) -> &str {
 
 fn safe(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -126,7 +132,9 @@ fn validate_package(ecosystem: &str, package: &str) -> io::Result<()> {
     validate_text("package", package)?;
     if package.starts_with('/')
         || package.contains('\\')
-        || package.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || package
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
         || (ecosystem == "python" && package.contains('/'))
     {
         return Err(other(format!("x: invalid package '{package}'")));
@@ -146,9 +154,7 @@ fn validate_from_bin(bin: &str) -> io::Result<()> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ".-_".contains(ch))
     {
-        return Err(other(
-            "x: --from requires a single safe executable name",
-        ));
+        return Err(other("x: --from requires a single safe executable name"));
     }
     Ok(())
 }
@@ -165,7 +171,9 @@ fn canonical_link_target(path: &Path) -> Option<PathBuf> {
 
 fn encoded_workspace(workspace: &str) -> Option<String> {
     if workspace.is_empty()
-        || workspace.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || workspace
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return None;
     }
@@ -195,9 +203,7 @@ fn check_projection_target(
                 return Err(missing());
             }
             let projection_id = closure["projection_id"].as_str().ok_or_else(missing)?;
-            if projection_id.is_empty()
-                || !projection_id.bytes().all(|b| b.is_ascii_hexdigit())
-            {
+            if projection_id.is_empty() || !projection_id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(missing());
             }
             let home = store
@@ -211,7 +217,10 @@ fn check_projection_target(
                 .join("forests")
                 .join(&project_key[..32])
                 .join(projection_id);
-            let expected = projection.join("node_modules").canonicalize().map_err(|_| missing())?;
+            let expected = projection
+                .join("node_modules")
+                .canonicalize()
+                .map_err(|_| missing())?;
             if canonical_link_target(&root.join("node_modules")) != Some(expected) {
                 return Err(missing());
             }
@@ -250,7 +259,12 @@ fn check_cached_projection(store: &Store, root: &Path, ecosystem: &str) -> io::R
     let id = path
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
         .ok_or_else(|| other("x: cached closure has a malformed environment object"))?;
     if path != store.object_path(id) || !store.has(id) {
         return Err(other(
@@ -282,10 +296,7 @@ fn check_cached_projection(store: &Store, root: &Path, ecosystem: &str) -> io::R
 pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     let ecosystem = choose_ecosystem(&request, cwd)?;
     let (tool, tool_version) = split_version(&request.tool);
-    let (package, from_version) = request
-        .from
-        .as_deref()
-        .map_or((tool, None), split_version);
+    let (package, from_version) = request.from.as_deref().map_or((tool, None), split_version);
     validate_package(ecosystem, package)?;
     if let Some(version) = tool_version {
         validate_version(version)?;
@@ -504,7 +515,10 @@ mod tests {
         assert_eq!(split_version("ruff"), ("ruff", None));
         assert_eq!(split_version("ruff@0.6.1"), ("ruff", Some("0.6.1")));
         assert_eq!(split_version("@angular/cli"), ("@angular/cli", None));
-        assert_eq!(split_version("@angular/cli@18"), ("@angular/cli", Some("18")));
+        assert_eq!(
+            split_version("@angular/cli@18"),
+            ("@angular/cli", Some("18"))
+        );
         assert_eq!(default_bin("@angular/cli"), "cli");
         assert_eq!(default_bin("prettier"), "prettier");
         assert_eq!(safe("@angular/cli"), "_angular_cli");
@@ -518,7 +532,10 @@ mod tests {
             tool: "ruff".into(),
             args: vec![],
         };
-        assert_eq!(choose_from_project(&request(Some("python")), &[]).unwrap(), "python");
+        assert_eq!(
+            choose_from_project(&request(Some("python")), &[]).unwrap(),
+            "python"
+        );
         let error = choose_from_project(&request(None), &[]).unwrap_err();
         assert!(error.to_string().contains("blanket x py:ruff"), "{error}");
         assert_eq!(
@@ -526,7 +543,10 @@ mod tests {
             "node"
         );
         let error = choose_from_project(&request(None), &["python", "node"]).unwrap_err();
-        assert!(error.to_string().contains("both Python and Node"), "{error}");
+        assert!(
+            error.to_string().contains("both Python and Node"),
+            "{error}"
+        );
     }
 
     #[test]

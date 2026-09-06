@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::OnceLock;
 #[cfg(not(test))]
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 /// A requirement was skipped because it is project-local or a direct reference.
 pub const REQUIREMENT_SKIPPED: &str = "requirement-skipped";
@@ -184,12 +184,7 @@ fn denied(policy: &Policy, kind: &str) -> bool {
     policy.strict || policy.deny.contains(kind)
 }
 
-pub fn record_with(
-    policy: &Policy,
-    kind: &str,
-    subject: &str,
-    detail: &str,
-) -> io::Result<()> {
+pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> io::Result<()> {
     if denied(policy, kind) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -199,11 +194,13 @@ pub fn record_with(
         ));
     }
     eprintln!("blanket: exception {kind}: {subject}: {detail}");
-    with_recorded(|recorded| recorded.push(Exception {
+    with_recorded(|recorded| {
+        recorded.push(Exception {
             kind: kind.into(),
             subject: subject.into(),
             detail: detail.into(),
-        }));
+        })
+    });
     Ok(())
 }
 
@@ -226,19 +223,18 @@ pub fn clear() {
 
 /// Exceptions that change the bytes of the object being built.
 pub fn object_exceptions() -> Vec<Exception> {
-    with_recorded(|recorded| recorded
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.kind.as_str(),
-                FILE_COLLISION
-                    | INSTALL_SCRIPT_FAILED
-                    | GIT_DEPENDENCY
-                    | UNATTESTED_CARGO_LOCK
-            )
-        })
-        .cloned()
-        .collect())
+    with_recorded(|recorded| {
+        recorded
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    FILE_COLLISION | INSTALL_SCRIPT_FAILED | GIT_DEPENDENCY | UNATTESTED_CARGO_LOCK
+                )
+            })
+            .cloned()
+            .collect()
+    })
 }
 
 /// Refuse a cached object when its recorded exceptions are denied now.
@@ -246,11 +242,7 @@ pub fn check_cached(store: &Store, id: &str) -> io::Result<()> {
     let exceptions = store.exceptions(id)?;
     check_exception_set(id, &exceptions)?;
     for exception in &exceptions {
-        record(
-            &exception.kind,
-            &exception.subject,
-            &exception.detail,
-        )?;
+        record(&exception.kind, &exception.subject, &exception.detail)?;
     }
     Ok(())
 }

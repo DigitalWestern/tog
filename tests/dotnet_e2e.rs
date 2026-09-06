@@ -83,7 +83,10 @@ fn assert_realization_does_not_evaluate_user_project(binary: &Path, temp: &TempD
     );
     std::fs::write(csproj, text).unwrap();
     let store = temp.0.join("tripwire-store");
-    assert_ok(blanket(binary, &project, &store, &["sync"]), "tripwire sync");
+    assert_ok(
+        blanket(binary, &project, &store, &["sync"]),
+        "tripwire sync",
+    );
     assert!(
         !project.join("tripwire.txt").exists(),
         "realization evaluated the user's project"

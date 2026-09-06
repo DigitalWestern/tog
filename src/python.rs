@@ -86,12 +86,10 @@ pub const PYTHONS: &[PinnedPython] = &[
 
 pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython> {
     // Accept "3.12" as a prefix match on "3.12.".
-    PYTHONS
-        .iter()
-        .find(|p| {
-            p.platform == platform
-                && (p.version == version || p.version.starts_with(&format!("{version}.")))
-        })
+    PYTHONS.iter().find(|p| {
+        p.platform == platform
+            && (p.version == version || p.version.starts_with(&format!("{version}.")))
+    })
 }
 
 pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<String> {
@@ -258,10 +256,7 @@ mod tests {
                 );
             }
 
-            let uv_rows: Vec<_> = UV
-                .iter()
-                .filter(|pin| pin.platform == platform)
-                .collect();
+            let uv_rows: Vec<_> = UV.iter().filter(|pin| pin.platform == platform).collect();
             assert_eq!(uv_rows.len(), 1, "uv rows for {platform:?}");
             for pin in uv_rows {
                 assert!(

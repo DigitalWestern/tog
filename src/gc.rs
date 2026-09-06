@@ -90,15 +90,9 @@ pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Re
         report,
         sweep_cache(store, &state, &live, &metadata, options, out)?,
     );
-    report = add_report(
-        report,
-        sweep_stages(store, options, out)?,
-    );
+    report = add_report(report, sweep_stages(store, options, out)?);
     if options.project {
-        report = add_report(
-            report,
-            sweep_projects(store, &state, options, out)?,
-        );
+        report = add_report(report, sweep_projects(store, &state, options, out)?);
     }
 
     Ok(report)
@@ -152,12 +146,13 @@ fn read_closures<W: Write>(
             continue;
         }
         let path = entry.path();
-        let value: serde_json::Value = serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("parse closure {}: {e}", path.display()),
-            )
-        })?;
+        let value: serde_json::Value =
+            serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("parse closure {}: {e}", path.display()),
+                )
+            })?;
         let body = value.get("body").unwrap_or(&value);
         collect_object_ids(body, store, &mut state.object_ids);
         collect_project_paths(body, store, &mut state.project_keep);
@@ -236,7 +231,9 @@ fn collect_project_paths(value: &serde_json::Value, store: &Store, paths: &mut V
     match value {
         serde_json::Value::String(text) => {
             let path = Path::new(text);
-            let Some(home) = store.root.parent() else { return };
+            let Some(home) = store.root.parent() else {
+                return;
+            };
             let forests = home.join("forests");
             let backups = home.join("backups");
             if path.is_absolute() && (path.starts_with(&forests) || path.starts_with(&backups)) {
@@ -258,7 +255,9 @@ fn collect_project_paths(value: &serde_json::Value, store: &Store, paths: &mut V
 }
 
 fn collect_project_path(path: &Path, store: &Store, paths: &mut Vec<PathBuf>) {
-    let Some(home) = store.root.parent() else { return };
+    let Some(home) = store.root.parent() else {
+        return;
+    };
     let forests = home.join("forests");
     let backups = home.join("backups");
     if path.starts_with(&forests) || path.starts_with(&backups) {
@@ -315,12 +314,13 @@ fn read_meta(store: &Store, id: &str) -> io::Result<Option<MetaInfo>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let value: serde_json::Value = serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("parse object metadata {}: {e}", path.display()),
-        )
-    })?;
+    let value: serde_json::Value =
+        serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse object metadata {}: {e}", path.display()),
+            )
+        })?;
     let mut refs = BTreeSet::new();
     let has_refs = value.get("refs").is_some();
     if let Some(values) = value.get("refs").and_then(serde_json::Value::as_array) {
@@ -348,7 +348,10 @@ fn read_meta(store: &Store, id: &str) -> io::Result<Option<MetaInfo>> {
         has_refs,
         refs,
         cache_hashes,
-        kind: value["identity"]["kind"].as_str().unwrap_or_default().to_string(),
+        kind: value["identity"]["kind"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
     }))
 }
 
@@ -425,8 +428,7 @@ fn sweep_objects<W: Write>(
             read_meta(store, &id)?.unwrap_or_default()
         };
         if !info.has_refs
-            && (!options.collect_legacy
-                || !older_than(&entry.path(), keep_age(options.keep_days)))
+            && (!options.collect_legacy || !older_than(&entry.path(), keep_age(options.keep_days)))
         {
             continue;
         }
@@ -438,7 +440,13 @@ fn sweep_objects<W: Write>(
             } else {
                 format!("[{}] ", info.kind)
             };
-            writeln!(out, "would remove object {} ({}{})", entry.path().display(), kind, size(bytes))?;
+            writeln!(
+                out,
+                "would remove object {} ({}{})",
+                entry.path().display(),
+                kind,
+                size(bytes)
+            )?;
         } else {
             store::remove_tree(&entry.path())?;
             let meta = store.root.join("meta").join(format!("{id}.json"));
@@ -486,7 +494,12 @@ fn sweep_cache<W: Write>(
         }
         let bytes = file_size(&entry.path());
         if options.dry_run {
-            writeln!(out, "would remove cached artifact {} ({})", entry.path().display(), size(bytes))?;
+            writeln!(
+                out,
+                "would remove cached artifact {} ({})",
+                entry.path().display(),
+                size(bytes)
+            )?;
         } else {
             remove_file(&entry.path())?;
         }
@@ -508,7 +521,12 @@ fn sweep_stages<W: Write>(store: &Store, options: Options, out: &mut W) -> io::R
         }
         let bytes = tree_size(&entry.path())?;
         if options.dry_run {
-            writeln!(out, "would remove stale stage {} ({})", entry.path().display(), size(bytes))?;
+            writeln!(
+                out,
+                "would remove stale stage {} ({})",
+                entry.path().display(),
+                size(bytes)
+            )?;
         } else {
             store::remove_tree(&entry.path())?;
         }
@@ -525,7 +543,9 @@ fn sweep_projects<W: Write>(
     out: &mut W,
 ) -> io::Result<Report> {
     let mut report = Report::default();
-    let Some(home) = store.root.parent() else { return Ok(report) };
+    let Some(home) = store.root.parent() else {
+        return Ok(report);
+    };
     let forests = home.join("forests");
     if forests.is_dir() {
         for project in fs::read_dir(&forests)? {
@@ -536,14 +556,22 @@ fn sweep_projects<W: Write>(
             for projection in fs::read_dir(project.path())? {
                 let projection = projection?;
                 if !projection.file_type()?.is_dir()
-                    || state.project_keep.iter().any(|keep| related(&projection.path(), keep))
+                    || state
+                        .project_keep
+                        .iter()
+                        .any(|keep| related(&projection.path(), keep))
                     || !older_than(&projection.path(), STAGE_WINDOW)
                 {
                     continue;
                 }
                 let bytes = tree_size(&projection.path())?;
                 if options.dry_run {
-                    writeln!(out, "would remove stale forest {} ({})", projection.path().display(), size(bytes))?;
+                    writeln!(
+                        out,
+                        "would remove stale forest {} ({})",
+                        projection.path().display(),
+                        size(bytes)
+                    )?;
                 } else {
                     store::remove_tree(&projection.path())?;
                 }
@@ -563,7 +591,12 @@ fn sweep_projects<W: Write>(
             }
             let bytes = tree_size(&backup.path())?;
             if options.dry_run {
-                writeln!(out, "would remove backup {} ({})", backup.path().display(), size(bytes))?;
+                writeln!(
+                    out,
+                    "would remove backup {} ({})",
+                    backup.path().display(),
+                    size(bytes)
+                )?;
             } else {
                 store::remove_tree(&backup.path())?;
             }
@@ -612,7 +645,9 @@ fn tree_size(path: &Path) -> io::Result<u64> {
 }
 
 fn file_size(path: &Path) -> u64 {
-    fs::symlink_metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn remove_file(path: &Path) -> io::Result<()> {
@@ -652,7 +687,9 @@ fn short_sha256(bytes: &[u8], hex_len: usize) -> String {
 
 #[cfg(test)]
 fn unix_secs(time: SystemTime) -> u64 {
-    time.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+    time.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -680,7 +717,9 @@ mod tests {
             Self { root }
         }
         fn store(&self) -> Store {
-            Store { root: self.root.canonicalize().unwrap() }
+            Store {
+                root: self.root.canonicalize().unwrap(),
+            }
         }
     }
 
@@ -695,7 +734,9 @@ mod tests {
             kind: "test".into(),
             name: name.into(),
             version: "1".into(),
-            inputs: input.map(|id| BTreeMap::from([("input".into(), id.into())])).unwrap_or_default(),
+            inputs: input
+                .map(|id| BTreeMap::from([("input".into(), id.into())]))
+                .unwrap_or_default(),
         };
         let id = identity.object_id();
         let staged = store.stage().unwrap();
@@ -716,8 +757,10 @@ mod tests {
                 "schema": "closure/1",
                 "ecosystem": "python",
                 "body": body,
-            })).unwrap(),
-        ).unwrap();
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     fn age(path: &Path) {
@@ -737,7 +780,11 @@ mod tests {
         age(&store.object_path(&dead));
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
-        closure(&project, &store.object_path(&parent), serde_json::json!({"id": parent}));
+        closure(
+            &project,
+            &store.object_path(&parent),
+            serde_json::json!({"id": parent}),
+        );
         store.register_root(&project).unwrap();
 
         let mut output = Vec::new();
@@ -767,7 +814,8 @@ mod tests {
         fs::write(&artifact_path, b"artifact").unwrap();
         age(&artifact_path);
         let meta_path = store.root.join("meta").join(format!("{id}.json"));
-        let mut meta: serde_json::Value = serde_json::from_reader(fs::File::open(&meta_path).unwrap()).unwrap();
+        let mut meta: serde_json::Value =
+            serde_json::from_reader(fs::File::open(&meta_path).unwrap()).unwrap();
         meta.as_object_mut().unwrap().remove("refs");
         fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
         age(&store.object_path(&id));
@@ -844,23 +892,15 @@ mod tests {
         fs::create_dir_all(project.join(".blanket/closures")).unwrap();
         let project = project.canonicalize().unwrap();
         let home = store.root.parent().unwrap();
-        let project_key = &hex::encode(sha2::Sha256::digest(
-            project.to_string_lossy().as_bytes(),
-        ))[..32];
+        let project_key =
+            &hex::encode(sha2::Sha256::digest(project.to_string_lossy().as_bytes()))[..32];
         let projection_id = "a".repeat(32);
-        let forest = home
-            .join("forests")
-            .join(project_key)
-            .join(&projection_id);
-        let workspace_forest = forest
-            .join("workspaces/packages%2Flib/node_modules");
+        let forest = home.join("forests").join(project_key).join(&projection_id);
+        let workspace_forest = forest.join("workspaces/packages%2Flib/node_modules");
         fs::create_dir_all(&workspace_forest).unwrap();
         fs::create_dir_all(project.join("packages/lib")).unwrap();
-        std::os::unix::fs::symlink(
-            &workspace_forest,
-            project.join("packages/lib/node_modules"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(&workspace_forest, project.join("packages/lib/node_modules"))
+            .unwrap();
         fs::write(
             project.join(".blanket/closures/node.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -889,7 +929,11 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert!(workspace_forest.is_dir(), "{}", String::from_utf8_lossy(&output));
+        assert!(
+            workspace_forest.is_dir(),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
     }
 
     #[test]

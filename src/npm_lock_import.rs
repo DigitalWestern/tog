@@ -9,11 +9,11 @@ use crate::fetch::Digest;
 use crate::npm::{NpmLink, NpmPackage, NpmPatch, NpmPlan};
 use crate::platform::Platform;
 use serde_json::Value as JsonValue;
+use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use sha2::{Digest as Sha2Digest, Sha256};
 
 fn err(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -94,9 +94,7 @@ fn split_key_value(value: &str) -> Option<(String, String)> {
                 '\'' | '"' => quote = Some(*ch),
                 '[' | '{' | '(' => depth += 1,
                 ']' | '}' | ')' => depth -= 1,
-                ':' if depth == 0
-                    && (i + 1 == chars.len() || chars[i + 1].is_whitespace()) =>
-                {
+                ':' if depth == 0 && (i + 1 == chars.len() || chars[i + 1].is_whitespace()) => {
                     return Some((
                         yaml_unquote(&chars[..i].iter().collect::<String>()),
                         chars[i + 1..].iter().collect::<String>().trim().to_string(),
@@ -113,16 +111,14 @@ fn yaml_inline(value: &str, line: usize) -> io::Result<YamlValue> {
     let value = value.trim();
     if value.starts_with('[') && value.ends_with(']') {
         let inner = &value[1..value.len() - 1];
-        return Ok(YamlValue::Seq(
-            if inner.trim().is_empty() {
-                Vec::new()
-            } else {
-                split_top_level(inner, ',')
-                    .into_iter()
-                    .map(|v| Ok(YamlValue::Scalar(yaml_unquote(&v))))
-                    .collect::<io::Result<Vec<_>>>()?
-            },
-        ));
+        return Ok(YamlValue::Seq(if inner.trim().is_empty() {
+            Vec::new()
+        } else {
+            split_top_level(inner, ',')
+                .into_iter()
+                .map(|v| Ok(YamlValue::Scalar(yaml_unquote(&v))))
+                .collect::<io::Result<Vec<_>>>()?
+        }));
     }
     if value.starts_with('{') && value.ends_with('}') {
         let inner = &value[1..value.len() - 1];
@@ -170,7 +166,10 @@ fn yaml_lines(text: &str) -> io::Result<Vec<YamlLine>> {
         }
         let indent = line.chars().take_while(|c| *c == ' ').count();
         if indent % 2 != 0 || line[..indent].contains('\t') {
-            return Err(err(format!("YAML line {}: expected 2-space indentation", index + 1)));
+            return Err(err(format!(
+                "YAML line {}: expected 2-space indentation",
+                index + 1
+            )));
         }
         lines.push(YamlLine {
             number: index + 1,
@@ -191,7 +190,10 @@ fn parse_yaml_block(lines: &[YamlLine], index: &mut usize, indent: usize) -> io:
         while *index < lines.len() && lines[*index].indent == indent {
             let line = &lines[*index];
             if !line.text.starts_with('-') {
-                return Err(err(format!("YAML line {}: mixed map and list", line.number)));
+                return Err(err(format!(
+                    "YAML line {}: mixed map and list",
+                    line.number
+                )));
             }
             let rest = line.text[1..].trim();
             *index += 1;
@@ -208,11 +210,17 @@ fn parse_yaml_block(lines: &[YamlLine], index: &mut usize, indent: usize) -> io:
                     let child_indent = lines[*index].indent;
                     let child = parse_yaml_block(lines, index, child_indent)?;
                     let YamlValue::Map(child) = child else {
-                        return Err(err(format!("YAML line {}: list map expected map", line.number)));
+                        return Err(err(format!(
+                            "YAML line {}: list map expected map",
+                            line.number
+                        )));
                     };
                     for (k, v) in child {
                         if map.insert(k.clone(), v).is_some() {
-                            return Err(err(format!("YAML line {}: duplicate key {k:?}", line.number)));
+                            return Err(err(format!(
+                                "YAML line {}: duplicate key {k:?}",
+                                line.number
+                            )));
                         }
                     }
                 }
@@ -234,7 +242,10 @@ fn parse_yaml_block(lines: &[YamlLine], index: &mut usize, indent: usize) -> io:
     while *index < lines.len() && lines[*index].indent == indent {
         let line = &lines[*index];
         if line.text.starts_with('-') {
-            return Err(err(format!("YAML line {}: mixed list and map", line.number)));
+            return Err(err(format!(
+                "YAML line {}: mixed list and map",
+                line.number
+            )));
         }
         let (key, val) = split_key_value(&line.text)
             .ok_or_else(|| err(format!("YAML line {}: expected key: value", line.number)))?;
@@ -249,7 +260,10 @@ fn parse_yaml_block(lines: &[YamlLine], index: &mut usize, indent: usize) -> io:
             yaml_inline(&val, line.number)?
         };
         if map.insert(key.clone(), parsed).is_some() {
-            return Err(err(format!("YAML line {}: duplicate key {key:?}", line.number)));
+            return Err(err(format!(
+                "YAML line {}: duplicate key {key:?}",
+                line.number
+            )));
         }
     }
     Ok(YamlValue::Map(map))
@@ -263,12 +277,18 @@ fn parse_yaml(text: &str) -> io::Result<YamlValue> {
     let mut index = 0;
     let value = parse_yaml_block(&lines, &mut index, lines[0].indent)?;
     if index != lines.len() {
-        return Err(err(format!("YAML line {}: unexpected indentation", lines[index].number)));
+        return Err(err(format!(
+            "YAML line {}: unexpected indentation",
+            lines[index].number
+        )));
     }
     Ok(value)
 }
 
-fn yaml_map<'a>(value: &'a YamlValue, context: &str) -> io::Result<&'a BTreeMap<String, YamlValue>> {
+fn yaml_map<'a>(
+    value: &'a YamlValue,
+    context: &str,
+) -> io::Result<&'a BTreeMap<String, YamlValue>> {
     match value {
         YamlValue::Map(map) => Ok(map),
         _ => Err(err(format!("{context} must be a map"))),
@@ -309,7 +329,11 @@ fn trim_peer_suffix(value: &str) -> &str {
             value.find('@')
         };
         delimiter
-            .and_then(|index| value[index + 1..].find('_').map(|offset| index + 1 + offset))
+            .and_then(|index| {
+                value[index + 1..]
+                    .find('_')
+                    .map(|offset| index + 1 + offset)
+            })
             .or_else(|| delimiter.is_none().then(|| value.find('_')).flatten())
     };
     [parenthesis, underscore]
@@ -436,9 +460,12 @@ fn patch_path(project_dir: &Path, raw: &str) -> io::Result<PathBuf> {
     if raw.is_empty()
         || raw.starts_with('/')
         || raw.starts_with('~')
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err(err(format!(
             "pnpm patch path {raw:?} must be a project-relative file"
@@ -494,18 +521,18 @@ fn pnpm_patches(
             (raw_path, hash)
         } else {
             let entry = yaml_map(value, &format!("pnpm patch {package}"))?;
-            let raw_path = yaml_str(entry.get("path")).ok_or_else(|| {
-                err(format!("pnpm patch {package} has no string path"))
-            })?;
-            let hash = yaml_str(entry.get("hash")).ok_or_else(|| {
-                err(format!("pnpm patch {package} has no string sha256 hash"))
-            })?;
+            let raw_path = yaml_str(entry.get("path"))
+                .ok_or_else(|| err(format!("pnpm patch {package} has no string path")))?;
+            let hash = yaml_str(entry.get("hash"))
+                .ok_or_else(|| err(format!("pnpm patch {package} has no string sha256 hash")))?;
             (raw_path.to_string(), hash)
         };
         let path = patch_path(project_dir, &raw_path)?;
         verify_patch_hash(package, &path, hash)?;
         let identity = normalize_pnpm_snapshot_key(package).ok_or_else(|| {
-            err(format!("pnpm patch {package} has no package@version identity"))
+            err(format!(
+                "pnpm patch {package} has no package@version identity"
+            ))
         })?;
         result.push((
             identity,
@@ -524,10 +551,9 @@ fn attach_pnpm_patches(
 ) -> io::Result<()> {
     let mut applied = BTreeSet::new();
     for node in nodes.values_mut() {
-        let Some((identity, patch)) = patches
-            .iter()
-            .find(|(identity, _)| identity_key_for_snapshot(identity) == identity_key_for_snapshot(&node.key))
-        else {
+        let Some((identity, patch)) = patches.iter().find(|(identity, _)| {
+            identity_key_for_snapshot(identity) == identity_key_for_snapshot(&node.key)
+        }) else {
             continue;
         };
         node.patch = Some(patch.clone());
@@ -618,16 +644,13 @@ fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) ->
         let repo = repo.unwrap_or("(unknown repository)");
         let commit = yaml_str(resolution.get("commit")).unwrap_or("unspecified commit");
         return Some(
-            crate::npm::git_dependency_detail(
-                name,
-                &format!("git+{repo}#{commit}"),
-            )
-            .unwrap_or_else(|| {
-                format!(
-                    "npm_git_dep: {name}: repo {repo}, commit {commit}; \
+            crate::npm::git_dependency_detail(name, &format!("git+{repo}#{commit}"))
+                .unwrap_or_else(|| {
+                    format!(
+                        "npm_git_dep: {name}: repo {repo}, commit {commit}; \
                      git sources are deferred to NEXT.md item 4"
-                )
-            }),
+                    )
+                }),
         );
     }
     let tarball = yaml_str(resolution.get("tarball")).unwrap_or_default();
@@ -672,7 +695,9 @@ fn dep_version_key(
     // snapshot for that package identity. If peer variants exist, choosing
     // one lexicographically is a wrong graph; pnpm normally writes the peer
     // suffix into the edge and the exact lookup above handles it.
-    (candidates.len() == 1).then(|| candidates.into_iter().next()).flatten()
+    (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten()
 }
 
 fn workspace_target(project_dir: &Path, importer: &str, raw: &str) -> io::Result<String> {
@@ -683,7 +708,9 @@ fn workspace_target(project_dir: &Path, importer: &str, raw: &str) -> io::Result
         return Ok(".".into());
     }
     if raw.starts_with('/') || raw.starts_with('~') {
-        return Err(err(format!("workspace link target {raw:?} is outside the project")));
+        return Err(err(format!(
+            "workspace link target {raw:?} is outside the project"
+        )));
     }
     let mut relative = Vec::<String>::new();
     if importer != "." {
@@ -705,7 +732,9 @@ fn workspace_target(project_dir: &Path, importer: &str, raw: &str) -> io::Result
                 }
             }
             Component::RootDir | Component::Prefix(_) => {
-                return Err(err(format!("workspace link target {raw:?} is outside the project")))
+                return Err(err(format!(
+                    "workspace link target {raw:?} is outside the project"
+                )))
             }
         }
     }
@@ -714,12 +743,16 @@ fn workspace_target(project_dir: &Path, importer: &str, raw: &str) -> io::Result
     } else {
         relative.join("/")
     };
-    let root = project_dir.canonicalize().unwrap_or_else(|_| project_dir.to_path_buf());
+    let root = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
     let target_path = root.join(&target);
     if target_path.exists() {
         let canonical = target_path.canonicalize()?;
         if !canonical.starts_with(&root) {
-            return Err(err(format!("workspace link target {raw:?} is outside the project")));
+            return Err(err(format!(
+                "workspace link target {raw:?} is outside the project"
+            )));
         }
     }
     Ok(target)
@@ -778,7 +811,7 @@ fn target_for_ref(
         return match dep_version_key(&real_name, &real_version, snapshots) {
             Some(key) => Target::Node(key),
             None => Target::External(format!("missing snapshot for {name}@{reference}")),
-        }
+        };
     }
     match dep_version_key(name, reference, snapshots) {
         Some(key) => Target::Node(key),
@@ -801,13 +834,19 @@ fn importer_dependencies(
         ("devDependencies", false),
         ("optionalDependencies", true),
     ] {
-        let Some(value) = importer.get(field) else { continue };
+        let Some(value) = importer.get(field) else {
+            continue;
+        };
         let map = yaml_map(value, &format!("importer {importer_name} {field}"))?;
         for (name, value) in map {
             let item = yaml_map(value, &format!("importer {importer_name} {field} {name}"))?;
             let specifier = yaml_str(item.get("specifier")).unwrap_or_default();
             if let Some(catalog) = specifier.strip_prefix("catalog:") {
-                let catalog_name = if catalog.is_empty() { "default" } else { catalog };
+                let catalog_name = if catalog.is_empty() {
+                    "default"
+                } else {
+                    catalog
+                };
                 if catalogs
                     .get(catalog_name)
                     .and_then(|catalog| catalog.get(name))
@@ -819,14 +858,15 @@ fn importer_dependencies(
                 }
             }
             let version = yaml_str(item.get("version")).ok_or_else(|| {
-                err(format!("importer {importer_name} dependency {name}: missing version"))
+                err(format!(
+                    "importer {importer_name} dependency {name}: missing version"
+                ))
             })?;
             let target = target_for_ref(name, version, importer_name, snapshots, project_dir);
             if let Target::Link(target_path) = &target {
-                if let Some(dependencies) =
-                    local_snapshots.get(&normalize_pnpm_snapshot_key(&format!("{name}@{version}"))
-                        .unwrap_or_default())
-                {
+                if let Some(dependencies) = local_snapshots.get(
+                    &normalize_pnpm_snapshot_key(&format!("{name}@{version}")).unwrap_or_default(),
+                ) {
                     local_link_deps
                         .entry(target_path.clone())
                         .or_insert_with(|| dependencies.clone());
@@ -849,14 +889,20 @@ fn pnpm_catalogs(
     root: &BTreeMap<String, YamlValue>,
 ) -> io::Result<BTreeMap<String, BTreeMap<String, String>>> {
     let mut catalogs = BTreeMap::new();
-    let Some(value) = root.get("catalogs") else { return Ok(catalogs) };
+    let Some(value) = root.get("catalogs") else {
+        return Ok(catalogs);
+    };
     let map = yaml_map(value, "catalogs")?;
     for (name, value) in map {
         let entries = yaml_map(value, &format!("catalog {name}"))?;
         let mut catalog = BTreeMap::new();
         for (package, value) in entries {
             let selected = yaml_str(Some(value))
-                .or_else(|| yaml_map(value, "").ok().and_then(|map| yaml_str(map.get("version"))))
+                .or_else(|| {
+                    yaml_map(value, "")
+                        .ok()
+                        .and_then(|map| yaml_str(map.get("version")))
+                })
                 .unwrap_or_default()
                 .to_string();
             catalog.insert(package.clone(), selected);
@@ -882,13 +928,7 @@ fn snapshot_dependencies(
                     name.clone(),
                     Dependency {
                         name: name.clone(),
-                        target: target_for_ref(
-                            name,
-                            reference,
-                            ".",
-                            lookup,
-                            project_dir,
-                        ),
+                        target: target_for_ref(name, reference, ".", lookup, project_dir),
                         optional,
                     },
                 );
@@ -979,7 +1019,9 @@ fn pnpm_nodes(
             )
             .is_some()
         {
-            return Err(err(format!("duplicate normalized pnpm package key {raw_key:?}")));
+            return Err(err(format!(
+                "duplicate normalized pnpm package key {raw_key:?}"
+            )));
         }
     }
 
@@ -987,7 +1029,9 @@ fn pnpm_nodes(
     if let Some(value) = snapshots_value {
         for (raw_key, value) in yaml_map(value, "snapshots")? {
             let snapshot_key = normalize_pnpm_snapshot_key(raw_key).ok_or_else(|| {
-                err(format!("snapshots entry {raw_key:?} has no name@version identity"))
+                err(format!(
+                    "snapshots entry {raw_key:?} has no name@version identity"
+                ))
             })?;
             if snapshots
                 .insert(
@@ -996,7 +1040,9 @@ fn pnpm_nodes(
                 )
                 .is_some()
             {
-                return Err(err(format!("duplicate normalized pnpm snapshot key {raw_key:?}")));
+                return Err(err(format!(
+                    "duplicate normalized pnpm snapshot key {raw_key:?}"
+                )));
             }
         }
     } else {
@@ -1066,12 +1112,8 @@ fn pnpm_nodes(
                 "pnpm snapshot {snapshot_key} has no matching packages metadata"
             )));
         };
-        node.deps = snapshot_dependencies(
-            &snapshot,
-            &snapshot_key,
-            &snapshot_metadata,
-            project_dir,
-        )?;
+        node.deps =
+            snapshot_dependencies(&snapshot, &snapshot_key, &snapshot_metadata, project_dir)?;
         nodes.insert(snapshot_key, node);
     }
     Ok((nodes, local_snapshots))
@@ -1154,12 +1196,12 @@ pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io:
         &local_snapshots,
         &mut local_link_deps,
     )?
-        .into_iter()
-        .map(|dependency| RootDependency {
-            dependency,
-            workspace: None,
-        })
-        .collect::<Vec<_>>();
+    .into_iter()
+    .map(|dependency| RootDependency {
+        dependency,
+        workspace: None,
+    })
+    .collect::<Vec<_>>();
     let mut workspace_roots = Vec::new();
     let workspace_paths = importers
         .keys()
@@ -1170,17 +1212,15 @@ pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io:
         if importer_name == "." {
             continue;
         }
-        for dependency in
-            importer_dependencies(
-                &importer,
-                &importer_name,
-                &nodes,
-                project_dir,
-                &catalogs,
-                &local_snapshots,
-                &mut local_link_deps,
-            )?
-        {
+        for dependency in importer_dependencies(
+            &importer,
+            &importer_name,
+            &nodes,
+            project_dir,
+            &catalogs,
+            &local_snapshots,
+            &mut local_link_deps,
+        )? {
             workspace_roots.push(RootDependency {
                 dependency,
                 workspace: Some(importer_name.clone()),
@@ -1368,8 +1408,7 @@ fn parse_yarn_entries(lock: &str) -> io::Result<Vec<YarnEntry>> {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::new();
     for chunk in bytes.chunks(3) {
         let a = chunk[0] as u32;
@@ -1392,17 +1431,21 @@ fn base64_encode(bytes: &[u8]) -> String {
     output
 }
 
-fn yarn_integrity(
-    resolved: &str,
-    integrity: Option<String>,
-    path: &str,
-) -> io::Result<String> {
+fn yarn_integrity(resolved: &str, integrity: Option<String>, path: &str) -> io::Result<String> {
     if let Some(integrity) = integrity {
         let selected = integrity
             .split_whitespace()
             .find(|value| value.starts_with("sha512-"))
-            .or_else(|| integrity.split_whitespace().find(|value| value.starts_with("sha256-")))
-            .or_else(|| integrity.split_whitespace().find(|value| value.starts_with("sha1-")))
+            .or_else(|| {
+                integrity
+                    .split_whitespace()
+                    .find(|value| value.starts_with("sha256-"))
+            })
+            .or_else(|| {
+                integrity
+                    .split_whitespace()
+                    .find(|value| value.starts_with("sha1-"))
+            })
             .ok_or_else(|| err(format!("{path}: malformed Yarn integrity")))?;
         integrity_policy(path, selected)?;
         Digest::from_sri(selected)?;
@@ -1485,8 +1528,7 @@ fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
             return path.is_empty();
         }
         if pattern[0] == "**" {
-            matches(&pattern[1..], path)
-                || (!path.is_empty() && matches(pattern, &path[1..]))
+            matches(&pattern[1..], path) || (!path.is_empty() && matches(pattern, &path[1..]))
         } else {
             !path.is_empty()
                 && workspace_segment_matches(pattern[0], path[0])
@@ -1599,17 +1641,19 @@ fn yarn_workspace_manifests(
     let mut workspaces = Vec::new();
     for path in selected {
         let manifest_path = project_dir.join(&path).join("package.json");
-        let text = fs::read_to_string(&manifest_path).map_err(|error| {
-            err(format!("Yarn workspace {path}: read package.json: {error}"))
-        })?;
-        let package: JsonValue = serde_json::from_str(&text).map_err(|error| {
-            err(format!("Yarn workspace {path}: package.json: {error}"))
-        })?;
+        let text = fs::read_to_string(&manifest_path)
+            .map_err(|error| err(format!("Yarn workspace {path}: read package.json: {error}")))?;
+        let package: JsonValue = serde_json::from_str(&text)
+            .map_err(|error| err(format!("Yarn workspace {path}: package.json: {error}")))?;
         let name = package["name"].as_str().ok_or_else(|| {
-            err(format!("Yarn workspace {path}: package.json has no string name"))
+            err(format!(
+                "Yarn workspace {path}: package.json has no string name"
+            ))
         })?;
         let version = package["version"].as_str().ok_or_else(|| {
-            err(format!("Yarn workspace {path}: package.json has no string version"))
+            err(format!(
+                "Yarn workspace {path}: package.json has no string version"
+            ))
         })?;
         workspaces.push(YarnWorkspace {
             path,
@@ -1663,7 +1707,9 @@ fn parse_semver(value: &str, allow_partial: bool) -> Option<Semver> {
                     || !part
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                    || part.len() > 1 && part.starts_with('0') && part.bytes().all(|b| b.is_ascii_digit())
+                    || part.len() > 1
+                        && part.starts_with('0')
+                        && part.bytes().all(|b| b.is_ascii_digit())
                 {
                     return None;
                 }
@@ -1808,7 +1854,9 @@ pub fn plan_yarn(
             deps.push(Dependency {
                 name,
                 target: Target::External(format!("missing yarn selector {selector}")),
-                optional: entry.optional_dependencies.contains_key(&selector_name(&selector)),
+                optional: entry
+                    .optional_dependencies
+                    .contains_key(&selector_name(&selector)),
             });
         }
         nodes.insert(
@@ -1849,13 +1897,14 @@ pub fn plan_yarn(
     }
 
     let workspaces = yarn_workspace_manifests(&package, project_dir)?;
-    let mut root_deps: Vec<RootDependency> = yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
-        .into_iter()
-        .map(|dependency| RootDependency {
-            dependency,
-            workspace: None,
-        })
-        .collect();
+    let mut root_deps: Vec<RootDependency> =
+        yarn_package_dependencies(&package, &selector_to_node, &workspaces, None)?
+            .into_iter()
+            .map(|dependency| RootDependency {
+                dependency,
+                workspace: None,
+            })
+            .collect();
     // Yarn classic links every discovered workspace into the root, including
     // members that no other manifest mentions. Keep these as root-local links
     // so `require("member")` works from the repository root just as it does
@@ -1888,7 +1937,10 @@ pub fn plan_yarn(
         nodes,
         roots: root_deps,
         workspace_roots,
-        workspace_paths: workspaces.iter().map(|workspace| workspace.path.clone()).collect(),
+        workspace_paths: workspaces
+            .iter()
+            .map(|workspace| workspace.path.clone())
+            .collect(),
         local_link_deps: BTreeMap::new(),
     };
     build_plan(platform, graph, "yarn.lock")
@@ -1906,10 +1958,14 @@ fn yarn_package_dependencies(
         ("devDependencies", false),
         ("optionalDependencies", true),
     ] {
-        let Some(map) = package[field].as_object() else { continue };
+        let Some(map) = package[field].as_object() else {
+            continue;
+        };
         for (name, spec) in map {
             let spec = spec.as_str().ok_or_else(|| {
-                err(format!("package.json {field} {name}: specifier must be a string"))
+                err(format!(
+                    "package.json {field} {name}: specifier must be a string"
+                ))
             })?;
             let workspace = workspaces.iter().find(|workspace| workspace.name == *name);
             let target = if let Some(workspace) = workspace {
@@ -1962,15 +2018,23 @@ fn platform_values_compatible(platform: Platform, values: &[String], ours: &str)
         return true;
     }
     if platform.is_macos() {
-        if values.iter().any(|value| value.strip_prefix('!') == Some(ours)) {
+        if values
+            .iter()
+            .any(|value| value.strip_prefix('!') == Some(ours))
+        {
             return false;
         }
-        !values.iter().any(|value| !value.starts_with('!')) || values.iter().any(|value| value == ours)
+        !values.iter().any(|value| !value.starts_with('!'))
+            || values.iter().any(|value| value == ours)
     } else {
-        if values.iter().any(|value| value.strip_prefix('!') == Some(ours)) {
+        if values
+            .iter()
+            .any(|value| value.strip_prefix('!') == Some(ours))
+        {
             return false;
         }
-        values.iter().any(|value| value == ours) || values.iter().all(|value| value.starts_with('!'))
+        values.iter().any(|value| value == ours)
+            || values.iter().all(|value| value.starts_with('!'))
     }
 }
 
@@ -2100,8 +2164,8 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             std::mem::swap(&mut queue, &mut workspace_queue);
         }
         let (parent, dependency, workspace) = queue.pop_front().unwrap();
-        let in_workspace = workspace.is_some()
-            || (!parent.is_empty() && !parent.starts_with("node_modules/"));
+        let in_workspace =
+            workspace.is_some() || (!parent.is_empty() && !parent.starts_with("node_modules/"));
         let (path, should_expand) = match &dependency.target {
             Target::External(detail) => {
                 if dependency.optional {
@@ -2118,7 +2182,10 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             }
             Target::Node(node_key) => {
                 let node = graph.nodes.get(node_key).ok_or_else(|| {
-                    err(format!("{}: missing graph node {node_key}", dependency.name))
+                    err(format!(
+                        "{}: missing graph node {node_key}",
+                        dependency.name
+                    ))
                 })?;
                 if !node_compatible(platform, node) {
                     if dependency.optional || node.optional {
@@ -2152,8 +2219,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                 // A git source is verified by its commit, so it legitimately
                 // has no tarball integrity (item 4).
                 let node_git = lock_git_source(&node.url, !node.integrity.is_empty());
-                if node.integrity.is_empty() && node_git.is_none()
-                {
+                if node.integrity.is_empty() && node_git.is_none() {
                     if dependency.optional || node.optional {
                         continue;
                     }
@@ -2187,39 +2253,39 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                         } else if in_workspace {
                             dependency_path(&parent, &dependency.name)
                         } else if parent.is_empty() {
-                        return Err(err(format!(
-                            "{}: root dependencies conflict between {} and {}",
-                            dependency.name,
-                            occupied_description(existing),
-                            format!("{}@{}", node.name, node.version)
-                        )));
+                            return Err(err(format!(
+                                "{}: root dependencies conflict between {} and {}",
+                                dependency.name,
+                                occupied_description(existing),
+                                format!("{}@{}", node.name, node.version)
+                            )));
+                        } else {
+                            dependency_path(&parent, &dependency.name)
+                        }
                     } else {
-                        dependency_path(&parent, &dependency.name)
+                        root
+                    };
+                    if let Some(existing) = occupied.get(&path) {
+                        if !same_target(existing, &dependency.target, &graph.nodes) {
+                            return Err(err(format!(
+                                "{}: two versions conflict at {} ({} and {})",
+                                dependency.name,
+                                path,
+                                occupied_description(existing),
+                                format!("{}@{}", node.name, node.version)
+                            )));
+                        }
+                    } else {
+                        occupied.insert(
+                            path.clone(),
+                            Occupied::Package {
+                                node_key: node_key.clone(),
+                                name: node.name.clone(),
+                                version: node.version.clone(),
+                            },
+                        );
                     }
-                } else {
-                    root
-                };
-                if let Some(existing) = occupied.get(&path) {
-                    if !same_target(existing, &dependency.target, &graph.nodes) {
-                        return Err(err(format!(
-                            "{}: two versions conflict at {} ({} and {})",
-                            dependency.name,
-                            path,
-                            occupied_description(existing),
-                            format!("{}@{}", node.name, node.version)
-                        )));
-                    }
-                } else {
-                    occupied.insert(
-                        path.clone(),
-                        Occupied::Package {
-                            node_key: node_key.clone(),
-                            name: node.name.clone(),
-                            version: node.version.clone(),
-                        },
-                    );
-                }
-                (path, true)
+                    (path, true)
                 }
             }
             Target::Link(target) => {
@@ -2306,7 +2372,9 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             }
         };
         if should_expand {
-            let Target::Node(node_key) = dependency.target else { continue };
+            let Target::Node(node_key) = dependency.target else {
+                continue;
+            };
             if expanded.insert((path.clone(), node_key.clone())) {
                 if let Some(node) = graph.nodes.get(&node_key) {
                     for child in &node.deps {
@@ -2328,7 +2396,9 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
     let mut packages = Vec::new();
     for (path, occupied) in occupied {
         crate::npm::validate_lock_path(&path)?;
-        let Occupied::Package { node_key, .. } = occupied else { continue };
+        let Occupied::Package { node_key, .. } = occupied else {
+            continue;
+        };
         let node = graph
             .nodes
             .get(&node_key)
@@ -2426,8 +2496,14 @@ snapshots:
         assert_eq!(plan.lock_source, "pnpm-lock.yaml");
         assert!(plan.links.iter().any(|link| link.target == "packages/lib"));
         assert!(plan.packages.iter().any(|package| package.name == "is-odd"));
-        assert!(plan.packages.iter().any(|package| package.name == "is-number"));
-        assert!(!plan.packages.iter().any(|package| package.name == "mac-only"));
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| package.name == "is-number"));
+        assert!(!plan
+            .packages
+            .iter()
+            .any(|package| package.name == "mac-only"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2453,10 +2529,7 @@ packages:
             .packages
             .iter()
             .any(|package| package.path == "node_modules/a"));
-        assert!(plan
-            .packages
-            .iter()
-            .any(|package| package.name == "b"));
+        assert!(plan.packages.iter().any(|package| package.name == "b"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2529,7 +2602,10 @@ snapshots:
         );
         let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
         assert_eq!(
-            plan.packages[0].patch.as_ref().map(|patch| patch.hash.as_str()),
+            plan.packages[0]
+                .patch
+                .as_ref()
+                .map(|patch| patch.hash.as_str()),
             Some(hash.as_str())
         );
         fs::write(&patch_path, b"changed patch").unwrap();
@@ -2565,10 +2641,7 @@ snapshots:
 "#
         );
         let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
-        assert!(plan
-            .links
-            .iter()
-            .any(|link| link.target == "vendor/a"));
+        assert!(plan.links.iter().any(|link| link.target == "vendor/a"));
         assert!(plan
             .packages
             .iter()
@@ -2629,9 +2702,10 @@ snapshots:
             .packages
             .iter()
             .any(|package| package.name == "child-a"));
-        assert!(plan.packages.iter().any(|package| {
-            package.name == "child-b"
-        }));
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| { package.name == "child-b" }));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2681,9 +2755,10 @@ snapshots:
             package.path == "node_modules/b/node_modules/d/node_modules/c"
                 && package.version == "1.0.0"
         }));
-        assert!(!plan.packages.iter().any(|package| {
-            package.path == "node_modules/c" && package.version == "2.0.0"
-        }));
+        assert!(!plan
+            .packages
+            .iter()
+            .any(|package| { package.path == "node_modules/c" && package.version == "2.0.0" }));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2703,8 +2778,7 @@ packages:
     resolution: {type: git, repo: https://example.invalid/a, commit: abc}
 snapshots: {}
 ";
-        let error =
-            plan_pnpm(Platform::X86_64UnknownLinuxGnu, required, &dir).unwrap_err();
+        let error = plan_pnpm(Platform::X86_64UnknownLinuxGnu, required, &dir).unwrap_err();
         assert!(error.to_string().contains("item 4"));
 
         let optional = required
@@ -2836,9 +2910,10 @@ snapshots:
 "#
         );
         let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
-        assert!(plan.packages.iter().any(|package| {
-            package.path == "p/node_modules/c" && package.version == "2.0.0"
-        }));
+        assert!(plan
+            .packages
+            .iter()
+            .any(|package| { package.path == "p/node_modules/c" && package.version == "2.0.0" }));
         assert!(plan.packages.iter().any(|package| {
             package.path == "p/child/node_modules/c" && package.version == "1.0.0"
         }));
@@ -2860,13 +2935,7 @@ is-number@^6.0.0:
   resolved \"https://registry.yarnpkg.com/is-number/-/is-number-6.0.0.tgz#0000000000000000000000000000000000000000\"
 ";
         let package_json = r#"{"dependencies":{"is-odd":"3.0.1"}}"#;
-        let plan = plan_yarn(
-            Platform::X86_64UnknownLinuxGnu,
-            lock,
-            package_json,
-            &dir,
-        )
-        .unwrap();
+        let plan = plan_yarn(Platform::X86_64UnknownLinuxGnu, lock, package_json, &dir).unwrap();
         assert_eq!(plan.packages.len(), 2);
         assert!(plan
             .packages
@@ -2901,17 +2970,8 @@ dep@1.0.0:
 "#
         );
         let package = fs::read_to_string(dir.join("package.json")).unwrap();
-        let plan = plan_yarn(
-            Platform::X86_64UnknownLinuxGnu,
-            &lock,
-            &package,
-            &dir,
-        )
-        .unwrap();
-        assert!(plan
-            .packages
-            .iter()
-            .any(|package| package.name == "dep"));
+        let plan = plan_yarn(Platform::X86_64UnknownLinuxGnu, &lock, &package, &dir).unwrap();
+        assert!(plan.packages.iter().any(|package| package.name == "dep"));
         assert!(plan
             .links
             .iter()
@@ -3038,10 +3098,16 @@ mod git_import_tests {
              \x20\x20\x20\x20resolution: {{gitHosted: true, integrity: sha512-ZUNzoqUI/328gbYuFUw9oKe0BVi/reurZZ2ut1+B8ZgEtZ6dtNgKMea7Kp8UvKTnF543WvI/8RwetH1Fzkflzw==, tarball: https://codeload.github.com/o/r/tar.gz/{commit}}}\n"
         );
         let parsed = super::parse_yaml(&lock).expect("parse");
-        let super::YamlValue::Map(top) = &parsed else { panic!("top level is a map") };
-        let super::YamlValue::Map(packages) = &top["packages"] else { panic!("packages map") };
+        let super::YamlValue::Map(top) = &parsed else {
+            panic!("top level is a map")
+        };
+        let super::YamlValue::Map(packages) = &top["packages"] else {
+            panic!("packages map")
+        };
         let (_key, entry) = packages.iter().next().expect("one package");
-        let super::YamlValue::Map(entry) = entry else { panic!("entry map") };
+        let super::YamlValue::Map(entry) = entry else {
+            panic!("entry map")
+        };
         let resolution = match entry.get("resolution") {
             Some(super::YamlValue::Map(map)) => Some(map),
             other => panic!("resolution is not a map: {other:?}"),

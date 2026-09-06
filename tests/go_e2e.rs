@@ -86,7 +86,10 @@ fn go_sync_build_and_rebuild_offline() {
     // Clean rebuild: everything must come from the store (blanket build is
     // itself the network-denied sandbox; sandboxes cannot nest on macOS).
     std::fs::remove_file(&hello).unwrap();
-    assert_ok(blanket(&binary, &project, &store, &["build", "go"]), "rebuild");
+    assert_ok(
+        blanket(&binary, &project, &store, &["build", "go"]),
+        "rebuild",
+    );
     assert!(hello.is_file());
     let out = Command::new(&hello)
         .env("LC_ALL", "en_US.UTF-8")
@@ -131,11 +134,7 @@ fn go_sync_build_and_rebuild_offline() {
     if cfg!(target_os = "linux") {
         let cgo_project = temp.0.join("go-cgo");
         std::fs::create_dir_all(&cgo_project).unwrap();
-        std::fs::write(
-            cgo_project.join("go.mod"),
-            "module cgohello\n\ngo 1.27\n",
-        )
-        .unwrap();
+        std::fs::write(cgo_project.join("go.mod"), "module cgohello\n\ngo 1.27\n").unwrap();
         std::fs::write(
             cgo_project.join("main.go"),
             r#"package main
@@ -171,9 +170,6 @@ func main() {
             cgo_output.status.success(),
             "cgo executable failed; gcc and glibc-devel are required: {cgo_output:?}"
         );
-        assert_eq!(
-            String::from_utf8_lossy(&cgo_output.stdout).trim(),
-            "42"
-        );
+        assert_eq!(String::from_utf8_lossy(&cgo_output.stdout).trim(), "42");
     }
 }

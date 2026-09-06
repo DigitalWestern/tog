@@ -84,13 +84,13 @@ fn linux_python_sync_run_and_uv_round_trip() {
         .unwrap_or_else(|| temp.0.join("store"));
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
-    assert_ok(
-        blanket(&binary, &project, &store_path, &["sync"]),
-        "sync",
-    );
+    assert_ok(blanket(&binary, &project, &store_path, &["sync"]), "sync");
 
     let imports = Command::new(project.join(".venv/bin/python"))
-        .args(["-c", "import markupsafe, six; print(markupsafe.__version__, six.__version__)"])
+        .args([
+            "-c",
+            "import markupsafe, six; print(markupsafe.__version__, six.__version__)",
+        ])
         .output()
         .unwrap();
     let imports = assert_ok(imports, "import markupsafe and six");
@@ -123,7 +123,10 @@ fn linux_python_sync_run_and_uv_round_trip() {
         root: store_path.canonicalize().unwrap(),
     };
     let uv = python::ensure_uv_for(&store, Platform::host().unwrap()).unwrap();
-    let uv_version = Command::new(uv.join("uv")).arg("--version").output().unwrap();
+    let uv_version = Command::new(uv.join("uv"))
+        .arg("--version")
+        .output()
+        .unwrap();
     let uv_version = assert_ok(uv_version, "uv --version");
     assert!(uv_version.contains("0.12.7"), "{uv_version}");
 

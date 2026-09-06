@@ -345,12 +345,7 @@ fn run_ruby_with_env(
         std::env::var("PATH").unwrap_or_default()
     );
     cmd.env("PATH", path);
-    force_env(
-        &mut cmd,
-        ENV_REMOVE_PREFIXES,
-        ENV_REMOVE,
-        &environment,
-    );
+    force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &environment);
     cmd.stdin(std::process::Stdio::null());
     cmd.output()
         .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
@@ -729,9 +724,8 @@ pub fn realize_gems(
     for g in &plan.gems {
         let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
         let (out, file_path) = {
-            let file = download_verified_held(store, &url, &g.sha256).map_err(|e| {
-                io::Error::new(e.kind(), format!("{}: {e}", g.full_name))
-            })?;
+            let file = download_verified_held(store, &url, &g.sha256)
+                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
             let out = run_ruby(
                 ruby_obj,
                 &scratch,
@@ -825,12 +819,15 @@ pub fn realize_gems(
             path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
         };
         crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
-            io::Error::new(e.kind(), format!(
-                "{}: sandboxed gem install failed: {e}\n(network is denied; \
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{}: sandboxed gem install failed: {e}\n(network is denied; \
                  gems whose installers need network or missing host \
                  libraries are unsupported in v0)",
-                g.full_name
-            ))
+                    g.full_name
+                ),
+            )
         })?;
     }
     let _ = crate::store::remove_tree(&scratch);
@@ -974,9 +971,12 @@ mod tests {
         symlink("gem-real", tree.join("bin/gem")).unwrap();
         fs::write(tree.join("bin/bundle"), b"#!/bin/sh\n").unwrap();
         fs::write(tree.join("lib/libruby-3.4.so"), b"ELF\0not text").unwrap();
-        fs::write(tree.join("include/ruby-3.4.0/ruby.h"), b"#define RUBY_H 1\n").unwrap();
-        fs::set_permissions(tree.join("bin/ruby"), fs::Permissions::from_mode(0o755))
-            .unwrap();
+        fs::write(
+            tree.join("include/ruby-3.4.0/ruby.h"),
+            b"#define RUBY_H 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(tree.join("bin/ruby"), fs::Permissions::from_mode(0o755)).unwrap();
 
         let archive = temp.0.join("portable ruby.tar.gz");
         let status = Command::new("/usr/bin/tar")

@@ -3,10 +3,10 @@
 //! contract from CLI.md (exit status 0/1/2, help on stdout, errors on stderr
 //! with a next step, pass-through for `run`).
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::os::unix::fs::PermissionsExt;
 
 use sha2::{Digest, Sha256};
 
@@ -144,7 +144,10 @@ fn failures_exit_1_and_survive_quiet() {
     let out = blanket(&project.0, &home.0, &["plan"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
-    assert!(stderr.starts_with("blanket: error: no_manifest"), "{stderr}");
+    assert!(
+        stderr.starts_with("blanket: error: no_manifest"),
+        "{stderr}"
+    );
 
     // --quiet silences narration but never the error.
     let out = blanket(&project.0, &home.0, &["--quiet", "plan"]);
@@ -160,7 +163,11 @@ fn directory_option_changes_where_the_command_runs() {
     let project = TempDir::new("chdir-project");
     // Run from `home`, point at the empty project: the empty project's
     // failure proves the command ran there.
-    let out = blanket(&home.0, &home.0, &["-C", project.0.to_str().unwrap(), "plan"]);
+    let out = blanket(
+        &home.0,
+        &home.0,
+        &["-C", project.0.to_str().unwrap(), "plan"],
+    );
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("no_manifest"));
     let out = blanket(
@@ -245,7 +252,11 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     // A built-in verb always wins over a same-named script.
     let out = blanket(&project.0, &home.0, &["build"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("blanket build requires"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("blanket build requires"),
+        "{}",
+        text(&out.stderr)
+    );
     // Not a script, not a verb: usage error naming the package.json.
     let out = blanket(&project.0, &home.0, &["deploy"]);
     assert_eq!(out.status.code(), Some(2));
@@ -277,7 +288,11 @@ fn inspect_verbs_offline() {
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let out = blanket(&project.0, &home.0, &["status"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stdout).contains("python  not synced  run 'blanket sync'"), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("python  not synced  run 'blanket sync'"),
+        "{}",
+        text(&out.stdout)
+    );
     let out = blanket(&project.0, &home.0, &["status", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["synced"], false);
@@ -310,20 +325,31 @@ fn dependency_verbs_offline_paths() {
     // ancestor walk cannot discover that unrelated checkout.
     let out = blanket(Path::new("/"), &home.0, &["add", "requests"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("no project from"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no project from"),
+        "{}",
+        text(&out.stderr)
+    );
 
     // A plain requirements file: blanket edits it itself; with --no-sync
     // nothing else runs, so this is fully offline.
     let project = TempDir::new("deps-req");
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
-    let out = blanket(&project.0, &home.0, &["add", "--no-sync", "requests>=2", "six==1.16.0"]);
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["add", "--no-sync", "requests>=2", "six==1.16.0"],
+    );
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
         std::fs::read_to_string(project.0.join("requirements.txt")).unwrap(),
         "six==1.16.0\nrequests>=2\n"
     );
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("requirements.txt: added requests, six"), "{stderr}");
+    assert!(
+        stderr.contains("requirements.txt: added requests, six"),
+        "{stderr}"
+    );
     assert!(stderr.contains("--no-sync"), "{stderr}");
     let out = blanket(&project.0, &home.0, &["remove", "--no-sync", "idna"]);
     assert_eq!(out.status.code(), Some(1));
@@ -335,36 +361,64 @@ fn dependency_verbs_offline_paths() {
         "six==1.16.0\n"
     );
     // --dev has no meaning here.
-    let out = blanket(&project.0, &home.0, &["add", "--dev", "--no-sync", "pytest"]);
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["add", "--dev", "--no-sync", "pytest"],
+    );
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("--dev has no meaning"));
 
     // Refuse-with-instructions rows never touch the network or the store.
     let setup = TempDir::new("deps-setup");
-    std::fs::write(setup.0.join("setup.py"), "from setuptools import setup\nsetup()\n").unwrap();
+    std::fs::write(
+        setup.0.join("setup.py"),
+        "from setuptools import setup\nsetup()\n",
+    )
+    .unwrap();
     let out = blanket(&setup.0, &home.0, &["add", "requests"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("install_requires"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("install_requires"),
+        "{}",
+        text(&out.stderr)
+    );
     let pnpm = TempDir::new("deps-pnpm");
     std::fs::write(pnpm.0.join("package.json"), "{}").unwrap();
     std::fs::write(pnpm.0.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
     let out = blanket(&pnpm.0, &home.0, &["add", "-D", "react", "left-pad"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("run 'pnpm add -D react left-pad'"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("run 'pnpm add -D react left-pad'"),
+        "{}",
+        text(&out.stderr)
+    );
     let poetry = TempDir::new("deps-poetry");
     std::fs::write(poetry.0.join("pyproject.toml"), "[tool.poetry]\nname='p'\n").unwrap();
     let out = blanket(&poetry.0, &home.0, &["update"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("poetry update"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("poetry update"),
+        "{}",
+        text(&out.stderr)
+    );
     let dotnet = TempDir::new("deps-dotnet");
     std::fs::write(dotnet.0.join("app.csproj"), "<Project/>").unwrap();
     let out = blanket(&dotnet.0, &home.0, &["add", "Newtonsoft.Json"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("dotnet add package Newtonsoft.Json"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("dotnet add package Newtonsoft.Json"),
+        "{}",
+        text(&out.stderr)
+    );
     // A shape that contradicts the project is caught before any tool runs.
     let out = blanket(&project.0, &home.0, &["add", "@types/node"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("no node manifest"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no node manifest"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -417,7 +471,7 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
             store.display(),
             blanket::platform::Platform::host().unwrap().triple()
         )
-            .as_bytes(),
+        .as_bytes(),
     ));
     let root = home
         .0
@@ -441,7 +495,15 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
     )
     .unwrap();
 
-    let out = blanket(&project.0, &home.0, &["x", "--py", "--from", "fake", "ruff"]);
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["x", "--py", "--from", "fake", "ruff"],
+    );
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("cached object test-env carries exception"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("cached object test-env carries exception"),
+        "{}",
+        text(&out.stderr)
+    );
 }

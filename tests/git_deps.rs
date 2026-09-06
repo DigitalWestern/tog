@@ -4,10 +4,10 @@
 //! The fixture repository is local and served over `file://`, so this needs no
 //! network beyond the pinned Node toolchain.
 
+use blanket::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use blanket::npm::{self, NpmPackage, NpmPlan};
 use blanket::store::Store;
 use blanket::{platform::Platform, policy};
-use blanket::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -37,7 +37,11 @@ fn git(args: &[&str], cwd: &Path) -> String {
         .current_dir(cwd)
         .output()
         .unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -66,7 +70,9 @@ fn store_at(root: &Path) -> Store {
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         std::fs::create_dir_all(store_root.join(sub)).unwrap();
     }
-    Store { root: store_root.canonicalize().unwrap() }
+    Store {
+        root: store_root.canonicalize().unwrap(),
+    }
 }
 
 #[test]
@@ -84,7 +90,10 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     let plan = npm::plan_npm(platform, &lock).expect("plan");
     assert_eq!(plan.packages.len(), 1);
     let package: &NpmPackage = &plan.packages[0];
-    let source = package.git.as_ref().expect("git source parsed from the lockfile");
+    let source = package
+        .git
+        .as_ref()
+        .expect("git source parsed from the lockfile");
     assert_eq!(source.commit, commit);
     assert_eq!(package.integrity, format!("git:{commit}"));
 
@@ -136,7 +145,11 @@ fn _unused(_: NpmPlan) {}
 /// no usable submodule checkout until the realizing code records `origin`;
 /// Git otherwise resolves `../subrepo` relative to its temporary worktree.
 fn relative_submodule_fixture(root: &Path, transformed: bool) -> (String, String) {
-    let subrepo_name = if transformed { "subrepo-transformed" } else { "subrepo" };
+    let subrepo_name = if transformed {
+        "subrepo-transformed"
+    } else {
+        "subrepo"
+    };
     let subrepo = root.join(subrepo_name);
     std::fs::create_dir_all(&subrepo).unwrap();
     git(&["init", "-q", "-b", "main"], &subrepo);
@@ -150,7 +163,11 @@ fn relative_submodule_fixture(root: &Path, transformed: bool) -> (String, String
     git(&["commit", "-qm", "sub"], &subrepo);
     let sub_commit = git(&["rev-parse", "HEAD"], &subrepo);
 
-    let parent = root.join(if transformed { "parent-transformed" } else { "parent" });
+    let parent = root.join(if transformed {
+        "parent-transformed"
+    } else {
+        "parent"
+    });
     std::fs::create_dir_all(&parent).unwrap();
     git(&["init", "-q", "-b", "main"], &parent);
     git(&["config", "user.email", "t@example.invalid"], &parent);
@@ -231,15 +248,14 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
 
     let requirement = format!("gitdep @ {url}@{commit}");
     let reqs = blanket::pypi::parse_requirements(&requirement).expect("parse");
-    let packages = blanket::pypi::lock_requirements(
-        platform,
-        blanket::pypi::Glibc(0, 0),
-        &reqs,
-        "cp312",
-    )
-    .expect("lock");
+    let packages =
+        blanket::pypi::lock_requirements(platform, blanket::pypi::Glibc(0, 0), &reqs, "cp312")
+            .expect("lock");
     assert_eq!(packages.len(), 1);
-    assert!(packages[0].git.is_some(), "the package carries its git source");
+    assert!(
+        packages[0].git.is_some(),
+        "the package carries its git source"
+    );
 
     let plan = blanket::types::Plan {
         ecosystem: "python".into(),
@@ -291,7 +307,10 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     );
     let plan = blanket::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
     assert_eq!(plan.crates.len(), 1);
-    assert!(plan.crates[0].git.is_some(), "the crate carries its git source");
+    assert!(
+        plan.crates[0].git.is_some(),
+        "the crate carries its git source"
+    );
 
     let vendor = blanket::cargo::realize_vendor(&store, &plan).expect("vendor");
     let crate_dir = vendor.join("gitdep-1.0.0");
@@ -304,7 +323,10 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
         std::fs::read_to_string(crate_dir.join(".cargo-checksum.json")).unwrap(),
         r#"{"files":{},"package":null}"#
     );
-    assert!(!crate_dir.join(".git").exists(), "the .git directory must not be vendored");
+    assert!(
+        !crate_dir.join(".git").exists(),
+        "the .git directory must not be vendored"
+    );
 
     // Realizing again is a cache hit on the same object.
     let again = blanket::cargo::realize_vendor(&store, &plan).expect("second vendor");

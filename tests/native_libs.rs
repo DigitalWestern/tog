@@ -43,7 +43,10 @@ fn linux_ready() -> bool {
         Ok(Platform::X86_64UnknownLinuxGnu) => {}
         Ok(platform) => {
             if required_sandbox_tests() {
-                panic!("required native library test cannot run on {}", platform.triple());
+                panic!(
+                    "required native library test cannot run on {}",
+                    platform.triple()
+                );
             }
             eprintln!("skip native library test: host is {}", platform.triple());
             return false;
@@ -103,10 +106,7 @@ fn linux_native_libs_pkg_config_sdist_and_runtime() {
     let pkg_scratch = temp.0.join("pkg-config-scratch");
     std::fs::create_dir_all(&pkg_scratch).unwrap();
     let version_file = pkg_scratch.join("pango-version");
-    let env = compose_env(
-        &native.path,
-        &[("PATH".into(), "/usr/bin:/bin".into())],
-    );
+    let env = compose_env(&native.path, &[("PATH".into(), "/usr/bin:/bin".into())]);
 
     // Cargo must receive the native library search path and rpath through its
     // Rust-specific flag channels. This deliberately uses a Rust cdylib
@@ -162,9 +162,17 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
     let cargo_output = cargo_probe.output().unwrap();
     assert_ok(cargo_output, "Rust Pango probe build");
     let probe = rust_probe.join("target/release/librust_pango_probe.so");
-    assert!(probe.is_file(), "Rust probe did not produce {}", probe.display());
+    assert!(
+        probe.is_file(),
+        "Rust probe did not produce {}",
+        probe.display()
+    );
     let readelf = assert_ok(
-        Command::new("readelf").args(["-dW"]).arg(&probe).output().unwrap(),
+        Command::new("readelf")
+            .args(["-dW"])
+            .arg(&probe)
+            .output()
+            .unwrap(),
         "readelf Rust Pango probe",
     );
     let native_lib = native.path.join("lib/libpango-1.0.so.0");
@@ -180,7 +188,8 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
         "ldd Rust Pango probe",
     );
     assert!(
-        ldd.lines().any(|line| line.contains(&native_lib.display().to_string())),
+        ldd.lines()
+            .any(|line| line.contains(&native_lib.display().to_string())),
         "Rust probe resolved a host Pango instead of {}:\n{ldd}",
         native_lib.display()
     );
@@ -240,7 +249,8 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
     let project = temp.0.join("manimpango");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native-libs/requirements.txt"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/native-libs/requirements.txt"),
         project.join("requirements.txt"),
     )
     .unwrap();
@@ -252,10 +262,9 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
         .output()
         .unwrap();
     assert_ok(sync, "manimpango sync");
-    let plan: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".blanket/plan.json")).unwrap(),
-    )
-    .unwrap();
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".blanket/plan.json")).unwrap())
+            .unwrap();
     let manimpango = plan["plan"]["packages"]
         .as_array()
         .unwrap()
@@ -273,10 +282,18 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
     let run = Command::new(&blanket_bin)
         .current_dir(&project)
         .env("BLANKET_STORE", &store_path)
-        .args(["run", "python", "-c", "import manimpango; print('manimpango ok')"])
+        .args([
+            "run",
+            "python",
+            "-c",
+            "import manimpango; print('manimpango ok')",
+        ])
         .output()
         .unwrap();
     let output = assert_ok(run, "blanket run python import manimpango");
-    assert!(output.contains("manimpango ok"), "unexpected run output: {output}");
+    assert!(
+        output.contains("manimpango ok"),
+        "unexpected run output: {output}"
+    );
     println!("blanket run python import manimpango: ok");
 }

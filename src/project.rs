@@ -243,9 +243,7 @@ pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result
 
 /// Canonical package order and duplicate rejection shared by planning and
 /// realization.
-fn canonical_packages<'a>(
-    plan: &'a Plan,
-) -> io::Result<Vec<&'a crate::types::LockedPackage>> {
+fn canonical_packages<'a>(plan: &'a Plan) -> io::Result<Vec<&'a crate::types::LockedPackage>> {
     let mut packages: Vec<&crate::types::LockedPackage> = plan.packages.iter().collect();
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     for w in packages.windows(2) {
@@ -268,8 +266,13 @@ fn environment_identity(
     plan: &Plan,
     cpython_id: &str,
 ) -> io::Result<Identity> {
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
+        no_pin(
+            &format!("cpython {}", plan.python_version),
+            platform,
+            "stage 2",
+        )
+    })?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
     inputs.insert("schema".to_string(), "python-env/2".to_string());
@@ -327,8 +330,13 @@ pub(crate) fn planned_env_object_id(
     platform: Platform,
     plan: &Plan,
 ) -> io::Result<String> {
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
+        no_pin(
+            &format!("cpython {}", plan.python_version),
+            platform,
+            "stage 2",
+        )
+    })?;
     let cpython_id = python::object_id_for(platform, &pin.version)?;
     Ok(environment_identity(store, platform, plan, &cpython_id)?.object_id())
 }
@@ -343,8 +351,13 @@ pub(crate) fn realize_env_at_depth(
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Python environment", "stage 2")?;
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
+        no_pin(
+            &format!("cpython {}", plan.python_version),
+            platform,
+            "stage 2",
+        )
+    })?;
     let python_obj = python::ensure_python_for(store, pin, platform)?;
 
     // Identity planning and realization use exactly the same input builder.
@@ -488,11 +501,14 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
         .as_secs();
     let dest = backups.join(format!("{project}-{dirname}-{secs}"));
     fs::rename(path, &dest).map_err(|e| {
-        io::Error::new(e.kind(), format!(
-            "could not move existing {} aside to {}: {e}",
-            path.display(),
-            dest.display()
-        ))
+        io::Error::new(
+            e.kind(),
+            format!(
+                "could not move existing {} aside to {}: {e}",
+                path.display(),
+                dest.display()
+            ),
+        )
     })?;
     eprintln!(
         "blanket: moved existing {} to {} (delete it once you're happy)",
@@ -625,16 +641,21 @@ fn project_env_inner(
 #[cfg(test)]
 mod closure_platform_tests {
     use super::*;
-    use sha2::Digest as _;
     use crate::types::LockedPackage;
+    use sha2::Digest as _;
 
     fn test_store(label: &str) -> Store {
-        let root = std::env::temp_dir().join(format!("blanket-project-identity-{label}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "blanket-project-identity-{label}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
-        Store { root: root.canonicalize().unwrap() }
+        Store {
+            root: root.canonicalize().unwrap(),
+        }
     }
 
     fn local_sdist(store: &Store, name: &str, requires: &str) -> LockedPackage {
@@ -722,7 +743,7 @@ mod closure_platform_tests {
                 url: String::new(),
                 sha256: sha256.into(),
                 kind: ArtifactKind::Wheel,
-            git: None,
+                git: None,
             }],
         };
         fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
@@ -745,11 +766,7 @@ mod closure_platform_tests {
     #[test]
     fn foreign_platform_closure_is_refused_and_legacy_is_accepted() {
         let host = Platform::host().unwrap();
-        let foreign = Platform::ALL
-            .iter()
-            .copied()
-            .find(|p| *p != host)
-            .unwrap();
+        let foreign = Platform::ALL.iter().copied().find(|p| *p != host).unwrap();
         let dir = std::env::temp_dir().join(format!("blanket-closure-plat-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
@@ -782,11 +799,21 @@ mod closure_platform_tests {
             version: "3.12.14".into(),
             inputs: BTreeMap::from([
                 ("schema".into(), "python-env/2".into()),
-                ("store_root".into(), store.root.to_string_lossy().into_owned()),
-                ("cpython".into(), python::object_id_for(Platform::host().unwrap(), "3.12.14").unwrap()),
+                (
+                    "store_root".into(),
+                    store.root.to_string_lossy().into_owned(),
+                ),
+                (
+                    "cpython".into(),
+                    python::object_id_for(Platform::host().unwrap(), "3.12.14").unwrap(),
+                ),
                 (
                     "pkg:fast-golden".into(),
-                    format!("Sdist:{}:{}", fast.sha256, crate::build::derivation_fingerprint()),
+                    format!(
+                        "Sdist:{}:{}",
+                        fast.sha256,
+                        crate::build::derivation_fingerprint()
+                    ),
                 ),
             ]),
         }
@@ -809,13 +836,19 @@ mod closure_platform_tests {
         let first = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
         cached_build_plan(&store, "setuptools~=83.1", &"b".repeat(64));
         let second = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
-        assert_ne!(first, second, "schema-3 build-env input must affect parent id");
-        assert_eq!(key, crate::build_requires::lock_cache_key(
-            Platform::host().unwrap(),
-            "3.12.14",
-            &["setuptools~=83.1".into()],
-            None,
-        ));
+        assert_ne!(
+            first, second,
+            "schema-3 build-env input must affect parent id"
+        );
+        assert_eq!(
+            key,
+            crate::build_requires::lock_cache_key(
+                Platform::host().unwrap(),
+                "3.12.14",
+                &["setuptools~=83.1".into()],
+                None,
+            )
+        );
         let _ = fs::remove_dir_all(&store.root);
     }
 

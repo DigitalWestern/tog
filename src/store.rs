@@ -123,9 +123,7 @@ impl Store {
         }
         for entry in fs::read_dir(roots)? {
             let entry = entry?;
-            if entry.file_type()?.is_file()
-                && is_sha1(&entry.file_name().to_string_lossy())
-            {
+            if entry.file_type()?.is_file() && is_sha1(&entry.file_name().to_string_lossy()) {
                 return Ok(true);
             }
         }
@@ -488,7 +486,10 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let root = store.register_root(&project).unwrap();
         assert_eq!(store.roots().unwrap(), vec![root.clone()]);
-        assert_eq!(fs::read_to_string(&root.registry_path).unwrap().trim(), project.canonicalize().unwrap().display().to_string());
+        assert_eq!(
+            fs::read_to_string(&root.registry_path).unwrap().trim(),
+            project.canonicalize().unwrap().display().to_string()
+        );
         store.remove_root_entry(&root).unwrap();
         assert!(store.roots().unwrap().is_empty());
     }
@@ -511,9 +512,7 @@ mod tests {
         assert_eq!(object, store.object_path(&identity.object_id()));
         assert_eq!(applied, vec![exception.clone()]);
 
-        let error = store
-            .commit(&identity, &staged(&store), &[])
-            .unwrap_err();
+        let error = store.commit(&identity, &staged(&store), &[]).unwrap_err();
         assert!(error
             .to_string()
             .contains("was published concurrently with different exceptions"));
@@ -532,9 +531,7 @@ mod tests {
         if std::env::var_os("BLANKET_STORE_STRICT_CHILD").is_some() {
             let store = Store::open().unwrap();
             crate::policy::init(&store.root, false).unwrap();
-            let error = store
-                .commit(&identity(), &staged(&store), &[])
-                .unwrap_err();
+            let error = store.commit(&identity(), &staged(&store), &[]).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
             return;
         }

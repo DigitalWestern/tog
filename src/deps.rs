@@ -16,10 +16,10 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::platform::Platform;
 use crate::store::Store;
@@ -151,7 +151,9 @@ pub fn validate_spec(text: &str) -> io::Result<()> {
         return Err(other("dependency spec must not be empty"));
     }
     if text != text.trim() {
-        return Err(other("dependency spec must not begin or end with whitespace"));
+        return Err(other(
+            "dependency spec must not begin or end with whitespace",
+        ));
     }
     if text.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
         return Err(other("dependency spec must not contain CR, LF, or NUL"));
@@ -165,7 +167,9 @@ pub fn validate_spec(text: &str) -> io::Result<()> {
         return Err(other("dependency spec must name a package"));
     }
     if candidate != candidate.trim() {
-        return Err(other("dependency spec must not begin or end with whitespace"));
+        return Err(other(
+            "dependency spec must not begin or end with whitespace",
+        ));
     }
     if candidate.trim_start().starts_with('-') {
         return Err(other(format!(
@@ -373,9 +377,10 @@ pub fn registry_lookup(eco: Eco, name: &str) -> io::Result<Option<String>> {
         Eco::Go => (format!("https://proxy.golang.org/{lower}/@latest"), |v| {
             v["Version"].as_str().map(str::to_string)
         }),
-        Eco::Ruby => (format!("https://rubygems.org/api/v1/gems/{name}.json"), |v| {
-            v["version"].as_str().map(str::to_string)
-        }),
+        Eco::Ruby => (
+            format!("https://rubygems.org/api/v1/gems/{name}.json"),
+            |v| v["version"].as_str().map(str::to_string),
+        ),
         Eco::Elixir => (format!("https://hex.pm/api/packages/{name}"), |v| {
             v["latest_stable_version"]
                 .as_str()
@@ -492,11 +497,47 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outco
         let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
         let texts: Vec<String> = specs.iter().map(|spec| spec.text.clone()).collect();
         let files = match eco {
-            Eco::Python => python(&store, platform, &project, request.verb, &texts, &names, request.dev)?,
-            Eco::Node => node(&store, platform, &project, request.verb, &texts, request.dev)?,
-            Eco::Cargo => cargo_delegate(&store, platform, &project, request.verb, &texts, request.dev)?,
-            Eco::Go => go_delegate(&store, platform, &project, request.verb, &texts, request.dev)?,
-            Eco::Ruby => ruby_delegate(&store, platform, &project, request.verb, &texts, request.dev)?,
+            Eco::Python => python(
+                &store,
+                platform,
+                &project,
+                request.verb,
+                &texts,
+                &names,
+                request.dev,
+            )?,
+            Eco::Node => node(
+                &store,
+                platform,
+                &project,
+                request.verb,
+                &texts,
+                request.dev,
+            )?,
+            Eco::Cargo => cargo_delegate(
+                &store,
+                platform,
+                &project,
+                request.verb,
+                &texts,
+                request.dev,
+            )?,
+            Eco::Go => go_delegate(
+                &store,
+                platform,
+                &project,
+                request.verb,
+                &texts,
+                request.dev,
+            )?,
+            Eco::Ruby => ruby_delegate(
+                &store,
+                platform,
+                &project,
+                request.verb,
+                &texts,
+                request.dev,
+            )?,
             Eco::Elixir => elixir_delegate(&store, platform, &project, request.verb, &texts)?,
             Eco::Dotnet => dotnet_refuse(request.verb, &texts)?,
         };
@@ -505,7 +546,11 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outco
         } else {
             names.join(", ")
         };
-        lines.push(format!("{}: {} {what}", files.join(", "), request.verb.past()));
+        lines.push(format!(
+            "{}: {} {what}",
+            files.join(", "),
+            request.verb.past()
+        ));
     }
     Ok(Outcome { project, lines })
 }
@@ -715,10 +760,7 @@ pub fn edit_requirements(path: &Path, add: &[String], remove: &[String]) -> io::
     let text = fs::read_to_string(path)?;
 
     for value in add.iter().chain(remove) {
-        if value
-            .bytes()
-            .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-        {
+        if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
             return Err(other(format!(
                 "dependency requirement '{value}' must not contain CR, LF, or NUL"
             )));
@@ -765,7 +807,10 @@ pub fn edit_requirements(path: &Path, add: &[String], remove: &[String]) -> io::
         .filter_map(|record| record.name.clone())
         .collect();
 
-    let remove_names: Vec<String> = remove.iter().map(|name| pypi::normalize_name(name)).collect();
+    let remove_names: Vec<String> = remove
+        .iter()
+        .map(|name| pypi::normalize_name(name))
+        .collect();
     for (name, wanted) in remove.iter().zip(&remove_names) {
         let matches: Vec<usize> = records
             .iter()
@@ -791,7 +836,9 @@ pub fn edit_requirements(path: &Path, add: &[String], remove: &[String]) -> io::
     let mut add_names = Vec::new();
     for spec in add {
         let wanted = requirement_name(spec).ok_or_else(|| {
-            other(format!("'{spec}' is not a requirement (name first, e.g. 'requests>=2')"))
+            other(format!(
+                "'{spec}' is not a requirement (name first, e.g. 'requests>=2')"
+            ))
         })?;
         if add_names.contains(&wanted) {
             return Err(other(format!(
@@ -908,7 +955,8 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    let (temp, mut file) = temp.ok_or_else(|| other("could not create a unique requirements temp file"))?;
+    let (temp, mut file) =
+        temp.ok_or_else(|| other("could not create a unique requirements temp file"))?;
     #[cfg(unix)]
     if let Ok(metadata) = fs::metadata(path) {
         use std::os::unix::fs::PermissionsExt;
@@ -939,9 +987,14 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn uv_command(store: &Store, platform: Platform, project: &Path) -> io::Result<(Command, &'static str)> {
+fn uv_command(
+    store: &Store,
+    platform: Platform,
+    project: &Path,
+) -> io::Result<(Command, &'static str)> {
     let uv = python::ensure_uv_for(store, platform)?.join("uv");
-    let selection = pyselect::select_python_with_inputs(platform, &manifest::python_inputs(project)?)?;
+    let selection =
+        pyselect::select_python_with_inputs(platform, &manifest::python_inputs(project)?)?;
     let interpreter = python::ensure_python_for(store, selection.pin, platform)?;
     let mut command = Command::new(uv);
     command
@@ -964,7 +1017,9 @@ fn run_inherited(mut command: Command, what: &str) -> io::Result<()> {
         .status()
         .map_err(|error| io::Error::new(error.kind(), format!("run {what}: {error}")))?;
     if !status.success() {
-        return Err(other(format!("{what} failed (exit status {status}); nothing was synced")));
+        return Err(other(format!(
+            "{what} failed (exit status {status}); nothing was synced"
+        )));
     }
     Ok(())
 }
@@ -978,7 +1033,10 @@ fn uv_compile(
     extra: &[String],
 ) -> io::Result<()> {
     let (mut command, version) = uv_command(store, platform, project)?;
-    command.args(["pip", "compile"]).arg(input).arg("--generate-hashes");
+    command
+        .args(["pip", "compile"])
+        .arg(input)
+        .arg("--generate-hashes");
     if !ui::verbose() {
         command.arg("--quiet");
     }
@@ -1167,12 +1225,16 @@ fn go_delegate(
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     if dev {
-        return Err(other("--dev has no meaning in Go (one dependency set per module)"));
+        return Err(other(
+            "--dev has no meaning in Go (one dependency set per module)",
+        ));
     }
     let go_obj = golang::ensure_go_for(store, platform)?;
     let scratch = store.stage()?;
     let args: Vec<String> = match verb {
-        Verb::Add => std::iter::once("get".to_string()).chain(texts.iter().cloned()).collect(),
+        Verb::Add => std::iter::once("get".to_string())
+            .chain(texts.iter().cloned())
+            .collect(),
         Verb::Remove => std::iter::once("get".to_string())
             .chain(texts.iter().map(|name| format!("{name}@none")))
             .collect(),
@@ -1349,7 +1411,10 @@ mod tests {
             "npm:\nreact",
             "requests\0evil",
         ] {
-            assert!(validate_spec(text).is_err(), "accepted unsafe spec {text:?}");
+            assert!(
+                validate_spec(text).is_err(),
+                "accepted unsafe spec {text:?}"
+            );
         }
         assert!(validate_spec("npm:react@18").is_ok());
         assert!(validate_spec("gem:rails@~> 7.1").is_ok());
@@ -1389,24 +1454,42 @@ mod tests {
         let both = [Eco::Python, Eco::Node];
 
         // Rung 1: prefix, no lookup.
-        assert_eq!(choose(&spec("npm:react"), &both, &mut lookup, &mut ask).unwrap(), Eco::Node);
+        assert_eq!(
+            choose(&spec("npm:react"), &both, &mut lookup, &mut ask).unwrap(),
+            Eco::Node
+        );
         // Rung 2: shape, no lookup.
-        assert_eq!(choose(&spec("@types/node"), &both, &mut lookup, &mut ask).unwrap(), Eco::Node);
+        assert_eq!(
+            choose(&spec("@types/node"), &both, &mut lookup, &mut ask).unwrap(),
+            Eco::Node
+        );
         // Rung 2 against a project without that ecosystem is an error.
         let error = choose(&spec("github.com/x/y"), &both, &mut lookup, &mut ask).unwrap_err();
         assert!(error.to_string().contains("no go manifest"), "{error}");
         // Rung 3 skipped when one ecosystem is present, no lookup.
-        assert_eq!(choose(&spec("react"), &[Eco::Node], &mut lookup, &mut ask).unwrap(), Eco::Node);
+        assert_eq!(
+            choose(&spec("react"), &[Eco::Node], &mut lookup, &mut ask).unwrap(),
+            Eco::Node
+        );
         assert!(lookups.borrow().is_empty());
         // Rung 3: registries decide when exactly one knows the name.
-        assert_eq!(choose(&spec("react"), &both, &mut lookup, &mut ask).unwrap(), Eco::Node);
+        assert_eq!(
+            choose(&spec("react"), &both, &mut lookup, &mut ask).unwrap(),
+            Eco::Node
+        );
         assert_eq!(lookups.borrow().len(), 2);
         // Rung 3, nobody knows: error names the explicit spellings.
         let error = choose(&spec("nothing"), &both, &mut lookup, &mut ask).unwrap_err();
-        assert!(error.to_string().contains("py:nothing / npm:nothing"), "{error}");
+        assert!(
+            error.to_string().contains("py:nothing / npm:nothing"),
+            "{error}"
+        );
         assert!(asked.borrow().is_empty());
         // Rung 4: both know it → ask, with the versions.
-        assert_eq!(choose(&spec("requests"), &both, &mut lookup, &mut ask).unwrap(), Eco::Python);
+        assert_eq!(
+            choose(&spec("requests"), &both, &mut lookup, &mut ask).unwrap(),
+            Eco::Python
+        );
         let asked = asked.borrow();
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].1[0], (Eco::Python, "2.32.5".to_string()));
@@ -1415,8 +1498,14 @@ mod tests {
 
     #[test]
     fn requirement_names_and_edits() {
-        assert_eq!(requirement_name("Requests>=2 ; python_version<'3'"), Some("requests".into()));
-        assert_eq!(requirement_name("zope.Interface[x]==5"), Some("zope-interface".into()));
+        assert_eq!(
+            requirement_name("Requests>=2 ; python_version<'3'"),
+            Some("requests".into())
+        );
+        assert_eq!(
+            requirement_name("zope.Interface[x]==5"),
+            Some("zope-interface".into())
+        );
         assert_eq!(requirement_name("# comment"), None);
         assert_eq!(requirement_name("-r other.txt"), None);
         assert_eq!(requirement_name("--hash=sha256:abc"), None);
@@ -1445,7 +1534,8 @@ mod tests {
 
     #[test]
     fn requirement_edits_are_logical_lossless_and_ambiguous_edits_fail() {
-        let temp = std::env::temp_dir().join(format!("blanket-deps-logical-{}", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("blanket-deps-logical-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
         let file = temp.join("requirements.txt");
@@ -1457,7 +1547,11 @@ mod tests {
         edit_requirements(&file, &[], &["foo".into()]).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "# pinned\r\nbar==2.0");
 
-        fs::write(&file, "foo==1; python_version<'3'\nfoo==2; python_version>='3'\n").unwrap();
+        fs::write(
+            &file,
+            "foo==1; python_version<'3'\nfoo==2; python_version>='3'\n",
+        )
+        .unwrap();
         let error = edit_requirements(&file, &["foo==3".into()], &[]).unwrap_err();
         assert!(error.to_string().contains("ambiguous"), "{error}");
         assert_eq!(
@@ -1468,13 +1562,11 @@ mod tests {
         fs::write(&file, "foo==1; python_version<'3'\n").unwrap();
         let error = edit_requirements(&file, &["foo==3".into()], &[]).unwrap_err();
         assert!(error.to_string().contains("environment marker"), "{error}");
-        edit_requirements(
-            &file,
-            &["foo==3; python_version<'3'".into()],
-            &[],
-        )
-        .unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "foo==3; python_version<'3'\n");
+        edit_requirements(&file, &["foo==3; python_version<'3'".into()], &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "foo==3; python_version<'3'\n"
+        );
 
         let error = edit_requirements(&file, &["foo\nbar".into()], &[]).unwrap_err();
         assert!(error.to_string().contains("CR, LF, or NUL"), "{error}");
@@ -1501,7 +1593,10 @@ mod tests {
         edit_requirements(&file, &["requests".into()], &[]).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "must remain\n");
         assert_eq!(fs::read_to_string(&file).unwrap(), "six\nrequests\n");
-        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _ = fs::remove_dir_all(&temp);
     }
 

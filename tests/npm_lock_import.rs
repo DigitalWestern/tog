@@ -19,13 +19,7 @@ fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -
     run_from(binary, project, store, args, tmp)
 }
 
-fn run_from(
-    binary: &Path,
-    current_dir: &Path,
-    store: &Path,
-    args: &[&str],
-    tmp: &Path,
-) -> Output {
+fn run_from(binary: &Path, current_dir: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
     Command::new(binary)
         .current_dir(current_dir)
         .env("BLANKET_STORE", store)

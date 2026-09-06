@@ -31,8 +31,7 @@ fn skip_or_panic(test_name: &str, reason: impl std::fmt::Display) {
 #[test]
 #[ignore]
 fn network_access_during_build_fails() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/evil-0.1.tar.gz");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evil-0.1.tar.gz");
     let bytes = std::fs::read(&fixture).expect("fixture exists");
     let sha = hex::encode(Sha256::digest(&bytes));
 
@@ -47,19 +46,24 @@ fn network_access_during_build_fails() {
         git: None,
     };
 
-    let result = build::build_sdist_wheel(
-        &store,
-        Platform::host().unwrap(),
-        &pkg,
-        "3.12.14",
-    );
+    let result = build::build_sdist_wheel(&store, Platform::host().unwrap(), &pkg, "3.12.14");
     let err = result.expect_err("build reaching the network must fail");
     let msg = err.to_string();
     // A sandbox that failed to set up (Unsupported) is not evidence of
     // denial: the build must have run and exited non-zero inside it.
-    assert_ne!(err.kind(), std::io::ErrorKind::Unsupported, "sandbox did not run: {msg}");
-    assert!(msg.contains("sandboxed build of evil==0.1 failed"), "unexpected error shape: {msg}");
-    assert!(msg.contains("sandboxed command failed (exit status"), "build did not execute: {msg}");
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "sandbox did not run: {msg}"
+    );
+    assert!(
+        msg.contains("sandboxed build of evil==0.1 failed"),
+        "unexpected error shape: {msg}"
+    );
+    assert!(
+        msg.contains("sandboxed command failed (exit status"),
+        "build did not execute: {msg}"
+    );
 }
 
 #[test]
@@ -67,11 +71,17 @@ fn bwrap_contract() {
     match Platform::host() {
         Ok(Platform::X86_64UnknownLinuxGnu) => {}
         Ok(platform) => {
-            skip_or_panic("bwrap_contract", format!("not Linux ({})", platform.triple()));
+            skip_or_panic(
+                "bwrap_contract",
+                format!("not Linux ({})", platform.triple()),
+            );
             return;
         }
         Err(error) => {
-            skip_or_panic("bwrap_contract", format!("not a supported Linux host ({error})"));
+            skip_or_panic(
+                "bwrap_contract",
+                format!("not a supported Linux host ({error})"),
+            );
             return;
         }
     }
@@ -118,10 +128,8 @@ fn bwrap_contract() {
         return;
     }
 
-    let root = std::env::temp_dir().join(format!(
-        "blanket-sandbox-contract-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("blanket-sandbox-contract-{}", std::process::id()));
     std::fs::create_dir(&root).expect("create contract temp directory");
     let scratch = root.join("scratch");
     let writable = root.join("writable");
@@ -142,9 +150,7 @@ fn bwrap_contract() {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     use std::io::Write;
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
-                    );
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));

@@ -13,7 +13,9 @@ impl TempDir {
             "blanket-cargo-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -73,12 +75,17 @@ fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
             "{key} closure path escaped the fresh store: {}",
             canonical.display()
         );
-        assert!(canonical.is_dir(), "{key} closure object is not a directory");
+        assert!(
+            canonical.is_dir(),
+            "{key} closure object is not a directory"
+        );
         canonical
     };
     let rust = object_path("rust_object");
     let vendor = object_path("vendor_object");
-    let rustlib = rust.join("lib/rustlib").join(Platform::host().unwrap().triple());
+    let rustlib = rust
+        .join("lib/rustlib")
+        .join(Platform::host().unwrap().triple());
     assert!(
         rustlib.is_dir(),
         "Rust object is missing the host rustlib tree: {}",
@@ -105,11 +112,14 @@ fn cargo_sync_build_and_run_again_offline() {
         blanket(&binary, &project, &store, &["run", "rustc", "-vV"]),
         "rustc -vV",
     );
-    assert!(rustc.contains("1.96.1"), "unexpected rustc version:\n{rustc}");
     assert!(
-        rustc.lines().any(|line| {
-            line.trim() == format!("host: {}", Platform::host().unwrap().triple())
-        }),
+        rustc.contains("1.96.1"),
+        "unexpected rustc version:\n{rustc}"
+    );
+    assert!(
+        rustc
+            .lines()
+            .any(|line| { line.trim() == format!("host: {}", Platform::host().unwrap().triple()) }),
         "rustc reported the wrong host:\n{rustc}"
     );
     assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
@@ -143,7 +153,10 @@ fn cargo_sync_build_and_run_again_offline() {
     // (network denial is already enforced by `blanket build` itself — the
     // seatbelt sandbox cannot nest, so no outer sandbox-exec wrapper here).
     std::fs::remove_dir_all(project.join("target")).unwrap();
-    assert!(!executable.exists(), "the first build result was not removed");
+    assert!(
+        !executable.exists(),
+        "the first build result was not removed"
+    );
     assert_ok(blanket(&binary, &project, &store, &["build"]), "rebuild");
     assert!(executable.is_file());
     let (rebuilt_rust_obj, rebuilt_vendor_obj) = assert_cargo_closure(&project, &store);

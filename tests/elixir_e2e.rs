@@ -229,7 +229,11 @@ fn elixir_sync_sandboxed_build_and_run() {
     //    by this unsandboxed run.
     assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
     let build_dir = project.join(format!("_build/blanket-{fingerprint}"));
-    assert!(build_dir.join("dev/lib/ex_real/ebin").is_dir(), "{}", build_dir.display());
+    assert!(
+        build_dir.join("dev/lib/ex_real/ebin").is_dir(),
+        "{}",
+        build_dir.display()
+    );
     assert!(build_dir.join("dev/lib/telemetry/ebin").is_dir());
     assert!(build_dir.join("dev/lib/jason/ebin").is_dir());
     let probe = [
@@ -249,10 +253,19 @@ fn elixir_sync_sandboxed_build_and_run() {
     //    objects, rerun.
     remove_tree(&build_dir);
     assert!(!build_dir.exists());
-    assert_ok(blanket(&binary, &project, &store, &["sync", "--fresh"]), "sync --fresh");
+    assert_ok(
+        blanket(&binary, &project, &store, &["sync", "--fresh"]),
+        "sync --fresh",
+    );
     let closure_again = closure_body(&project);
-    assert_eq!(closure_again["beam_object"]["path"], closure["beam_object"]["path"]);
-    assert_eq!(closure_again["deps_object"]["path"], closure["deps_object"]["path"]);
+    assert_eq!(
+        closure_again["beam_object"]["path"],
+        closure["beam_object"]["path"]
+    );
+    assert_eq!(
+        closure_again["deps_object"]["path"],
+        closure["deps_object"]["path"]
+    );
     assert_ok(blanket(&binary, &project, &store, &["build"]), "rebuild");
     let out = assert_ok(blanket(&binary, &project, &store, &probe), "rerun");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
@@ -276,7 +289,12 @@ fn elixir_sync_sandboxed_build_and_run() {
         use std::os::unix::fs::PermissionsExt;
         for p in [beam.clone(), otp.clone(), otp.join("bin/erl")] {
             let mode = std::fs::metadata(&p).unwrap().permissions().mode();
-            assert_eq!(mode & 0o222, 0, "{} is writable (mode {mode:o})", p.display());
+            assert_eq!(
+                mode & 0o222,
+                0,
+                "{} is writable (mode {mode:o})",
+                p.display()
+            );
         }
     }
     assert!(std::fs::write(beam.join("tamper"), b"x").is_err());

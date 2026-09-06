@@ -90,7 +90,10 @@ impl Platform {
 pub fn no_pin(what: &str, platform: Platform, stage: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("no {what} pinned for {} (LINUX_PORT.md {stage})", platform.triple()),
+        format!(
+            "no {what} pinned for {} (LINUX_PORT.md {stage})",
+            platform.triple()
+        ),
     )
 }
 
@@ -125,7 +128,10 @@ mod tests {
 
     #[test]
     fn triples_are_unique_and_darwin_is_stable() {
-        assert_eq!(Platform::Aarch64AppleDarwin.triple(), "aarch64-apple-darwin");
+        assert_eq!(
+            Platform::Aarch64AppleDarwin.triple(),
+            "aarch64-apple-darwin"
+        );
         assert_ne!(
             Platform::Aarch64AppleDarwin.triple(),
             Platform::X86_64UnknownLinuxGnu.triple()

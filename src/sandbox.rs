@@ -12,15 +12,15 @@
 //! and should also be documented in LIMITATIONS.md.
 
 use crate::platform::Platform;
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -53,8 +53,7 @@ pub fn force_env(
 ) {
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy().into_owned();
-        if remove_prefixes.iter().any(|p| name.starts_with(p)) || remove.contains(&name.as_str())
-        {
+        if remove_prefixes.iter().any(|p| name.starts_with(p)) || remove.contains(&name.as_str()) {
             cmd.env_remove(&key);
         }
     }
@@ -75,7 +74,14 @@ pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Res
         read: spec.read.iter().map(PathBuf::as_path).collect(),
         write,
     };
-    sandbox.run_in_on(platform, &argv, &spec.path, &spec.scratch, &spec.cwd, &spec.env)
+    sandbox.run_in_on(
+        platform,
+        &argv,
+        &spec.path,
+        &spec.scratch,
+        &spec.cwd,
+        &spec.env,
+    )
 }
 
 pub struct Sandbox<'a> {
@@ -113,7 +119,10 @@ impl Sandbox<'_> {
              (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n",
         );
         for r in &self.read {
-            p.push_str(&format!("(allow file-read* (subpath {:?}))\n", r.display().to_string()));
+            p.push_str(&format!(
+                "(allow file-read* (subpath {:?}))\n",
+                r.display().to_string()
+            ));
         }
         for w in &self.write {
             p.push_str(&format!(
@@ -153,12 +162,8 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
     ) -> io::Result<()> {
         match platform {
-            Platform::Aarch64AppleDarwin => {
-                self.run_seatbelt(cmd, env_path, tmp, cwd, envs)
-            }
-            Platform::X86_64UnknownLinuxGnu => {
-                self.run_bwrap(cmd, env_path, tmp, cwd, envs)
-            }
+            Platform::Aarch64AppleDarwin => self.run_seatbelt(cmd, env_path, tmp, cwd, envs),
+            Platform::X86_64UnknownLinuxGnu => self.run_bwrap(cmd, env_path, tmp, cwd, envs),
         }
     }
 
@@ -265,7 +270,10 @@ impl Sandbox<'_> {
         let mut scanned = Vec::new();
         for root in roots {
             let root = fs::canonicalize(root)?;
-            if scanned.iter().any(|parent: &PathBuf| root.starts_with(parent)) {
+            if scanned
+                .iter()
+                .any(|parent: &PathBuf| root.starts_with(parent))
+            {
                 continue;
             }
             scanned.retain(|parent| !parent.starts_with(&root));
@@ -487,14 +495,8 @@ fn inherited_fds() -> io::Result<Vec<RawFd>> {
 
 #[cfg(target_os = "linux")]
 fn mark_inherited_fds_cloexec(fds: &[RawFd]) -> io::Result<()> {
-    let close_range_result = unsafe {
-        syscall(
-            SYS_CLOSE_RANGE,
-            3_u32,
-            u32::MAX,
-            CLOSE_RANGE_CLOEXEC,
-        )
-    };
+    let close_range_result =
+        unsafe { syscall(SYS_CLOSE_RANGE, 3_u32, u32::MAX, CLOSE_RANGE_CLOEXEC) };
     if close_range_result == 0 {
         return Ok(());
     }
@@ -655,10 +657,7 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
         }
     }) {
         Ok(path) => Ok(path.as_path()),
-        Err(message) => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            message.clone(),
-        )),
+        Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
     }
 }
 
@@ -956,7 +955,10 @@ mod tests {
             &[],
         );
         fs::remove_dir_all(root).unwrap();
-        assert!(result.is_ok(), "inherited directory/socket fd leaked: {result:?}");
+        assert!(
+            result.is_ok(),
+            "inherited directory/socket fd leaked: {result:?}"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1134,7 +1136,14 @@ mod tests {
             .lines()
             .map(|l| l.trim().to_string())
             .collect();
-        assert_eq!(lines, vec![project.display().to_string(), "0".to_string(), "unreadable".to_string()]);
+        assert_eq!(
+            lines,
+            vec![
+                project.display().to_string(),
+                "0".to_string(),
+                "unreadable".to_string()
+            ]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1164,7 +1173,10 @@ mod tests {
             &project,
             &[],
         );
-        assert!(result.is_ok(), "writable child under implicit cwd was shadowed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "writable child under implicit cwd was shadowed: {result:?}"
+        );
         assert!(out_file.exists());
 
         let project_file = project.join("y");
@@ -1177,8 +1189,14 @@ mod tests {
         );
         // The undeclared cwd is a private tmpfs: a write there succeeds
         // inside the sandbox but never reaches the host directory.
-        assert!(result.is_ok(), "write into the tmpfs cwd failed: {result:?}");
-        assert!(!project_file.exists(), "implicit cwd write reached the host");
+        assert!(
+            result.is_ok(),
+            "write into the tmpfs cwd failed: {result:?}"
+        );
+        assert!(
+            !project_file.exists(),
+            "implicit cwd write reached the host"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1234,7 +1252,9 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(read_lines(&output), expected);
-        assert!(!read_lines(&output).iter().any(|line| line.starts_with("PWD=")));
+        assert!(!read_lines(&output)
+            .iter()
+            .any(|line| line.starts_with("PWD=")));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1331,7 +1351,10 @@ mod tests {
         assert!(result.is_ok(), "IPC namespace probe failed: {result:?}");
         let sandbox_ipc = fs::read_to_string(&output).unwrap();
         fs::remove_dir_all(root).unwrap();
-        assert_ne!(sandbox_ipc.trim(), String::from_utf8_lossy(&host.stdout).trim());
+        assert_ne!(
+            sandbox_ipc.trim(),
+            String::from_utf8_lossy(&host.stdout).trim()
+        );
     }
 
     #[test]
@@ -1488,11 +1511,7 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .output()
             .unwrap();
-        let error = classify_bwrap_failure(
-            &output.status,
-            &output.stderr,
-            &["/usr/bin/true"],
-        );
+        let error = classify_bwrap_failure(&output.status, &output.stderr, &["/usr/bin/true"]);
         fs::remove_dir_all(root).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().starts_with("bwrap:"));

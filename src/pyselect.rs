@@ -89,7 +89,9 @@ impl PythonSelection {
                 "blanket: python {} selected (requires-python \"{}\" from {})",
                 self.pin.version,
                 self.constraint.as_deref().unwrap_or("*"),
-                self.constraint_source.as_deref().unwrap_or("project metadata")
+                self.constraint_source
+                    .as_deref()
+                    .unwrap_or("project metadata")
             )
         }
     }
@@ -168,7 +170,8 @@ pub fn select_python_with_inputs(
     let (pin, explicit_request) = if let Some(explicit) = &inputs.explicit {
         let matching = pins.iter().copied().find(|pin| {
             let version = pinned_version(pin.version).expect("pinned CPython version");
-            version.major() == explicit.version.major() && version.minor() == explicit.version.minor()
+            version.major() == explicit.version.major()
+                && version.minor() == explicit.version.minor()
         });
         let Some(pin) = matching else {
             return Err(no_satisfying_pin(
@@ -194,9 +197,7 @@ pub fn select_python_with_inputs(
         if !violated.is_empty() {
             let declared = violated
                 .iter()
-                .map(|constraint| {
-                    format!("\"{}\" from {}", constraint.text, constraint.source)
-                })
+                .map(|constraint| format!("\"{}\" from {}", constraint.text, constraint.source))
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
@@ -208,7 +209,9 @@ pub fn select_python_with_inputs(
     } else {
         let satisfies = |pin: &&PinnedPython| {
             let version = pinned_version(pin.version).expect("pinned CPython version");
-            parsed.iter().all(|(_, specifier)| specifier.matches(&version))
+            parsed
+                .iter()
+                .all(|(_, specifier)| specifier.matches(&version))
         };
         let default = pins
             .iter()
@@ -269,10 +272,9 @@ pub fn select_python_for_version(
     }
     let mut forced = inputs.clone();
     let minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
-    forced.constraints.push(ConstraintSource::new(
-        format!("=={minor}.*"),
-        "locked plan",
-    ));
+    forced
+        .constraints
+        .push(ConstraintSource::new(format!("=={minor}.*"), "locked plan"));
     select_python_with_inputs(platform, &forced)
 }
 
@@ -298,7 +300,8 @@ fn no_satisfying_pin(
 
 fn pinned_version(text: &str) -> Option<crate::pep440::Version> {
     let version = crate::pep440::Version::parse(text).ok()?;
-    (version.release_len() == 3 && !version.has_epoch() && !version.is_prerelease()).then_some(version)
+    (version.release_len() == 3 && !version.has_epoch() && !version.is_prerelease())
+        .then_some(version)
 }
 
 /// Parse the first usable line of a `.python-version` file. Unsupported
@@ -338,9 +341,9 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
         .unwrap_or(line);
     let pieces: Vec<_> = numeric.split('.').collect();
     if !(2..=3).contains(&pieces.len())
-        || pieces.iter().any(|piece| {
-            piece.is_empty() || !piece.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        || pieces
+            .iter()
+            .any(|piece| piece.is_empty() || !piece.bytes().all(|byte| byte.is_ascii_digit()))
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -389,7 +392,10 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
             let text = requires.as_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}: requires-python must be a string", pyproject_path.display()),
+                    format!(
+                        "{}: requires-python must be a string",
+                        pyproject_path.display()
+                    ),
                 )
             })?;
             inputs
@@ -474,60 +480,60 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
     let mut option_indent: Option<usize> = None;
     let mut metadata = SetupCfgMetadata::default();
 
-    let finish = |section: &str,
-                  key: Option<String>,
-                  values: &[String],
-                  metadata: &mut SetupCfgMetadata| {
-        let Some(key) = key else { return; };
-        if section.eq_ignore_ascii_case("options") {
-            match key.as_str() {
-                "install_requires" => {
-                    metadata.install_requires_found = true;
-                    metadata.install_requires.extend(
-                        values
+    let finish =
+        |section: &str, key: Option<String>, values: &[String], metadata: &mut SetupCfgMetadata| {
+            let Some(key) = key else {
+                return;
+            };
+            if section.eq_ignore_ascii_case("options") {
+                match key.as_str() {
+                    "install_requires" => {
+                        metadata.install_requires_found = true;
+                        metadata.install_requires.extend(
+                            values
+                                .iter()
+                                .map(String::as_str)
+                                .filter(|value| !value.trim().is_empty())
+                                .map(str::to_string),
+                        );
+                    }
+                    "python_requires" => {
+                        let value = values
                             .iter()
                             .map(String::as_str)
                             .filter(|value| !value.trim().is_empty())
-                            .map(str::to_string),
-                    );
-                }
-                "python_requires" => {
-                    let value = values
-                        .iter()
-                        .map(String::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if !value.is_empty() {
-                        metadata.python_requires = Some(value);
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !value.is_empty() {
+                            metadata.python_requires = Some(value);
+                        }
                     }
-                }
-                _ => {}
-            }
-        } else if section.eq_ignore_ascii_case("options.extras_require") {
-            for value in values.iter().filter(|value| !value.trim().is_empty()) {
-                metadata
-                    .extras_require
-                    .entry(key.clone())
-                    .or_default()
-                    .push(value.trim().to_string());
-            }
-        } else if section.eq_ignore_ascii_case("options.packages.find") {
-            let packages = metadata.packages_find.get_or_insert_with(Default::default);
-            for value in values.iter().filter(|value| !value.trim().is_empty()) {
-                let values = value
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>();
-                match key.as_str() {
-                    "where" => packages.where_.extend(values),
-                    "include" => packages.include.extend(values),
-                    "exclude" => packages.exclude.extend(values),
                     _ => {}
                 }
+            } else if section.eq_ignore_ascii_case("options.extras_require") {
+                for value in values.iter().filter(|value| !value.trim().is_empty()) {
+                    metadata
+                        .extras_require
+                        .entry(key.clone())
+                        .or_default()
+                        .push(value.trim().to_string());
+                }
+            } else if section.eq_ignore_ascii_case("options.packages.find") {
+                let packages = metadata.packages_find.get_or_insert_with(Default::default);
+                for value in values.iter().filter(|value| !value.trim().is_empty()) {
+                    let values = value
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    match key.as_str() {
+                        "where" => packages.where_.extend(values),
+                        "include" => packages.include.extend(values),
+                        "exclude" => packages.exclude.extend(values),
+                        _ => {}
+                    }
+                }
             }
-        }
-    };
+        };
 
     for raw in text.lines() {
         // ConfigParser ignores full-line comments before it applies the
@@ -548,12 +554,7 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
             continue;
         }
 
-        finish(
-            &section,
-            current_key.take(),
-            &current_values,
-            &mut metadata,
-        );
+        finish(&section, current_key.take(), &current_values, &mut metadata);
         current_values.clear();
         option_indent = None;
 
@@ -572,20 +573,14 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
             current_values.push(value.to_string());
         }
     }
-    finish(
-        &section,
-        current_key,
-        &current_values,
-        &mut metadata,
-    );
+    finish(&section, current_key, &current_values, &mut metadata);
     metadata
 }
 
 fn strip_setup_cfg_comment(line: &str) -> &str {
     line.char_indices()
         .find(|(index, character)| {
-            *character == '#'
-                && (*index == 0 || line.as_bytes()[*index - 1].is_ascii_whitespace())
+            *character == '#' && (*index == 0 || line.as_bytes()[*index - 1].is_ascii_whitespace())
         })
         .map(|(index, _)| &line[..index])
         .unwrap_or(line)
@@ -601,7 +596,11 @@ pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
     while let Some(found) = text[search_from..].find(key) {
         let start = search_from + found + key.len();
         let mut pos = start;
-        while text.as_bytes().get(pos).is_some_and(u8::is_ascii_whitespace) {
+        while text
+            .as_bytes()
+            .get(pos)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
             pos += 1;
         }
         if text.as_bytes().get(pos) != Some(&b'=') {
@@ -609,7 +608,11 @@ pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
             continue;
         }
         pos += 1;
-        while text.as_bytes().get(pos).is_some_and(u8::is_ascii_whitespace) {
+        while text
+            .as_bytes()
+            .get(pos)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
             pos += 1;
         }
         let Some(&quote) = text.as_bytes().get(pos) else {
@@ -687,7 +690,10 @@ mod tests {
         for (specifier, expected) in cases {
             let actual = selected(specifier);
             if expected == "error" {
-                assert!(actual.is_err(), "{specifier} unexpectedly selected {actual:?}");
+                assert!(
+                    actual.is_err(),
+                    "{specifier} unexpectedly selected {actual:?}"
+                );
             } else {
                 assert_eq!(actual.unwrap(), expected, "{specifier}");
             }
@@ -711,7 +717,13 @@ mod tests {
 
     #[test]
     fn python_version_formats_and_unsupported_interpreters() {
-        for text in ["3.11", "3.11.4", "python3.11", "cpython-3.11", "cpython@3.11"] {
+        for text in [
+            "3.11",
+            "3.11.4",
+            "python3.11",
+            "cpython-3.11",
+            "cpython@3.11",
+        ] {
             assert_eq!(
                 parse_python_version_file(text, ".python-version")
                     .unwrap()
@@ -720,7 +732,14 @@ mod tests {
                 3
             );
         }
-        for text in ["3.11-dev", "3.11t", "3.11-free-threaded", "pypy3.11", "miniconda3", "system"] {
+        for text in [
+            "3.11-dev",
+            "3.11t",
+            "3.11-free-threaded",
+            "pypy3.11",
+            "miniconda3",
+            "system",
+        ] {
             assert_eq!(
                 parse_python_version_file(text, ".python-version")
                     .unwrap_err()
@@ -728,7 +747,8 @@ mod tests {
                 io::ErrorKind::Unsupported
             );
         }
-        let parsed = parse_python_version_file("# comment\n\n3.11\n3.10", ".python-version").unwrap();
+        let parsed =
+            parse_python_version_file("# comment\n\n3.11\n3.10", ".python-version").unwrap();
         assert_eq!(parsed.raw, "3.11");
     }
 
@@ -738,10 +758,17 @@ mod tests {
             explicit: Some(parse_python_version_file("3.10", ".python-version").unwrap()),
             constraints: vec![c(">=3.12")],
         };
-        let selection = select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
+        let selection =
+            select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
         assert_eq!(selection.pin.version, "3.10.21");
-        assert!(selection.warnings.iter().any(|warning| warning.contains("3.10")));
-        assert!(selection.warnings.iter().any(|warning| warning.contains(">=3.12")));
+        assert!(selection
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("3.10")));
+        assert!(selection
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(">=3.12")));
     }
 
     #[test]
@@ -750,11 +777,13 @@ mod tests {
             explicit: Some(parse_python_version_file("3.11.4", ".python-version").unwrap()),
             constraints: Vec::new(),
         };
-        let selection = select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
+        let selection =
+            select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
         assert_eq!(selection.pin.version, "3.11.16");
-        assert!(selection.warnings.iter().any(|warning| {
-            warning.contains("3.11.4") && warning.contains("3.11.16")
-        }));
+        assert!(selection
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("3.11.4") && warning.contains("3.11.16") }));
     }
 
     #[test]
@@ -766,10 +795,13 @@ mod tests {
         assert!(matches_specifier("", "3.12.14").unwrap());
         assert!(matches_specifier("   ", "3.10.21").unwrap());
         assert_eq!(
-            select_python(Platform::X86_64UnknownLinuxGnu, &[ConstraintSource::new("", "pyproject.toml")])
-                .unwrap()
-                .pin
-                .version,
+            select_python(
+                Platform::X86_64UnknownLinuxGnu,
+                &[ConstraintSource::new("", "pyproject.toml")]
+            )
+            .unwrap()
+            .pin
+            .version,
             "3.12.14"
         );
     }
@@ -777,17 +809,29 @@ mod tests {
     #[test]
     fn setup_cfg_indented_option_keys_are_options_not_continuations() {
         let cfg = "[options]\n  python_requires = <3.12\n  zip_safe = False\n";
-        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some("<3.12"));
+        assert_eq!(
+            extract_setup_cfg_python_requires(cfg).as_deref(),
+            Some("<3.12")
+        );
         let cfg = "[options]\n  install_requires =\n    six\n  python_requires =\n    >=3.9,\n    <3.12\n[options.extras_require]\n  x = y\n";
-        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some(">=3.9, <3.12"));
+        assert_eq!(
+            extract_setup_cfg_python_requires(cfg).as_deref(),
+            Some(">=3.9, <3.12")
+        );
         let cfg = "[options]\npython_requires = >=3.8\n[metadata]\n  python_requires = <3.0\n";
-        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some(">=3.8"));
+        assert_eq!(
+            extract_setup_cfg_python_requires(cfg).as_deref(),
+            Some(">=3.8")
+        );
     }
 
     #[test]
     fn setup_cfg_and_setup_py_extractors_handle_requested_shapes() {
         let cfg = "[metadata]\nname=x\n[options]\npython_requires: >=3.9,\n  <3.12\n";
-        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some(">=3.9, <3.12"));
+        assert_eq!(
+            extract_setup_cfg_python_requires(cfg).as_deref(),
+            Some(">=3.9, <3.12")
+        );
         assert_eq!(
             extract_setup_py_python_requires("setup(python_requires = \"<3.12\")"),
             Some("<3.12".into())

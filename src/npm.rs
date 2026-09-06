@@ -300,11 +300,14 @@ pub(crate) fn validate_lock_path(path: &str) -> io::Result<()> {
                 && component != "node_modules"
                 && !component.starts_with('.')
                 && component.bytes().all(|b| {
-                    b.is_ascii_alphanumeric()
-                        || matches!(b, b'@' | b'-' | b'_' | b'.' | b'+')
+                    b.is_ascii_alphanumeric() || matches!(b, b'@' | b'-' | b'_' | b'.' | b'+')
                 })
         };
-        if prefix.is_empty() || prefix.split('/').any(|component| !workspace_name(component)) {
+        if prefix.is_empty()
+            || prefix
+                .split('/')
+                .any(|component| !workspace_name(component))
+        {
             return Err(bad());
         }
         comps = path[index + 1..].split('/').peekable();
@@ -375,7 +378,10 @@ fn importer_relative_path(path: &str) -> &str {
 }
 
 fn is_importer_top_level(path: &str) -> bool {
-    importer_relative_path(path).matches("node_modules/").count() == 1
+    importer_relative_path(path)
+        .matches("node_modules/")
+        .count()
+        == 1
 }
 
 fn normalized_bin_path(path: &str) -> io::Result<PathBuf> {
@@ -501,9 +507,9 @@ fn previous_workspace_set(project_dir: &Path) -> Vec<String> {
 fn safe_workspace_path(workspace: &str) -> bool {
     !workspace.is_empty()
         && !workspace.starts_with('/')
-        && Path::new(workspace).components().all(|component| {
-            matches!(component, std::path::Component::Normal(_))
-    })
+        && Path::new(workspace)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn canonical_workspace_parent(path: &Path) -> io::Result<PathBuf> {
@@ -651,17 +657,15 @@ pub(crate) fn git_repo_and_commit(url: &str) -> Option<(String, String)> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() >= 4 && parts[2] == "tar.gz" {
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
-            commit = fragment_commit.or_else(|| {
-                Some(parts[3].trim_end_matches(".tar.gz").to_string())
-            });
+            commit =
+                fragment_commit.or_else(|| Some(parts[3].trim_end_matches(".tar.gz").to_string()));
         }
     } else if let Some(path) = source.strip_prefix("https://github.com/") {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() >= 4 && parts[2] == "archive" {
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
-            commit = fragment_commit.or_else(|| {
-                Some(parts[3].trim_end_matches(".tar.gz").to_string())
-            });
+            commit =
+                fragment_commit.or_else(|| Some(parts[3].trim_end_matches(".tar.gz").to_string()));
         } else if parts.len() >= 2 && parts[0] != "" && parts[1] != "" {
             // Yarn also emits the repository URL itself for some GitHub
             // dependencies (not an immutable registry tarball).
@@ -864,9 +868,9 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
             ))
         })?;
         let name = entry["name"]
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| name_from_path(path));
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| name_from_path(path));
         // A git dependency pinned to a full commit is realizable (item 4);
         // anything else (a branch, a tag, a bare repo URL) is not, because the
         // bytes it names can change.
@@ -986,7 +990,12 @@ fn tarball_has_binding_gyp(path: &Path) -> io::Result<bool> {
         .args(["-tzf"])
         .arg(path)
         .output()
-        .map_err(|e| io::Error::new(e.kind(), format!("list npm tarball {}: {e}", path.display())))?;
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("list npm tarball {}: {e}", path.display()),
+            )
+        })?;
     if !output.status.success() {
         return Err(err(format!(
             "list npm tarball {} failed: {}",
@@ -1020,14 +1029,20 @@ fn read_archive_classification(store: &Store, digest: &Digest) -> io::Result<Opt
         Err(error) => {
             return Err(io::Error::new(
                 error.kind(),
-                format!("read npm archive classification {}: {error}", path.display()),
+                format!(
+                    "read npm archive classification {}: {error}",
+                    path.display()
+                ),
             ))
         }
     };
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse npm archive classification {}: {error}", path.display()),
+            format!(
+                "parse npm archive classification {}: {error}",
+                path.display()
+            ),
         )
     })?;
     if value.get("schema").and_then(serde_json::Value::as_str)
@@ -1037,7 +1052,10 @@ fn read_archive_classification(store: &Store, digest: &Digest) -> io::Result<Opt
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("npm archive classification {} has the wrong identity", path.display()),
+            format!(
+                "npm archive classification {} has the wrong identity",
+                path.display()
+            ),
         ));
     }
     value
@@ -1046,7 +1064,10 @@ fn read_archive_classification(store: &Store, digest: &Digest) -> io::Result<Opt
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("npm archive classification {} has no binding_gyp result", path.display()),
+                format!(
+                    "npm archive classification {} has no binding_gyp result",
+                    path.display()
+                ),
             )
         })
         .map(Some)
@@ -1104,12 +1125,17 @@ fn write_archive_classification(
                         digest.hex()
                     ),
                 )),
-                None => Err(io::Error::other("npm archive classification disappeared during publication")),
+                None => Err(io::Error::other(
+                    "npm archive classification disappeared during publication",
+                )),
             }
         }
         Err(error) => Err(io::Error::new(
             error.kind(),
-            format!("publish npm archive classification {}: {error}", destination.display()),
+            format!(
+                "publish npm archive classification {}: {error}",
+                destination.display()
+            ),
         )),
     }
 }
@@ -1244,7 +1270,10 @@ fn node_env_identity(
                     content,
                     p.name,
                     p.version,
-                    p.patch.as_ref().map(|patch| patch.hash.as_str()).unwrap_or(""),
+                    p.patch
+                        .as_ref()
+                        .map(|patch| patch.hash.as_str())
+                        .unwrap_or(""),
                     bins.join(",")
                 ),
             )
@@ -1308,8 +1337,14 @@ fn realize_node_env_with_node_object(
         };
         native_libs_identity_id(store, platform, has_native)?
     };
-    let identity =
-        node_env_identity(store, platform, node_obj, plan, artifacts, native_libs_id.as_deref())?;
+    let identity = node_env_identity(
+        store,
+        platform,
+        node_obj,
+        plan,
+        artifacts,
+        native_libs_id.as_deref(),
+    )?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -1332,7 +1367,10 @@ fn realize_node_env_with_node_object(
         // below extracts tarballs, so they are collected separately.
         if let Some(source) = &p.git {
             let object = crate::gitsrc::ensure_git_source(store, source).map_err(|e| {
-                io::Error::new(e.kind(), format!("{}: git source {}: {e}", p.path, source.url))
+                io::Error::new(
+                    e.kind(),
+                    format!("{}: git source {}: {e}", p.path, source.url),
+                )
             })?;
             crate::policy::record(
                 crate::policy::GIT_DEPENDENCY,
@@ -1378,9 +1416,8 @@ fn realize_node_env_with_node_object(
     // already holds after sort, since "a/node_modules/b" sorts after "a").
     for (p, tarball) in &mut tarballs {
         let dest = env_package_path(&staged, &p.path);
-        fs::create_dir_all(&dest).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path))
-        })?;
+        fs::create_dir_all(&dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path)))?;
         let mut tar = Command::new("/usr/bin/tar");
         tar.arg("-xzf")
             .arg(tarball)
@@ -1401,9 +1438,8 @@ fn realize_node_env_with_node_object(
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
-        normalize_modes(&dest).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path))
-        })?;
+        normalize_modes(&dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {
             let patch_path = Path::new(&patch.path);
             let patch_bytes = fs::read(patch_path).map_err(|e| {
@@ -1440,7 +1476,10 @@ fn realize_node_env_with_node_object(
                 )));
             }
             normalize_modes(&dest).map_err(|e| {
-                io::Error::new(e.kind(), format!("{}: normalize patched modes: {e}", p.path))
+                io::Error::new(
+                    e.kind(),
+                    format!("{}: normalize patched modes: {e}", p.path),
+                )
             })?;
         }
         if p.bin.is_empty() {
@@ -1496,19 +1535,20 @@ fn realize_node_env_with_node_object(
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
         let _ = crate::store::remove_tree(&staging);
-        crate::project::clone_tree(&source_root, &staging).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path))
-        })?;
+        crate::project::clone_tree(&source_root, &staging)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path)))?;
         for entry in fs::read_dir(&staging)? {
             let entry = entry?;
             fs::rename(entry.path(), dest.join(entry.file_name()))?;
         }
         let _ = crate::store::remove_tree(&staging);
-        normalize_modes(&dest).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path))
-        })?;
+        normalize_modes(&dest)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         let manifest = fs::read_to_string(dest.join("package.json")).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: git source has no package.json: {e}", p.path))
+            io::Error::new(
+                e.kind(),
+                format!("{}: git source has no package.json: {e}", p.path),
+            )
         })?;
         if serde_json::from_str::<serde_json::Value>(&manifest)
             .ok()
@@ -1747,12 +1787,17 @@ fn run_install_scripts_staged(
         // Plant declared artifacts where this package's installer looks
         // (paths are HOME-relative; HOME is this scratch dir).
         for a in artifacts {
-            let src = download_verified_held(store, &a.url, &a.sha256)
-                .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
+            let src = download_verified_held(store, &a.url, &a.sha256).map_err(|e| {
+                io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url))
+            })?;
             let dest = tmp.join(&a.path);
             fs::create_dir_all(dest.parent().unwrap())?;
-            fs::copy(&src, &dest)
-                .map_err(|e| io::Error::new(e.kind(), format!("placing declared artifact {}: {e}", a.path)))?;
+            fs::copy(&src, &dest).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("placing declared artifact {}: {e}", a.path),
+                )
+            })?;
         }
 
         let phases: Vec<(&str, String)> = ["preinstall", "install", "postinstall"]
@@ -1777,13 +1822,11 @@ fn run_install_scripts_staged(
         let python = match &python_obj {
             Some(p) => p.clone(),
             None => {
-                let pin = crate::python::lookup(platform, "3.12").ok_or_else(|| {
-                    crate::platform::no_pin("cpython 3.12", platform, "stage 2")
+                let pin = crate::python::lookup(platform, "3.12")
+                    .ok_or_else(|| crate::platform::no_pin("cpython 3.12", platform, "stage 2"))?;
+                let p = crate::python::ensure_python_for(store, pin, platform).map_err(|e| {
+                    io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}"))
                 })?;
-                let p = crate::python::ensure_python_for(store, pin, platform)
-                    .map_err(|e| {
-                        io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}"))
-                    })?;
                 python_obj.insert(p).clone()
             }
         };
@@ -1862,18 +1905,17 @@ fn run_install_scripts_staged(
             Ok(Some(provisioning)) => {
                 envs.extend(provisioning.envs);
                 for (subject, detail) in &provisioning.records {
-                    crate::policy::record(
-                        crate::policy::ARTIFACT_PROVISIONED,
-                        subject,
-                        detail,
-                    )?;
+                    crate::policy::record(crate::policy::ARTIFACT_PROVISIONED, subject, detail)?;
                 }
             }
             Ok(None) => {}
             Err(error) => {
                 // A provisioning failure is not fatal: the install script still
                 // runs and fails loudly on its own if it needs the artifact.
-                eprintln!("blanket: {}: could not provision its artifact: {error}", p.name);
+                eprintln!(
+                    "blanket: {}: could not provision its artifact: {error}",
+                    p.name
+                );
                 crate::policy::record(
                     crate::policy::ARTIFACT_NOT_PROVISIONED,
                     &format!("{}@{}", p.name, p.version),
@@ -1965,16 +2007,12 @@ fn run_install_scripts_staged(
 
 fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Result<()> {
     let mut bin_dirs = vec![staged.join("node_modules/.bin")];
-    bin_dirs.extend(
-        workspace_set(plan)
-            .into_iter()
-            .map(|workspace| {
-                staged
-                    .join("workspaces")
-                    .join(encode_workspace_path(&workspace))
-                    .join("node_modules/.bin")
-            }),
-    );
+    bin_dirs.extend(workspace_set(plan).into_iter().map(|workspace| {
+        staged
+            .join("workspaces")
+            .join(encode_workspace_path(&workspace))
+            .join("node_modules/.bin")
+    }));
     for bin_dir in bin_dirs {
         let entries = match fs::read_dir(&bin_dir) {
             Ok(entries) => entries,
@@ -2096,16 +2134,18 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
 fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
     let from: Vec<_> = from.components().collect();
     let to: Vec<_> = to.components().collect();
-    let common = from
-        .iter()
-        .zip(&to)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
     if common == 0 {
         return Err(err(format!(
             "cannot make relative link from {} to {}",
-            from.iter().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
-            to.iter().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+            from.iter()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+            to.iter()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
         )));
     }
     let mut result = PathBuf::new();
@@ -2309,7 +2349,8 @@ pub fn project_node_env_recorded(
         }
         if link.symlink_metadata().is_err() {
             let target = relative_path(
-                link.parent().ok_or_else(|| err("workspace link has no parent"))?,
+                link.parent()
+                    .ok_or_else(|| err("workspace link has no parent"))?,
                 &project_dir.join(&l.target),
             )?;
             std::os::unix::fs::symlink(target, &link)?;
@@ -2520,15 +2561,15 @@ mod tests {
 
     #[test]
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
-        let root = std::env::temp_dir().join(format!(
-            "blanket-npm-darwin-warm-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("blanket-npm-darwin-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store { root: root.canonicalize().unwrap() };
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
         let node_obj = store.object_path("node-cache");
         std::fs::create_dir_all(&node_obj).unwrap();
         let plan = NpmPlan {
@@ -2548,7 +2589,15 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
-        let identity = node_env_identity(&store, Platform::host().unwrap(), &node_obj, &plan, &[], None).unwrap();
+        let identity = node_env_identity(
+            &store,
+            Platform::host().unwrap(),
+            &node_obj,
+            &plan,
+            &[],
+            None,
+        )
+        .unwrap();
         let staged = store.stage().unwrap();
         std::fs::create_dir_all(staged.join("node_modules")).unwrap();
         let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
@@ -2562,21 +2611,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(realized, expected);
-        assert_eq!(std::fs::read_dir(store.root.join("cache/sha256")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(store.root.join("cache/sha256"))
+                .unwrap()
+                .count(),
+            0
+        );
         crate::store::remove_tree(&root).unwrap();
     }
 
     #[test]
     fn linux_warm_sync_uses_persisted_archive_classification() {
-        let root = std::env::temp_dir().join(format!(
-            "blanket-npm-linux-warm-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("blanket-npm-linux-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
         }
-        let store = Store { root: root.canonicalize().unwrap() };
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
         let node_obj = store.object_path("node-cache");
         std::fs::create_dir_all(&node_obj).unwrap();
         let plan = NpmPlan {
@@ -2598,7 +2652,15 @@ mod tests {
         };
         let digest = Digest::from_sri(TEST_SRI).unwrap();
         write_archive_classification(&store, &digest, false).unwrap();
-        let identity = node_env_identity(&store, Platform::host().unwrap(), &node_obj, &plan, &[], None).unwrap();
+        let identity = node_env_identity(
+            &store,
+            Platform::host().unwrap(),
+            &node_obj,
+            &plan,
+            &[],
+            None,
+        )
+        .unwrap();
         let staged = store.stage().unwrap();
         std::fs::create_dir_all(staged.join("node_modules")).unwrap();
         let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
@@ -2615,7 +2677,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(realized, expected);
-        assert_eq!(std::fs::read_dir(store.root.join("cache/sha256")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(store.root.join("cache/sha256"))
+                .unwrap()
+                .count(),
+            0
+        );
         crate::store::remove_tree(&root).unwrap();
     }
 
@@ -2657,7 +2724,10 @@ mod tests {
             lock_source: "package-lock.json".into(),
         };
         let host = Platform::host().unwrap();
-        let foreign = *Platform::ALL.iter().find(|platform| **platform != host).unwrap();
+        let foreign = *Platform::ALL
+            .iter()
+            .find(|platform| **platform != host)
+            .unwrap();
         let error = realize_node_env(&store, foreign, &plan, &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains(foreign.triple()));
@@ -2707,8 +2777,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            discover_package_bins(r#"{"directories":{"bin":"cli"}}"#, "tool", &dir)
-                .unwrap(),
+            discover_package_bins(r#"{"directories":{"bin":"cli"}}"#, "tool", &dir).unwrap(),
             vec![("a".into(), "cli/a".into()), ("b".into(), "cli/b".into())]
         );
         let _ = fs::remove_dir_all(dir);
@@ -2734,10 +2803,7 @@ mod tests {
             lock_source: "pnpm-lock.yaml".into(),
         };
         assert_eq!(workspace_set(&plan), vec!["packages/lib"]);
-        assert_eq!(
-            encode_workspace_path("packages/lib"),
-            "packages%2Flib"
-        );
+        assert_eq!(encode_workspace_path("packages/lib"), "packages%2Flib");
         assert_eq!(
             env_package_path(Path::new("/env"), "packages/lib/node_modules/a"),
             PathBuf::from("/env/workspaces/packages%2Flib/node_modules/a")
@@ -2753,12 +2819,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("blanket-npm-stale-workspace-{nonce}"));
         let project = root.join("project");
         let env = root.join("home/store/objects/env");
-        fs::create_dir_all(project.join("packages/lib")) .unwrap();
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
         fs::create_dir_all(env.join("node_modules/c")).unwrap();
-        fs::create_dir_all(
-            env.join("workspaces/packages%2Flib/node_modules/c"),
-        )
-        .unwrap();
+        fs::create_dir_all(env.join("workspaces/packages%2Flib/node_modules/c")).unwrap();
         fs::write(env.join("node_modules/c/package.json"), "{}").unwrap();
         fs::write(
             env.join("workspaces/packages%2Flib/node_modules/c/package.json"),
@@ -2797,7 +2860,10 @@ mod tests {
         )
         .unwrap();
         let workspace_nm = project.join("packages/lib/node_modules");
-        assert!(fs::symlink_metadata(&workspace_nm).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&workspace_nm)
+            .unwrap()
+            .file_type()
+            .is_symlink());
 
         // The second plan aligns the workspace dependency with the root, so
         // the planner no longer needs a workspace-local forest.
@@ -2860,12 +2926,8 @@ mod tests {
         let marker = external.join("must-remain");
         fs::write(&marker, "user data").unwrap();
 
-        let error = validate_workspace_parents(
-            &project,
-            &["packages/lib".to_string()],
-            &[],
-        )
-        .unwrap_err();
+        let error =
+            validate_workspace_parents(&project, &["packages/lib".to_string()], &[]).unwrap_err();
         assert!(error.to_string().contains("outside the project"), "{error}");
         assert_eq!(fs::read_to_string(&marker).unwrap(), "user data");
         let _ = fs::remove_dir_all(root);
@@ -2886,13 +2948,12 @@ mod tests {
         let marker = external.join("must-remain");
         fs::write(&marker, "user data").unwrap();
 
-        let error = validate_workspace_parents(
-            &project,
-            &[],
-            &["../external".to_string()],
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("safe project-relative"), "{error}");
+        let error =
+            validate_workspace_parents(&project, &[], &["../external".to_string()]).unwrap_err();
+        assert!(
+            error.to_string().contains("safe project-relative"),
+            "{error}"
+        );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "user data");
         let _ = fs::remove_dir_all(root);
     }
@@ -2947,12 +3008,20 @@ mod tests {
         ));
         let linux = plan_npm(Platform::X86_64UnknownLinuxGnu, &l).unwrap();
         assert_eq!(
-            linux.packages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            linux
+                .packages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["@esbuild/linux-x64"]
         );
         let darwin = plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap();
         assert_eq!(
-            darwin.packages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            darwin
+                .packages
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["@esbuild/darwin-arm64"]
         );
     }
@@ -2966,24 +3035,18 @@ mod tests {
         ));
         let plan = plan_npm(Platform::X86_64UnknownLinuxGnu, &l).unwrap();
         assert_eq!(plan.packages.len(), 1);
-        assert_eq!(plan.packages[0].path, "node_modules/optional-parent-sibling");
+        assert_eq!(
+            plan.packages[0].path,
+            "node_modules/optional-parent-sibling"
+        );
     }
 
     #[test]
     fn required_platform_and_libc_restrictions_have_host_diagnostics() {
         let cases = [
-            (
-                r#""os":["darwin"]"#,
-                "os restriction",
-            ),
-            (
-                r#""cpu":["arm64"]"#,
-                "cpu restriction",
-            ),
-            (
-                r#""libc":["musl"]"#,
-                "libc restriction",
-            ),
+            (r#""os":["darwin"]"#, "os restriction"),
+            (r#""cpu":["arm64"]"#, "cpu restriction"),
+            (r#""libc":["musl"]"#, "libc restriction"),
         ];
         for (restriction, reason) in cases {
             let l = lock(&format!(
@@ -3049,13 +3112,19 @@ mod tests {
             let l = lock(&format!(
                 r#""node_modules/restricted":{{"version":"1","libc":{libc},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
-            assert!(plan_npm(Platform::X86_64UnknownLinuxGnu, &l).is_ok(), "libc {libc}");
+            assert!(
+                plan_npm(Platform::X86_64UnknownLinuxGnu, &l).is_ok(),
+                "libc {libc}"
+            );
         }
         for libc in [r#"["musl"]"#, r#"["!glibc"]"#, r#""musl""#] {
             let l = lock(&format!(
                 r#""node_modules/restricted":{{"version":"1","libc":{libc},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
-            assert!(plan_npm(Platform::X86_64UnknownLinuxGnu, &l).is_err(), "libc {libc}");
+            assert!(
+                plan_npm(Platform::X86_64UnknownLinuxGnu, &l).is_err(),
+                "libc {libc}"
+            );
         }
     }
 
@@ -3077,7 +3146,11 @@ mod tests {
                 r#""node_modules/restricted":{{"version":"1","os":{restriction},"resolved":"https://r/restricted.tgz","integrity":"{TEST_SRI}"}}"#
             ));
             let result = plan_npm(Platform::Aarch64AppleDarwin, &l);
-            assert_eq!(result.is_ok(), compatible, "darwin os restriction {restriction}");
+            assert_eq!(
+                result.is_ok(),
+                compatible,
+                "darwin os restriction {restriction}"
+            );
         }
         // Darwin ignores libc entirely.
         let l = lock(&format!(
@@ -3089,7 +3162,11 @@ mod tests {
     #[test]
     fn rejections() {
         // v1 lockfile
-        assert!(plan_npm(Platform::Aarch64AppleDarwin, r#"{"lockfileVersion":1,"packages":{}}"#).is_err());
+        assert!(plan_npm(
+            Platform::Aarch64AppleDarwin,
+            r#"{"lockfileVersion":1,"packages":{}}"#
+        )
+        .is_err());
         // link entry
         let l = lock(r#""node_modules/a":{"link":true,"resolved":"https://r/a.tgz"}"#);
         assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_err());
@@ -3115,14 +3192,26 @@ mod tests {
             r#""node_modules/a":{"version":"1","resolved":"https://r/a.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
                "node_modules/a/node_modules/b":{"version":"1","inBundle":true}"#,
         );
-        assert_eq!(plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap().packages.len(), 1);
+        assert_eq!(
+            plan_npm(Platform::Aarch64AppleDarwin, &l)
+                .unwrap()
+                .packages
+                .len(),
+            1
+        );
         // descendants of a platform-skipped optional package are dropped
         // even without their own os/cpu/resolved fields.
         let l = lock(
             r#""node_modules/w":{"version":"1","optional":true,"cpu":["wasm32"],"resolved":"https://r/w.tgz","integrity":"sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw=="},
                "node_modules/w/node_modules/c":{"version":"1"}"#,
         );
-        assert_eq!(plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap().packages.len(), 0);
+        assert_eq!(
+            plan_npm(Platform::Aarch64AppleDarwin, &l)
+                .unwrap()
+                .packages
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -3213,7 +3302,8 @@ mod tests {
         let identity = |inputs| Identity {
             kind: "node-env".into(),
             name: "env".into(),
-            version: node_pin(Platform::Aarch64AppleDarwin).unwrap()
+            version: node_pin(Platform::Aarch64AppleDarwin)
+                .unwrap()
                 .version
                 .into(),
             inputs,
@@ -3241,9 +3331,11 @@ mod tests {
 
     #[test]
     fn lifecycle_script_failure_is_separate_from_sandbox_failure() {
-        let failure = classify_lifecycle_result(Err(io::Error::other("script exited 1")))
-            .unwrap_err();
-        assert!(matches!(failure, LifecycleFailure::Script(error) if error.kind() == io::ErrorKind::Other));
+        let failure =
+            classify_lifecycle_result(Err(io::Error::other("script exited 1"))).unwrap_err();
+        assert!(
+            matches!(failure, LifecycleFailure::Script(error) if error.kind() == io::ErrorKind::Other)
+        );
     }
 }
 
@@ -3258,8 +3350,8 @@ mod git_url_tests {
             &format!("git+https://github.com/o/r.git#{commit}"),
             &format!("git+ssh://git@github.com/o/r.git#{commit}"),
         ] {
-            let source = super::git_source_from_url(url)
-                .unwrap_or_else(|| panic!("not recognized: {url}"));
+            let source =
+                super::git_source_from_url(url).unwrap_or_else(|| panic!("not recognized: {url}"));
             assert_eq!(source.commit, commit, "{url}");
             assert!(
                 source.url.starts_with("https://") || source.url.starts_with("ssh://"),

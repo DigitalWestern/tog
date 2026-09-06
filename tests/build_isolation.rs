@@ -35,7 +35,7 @@ fn runtime_numpy() -> Plan {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Wheel,
-        git: None,
+            git: None,
         }],
     }
 }
@@ -82,7 +82,10 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
     let wheel = build::build_sdist_wheel(&store, Platform::host().unwrap(), &pkg, "3.12.14")
         .expect("tomli-w sdist build");
     assert!(wheel.is_file());
-    python_import(&wheel, "import tomli_w; assert tomli_w.dumps({'ok': True}) == 'ok = true\\n'");
+    python_import(
+        &wheel,
+        "import tomli_w; assert tomli_w.dumps({'ok': True}) == 'ok = true\\n'",
+    );
 }
 
 #[test]

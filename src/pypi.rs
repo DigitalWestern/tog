@@ -7,8 +7,8 @@ use crate::store::Store;
 use crate::types::{ArtifactKind, LockedPackage, Plan};
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::ffi::CStr;
-use std::io;
 use std::fs;
+use std::io;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::os::raw::c_char;
 use std::process::Command;
@@ -202,8 +202,7 @@ pub fn is_requirement_option(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or_default();
     matches!(
         first,
-        "-r"
-            | "--requirement"
+        "-r" | "--requirement"
             | "-c"
             | "--constraint"
             | "--index-url"
@@ -229,10 +228,7 @@ pub fn unattested_index_options(text: &str) -> Vec<String> {
             let first = line.split_whitespace().next().unwrap_or_default();
             matches!(
                 first,
-                "--index-url"
-                    | "--extra-index-url"
-                    | "--find-links"
-                    | "--trusted-host"
+                "--index-url" | "--extra-index-url" | "--find-links" | "--trusted-host"
             ) || first.starts_with("--index-url=")
                 || first.starts_with("--extra-index-url=")
                 || first.starts_with("--find-links=")
@@ -293,11 +289,16 @@ pub fn skippable_specs(text: &str) -> Vec<String> {
 pub fn is_skippable_spec(spec: &str) -> bool {
     let spec = spec.trim();
     let is_local = |p: &str| {
-        p == "." || p.starts_with("./") || p.starts_with("../") || p.starts_with('/')
+        p == "."
+            || p.starts_with("./")
+            || p.starts_with("../")
+            || p.starts_with('/')
             || p.starts_with("file:")
     };
     let is_url = |r: &str| {
-        r.starts_with("https://") || r.starts_with("http://") || r.starts_with("git+")
+        r.starts_with("https://")
+            || r.starts_with("http://")
+            || r.starts_with("git+")
             || r.starts_with("file:")
     };
     if is_local(spec) || is_url(spec) {
@@ -429,7 +430,12 @@ struct Score {
     glibc_floor: (u32, u32),
 }
 
-type ScoreOrder = (u32, u32, std::cmp::Reverse<u32>, std::cmp::Reverse<(u32, u32)>);
+type ScoreOrder = (
+    u32,
+    u32,
+    std::cmp::Reverse<u32>,
+    std::cmp::Reverse<(u32, u32)>,
+);
 
 fn score_order(score: Score) -> ScoreOrder {
     (
@@ -478,11 +484,7 @@ fn manylinux_floor(tag: &str) -> Option<(u32, u32)> {
     Some((digits(parts[0])?, digits(parts[1])?))
 }
 
-fn platform_score(
-    tag: &str,
-    platform: Platform,
-    glibc: Glibc,
-) -> Option<(u32, (u32, u32))> {
+fn platform_score(tag: &str, platform: Platform, glibc: Glibc) -> Option<(u32, (u32, u32))> {
     match platform {
         Platform::Aarch64AppleDarwin => {
             if tag.starts_with("macosx_") && tag.ends_with("_arm64") {
@@ -519,7 +521,9 @@ fn pure_python_tag(tag: &str, python_tag: &str, python_minor: u32) -> bool {
     !minor.is_empty()
         && minor.len() <= 2
         && minor.bytes().all(|byte| byte.is_ascii_digit())
-        && minor.parse::<u32>().is_ok_and(|minor| minor <= python_minor)
+        && minor
+            .parse::<u32>()
+            .is_ok_and(|minor| minor <= python_minor)
 }
 
 /// Score a wheel or source archive for an explicit host platform.
@@ -527,12 +531,7 @@ fn pure_python_tag(tag: &str, python_tag: &str, python_minor: u32) -> bool {
 /// The filename's compressed py/abi/platform tags are expanded as a
 /// Cartesian product. The best compatible tuple is retained, then the
 /// caller adds the filename as the final deterministic tiebreaker.
-fn score(
-    filename: &str,
-    python_tag: &str,
-    platform: Platform,
-    glibc: Glibc,
-) -> Option<Score> {
+fn score(filename: &str, python_tag: &str, platform: Platform, glibc: Glibc) -> Option<Score> {
     let (ours, python_minor) = parse_python_tag(python_tag)?;
     if let Some(stem) = filename
         .strip_suffix(".tar.gz")
@@ -792,9 +791,12 @@ pub(crate) fn lock_requirement_text_with_uv(
             "--no-build",
         ]);
         if constraints.is_some() {
-            command.args(["-c", constraints_path.to_str().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "constraints path is not UTF-8")
-            })?]);
+            command.args([
+                "-c",
+                constraints_path.to_str().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "constraints path is not UTF-8")
+                })?,
+            ]);
         }
         let uv_output = command
             .arg(&input)
@@ -810,13 +812,17 @@ pub(crate) fn lock_requirement_text_with_uv(
                 .map(str::trim)
                 .filter(|line| !line.is_empty() && !line.starts_with('#'))
                 .map(|line| {
-                    line.split(|ch: char| matches!(ch, '<' | '>' | '=' | '!' | '~' | '[' | ';' | ' ' | '\t'))
-                        .next()
-                        .unwrap_or(line)
+                    line.split(|ch: char| {
+                        matches!(ch, '<' | '>' | '=' | '!' | '~' | '[' | ';' | ' ' | '\t')
+                    })
+                    .next()
+                    .unwrap_or(line)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let diagnostics = String::from_utf8_lossy(&uv_output.stderr).trim().to_string();
+            let diagnostics = String::from_utf8_lossy(&uv_output.stderr)
+                .trim()
+                .to_string();
             return Err(io::Error::other(format!(
                 "uv pip compile failed for build requirements ({names}); sdist-only build dependencies are unsupported during resolve-time metadata builds: {diagnostics}"
             )));
@@ -879,7 +885,10 @@ six==1.17.0 \\\n\
     fn requirements_options_and_inline_comments_are_data_only() {
         let text = "--index-url https://private.invalid/simple\nsix==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001 # note\n";
         assert_eq!(parse_requirements(text).unwrap().len(), 1);
-        assert_eq!(unattested_index_options(text), vec!["--index-url https://private.invalid/simple"]);
+        assert_eq!(
+            unattested_index_options(text),
+            vec!["--index-url https://private.invalid/simple"]
+        );
     }
 
     #[test]
@@ -907,7 +916,11 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         ] {
             assert!(parse_requirements(bad).is_err(), "should reject: {bad}");
         }
-        assert!(parse_requirements("-r other.txt\n--index-url https://private.invalid/simple\n").unwrap().is_empty());
+        assert!(
+            parse_requirements("-r other.txt\n--index-url https://private.invalid/simple\n")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -945,12 +958,7 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         files: &'a [FileCandidate],
         python_tag: &str,
     ) -> Option<(&'a FileCandidate, ArtifactKind)> {
-        select_file(
-            files,
-            python_tag,
-            Platform::Aarch64AppleDarwin,
-            Glibc(0, 0),
-        )
+        select_file(files, python_tag, Platform::Aarch64AppleDarwin, Glibc(0, 0))
     }
 
     fn linux_select<'a>(
@@ -958,12 +966,7 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         python_tag: &str,
         glibc: Glibc,
     ) -> Option<(&'a FileCandidate, ArtifactKind)> {
-        select_file(
-            files,
-            python_tag,
-            Platform::X86_64UnknownLinuxGnu,
-            glibc,
-        )
+        select_file(files, python_tag, Platform::X86_64UnknownLinuxGnu, glibc)
     }
 
     #[test]
@@ -1214,24 +1217,78 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
     #[test]
     fn manylinux_floor_rejects_signs_and_python4_abi3_floors_are_not_floors() {
         let linux = Platform::X86_64UnknownLinuxGnu;
-        assert!(score("pkg-1.0-cp312-cp312-manylinux_+2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_none());
-        assert!(score("pkg-1.0-cp40-abi3-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_none());
-        assert!(score("pkg-1.0-cp38-abi3-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_some());
-        assert!(score("pkg-1.0-cp310-abi3-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_some());
+        assert!(score(
+            "pkg-1.0-cp312-cp312-manylinux_+2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 43)
+        )
+        .is_none());
+        assert!(score(
+            "pkg-1.0-cp40-abi3-manylinux_2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 43)
+        )
+        .is_none());
+        assert!(score(
+            "pkg-1.0-cp38-abi3-manylinux_2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 43)
+        )
+        .is_some());
+        assert!(score(
+            "pkg-1.0-cp310-abi3-manylinux_2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 43)
+        )
+        .is_some());
     }
 
     #[test]
     fn linux_platform_none_wheel_beats_any_and_compressed_second_alternative_counts() {
         let linux = Platform::X86_64UnknownLinuxGnu;
-        let plat = score("pkg-1.0-py3-none-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).unwrap();
+        let plat = score(
+            "pkg-1.0-py3-none-manylinux_2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 43),
+        )
+        .unwrap();
         let any = score("pkg-1.0-py3-none-any.whl", "cp312", linux, Glibc(2, 43)).unwrap();
         assert!(score_order(plat) < score_order(any));
         // only the second alternative fits glibc 2.17
-        assert!(score("pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 17)).is_some());
-        assert!(score("pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.whl", "cp312", linux, Glibc(2, 17)).is_none());
+        assert!(score(
+            "pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.manylinux_2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 17)
+        )
+        .is_some());
+        assert!(score(
+            "pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 17)
+        )
+        .is_none());
         // cp313 target
-        assert!(score("pkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl", "cp313", linux, Glibc(2, 43)).is_some());
-        assert!(score("pkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl", "cp312", linux, Glibc(2, 43)).is_none());
+        assert!(score(
+            "pkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+            "cp313",
+            linux,
+            Glibc(2, 43)
+        )
+        .is_some());
+        assert!(score(
+            "pkg-1.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+            "cp312",
+            linux,
+            Glibc(2, 43)
+        )
+        .is_none());
     }
 
     #[test]
@@ -1240,9 +1297,27 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         // py3-none-macosx_*_arm64 ahead of abi3. pip's supported-tag order
         // puts every abi3 variant before py3-none-<plat>; we follow pip.
         let mac = Platform::Aarch64AppleDarwin;
-        let abi3 = score("pkg-1.0-cp39-abi3-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
-        let none = score("pkg-1.0-py3-none-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
-        let exact = score("pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
+        let abi3 = score(
+            "pkg-1.0-cp39-abi3-macosx_11_0_arm64.whl",
+            "cp312",
+            mac,
+            Glibc(0, 0),
+        )
+        .unwrap();
+        let none = score(
+            "pkg-1.0-py3-none-macosx_11_0_arm64.whl",
+            "cp312",
+            mac,
+            Glibc(0, 0),
+        )
+        .unwrap();
+        let exact = score(
+            "pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl",
+            "cp312",
+            mac,
+            Glibc(0, 0),
+        )
+        .unwrap();
         assert!(score_order(exact) < score_order(abi3));
         assert!(score_order(abi3) < score_order(none));
     }
@@ -1255,8 +1330,10 @@ mod git_requirement_tests {
     #[test]
     fn pinned_git_requirements_parse_and_unpinned_ones_do_not() {
         let commit = "a".repeat(40);
-        let req = parse_git_requirement(&format!("six @ git+https://github.com/benjaminp/six@{commit}"))
-            .expect("a pinned git requirement");
+        let req = parse_git_requirement(&format!(
+            "six @ git+https://github.com/benjaminp/six@{commit}"
+        ))
+        .expect("a pinned git requirement");
         assert_eq!(req.name, "six");
         assert_eq!(req.version, format!("0+git.{}", &commit[..12]));
         assert!(req.sha256s.is_empty(), "the commit is the verification");
@@ -1289,7 +1366,10 @@ mod git_requirement_tests {
         );
         let reqs = parse_requirements(&text).expect("parse");
         assert_eq!(reqs.len(), 2);
-        let git = reqs.iter().find(|r| r.name == "pkg").expect("the git requirement");
+        let git = reqs
+            .iter()
+            .find(|r| r.name == "pkg")
+            .expect("the git requirement");
         assert_eq!(git.git.as_ref().unwrap().commit, commit);
         // The registry requirement is untouched.
         let six = reqs.iter().find(|r| r.name == "six").expect("six");

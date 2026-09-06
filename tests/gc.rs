@@ -98,16 +98,18 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
     // exercises the sweep without sleeping.
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         let entry = entry.unwrap();
-        let meta = store.join("meta").join(format!(
-            "{}.json",
-            entry.file_name().to_string_lossy()
-        ));
+        let meta = store
+            .join("meta")
+            .join(format!("{}.json", entry.file_name().to_string_lossy()));
         let text = fs::read_to_string(meta).unwrap();
         if text.contains(r#""kind": "node-env""#) {
             let old = SystemTime::now()
                 .checked_sub(Duration::from_secs(11 * 60))
                 .unwrap();
-            fs::File::open(entry.path()).unwrap().set_modified(old).unwrap();
+            fs::File::open(entry.path())
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
         }
     }
 
@@ -115,10 +117,18 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
     // report them: the ten-minute window applies to --dry-run too, so its
     // output is what a real sweep would do.
     let dry = ok(
-        blanket(&bin, &python, &store, &["gc", "--dry-run", "--keep-days", "0"]),
+        blanket(
+            &bin,
+            &python,
+            &store,
+            &["gc", "--dry-run", "--keep-days", "0"],
+        ),
         "gc dry-run",
     );
-    assert!(dry.contains("node-env"), "dry-run did not list node objects:\n{dry}");
+    assert!(
+        dry.contains("node-env"),
+        "dry-run did not list node objects:\n{dry}"
+    );
 
     ok(blanket(&bin, &python, &store, &["gc"]), "gc");
     let objects = fs::read_dir(store.join("objects"))
@@ -134,7 +144,9 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
         })
         .collect::<Vec<_>>();
     assert!(
-        objects.iter().all(|meta| !meta.contains(r#""kind": "node-env""#)),
+        objects
+            .iter()
+            .all(|meta| !meta.contains(r#""kind": "node-env""#)),
         "node object survived GC"
     );
     ok(
@@ -189,10 +201,19 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
 
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
     let refused = blanket(&bin, &project, &store, &["gc", "--keep-days", "0"]);
-    assert!(!refused.status.success(), "uninitialized GC unexpectedly ran");
+    assert!(
+        !refused.status.success(),
+        "uninitialized GC unexpectedly ran"
+    );
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("refusing to sweep"), "unexpected error: {stderr}");
-    assert!(stderr.contains("--register"), "migration hint missing: {stderr}");
+    assert!(
+        stderr.contains("refusing to sweep"),
+        "unexpected error: {stderr}"
+    );
+    assert!(
+        stderr.contains("--register"),
+        "migration hint missing: {stderr}"
+    );
     assert!(object.is_dir(), "default upgrade GC deleted the old object");
 
     ok(
@@ -200,7 +221,13 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
             &bin,
             &project,
             &store,
-            &["gc", "--register", project.to_str().unwrap(), "--keep-days", "0"],
+            &[
+                "gc",
+                "--register",
+                project.to_str().unwrap(),
+                "--keep-days",
+                "0",
+            ],
         ),
         "register existing project",
     );

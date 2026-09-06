@@ -69,21 +69,39 @@ fn python_requirements_add_update_remove_roundtrip() {
     let bin = binary();
 
     assert_ok(
-        run(&bin, project, &store, &["add", "--no-sync", "charset-normalizer==3.4.3"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--no-sync", "charset-normalizer==3.4.3"],
+            &temp.0,
+        ),
         "python requirements add",
     );
     assert!(std::fs::read_to_string(project.join("requirements.txt"))
         .unwrap()
         .contains("charset-normalizer==3.4.3"));
     assert_ok(
-        run(&bin, project, &store, &["update", "--no-sync", "charset-normalizer"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "charset-normalizer"],
+            &temp.0,
+        ),
         "python requirements update",
     );
     assert!(std::fs::read_to_string(project.join("requirements.txt"))
         .unwrap()
         .contains("charset-normalizer==3.4.3"));
     assert_ok(
-        run(&bin, project, &store, &["remove", "--no-sync", "charset-normalizer"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--no-sync", "charset-normalizer"],
+            &temp.0,
+        ),
         "python requirements remove",
     );
     let requirements = std::fs::read_to_string(project.join("requirements.txt")).unwrap();
@@ -104,21 +122,39 @@ fn python_uv_add_update_remove_roundtrip() {
     let bin = binary();
 
     assert_ok(
-        run(&bin, project, &store, &["add", "--dev", "--no-sync", "idna==3.10"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--dev", "--no-sync", "idna==3.10"],
+            &temp.0,
+        ),
         "uv add",
     );
     assert!(std::fs::read_to_string(project.join("pyproject.toml"))
         .unwrap()
         .contains("idna"));
     assert_ok(
-        run(&bin, project, &store, &["update", "--no-sync", "idna"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "idna"],
+            &temp.0,
+        ),
         "uv update",
     );
     assert!(std::fs::read_to_string(project.join("pyproject.toml"))
         .unwrap()
         .contains("idna"));
     assert_ok(
-        run(&bin, project, &store, &["remove", "--dev", "--no-sync", "idna"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--dev", "--no-sync", "idna"],
+            &temp.0,
+        ),
         "uv remove",
     );
     let pyproject = std::fs::read_to_string(project.join("pyproject.toml")).unwrap();
@@ -131,29 +167,49 @@ fn npm_add_update_remove_roundtrip() {
     let temp = TempDir::new("npm");
     let project = &temp.0;
     let store = project.join("store");
-    std::fs::write(project.join("package.json"), "{\"name\":\"deps-e2e\",\"version\":\"1.0.0\"}\n").unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        "{\"name\":\"deps-e2e\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
     let bin = binary();
 
     assert_ok(
-        run(&bin, project, &store, &["add", "--no-sync", "is-number@7.0.0"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--no-sync", "is-number@7.0.0"],
+            &temp.0,
+        ),
         "npm add",
     );
-    let package: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join("package.json")).unwrap(),
-    )
-    .unwrap();
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
+            .unwrap();
     assert_eq!(package["dependencies"]["is-number"], "^7.0.0");
     assert_ok(
-        run(&bin, project, &store, &["update", "--no-sync", "is-number"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "is-number"],
+            &temp.0,
+        ),
         "npm update",
     );
-    let package: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join("package.json")).unwrap(),
-    )
-    .unwrap();
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
+            .unwrap();
     assert_eq!(package["dependencies"]["is-number"], "^7.0.0");
     assert_ok(
-        run(&bin, project, &store, &["remove", "--no-sync", "is-number"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--no-sync", "is-number"],
+            &temp.0,
+        ),
         "npm remove",
     );
     let package = std::fs::read_to_string(project.join("package.json")).unwrap();
@@ -176,7 +232,13 @@ fn cargo_add_update_remove_roundtrip() {
     let bin = binary();
 
     assert_ok(
-        run(&bin, project, &store, &["add", "--no-sync", "itoa@1.0.15"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--no-sync", "itoa@1.0.15"],
+            &temp.0,
+        ),
         "cargo add",
     );
     assert!(std::fs::read_to_string(project.join("Cargo.toml"))
@@ -186,14 +248,26 @@ fn cargo_add_update_remove_roundtrip() {
         .unwrap()
         .contains("name = \"itoa\""));
     assert_ok(
-        run(&bin, project, &store, &["update", "--no-sync", "itoa"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "itoa"],
+            &temp.0,
+        ),
         "cargo update",
     );
     assert!(std::fs::read_to_string(project.join("Cargo.lock"))
         .unwrap()
         .contains("name = \"itoa\""));
     assert_ok(
-        run(&bin, project, &store, &["remove", "--no-sync", "itoa"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--no-sync", "itoa"],
+            &temp.0,
+        ),
         "cargo remove",
     );
     let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
@@ -206,7 +280,11 @@ fn go_add_update_remove_roundtrip() {
     let temp = TempDir::new("go");
     let project = &temp.0;
     let store = project.join("store");
-    std::fs::write(project.join("go.mod"), "module example.com/deps-e2e\n\ngo 1.24\n").unwrap();
+    std::fs::write(
+        project.join("go.mod"),
+        "module example.com/deps-e2e\n\ngo 1.24\n",
+    )
+    .unwrap();
     std::fs::write(
         project.join("main.go"),
         "package main\n\nimport _ \"rsc.io/quote\"\n\nfunc main() {}\n",
@@ -215,7 +293,13 @@ fn go_add_update_remove_roundtrip() {
     let bin = binary();
 
     assert_ok(
-        run(&bin, project, &store, &["add", "--no-sync", "rsc.io/quote@v1.5.2"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--no-sync", "rsc.io/quote@v1.5.2"],
+            &temp.0,
+        ),
         "go add",
     );
     assert!(std::fs::read_to_string(project.join("go.mod"))
@@ -225,14 +309,26 @@ fn go_add_update_remove_roundtrip() {
         .unwrap()
         .contains("rsc.io/quote v1.5.2"));
     assert_ok(
-        run(&bin, project, &store, &["update", "--no-sync", "rsc.io/quote"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "rsc.io/quote"],
+            &temp.0,
+        ),
         "go update",
     );
     assert!(std::fs::read_to_string(project.join("go.mod"))
         .unwrap()
         .contains("rsc.io/quote v1.5.2"));
     assert_ok(
-        run(&bin, project, &store, &["remove", "--no-sync", "rsc.io/quote"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--no-sync", "rsc.io/quote"],
+            &temp.0,
+        ),
         "go remove",
     );
     let go_mod = std::fs::read_to_string(project.join("go.mod")).unwrap();
@@ -245,15 +341,17 @@ fn ruby_add_update_remove_roundtrip() {
     let temp = TempDir::new("ruby");
     let project = &temp.0;
     let store = project.join("store");
-    std::fs::write(
-        project.join("Gemfile"),
-        "source \"https://rubygems.org\"\n",
-    )
-    .unwrap();
+    std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
     let bin = binary();
 
     assert_ok(
-        run(&bin, project, &store, &["add", "--no-sync", "rake@13.2.1"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--no-sync", "rake@13.2.1"],
+            &temp.0,
+        ),
         "ruby add",
     );
     assert!(std::fs::read_to_string(project.join("Gemfile"))
@@ -263,14 +361,26 @@ fn ruby_add_update_remove_roundtrip() {
         .unwrap()
         .contains("rake (13.2.1)"));
     assert_ok(
-        run(&bin, project, &store, &["update", "--no-sync", "rake"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "rake"],
+            &temp.0,
+        ),
         "ruby update",
     );
     assert!(std::fs::read_to_string(project.join("Gemfile.lock"))
         .unwrap()
         .contains("rake (13.2.1)"));
     assert_ok(
-        run(&bin, project, &store, &["remove", "--no-sync", "rake"], &temp.0),
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--no-sync", "rake"],
+            &temp.0,
+        ),
         "ruby remove",
     );
     let gemfile = std::fs::read_to_string(project.join("Gemfile")).unwrap();

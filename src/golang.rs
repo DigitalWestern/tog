@@ -29,17 +29,20 @@ struct GoPin {
     sha256: &'static str,
 }
 
-const GO_PIN_ROWS: &[GoPin] = &[GoPin {
-    platform: Platform::Aarch64AppleDarwin,
-    version: GO_VERSION,
-    url: "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz",
-    sha256: "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e",
-}, GoPin {
-    platform: Platform::X86_64UnknownLinuxGnu,
-    version: GO_VERSION,
-    url: "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
-    sha256: "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
-}];
+const GO_PIN_ROWS: &[GoPin] = &[
+    GoPin {
+        platform: Platform::Aarch64AppleDarwin,
+        version: GO_VERSION,
+        url: "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz",
+        sha256: "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e",
+    },
+    GoPin {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        version: GO_VERSION,
+        url: "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
+        sha256: "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
+    },
+];
 
 fn go_pin(platform: Platform) -> io::Result<&'static GoPin> {
     GO_PIN_ROWS
@@ -107,7 +110,8 @@ fn extract_go_toolchain(archive: &Path, staged: &Path) -> io::Result<()> {
         }
         let mut components = entry.split('/');
         if components.next() != Some("go")
-            || components.any(|component| component.is_empty() || component == "." || component == "..")
+            || components
+                .any(|component| component.is_empty() || component == "." || component == "..")
         {
             return Err(err(format!(
                 "go archive has unexpected layout entry {raw:?}; expected a single top-level go/ root"
@@ -197,7 +201,11 @@ pub(crate) fn run_checked(
     offline: bool,
     args: &[&str],
 ) -> io::Result<()> {
-    crate::ui::trace(&format!("run: go {} (in {})", args.join(" "), cwd.display()));
+    crate::ui::trace(&format!(
+        "run: go {} (in {})",
+        args.join(" "),
+        cwd.display()
+    ));
     let out = run_go(go_obj, cwd, modcache, offline, args)?;
     if crate::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
@@ -253,8 +261,7 @@ pub fn resolve_toolchain(platform: Platform, gomod: &str) -> io::Result<&'static
     }
     let floor = |k: &Option<Vec<u64>>| k.clone().unwrap_or_default();
     let (need_a, need_b) = (floor(&min_go), floor(&suggestion));
-    pins
-        .iter()
+    pins.iter()
         .copied()
         .filter_map(|p| go_version_key(p, &pins).ok().map(|k| (k, p)))
         .filter(|(k, _)| *k >= need_a && *k >= need_b)
@@ -766,9 +773,7 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
             // already exist, so a poisoned cache byte would go straight
             // into the object).
             let src = cache_verified_held(store, hash)
-                .map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version))
-                })?;
+                .map_err(|e| io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version)))?;
             // COPY, never hardlink: builds must not reach the cache.
             fs::copy(&src, dir.join(format!("{ver}.{ext}")))?;
         }
@@ -992,10 +997,13 @@ pub fn build_sandboxed(
         path: format!("{}:/usr/bin:/bin", go_obj.join("bin").display()),
     };
     let result = crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
-        io::Error::new(e.kind(), format!(
-            "go build failed: {e}; network is denied during builds (local \
+        io::Error::new(
+            e.kind(),
+            format!(
+                "go build failed: {e}; network is denied during builds (local \
              replace directives and network-dependent tooling are unsupported)"
-        ))
+            ),
+        )
     });
     let moved: io::Result<()> = result.and_then(|_| {
         for entry in fs::read_dir(&outdir)? {
@@ -1036,10 +1044,7 @@ mod tests {
 
         let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
         assert_eq!(linux.version, "1.27.0");
-        assert_eq!(
-            linux.url,
-            "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz"
-        );
+        assert_eq!(linux.url, "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz");
         assert_eq!(
             linux.sha256,
             "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
@@ -1070,7 +1075,11 @@ mod tests {
             identity.object_id(),
             "d2d13392a210fa6589345911feb433fbf3bc06ae-go-1.27.0"
         );
-        let empty = GoPlan { go_version: "1.27.0".into(), module: "example.com/x".into(), modules: vec![] };
+        let empty = GoPlan {
+            go_version: "1.27.0".into(),
+            module: "example.com/x".into(),
+            modules: vec![],
+        };
         let modcache = modcache_identity(pin, &empty);
         assert_eq!(
             modcache.inputs["extractor"],
@@ -1082,10 +1091,7 @@ mod tests {
             modcache_identity(linux, &empty).object_id(),
             modcache.object_id()
         );
-        assert_eq!(
-            pin.url,
-            "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz"
-        );
+        assert_eq!(pin.url, "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz");
     }
 
     #[test]
@@ -1095,17 +1101,27 @@ mod tests {
             "1.27.0"
         );
         assert_eq!(
-            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27\n\ntoolchain go1.27.0\n").unwrap(),
+            resolve_toolchain(
+                Platform::Aarch64AppleDarwin,
+                "module m\n\ngo 1.27\n\ntoolchain go1.27.0\n"
+            )
+            .unwrap(),
             "1.27.0"
         );
         assert_eq!(
-            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.24\n\ntoolchain default\n").unwrap(),
+            resolve_toolchain(
+                Platform::Aarch64AppleDarwin,
+                "module m\n\ngo 1.24\n\ntoolchain default\n"
+            )
+            .unwrap(),
             "1.27.0"
         );
         // Requirement above every pin -> fail.
         assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.99\n").is_err());
         // Prerelease -> fail with instructions.
-        assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27rc1\n").is_err());
+        assert!(
+            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27rc1\n").is_err()
+        );
     }
 
     #[test]
@@ -1119,11 +1135,7 @@ mod tests {
             );
         }
         assert_eq!(
-            resolve_toolchain(
-                platform,
-                "module m\n\ngo 1.21\n\ntoolchain go1.27.0\n"
-            )
-            .unwrap(),
+            resolve_toolchain(platform, "module m\n\ngo 1.21\n\ntoolchain go1.27.0\n").unwrap(),
             "1.27.0"
         );
         assert_eq!(
@@ -1131,17 +1143,11 @@ mod tests {
             "1.27.0"
         );
         assert!(resolve_toolchain(platform, "module m\n\ngo 1.28\n").is_err());
-        assert!(resolve_toolchain(
-            platform,
-            "module m\n\ngo 1.27\n\ntoolchain go1.28\n"
-        )
-        .is_err());
+        assert!(resolve_toolchain(platform, "module m\n\ngo 1.27\n\ntoolchain go1.28\n").is_err());
         assert!(resolve_toolchain(platform, "module m\n\ngo 1.27rc1\n").is_err());
-        assert!(resolve_toolchain(
-            platform,
-            "module m\n\ngo 1.27\n\ntoolchain go1.27rc1\n"
-        )
-        .is_err());
+        assert!(
+            resolve_toolchain(platform, "module m\n\ngo 1.27\n\ntoolchain go1.27rc1\n").is_err()
+        );
     }
 
     #[test]
@@ -1159,7 +1165,10 @@ mod tests {
         assert_eq!(value(&offline, "GOROOT"), Some("/store/objects/linux-go"));
         assert_eq!(value(&offline, "GOENV"), Some("off"));
         assert_eq!(value(&offline, "GOWORK"), Some("off"));
-        assert_eq!(value(&offline, "GOMODCACHE"), Some("/store/objects/modcache"));
+        assert_eq!(
+            value(&offline, "GOMODCACHE"),
+            Some("/store/objects/modcache")
+        );
         assert_eq!(value(&offline, "GOPROXY"), Some("off"));
         assert_eq!(value(&offline, "GOSUMDB"), Some("off"));
         assert!(value(&offline, "GOVCS").is_none());
@@ -1191,17 +1200,15 @@ mod tests {
         std::fs::write(source.join("go/pkg/README"), b"pkg").unwrap();
         let archive = temp.join("go.tar.gz");
         std::fs::create_dir_all(&source).unwrap();
-        assert!(
-            Command::new("/usr/bin/tar")
-                .args(["-czf"])
-                .arg(&archive)
-                .args(["-C"])
-                .arg(&source)
-                .arg("go")
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&source)
+            .arg("go")
+            .status()
+            .unwrap()
+            .success());
         let staged = temp.join("staged");
         std::fs::create_dir_all(&staged).unwrap();
         extract_go_toolchain(&archive, &staged).unwrap();
@@ -1214,17 +1221,15 @@ mod tests {
         std::fs::create_dir_all(nested_source.join("outer/go/bin")).unwrap();
         std::fs::write(nested_source.join("outer/go/bin/go"), b"go").unwrap();
         let nested_archive = temp.join("nested.tar.gz");
-        assert!(
-            Command::new("/usr/bin/tar")
-                .args(["-czf"])
-                .arg(&nested_archive)
-                .args(["-C"])
-                .arg(&nested_source)
-                .arg("outer")
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&nested_archive)
+            .args(["-C"])
+            .arg(&nested_source)
+            .arg("outer")
+            .status()
+            .unwrap()
+            .success());
         let nested_staged = temp.join("nested-staged");
         std::fs::create_dir_all(&nested_staged).unwrap();
         let error = extract_go_toolchain(&nested_archive, &nested_staged).unwrap_err();

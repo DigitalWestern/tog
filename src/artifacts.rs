@@ -81,7 +81,10 @@ pub fn wants_source_build(script_text: &str, has_declared_artifacts: bool) -> bo
 /// The environment that makes a prebuilt-binary downloader compile instead.
 pub fn source_build_envs() -> Vec<(String, String)> {
     vec![
-        ("npm_config_build_from_source".to_string(), "true".to_string()),
+        (
+            "npm_config_build_from_source".to_string(),
+            "true".to_string(),
+        ),
         // node-pre-gyp reads this spelling; prebuild-install reads the npm_config one.
         ("BUILD_FROM_SOURCE".to_string(), "true".to_string()),
     ]
@@ -148,7 +151,10 @@ fn resolve_electron(
             // tables: this IS the checksum source. The zip is then verified
             // against it, so a corrupted or swapped zip fails.
             let text = crate::fetch::fetch_text(&sums_url).map_err(|e| {
-                io::Error::new(e.kind(), format!("electron {version}: fetch {sums_url}: {e}"))
+                io::Error::new(
+                    e.kind(),
+                    format!("electron {version}: fetch {sums_url}: {e}"),
+                )
             })?;
             fs::create_dir_all(&cached)?;
             fs::write(cached.join("SHASUMS256.txt"), text.as_bytes())?;
@@ -214,7 +220,8 @@ pub fn provision(
         return Ok(None);
     }
     let (sha256, sums, release_url, zip_name) = resolve_electron(store, platform, version)?;
-    let zip = crate::fetch::download_verified(store, &format!("{release_url}/{zip_name}"), &sha256)?;
+    let zip =
+        crate::fetch::download_verified(store, &format!("{release_url}/{zip_name}"), &sha256)?;
 
     let cache_root = scratch.join(".cache/blanket-electron");
     let dir = cache_root.join(electron_cache_directory(&release_url));
@@ -287,12 +294,21 @@ mod tests {
 
     #[test]
     fn source_build_is_detected_from_the_script_text() {
-        assert!(wants_source_build("prebuild-install || node-gyp rebuild", false));
-        assert!(wants_source_build("node-pre-gyp install --fallback-to-build", false));
+        assert!(wants_source_build(
+            "prebuild-install || node-gyp rebuild",
+            false
+        ));
+        assert!(wants_source_build(
+            "node-pre-gyp install --fallback-to-build",
+            false
+        ));
         assert!(!wants_source_build("node-gyp rebuild", false));
         assert!(!wants_source_build("echo hello", false));
         // Declared artifacts win: the bytes are already where the downloader
         // looks, so it must not be told to ignore them.
-        assert!(!wants_source_build("prebuild-install || node-gyp rebuild", true));
+        assert!(!wants_source_build(
+            "prebuild-install || node-gyp rebuild",
+            true
+        ));
     }
 }

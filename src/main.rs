@@ -48,7 +48,9 @@ enum Pending {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (options, pending) = match cli::parse(&args) {
-        Ok(cli::Parsed::Run(invocation)) => (invocation.options, Pending::Command(invocation.command)),
+        Ok(cli::Parsed::Run(invocation)) => {
+            (invocation.options, Pending::Command(invocation.command))
+        }
         Ok(cli::Parsed::Print(text)) => {
             print!("{text}");
             exit(0);
@@ -59,7 +61,14 @@ fn main() {
             name,
             args,
             message,
-        }) => (options, Pending::Script { name, args, message }),
+        }) => (
+            options,
+            Pending::Script {
+                name,
+                args,
+                message,
+            },
+        ),
         Err(error) => {
             eprint!("{}", error.render());
             exit(cli::EXIT_USAGE);
@@ -166,12 +175,18 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
         Doctor { json } => {
             let checks = inspect::doctor(&project_dir());
             print!("{}", inspect::render_doctor(&checks, json)?);
-            if checks.iter().any(|check| check.level == inspect::Level::Fail) {
+            if checks
+                .iter()
+                .any(|check| check.level == inspect::Level::Fail)
+            {
                 exit(cli::EXIT_FAILURE);
             }
             return Ok(());
         }
-        Ls { ref ecosystem, json } => {
+        Ls {
+            ref ecosystem,
+            json,
+        } => {
             print!(
                 "{}",
                 inspect::ls(&project_dir(), ecosystem.as_deref(), json, ui::verbose())?
@@ -201,7 +216,11 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
             },
             no_sync,
         ),
-        Remove { names, dev, no_sync } => run_deps(
+        Remove {
+            names,
+            dev,
+            no_sync,
+        } => run_deps(
             platform,
             deps::Request {
                 verb: deps::Verb::Remove,
@@ -320,7 +339,11 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
         writeln!(stdout, "blanket: registered root {}", entry.path.display())?;
     }
     let report = gc::collect(&store, options, &mut stdout)?;
-    let verb = if options.dry_run { "would free" } else { "freed" };
+    let verb = if options.dry_run {
+        "would free"
+    } else {
+        "freed"
+    };
     writeln!(
         stdout,
         "blanket: gc {verb} {} MB ({} objects, {} cached artifacts)",
@@ -414,17 +437,15 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
     ui::trace_command(&command);
-    let status = command
-        .status()
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "could not run store Cargo to generate Cargo.lock: {e}; \
+    let status = command.status().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "could not run store Cargo to generate Cargo.lock: {e}; \
                      use `blanket sync` after fixing the project or network"
-                ),
-            )
-        })?;
+            ),
+        )
+    })?;
     if !status.success() {
         return Err(io::Error::other(
             "store Cargo generate-lockfile failed; check the project manifest and network",
@@ -442,7 +463,11 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
 /// caller: planning, realization and the closure all use this one value.
 /// The Python plan, the interpreter selection it was made with, and the
 /// project files it was computed from (recorded in the closure for status).
-type PythonPlan = (types::Plan, pyselect::PythonSelection, Vec<project::InputRecord>);
+type PythonPlan = (
+    types::Plan,
+    pyselect::PythonSelection,
+    Vec<project::InputRecord>,
+);
 
 /// Candidate input files for the status record: the manifest that won, the
 /// interpreter request, and every lock blanket reads or writes.
@@ -555,9 +580,7 @@ fn read_plan(platform: Platform, dir: &Path) -> io::Result<PythonPlan> {
         ));
     }
 
-    let generated_input = if input.starts_with("requirements")
-        && resolver_source == source
-    {
+    let generated_input = if input.starts_with("requirements") && resolver_source == source {
         None
     } else if is_fully_pinned(&source) && resolver_source == source {
         None
@@ -653,11 +676,7 @@ fn record_skippable_specs(input: &str, source: &str) -> io::Result<()> {
     record_skippable_specs_with(input, source, policy::record)
 }
 
-fn record_skippable_specs_with<F>(
-    _input: &str,
-    source: &str,
-    mut record: F,
-) -> io::Result<()>
+fn record_skippable_specs_with<F>(_input: &str, source: &str, mut record: F) -> io::Result<()>
 where
     F: FnMut(&str, &str, &str) -> io::Result<()>,
 {
@@ -729,9 +748,10 @@ fn locked_requirements(
     let lock_path = dir.join("requirements.lock.txt");
     let stamp_path = dir.join(".blanket/lock-source.hash");
     let source_hash = if compile_path.is_some_and(|path| {
-        !path.components().any(|component| component.as_os_str() == ".blanket")
-    })
-    {
+        !path
+            .components()
+            .any(|component| component.as_os_str() == ".blanket")
+    }) {
         let path = compile_path.expect("checked above");
         let tree_hash = manifest::requirements_tree_hash(path)?;
         lock_source_hash(pyver, &format!("{source}\0{tree_hash}"))
@@ -749,9 +769,7 @@ fn locked_requirements(
     eprintln!("blanket: {input} is not hash-pinned; resolving with the store uv...");
     // Store-pinned uv, not host uv: a bare machine needs only blanket.
     let uv = python::ensure_uv_for(&store::Store::open()?, platform)?.join("uv");
-    let compile_input = compile_path
-        .and_then(|path| path.to_str())
-        .unwrap_or(input);
+    let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut command = std::process::Command::new(&uv);
     command.args(["pip", "compile", compile_input, "--generate-hashes"]);
     if !ui::verbose() {
@@ -884,11 +902,7 @@ struct GoInputs {
     gosum_sha256: String,
 }
 
-fn load_go_inputs(
-    platform: Platform,
-    dir: &Path,
-    store: &store::Store,
-) -> io::Result<GoInputs> {
+fn load_go_inputs(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<GoInputs> {
     let go_obj = golang::ensure_go_for(store, platform)?;
     let plan = golang::plan_go(store, platform, dir, &go_obj)?;
     let gosum = std::fs::read_to_string(dir.join("go.sum")).unwrap_or_default();
@@ -936,14 +950,12 @@ fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
     }
     command.current_dir(dir).env("PATH", path);
     ui::trace_command(&command);
-    let status = command
-        .status()
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("run store npm ({}/bin/npm): {e}", node.display()),
-            )
-        })?;
+    let status = command.status().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("run store npm ({}/bin/npm): {e}", node.display()),
+        )
+    })?;
     if !status.success() {
         return Err(io::Error::other("npm install --package-lock-only failed"));
     }
@@ -963,10 +975,8 @@ fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
         npm::preflight(platform)?;
     }
     if has_python_input(dir)? {
-        let selection = pyselect::select_python_with_inputs(
-            platform,
-            &manifest::python_inputs(dir)?,
-        )?;
+        let selection =
+            pyselect::select_python_with_inputs(platform, &manifest::python_inputs(dir)?)?;
         python::preflight(platform, selection.pin.version)?;
     }
     if dir.join("go.mod").is_file() {
@@ -1197,17 +1207,26 @@ fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
         "cargo" => cwd
             .ancestors()
             .find(|dir| dir.join("Cargo.toml").is_file())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no Cargo.toml found from here upward"))?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no Cargo.toml found from here upward",
+                )
+            })?
             .to_path_buf(),
         "go" => cwd
             .ancestors()
             .find(|dir| dir.join("go.mod").is_file())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no go.mod found from here upward"))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no go.mod found from here upward")
+            })?
             .to_path_buf(),
         "elixir" => cwd
             .ancestors()
             .find(|dir| dir.join("mix.exs").is_file())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no mix.exs found from here upward"))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no mix.exs found from here upward")
+            })?
             .to_path_buf(),
         _ => cwd.clone(),
     };
@@ -1224,13 +1243,7 @@ fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
                 &inputs.plan,
                 &inputs.lock_digest,
             )?;
-            cargo::build_sandboxed(
-                platform,
-                &inputs.root,
-                &inputs.rust_obj,
-                &vendor_obj,
-                rest,
-            )
+            cargo::build_sandboxed(platform, &inputs.root, &inputs.rust_obj, &vendor_obj, rest)
         }
         "go" => {
             let root = cwd
@@ -1241,7 +1254,8 @@ fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
                 })?
                 .to_path_buf();
             let inputs = load_go_inputs(platform, &root, &store)?;
-            let modcache = golang::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
+            let modcache =
+                golang::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
             golang::project_go_env(
                 &root,
                 &inputs.go_obj,
@@ -1262,8 +1276,15 @@ fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
             let beam = elixir::ensure_beam_for(&store, platform)?;
             let (plan, lock_sha256) = elixir::plan_elixir(&store, &root, &beam)?;
             let deps = elixir::realize_deps(&store, platform, &plan, &beam)?;
-            let projection =
-                elixir::project_elixir_env(platform, &root, &beam, &deps, &plan, &lock_sha256, false)?;
+            let projection = elixir::project_elixir_env(
+                platform,
+                &root,
+                &beam,
+                &deps,
+                &plan,
+                &lock_sha256,
+                false,
+            )?;
             elixir::build_sandboxed(platform, &root, &beam, &projection, rest)
         }
         _ => {
@@ -1324,7 +1345,9 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
                     .unwrap_or(false)
                     && forest_root
                         .as_ref()
-                        .and_then(|root| path.canonicalize().ok().map(|path| path.starts_with(root)))
+                        .and_then(|root| {
+                            path.canonicalize().ok().map(|path| path.starts_with(root))
+                        })
                         .unwrap_or(false)
             })
             .unwrap_or_else(|| nm.clone())
@@ -1451,13 +1474,12 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         prefix.push(beam.join("otp/bin").to_string_lossy().into_owned());
         let scratch = std::env::temp_dir().join(format!("blanket-mix-run-{}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
-        let (prefixes, remove, set) =
-            elixir::run_env(
-                &beam,
-                &projection,
-                &elixir::build_root(platform, &dir)?,
-                &scratch,
-            )?;
+        let (prefixes, remove, set) = elixir::run_env(
+            &beam,
+            &projection,
+            &elixir::build_root(platform, &dir)?,
+            &scratch,
+        )?;
         blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if dir.join(".blanket/closures/dotnet.json").exists() {
@@ -1730,10 +1752,11 @@ mod tests {
             strict: true,
             ..policy::Policy::default()
         };
-        let error = record_skippable_specs_with("requirements.txt", source, |kind, subject, detail| {
-            policy::record_with(&strict, kind, subject, detail)
-        })
-        .unwrap_err();
+        let error =
+            record_skippable_specs_with("requirements.txt", source, |kind, subject, detail| {
+                policy::record_with(&strict, kind, subject, detail)
+            })
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
 
         let mut recorded = Vec::new();

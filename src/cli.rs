@@ -26,17 +26,37 @@ pub const EXIT_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Sync { fresh: bool, strict: bool },
+    Sync {
+        fresh: bool,
+        strict: bool,
+    },
     Plan,
     /// Everything after `build` (ecosystem name and tool arguments); the
     /// ecosystem is inferred by the dispatcher from the project layout.
-    Build { args: Vec<String> },
+    Build {
+        args: Vec<String>,
+    },
     /// The program (or package.json script) and its arguments.
-    Run { command: Vec<String> },
-    Sbom { output: Option<PathBuf> },
-    Add { specs: Vec<String>, dev: bool, no_sync: bool },
-    Remove { names: Vec<String>, dev: bool, no_sync: bool },
-    Update { names: Vec<String>, no_sync: bool },
+    Run {
+        command: Vec<String>,
+    },
+    Sbom {
+        output: Option<PathBuf>,
+    },
+    Add {
+        specs: Vec<String>,
+        dev: bool,
+        no_sync: bool,
+    },
+    Remove {
+        names: Vec<String>,
+        dev: bool,
+        no_sync: bool,
+    },
+    Update {
+        names: Vec<String>,
+        no_sync: bool,
+    },
     /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
     X {
         ecosystem: Option<String>,
@@ -44,13 +64,22 @@ pub enum Command {
         tool: String,
         args: Vec<String>,
     },
-    Status { json: bool },
-    Ls { ecosystem: Option<String>, json: bool },
-    Doctor { json: bool },
+    Status {
+        json: bool,
+    },
+    Ls {
+        ecosystem: Option<String>,
+        json: bool,
+    },
+    Doctor {
+        json: bool,
+    },
     Gc(GcArgs),
     StorePath,
     StoreRoots,
-    Completions { shell: Shell },
+    Completions {
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,8 +606,11 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                 index += 2;
             }
             _ if arg.starts_with("--directory=") => {
-                options.directory =
-                    Some(non_empty(&arg["--directory=".len()..], "--directory", None)?);
+                options.directory = Some(non_empty(
+                    &arg["--directory=".len()..],
+                    "--directory",
+                    None,
+                )?);
                 index += 1;
             }
             _ if arg.starts_with("-C") => {
@@ -805,10 +837,9 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             dev,
             no_sync,
         })),
-        "remove" if positional.is_empty() => Err(UsageError::new(
-            "remove: no package given",
-            Some("remove"),
-        )),
+        "remove" if positional.is_empty() => {
+            Err(UsageError::new("remove: no package given", Some("remove")))
+        }
         "remove" => Ok(Some(Command::Remove {
             names: positional,
             dev,
@@ -832,9 +863,8 @@ fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageErr
             Some(name),
         ));
     }
-    crate::deps::validate_spec(arg).map_err(|error| {
-        UsageError::new(format!("{name}: {error}"), Some(name))
-    })
+    crate::deps::validate_spec(arg)
+        .map_err(|error| UsageError::new(format!("{name}: {error}"), Some(name)))
 }
 
 fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -916,7 +946,9 @@ fn validate_x_version_pair(from: Option<&str>, tool: &str) -> Result<(), UsageEr
     let from_version = from.and_then(|value| split_x_version(value).1);
     for version in [from_version, tool_version].into_iter().flatten() {
         if version.is_empty()
-            || version.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+            || version
+                .bytes()
+                .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
             || version.chars().any(char::is_whitespace)
             || version.starts_with('-')
         {
@@ -992,14 +1024,18 @@ fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
         match arg {
             "-h" | "--help" => return Ok(None),
             "-o" | "--output" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| UsageError::new(format!("{arg} needs a file path"), Some("sbom")))?;
+                let value = args.get(index + 1).ok_or_else(|| {
+                    UsageError::new(format!("{arg} needs a file path"), Some("sbom"))
+                })?;
                 output = Some(PathBuf::from(value));
                 index += 1;
             }
             _ if arg.starts_with("--output=") => {
-                output = Some(non_empty(&arg["--output=".len()..], "--output", Some("sbom"))?);
+                output = Some(non_empty(
+                    &arg["--output=".len()..],
+                    "--output",
+                    Some("sbom"),
+                )?);
             }
             other => return Err(reject("sbom", other)),
         }
@@ -1033,8 +1069,11 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
                 continue;
             }
             _ if arg.starts_with("--register=") => {
-                gc.register
-                    .push(non_empty(&arg["--register=".len()..], "--register", Some("gc"))?);
+                gc.register.push(non_empty(
+                    &arg["--register=".len()..],
+                    "--register",
+                    Some("gc"),
+                )?);
             }
             "--keep-days" => {
                 let value = args
@@ -1143,7 +1182,9 @@ fn reject(name: &'static str, arg: &str) -> UsageError {
         with_suggestion(
             format!("{name}: unknown option '{arg}'"),
             flag_name(arg),
-            spec.options.iter().flat_map(|(flag, _)| option_spellings(flag)),
+            spec.options
+                .iter()
+                .flat_map(|(flag, _)| option_spellings(flag)),
         )
     } else {
         format!("{name}: unexpected argument '{arg}'")
@@ -1366,9 +1407,8 @@ fn zsh_completions() -> String {
             .options
             .iter()
             .flat_map(|(flag, description)| {
-                option_spellings(flag).map(move |spelling| {
-                    format!("'{spelling}[{}]'", zsh_quote(description))
-                })
+                option_spellings(flag)
+                    .map(move |spelling| format!("'{spelling}[{}]'", zsh_quote(description)))
             })
             .collect();
         if !spec.words.is_empty() {
@@ -1428,8 +1468,12 @@ fn fish_completions() -> String {
         ));
     }
     out.push_str("complete -c blanket -n '__fish_use_subcommand' -a install -d 'alias for sync'\n");
-    out.push_str("complete -c blanket -n '__fish_use_subcommand' -a help -d 'show help for a command'\n");
-    out.push_str("complete -c blanket -n '__fish_use_subcommand' -a version -d 'print the version'\n");
+    out.push_str(
+        "complete -c blanket -n '__fish_use_subcommand' -a help -d 'show help for a command'\n",
+    );
+    out.push_str(
+        "complete -c blanket -n '__fish_use_subcommand' -a version -d 'print the version'\n",
+    );
     out.push_str("complete -c blanket -n '__fish_use_subcommand' -a '(__blanket_scripts)' -d 'package.json script'\n");
     for spec in COMMANDS {
         let seen = if spec.name == "sync" {
@@ -1469,7 +1513,11 @@ fn fish_completions() -> String {
     }
     out.push_str(&format!(
         "complete -c blanket -n '__fish_seen_subcommand_from help' -a '{}'\n",
-        COMMANDS.iter().map(|spec| spec.name).collect::<Vec<_>>().join(" ")
+        COMMANDS
+            .iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>()
+            .join(" ")
     ));
     out
 }
@@ -1539,8 +1587,14 @@ mod tests {
             message(&["snyc"]),
             "unknown command 'snyc'; did you mean 'sync'?"
         );
-        assert_eq!(message(&["sy"]), "unknown command 'sy'; did you mean 'sync'?");
-        assert_eq!(message(&["gcc"]), "unknown command 'gcc'; did you mean 'gc'?");
+        assert_eq!(
+            message(&["sy"]),
+            "unknown command 'sy'; did you mean 'sync'?"
+        );
+        assert_eq!(
+            message(&["gcc"]),
+            "unknown command 'gcc'; did you mean 'gc'?"
+        );
         assert_eq!(message(&["deploy"]), "unknown command 'deploy'");
         assert_eq!(
             render_usage_error("unknown command 'deploy'", None),
@@ -1558,17 +1612,35 @@ mod tests {
         for words in [&["--help"][..], &["-h"], &["help"], &["help", "help"]] {
             assert_eq!(printed(words), usage(), "{words:?}");
         }
-        for words in [&["--version"][..], &["-V"], &["version"], &["help", "version"]] {
+        for words in [
+            &["--version"][..],
+            &["-V"],
+            &["version"],
+            &["help", "version"],
+        ] {
             assert_eq!(printed(words), format!("blanket {VERSION}\n"), "{words:?}");
         }
         for spec in COMMANDS {
-            assert_eq!(printed(&["help", spec.name]), help(spec), "help {}", spec.name);
-            assert_eq!(printed(&[spec.name, "--help"]), help(spec), "{} --help", spec.name);
+            assert_eq!(
+                printed(&["help", spec.name]),
+                help(spec),
+                "help {}",
+                spec.name
+            );
+            assert_eq!(
+                printed(&[spec.name, "--help"]),
+                help(spec),
+                "{} --help",
+                spec.name
+            );
             assert_eq!(printed(&[spec.name, "-h"]), help(spec), "{} -h", spec.name);
         }
         assert_eq!(printed(&["help", "install"]), help(spec("sync").unwrap()));
         assert_eq!(printed(&["i", "--help"]), help(spec("sync").unwrap()));
-        assert_eq!(printed(&["gc", "--dry-run", "--help"]), help(spec("gc").unwrap()));
+        assert_eq!(
+            printed(&["gc", "--dry-run", "--help"]),
+            help(spec("gc").unwrap())
+        );
         assert_eq!(printed(&["-C", "/tmp", "--help"]), usage());
         assert!(message(&["help", "snyc"]).contains("did you mean 'sync'?"));
     }
@@ -1576,11 +1648,21 @@ mod tests {
     #[test]
     fn usage_lists_every_command_with_its_help() {
         let text = usage();
-        for title in ["EVERYDAY:", "INSPECT:", "MAINTAIN:", "OPTIONS:", "ENVIRONMENT:"] {
+        for title in [
+            "EVERYDAY:",
+            "INSPECT:",
+            "MAINTAIN:",
+            "OPTIONS:",
+            "ENVIRONMENT:",
+        ] {
             assert!(text.contains(title), "usage lacks {title}");
         }
         for spec in COMMANDS {
-            assert!(text.contains(&format!("  {}", spec.name)), "usage lacks {}", spec.name);
+            assert!(
+                text.contains(&format!("  {}", spec.name)),
+                "usage lacks {}",
+                spec.name
+            );
             let help = help(spec);
             assert!(help.starts_with(&format!("blanket {} — ", spec.name)));
             assert!(help.contains(spec.usage));
@@ -1628,16 +1710,25 @@ mod tests {
     #[test]
     fn plan_takes_nothing() {
         assert_eq!(command(&["plan"]), Command::Plan);
-        assert_eq!(message(&["plan", "--json"]), "plan: unknown option '--json'");
+        assert_eq!(
+            message(&["plan", "--json"]),
+            "plan: unknown option '--json'"
+        );
         assert_eq!(message(&["plan", "x"]), "plan: unexpected argument 'x'");
     }
 
     #[test]
     fn inspect_commands() {
         assert_eq!(command(&["status"]), Command::Status { json: false });
-        assert_eq!(command(&["status", "--json"]), Command::Status { json: true });
+        assert_eq!(
+            command(&["status", "--json"]),
+            Command::Status { json: true }
+        );
         assert_eq!(message(&["status", "-j"]), "status: unknown option '-j'");
-        assert_eq!(command(&["doctor", "--json"]), Command::Doctor { json: true });
+        assert_eq!(
+            command(&["doctor", "--json"]),
+            Command::Doctor { json: true }
+        );
         assert_eq!(
             command(&["ls"]),
             Command::Ls {
@@ -1679,8 +1770,14 @@ mod tests {
         assert!(message(&["add", "-D", "--", "-weird"])
             .contains("dependency spec '-weird' looks like a tool option"));
         assert!(message(&["add"]).starts_with("add: no package given"));
-        assert_eq!(message(&["add", "--dve", "x"]), "add: unknown option '--dve'; did you mean '--dev'?");
-        assert_eq!(message(&["remove", "--dve", "x"]), "remove: unknown option '--dve'; did you mean '--dev'?");
+        assert_eq!(
+            message(&["add", "--dve", "x"]),
+            "add: unknown option '--dve'; did you mean '--dev'?"
+        );
+        assert_eq!(
+            message(&["remove", "--dve", "x"]),
+            "remove: unknown option '--dve'; did you mean '--dev'?"
+        );
         assert_eq!(
             command(&["remove", "six", "--no-sync"]),
             Command::Remove {
@@ -1749,7 +1846,10 @@ mod tests {
         assert!(message(&["x", "--", "--weird-tool"]).contains("x: invalid tool"));
         assert!(message(&["x"]).starts_with("x: no tool given"));
         assert_eq!(message(&["x", "--from"]), "--from needs a package name");
-        assert_eq!(message(&["x", "--pyy", "ruff"]), "x: unknown option '--pyy'; did you mean '--py'?");
+        assert_eq!(
+            message(&["x", "--pyy", "ruff"]),
+            "x: unknown option '--pyy'; did you mean '--py'?"
+        );
     }
 
     #[test]
@@ -1760,7 +1860,12 @@ mod tests {
                 command: argv(&["python", "-c", "print(1)", "--help"])
             }
         );
-        assert_eq!(command(&["run", "--", "-h"]), Command::Run { command: argv(&["-h"]) });
+        assert_eq!(
+            command(&["run", "--", "-h"]),
+            Command::Run {
+                command: argv(&["-h"])
+            }
+        );
         assert_eq!(message(&["run"]), "run: no command given");
         assert_eq!(message(&["run", "--"]), "run: no command given");
         assert_eq!(command(&["build"]), Command::Build { args: vec![] });
@@ -1807,7 +1912,10 @@ mod tests {
             message(&["sbom", "--out", "x"]),
             "sbom: unknown option '--out'; did you mean '--output'?"
         );
-        assert_eq!(message(&["sbom", "bom.json"]), "sbom: unexpected argument 'bom.json'");
+        assert_eq!(
+            message(&["sbom", "bom.json"]),
+            "sbom: unexpected argument 'bom.json'"
+        );
     }
 
     #[test]
@@ -1984,14 +2092,25 @@ mod tests {
                         (Shell::Fish, None) => format!("-s {}", &flag[1..]),
                         _ => flag.to_string(),
                     };
-                    assert!(script.contains(&spelled), "{shell:?} lacks {} {spelled}", spec.name);
+                    assert!(
+                        script.contains(&spelled),
+                        "{shell:?} lacks {} {spelled}",
+                        spec.name
+                    );
                 }
                 for word in spec.words {
-                    assert!(script.contains(word), "{shell:?} lacks {} {word}", spec.name);
+                    assert!(
+                        script.contains(word),
+                        "{shell:?} lacks {} {word}",
+                        spec.name
+                    );
                 }
             }
             assert!(script.contains("install"), "{shell:?} lacks the sync alias");
-            assert!(script.contains("package.json"), "{shell:?} lacks script completion");
+            assert!(
+                script.contains("package.json"),
+                "{shell:?} lacks script completion"
+            );
         }
         assert!(completions(Shell::Bash).ends_with("complete -F _blanket blanket\n"));
         assert!(completions(Shell::Zsh).starts_with("#compdef blanket\n"));

@@ -17,13 +17,12 @@ fn docopt_sdist_builds_in_sandbox() {
         kind: ArtifactKind::Sdist,
         git: None,
     };
-    let wheel = build::build_sdist_wheel(
-        &store,
-        Platform::host().unwrap(),
-        &pkg,
-        "3.12.14",
-    )
-    .expect("sdist build");
-    assert!(wheel.file_name().unwrap().to_string_lossy().starts_with("docopt-0.6.2-"));
+    let wheel = build::build_sdist_wheel(&store, Platform::host().unwrap(), &pkg, "3.12.14")
+        .expect("sdist build");
+    assert!(wheel
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("docopt-0.6.2-"));
     assert!(wheel.exists());
 }

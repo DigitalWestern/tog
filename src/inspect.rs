@@ -88,10 +88,7 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
             )
         })?;
         out.push(ClosureFile {
-            ecosystem: value["ecosystem"]
-                .as_str()
-                .unwrap_or(stem)
-                .to_string(),
+            ecosystem: value["ecosystem"].as_str().unwrap_or(stem).to_string(),
             platform: value["platform"].as_str().map(str::to_string),
             projected_at: value["projected_at"].as_u64(),
             body: value["body"].clone(),
@@ -415,7 +412,9 @@ fn store_home_from_object(path: &Path) -> Option<PathBuf> {
 
 fn encoded_workspace(workspace: &str) -> Option<String> {
     if workspace.is_empty()
-        || workspace.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || workspace
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return None;
     }
@@ -442,10 +441,7 @@ fn node_projection_state(dir: &Path, body: &Value) -> State {
     }) else {
         return State::ProjectionMissing("node_modules".into());
     };
-    let expected_root = home
-        .join("forests")
-        .join(project_key)
-        .join(projection_id);
+    let expected_root = home.join("forests").join(project_key).join(projection_id);
     let Some(expected) = expected_root.join("node_modules").canonicalize().ok() else {
         return State::ProjectionMissing("node_modules".into());
     };
@@ -472,8 +468,7 @@ fn node_projection_state(dir: &Path, body: &Value) -> State {
             else {
                 return State::ProjectionMissing("workspace node_modules".into());
             };
-            if canonical_symlink_target(&dir.join(workspace).join("node_modules"))
-                != Some(expected)
+            if canonical_symlink_target(&dir.join(workspace).join("node_modules")) != Some(expected)
             {
                 return State::ProjectionMissing("workspace node_modules".into());
             }
@@ -487,7 +482,10 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
     let closures = closures(dir)?;
     let mut rows = Vec::new();
     for ecosystem in present {
-        let Some(closure) = closures.iter().find(|closure| closure.ecosystem == ecosystem) else {
+        let Some(closure) = closures
+            .iter()
+            .find(|closure| closure.ecosystem == ecosystem)
+        else {
             rows.push(EcosystemStatus {
                 ecosystem: ecosystem.into(),
                 state: State::NotSynced,
@@ -523,8 +521,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                 let venv = dir.join(".venv");
                 let env_object = string(&body["env_object"]);
                 let target = symlink_target(&venv);
-                if target.as_deref() != Some(Path::new(&env_object)) || !venv.join("bin").is_dir()
-                {
+                if target.as_deref() != Some(Path::new(&env_object)) || !venv.join("bin").is_dir() {
                     State::ProjectionMissing(".venv".into())
                 } else {
                     recorded_inputs_state(dir, body)?
@@ -551,16 +548,19 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             }
             "go" => object_liveness_state(body, &["go_object", "modcache_object"])
                 .unwrap_or(lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?),
-            "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"])
-                .unwrap_or(lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?),
-            "elixir" => object_liveness_state(body, &["beam_object", "deps_object"])
-                .unwrap_or(lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?),
-            "dotnet" => object_liveness_state(body, &["sdk_object", "packages_object"])
-                .unwrap_or(lock_state(
+            "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(
+                lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?,
+            ),
+            "elixir" => object_liveness_state(body, &["beam_object", "deps_object"]).unwrap_or(
+                lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?,
+            ),
+            "dotnet" => object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(
+                lock_state(
                     dir,
                     "packages.lock.json",
                     &string(&body["packages_lock_sha256"]),
-                )?),
+                )?,
+            ),
             _ => State::Unchecked("unknown ecosystem".into()),
         };
         rows.push(EcosystemStatus {
@@ -726,7 +726,10 @@ fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
         if TOOLCHAIN_KINDS.contains(&kind.as_str()) {
             let name = string(&identity["name"]);
             let version = string(&identity["version"]);
-            found.push(format!("{} {version}", if name.is_empty() { kind } else { name }));
+            found.push(format!(
+                "{} {version}",
+                if name.is_empty() { kind } else { name }
+            ));
         }
     }
     found.sort();
@@ -735,7 +738,9 @@ fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
 }
 
 fn count_entries(path: &Path) -> usize {
-    fs::read_dir(path).map(|entries| entries.count()).unwrap_or(0)
+    fs::read_dir(path)
+        .map(|entries| entries.count())
+        .unwrap_or(0)
 }
 
 pub fn doctor(dir: &Path) -> Vec<Check> {
@@ -880,11 +885,13 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
     }
 
     let strict = std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
-    let policy_file = std::env::var_os("BLANKET_POLICY").map(PathBuf::from).or_else(|| {
-        std::env::var_os("HOME")
-            .map(|home| Path::new(&home).join(".blanket/policy.toml"))
-            .filter(|path| path.is_file())
-    });
+    let policy_file = std::env::var_os("BLANKET_POLICY")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| Path::new(&home).join(".blanket/policy.toml"))
+                .filter(|path| path.is_file())
+        });
     let mut policy = Vec::new();
     if strict {
         policy.push("BLANKET_STRICT=1".to_string());
@@ -924,7 +931,10 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
                 "project",
                 Level::Ok,
                 if unsynced.is_empty() {
-                    format!("{} (synced; 'blanket status' checks the inputs)", found.join(", "))
+                    format!(
+                        "{} (synced; 'blanket status' checks the inputs)",
+                        found.join(", ")
+                    )
                 } else {
                     format!(
                         "{} found; not synced yet: {} (run 'blanket sync')",
@@ -963,9 +973,15 @@ pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
             Level::Warn => "warn",
             Level::Fail => "FAIL",
         };
-        out.push_str(&format!("{level}  {:width$}  {}\n", check.name, check.detail));
+        out.push_str(&format!(
+            "{level}  {:width$}  {}\n",
+            check.name, check.detail
+        ));
     }
-    let failures = checks.iter().filter(|check| check.level == Level::Fail).count();
+    let failures = checks
+        .iter()
+        .filter(|check| check.level == Level::Fail)
+        .count();
     if failures > 0 {
         out.push_str(&format!(
             "\n{failures} check{} failed.\n",
@@ -1060,10 +1076,30 @@ mod tests {
             host,
             json!({"plan": {"rust_version": "1.96.1", "crates": [{"name": "serde", "version": "1.0.0", "sha256": "ab"}]}}),
         );
-        write_closure(&temp.0, "go", host, json!({"plan": {"go_version": "1.25", "modules": [{"path": "github.com/x/y", "version": "v1.2.3"}]}}));
-        write_closure(&temp.0, "ruby", host, json!({"plan": {"ruby_version": "3.4.6", "bundler_version": "2.6", "gems": [{"name": "rake", "version": "13.0", "full_name": "rake-13.0"}]}}));
-        write_closure(&temp.0, "elixir", host, json!({"plan": {"elixir_version": "1.18", "otp_version": "27", "deps": [{"app": "jason", "package": "jason", "version": "1.4"}]}}));
-        write_closure(&temp.0, "dotnet", host, json!({"plan": {"sdk_version": "9.0", "packages": [{"id": "Newtonsoft.Json", "version": "13.0", "content_hash": "x"}]}}));
+        write_closure(
+            &temp.0,
+            "go",
+            host,
+            json!({"plan": {"go_version": "1.25", "modules": [{"path": "github.com/x/y", "version": "v1.2.3"}]}}),
+        );
+        write_closure(
+            &temp.0,
+            "ruby",
+            host,
+            json!({"plan": {"ruby_version": "3.4.6", "bundler_version": "2.6", "gems": [{"name": "rake", "version": "13.0", "full_name": "rake-13.0"}]}}),
+        );
+        write_closure(
+            &temp.0,
+            "elixir",
+            host,
+            json!({"plan": {"elixir_version": "1.18", "otp_version": "27", "deps": [{"app": "jason", "package": "jason", "version": "1.4"}]}}),
+        );
+        write_closure(
+            &temp.0,
+            "dotnet",
+            host,
+            json!({"plan": {"sdk_version": "9.0", "packages": [{"id": "Newtonsoft.Json", "version": "13.0", "content_hash": "x"}]}}),
+        );
 
         let all = closures(&temp.0).unwrap();
         assert_eq!(
@@ -1071,7 +1107,10 @@ mod tests {
             ECOSYSTEMS
         );
         let node = listing(&all[1]);
-        assert_eq!(node.toolchain, vec![("node".to_string(), "24.0.0".to_string())]);
+        assert_eq!(
+            node.toolchain,
+            vec![("node".to_string(), "24.0.0".to_string())]
+        );
         assert_eq!(node.packages[0].name, "@s/b");
         assert_eq!(node.packages[1].name, "a");
         let text = ls(&temp.0, None, false, false).unwrap();
@@ -1093,8 +1132,15 @@ mod tests {
         assert!(error.is_ok());
         let missing = {
             let solo = TempDir::new("ls-solo");
-            write_closure(&solo.0, "go", host, json!({"plan": {"go_version": "1.25", "modules": []}}));
-            ls(&solo.0, Some("python"), false, false).unwrap_err().to_string()
+            write_closure(
+                &solo.0,
+                "go",
+                host,
+                json!({"plan": {"go_version": "1.25", "modules": []}}),
+            );
+            ls(&solo.0, Some("python"), false, false)
+                .unwrap_err()
+                .to_string()
         };
         assert!(missing.contains("no python closure here"), "{missing}");
     }
@@ -1144,18 +1190,30 @@ mod tests {
         );
         let rows = status(platform, dir).unwrap();
         assert_eq!(rows[0].state, State::Synced);
-        assert_eq!(rows[1].state, State::ProjectionMissing(".blanket/cargo-home".into()));
+        assert_eq!(
+            rows[1].state,
+            State::ProjectionMissing(".blanket/cargo-home".into())
+        );
         assert_eq!(rows[2].state, State::Synced);
         let text = render_status(dir, &rows, false).unwrap();
-        assert!(text.contains("python  synced      (cpython 3.12.14; 0 packages)"), "{text}");
-        assert!(text.contains("cargo   missing     .blanket/cargo-home"), "{text}");
+        assert!(
+            text.contains("python  synced      (cpython 3.12.14; 0 packages)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("cargo   missing     .blanket/cargo-home"),
+            "{text}"
+        );
 
         // Edit the manifest and the lock: both reported by name.
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
         fs::write(dir.join("go.sum"), "changed\n").unwrap();
         fs::create_dir_all(dir.join(".blanket/cargo-home")).unwrap();
         let rows = status(platform, dir).unwrap();
-        assert_eq!(rows[0].state, State::Changed(vec!["requirements.txt".into()]));
+        assert_eq!(
+            rows[0].state,
+            State::Changed(vec!["requirements.txt".into()])
+        );
         assert_eq!(rows[1].state, State::Synced);
         assert_eq!(rows[2].state, State::Changed(vec!["go.sum".into()]));
         let json_text = render_status(dir, &rows, true).unwrap();
@@ -1176,9 +1234,17 @@ mod tests {
         assert!(rows[0].is_synced());
 
         // A foreign platform is reported, not compared.
-        write_closure(dir, "go", "other-platform", json!({"go_sum_sha256": "x", "plan": {}}));
+        write_closure(
+            dir,
+            "go",
+            "other-platform",
+            json!({"go_sum_sha256": "x", "plan": {}}),
+        );
         let rows = status(platform, dir).unwrap();
-        assert_eq!(rows[2].state, State::ForeignPlatform("other-platform".into()));
+        assert_eq!(
+            rows[2].state,
+            State::ForeignPlatform("other-platform".into())
+        );
     }
 
     #[test]
@@ -1206,11 +1272,8 @@ mod tests {
             project.join("node_modules"),
         )
         .unwrap();
-        std::os::unix::fs::symlink(
-            &workspace_env,
-            project.join("packages/lib/node_modules"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(&workspace_env, project.join("packages/lib/node_modules"))
+            .unwrap();
         write_closure(
             project,
             "node",
@@ -1229,7 +1292,10 @@ mod tests {
         fs::remove_file(project.join("node_modules")).unwrap();
         std::os::unix::fs::symlink(&env, project.join("node_modules")).unwrap();
         let rows = status(platform, project).unwrap();
-        assert_eq!(rows[0].state, State::ProjectionMissing("node_modules".into()));
+        assert_eq!(
+            rows[0].state,
+            State::ProjectionMissing("node_modules".into())
+        );
 
         fs::remove_file(project.join("node_modules")).unwrap();
         std::os::unix::fs::symlink(
@@ -1249,10 +1315,34 @@ mod tests {
     fn status_reports_missing_non_python_toolchain_objects() {
         let host = Platform::host().unwrap().triple();
         let cases = [
-            ("go", "go.mod", "go_object", "modcache_object", "go_object object"),
-            ("ruby", "Gemfile", "ruby_object", "gems_object", "ruby_object object"),
-            ("elixir", "mix.exs", "beam_object", "deps_object", "beam_object object"),
-            ("dotnet", "app.csproj", "sdk_object", "packages_object", "sdk_object object"),
+            (
+                "go",
+                "go.mod",
+                "go_object",
+                "modcache_object",
+                "go_object object",
+            ),
+            (
+                "ruby",
+                "Gemfile",
+                "ruby_object",
+                "gems_object",
+                "ruby_object object",
+            ),
+            (
+                "elixir",
+                "mix.exs",
+                "beam_object",
+                "deps_object",
+                "beam_object object",
+            ),
+            (
+                "dotnet",
+                "app.csproj",
+                "sdk_object",
+                "packages_object",
+                "sdk_object object",
+            ),
         ];
         for (ecosystem, marker, first, second, expected) in cases {
             let temp = TempDir::new(&format!("missing-{ecosystem}"));
@@ -1260,12 +1350,7 @@ mod tests {
             let mut body = json!({"inputs": []});
             body[first] = json!({"path": temp.0.join("missing/first")});
             body[second] = json!({"path": temp.0.join("missing/second")});
-            write_closure(
-                &temp.0,
-                ecosystem,
-                host,
-                body,
-            );
+            write_closure(&temp.0, ecosystem, host, body);
             let rows = status(Platform::host().unwrap(), &temp.0).unwrap();
             let row = rows.iter().find(|row| row.ecosystem == ecosystem).unwrap();
             assert_eq!(row.state, State::ProjectionMissing(expected.into()));
@@ -1287,7 +1372,16 @@ mod tests {
             None => std::env::remove_var("BLANKET_STORE"),
         }
         let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
-        for expected in ["platform", "store", "disk", "toolchains", "sandbox", "c-toolchain", "policy", "project"] {
+        for expected in [
+            "platform",
+            "store",
+            "disk",
+            "toolchains",
+            "sandbox",
+            "c-toolchain",
+            "policy",
+            "project",
+        ] {
             assert!(names.contains(&expected), "{names:?} lacks {expected}");
         }
         let store_check = checks.iter().find(|check| check.name == "store").unwrap();

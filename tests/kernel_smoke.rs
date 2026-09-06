@@ -29,7 +29,10 @@ fn realize_env_and_run_python() {
     assert!(env.join("pyvenv.cfg").is_file());
 
     let out = Command::new(env.join("bin/python"))
-        .args(["-c", "import six, sys; print(six.__version__, sys.version.split()[0])"])
+        .args([
+            "-c",
+            "import six, sys; print(six.__version__, sys.version.split()[0])",
+        ])
         .output()
         .expect("run python");
     assert!(
@@ -41,7 +44,7 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 = project::realize_env(&store, Platform::host().unwrap(), &plan)
-        .expect("realize again");
+    let env2 =
+        project::realize_env(&store, Platform::host().unwrap(), &plan).expect("realize again");
     assert_eq!(env, env2);
 }

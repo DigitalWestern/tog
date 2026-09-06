@@ -142,7 +142,11 @@ impl Version {
     fn from_release_with_epoch(release: Vec<u64>, epoch: u64) -> Self {
         let release_len = release.len();
         Self {
-            raw: release.iter().map(u64::to_string).collect::<Vec<_>>().join("."),
+            raw: release
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
             epoch,
             release,
             release_len,
@@ -222,15 +226,27 @@ fn compare_pre(left: &Version, right: &Version) -> Ordering {
     left.pre.cmp(&right.pre)
 }
 
-fn compare_optional_number(left: Option<u64>, right: Option<u64>, missing_is_high: bool) -> Ordering {
+fn compare_optional_number(
+    left: Option<u64>,
+    right: Option<u64>,
+    missing_is_high: bool,
+) -> Ordering {
     match (left, right) {
         (Some(left), Some(right)) => left.cmp(&right),
         (None, None) => Ordering::Equal,
         (None, Some(_)) => {
-            if missing_is_high { Ordering::Greater } else { Ordering::Less }
+            if missing_is_high {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
         }
         (Some(_), None) => {
-            if missing_is_high { Ordering::Less } else { Ordering::Greater }
+            if missing_is_high {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
         }
     }
 }
@@ -259,7 +275,8 @@ fn compare_local(left: Option<&[LocalPart]>, right: Option<&[LocalPart]>) -> Ord
 }
 
 fn parse_number(text: &str) -> Result<u64, String> {
-    text.parse::<u64>().map_err(|_| "numeric version segment is too large".into())
+    text.parse::<u64>()
+        .map_err(|_| "numeric version segment is too large".into())
 }
 
 fn parse_local(text: &str) -> Result<Vec<LocalPart>, String> {
@@ -277,7 +294,9 @@ fn parse_local(text: &str) -> Result<Vec<LocalPart>, String> {
         .collect()
 }
 
-fn parse_suffix(suffix: &str) -> Result<(Option<(PreKind, u64)>, Option<u64>, Option<u64>), String> {
+fn parse_suffix(
+    suffix: &str,
+) -> Result<(Option<(PreKind, u64)>, Option<u64>, Option<u64>), String> {
     if suffix.is_empty() {
         return Ok((None, None, None));
     }
@@ -312,7 +331,11 @@ fn parse_suffix(suffix: &str) -> Result<(Option<(PreKind, u64)>, Option<u64>, Op
         if let Some(kind) = kind {
             let after = rest[consumed..].trim_start_matches('.');
             let digits = after.chars().take_while(char::is_ascii_digit).count();
-            let number = if digits == 0 { 0 } else { parse_number(&after[..digits])? };
+            let number = if digits == 0 {
+                0
+            } else {
+                parse_number(&after[..digits])?
+            };
             if pre.replace((kind, number)).is_some() {
                 return Err("duplicate pre-release segment".into());
             }
@@ -326,7 +349,11 @@ fn parse_suffix(suffix: &str) -> Result<(Option<(PreKind, u64)>, Option<u64>, Op
             (true, rest.len() - after.len())
         } else if let Some(after) = rest.strip_prefix("r") {
             (true, rest.len() - after.len())
-        } else if rest.bytes().next().is_some_and(|byte| byte.is_ascii_digit()) {
+        } else if rest
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_digit())
+        {
             (true, 0)
         } else {
             (false, 0)
@@ -334,7 +361,11 @@ fn parse_suffix(suffix: &str) -> Result<(Option<(PreKind, u64)>, Option<u64>, Op
         if is_post {
             let after = rest[consumed..].trim_start_matches('.');
             let digits = after.chars().take_while(char::is_ascii_digit).count();
-            let number = if digits == 0 { 0 } else { parse_number(&after[..digits])? };
+            let number = if digits == 0 {
+                0
+            } else {
+                parse_number(&after[..digits])?
+            };
             if post.replace(number).is_some() {
                 return Err("duplicate post-release segment".into());
             }
@@ -344,7 +375,11 @@ fn parse_suffix(suffix: &str) -> Result<(Option<(PreKind, u64)>, Option<u64>, Op
         if let Some(after) = rest.strip_prefix("dev") {
             let after = after.trim_start_matches('.');
             let digits = after.chars().take_while(char::is_ascii_digit).count();
-            let number = if digits == 0 { 0 } else { parse_number(&after[..digits])? };
+            let number = if digits == 0 {
+                0
+            } else {
+                parse_number(&after[..digits])?
+            };
             if dev.replace(number).is_some() {
                 return Err("duplicate dev-release segment".into());
             }
@@ -388,7 +423,9 @@ pub struct SpecifierSet {
 impl SpecifierSet {
     pub fn parse(text: &str, source: &str) -> io::Result<Self> {
         if text.trim().is_empty() {
-            return Ok(Self { alternatives: vec![vec![Clause::Any]] });
+            return Ok(Self {
+                alternatives: vec![vec![Clause::Any]],
+            });
         }
         let alternatives = text
             .split("||")
@@ -414,7 +451,10 @@ impl SpecifierSet {
         if !version.is_prerelease() || self.allows_prereleases() {
             return self.matches_raw(version);
         }
-        if candidates.iter().any(|candidate| !candidate.is_prerelease() && self.matches_raw(candidate)) {
+        if candidates
+            .iter()
+            .any(|candidate| !candidate.is_prerelease() && self.matches_raw(candidate))
+        {
             return false;
         }
         self.matches_raw(version)
@@ -427,10 +467,13 @@ impl SpecifierSet {
     }
 
     fn allows_prereleases(&self) -> bool {
-        self.alternatives.iter().flatten().any(|clause| match clause {
-            Clause::Compare(_, target) => target.is_prerelease(),
-            _ => false,
-        })
+        self.alternatives
+            .iter()
+            .flatten()
+            .any(|clause| match clause {
+                Clause::Compare(_, target) => target.is_prerelease(),
+                _ => false,
+            })
     }
 }
 
@@ -448,29 +491,50 @@ fn parse_alternative(alternative: &str, full_text: &str, source: &str) -> io::Re
     let mut saw_token = false;
     let mut after_comma = false;
     while pos < bytes.len() {
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() { pos += 1; }
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
         if pos == bytes.len() {
-            if after_comma { return invalid_specifier(source, full_text, "trailing comma"); }
+            if after_comma {
+                return invalid_specifier(source, full_text, "trailing comma");
+            }
             break;
         }
         if bytes[pos] == b',' {
-            if after_comma || !saw_token { return invalid_specifier(source, full_text, "empty comma-separated clause"); }
+            if after_comma || !saw_token {
+                return invalid_specifier(source, full_text, "empty comma-separated clause");
+            }
             after_comma = true;
             pos += 1;
             continue;
         }
         after_comma = false;
         let (operator, consumed) = parse_operator(&alternative[pos..]);
-        let Some(operator) = operator else { return invalid_specifier(source, full_text, "expected a supported operator"); };
+        let Some(operator) = operator else {
+            return invalid_specifier(source, full_text, "expected a supported operator");
+        };
         pos += consumed;
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() { pos += 1; }
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
         let start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b',' { pos += 1; }
-        if start == pos { return invalid_specifier(source, full_text, "operator has no version"); }
-        clauses.extend(expand_clause(operator, &alternative[start..pos], full_text, source)?);
+        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b',' {
+            pos += 1;
+        }
+        if start == pos {
+            return invalid_specifier(source, full_text, "operator has no version");
+        }
+        clauses.extend(expand_clause(
+            operator,
+            &alternative[start..pos],
+            full_text,
+            source,
+        )?);
         saw_token = true;
     }
-    if !saw_token { return invalid_specifier(source, full_text, "empty expression"); }
+    if !saw_token {
+        return invalid_specifier(source, full_text, "empty expression");
+    }
     Ok(clauses)
 }
 
@@ -487,7 +551,9 @@ fn parse_operator(text: &str) -> (Option<Operator>, usize) {
         (Operator::PoetryCaret, "^"),
         (Operator::PoetryTilde, "~"),
     ] {
-        if text.starts_with(spelling) { return (Some(operator), spelling.len()); }
+        if text.starts_with(spelling) {
+            return (Some(operator), spelling.len());
+        }
     }
     if !text.is_empty() && !text.starts_with(',') && !text.starts_with('|') {
         return (Some(Operator::BareEqual), 0);
@@ -495,7 +561,12 @@ fn parse_operator(text: &str) -> (Option<Operator>, usize) {
     (None, 0)
 }
 
-fn expand_clause(operator: Operator, version_text: &str, full_text: &str, source: &str) -> io::Result<Vec<Clause>> {
+fn expand_clause(
+    operator: Operator,
+    version_text: &str,
+    full_text: &str,
+    source: &str,
+) -> io::Result<Vec<Clause>> {
     if matches!(operator, Operator::ArbitraryEqual) {
         return Ok(vec![Clause::Literal(version_text.to_string())]);
     }
@@ -506,18 +577,39 @@ fn expand_clause(operator: Operator, version_text: &str, full_text: &str, source
         };
     }
     let wildcard = version_text.ends_with(".*");
-    let version_text = if wildcard { &version_text[..version_text.len() - 2] } else { version_text };
+    let version_text = if wildcard {
+        &version_text[..version_text.len() - 2]
+    } else {
+        version_text
+    };
     let version = Version::parse(version_text).map_err(|why| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("{source}: invalid PEP 440 specifier `{full_text}`: {why}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{source}: invalid PEP 440 specifier `{full_text}`: {why}"),
+        )
     })?;
     if wildcard {
-        if version.pre.is_some() || version.post.is_some() || version.dev.is_some() || version.local.is_some() {
-            return invalid_specifier(source, full_text, "wildcards may only follow a release prefix");
+        if version.pre.is_some()
+            || version.post.is_some()
+            || version.dev.is_some()
+            || version.local.is_some()
+        {
+            return invalid_specifier(
+                source,
+                full_text,
+                "wildcards may only follow a release prefix",
+            );
         }
         let prefix = version.release[..version.release_len].to_vec();
         return match operator {
-            Operator::Equal | Operator::BareEqual => Ok(vec![Clause::PrefixEqual { epoch: version.epoch, prefix }]),
-            Operator::NotEqual => Ok(vec![Clause::PrefixNotEqual { epoch: version.epoch, prefix }]),
+            Operator::Equal | Operator::BareEqual => Ok(vec![Clause::PrefixEqual {
+                epoch: version.epoch,
+                prefix,
+            }]),
+            Operator::NotEqual => Ok(vec![Clause::PrefixNotEqual {
+                epoch: version.epoch,
+                prefix,
+            }]),
             _ => invalid_specifier(source, full_text, "wildcards need == or !="),
         };
     }
@@ -525,9 +617,18 @@ fn expand_clause(operator: Operator, version_text: &str, full_text: &str, source
         return Ok(vec![Clause::Compare(operator, version)]);
     }
     if version.has_local() {
-        return invalid_specifier(source, full_text, "local versions are only valid with equality");
+        return invalid_specifier(
+            source,
+            full_text,
+            "local versions are only valid with equality",
+        );
     }
-    if operator == Operator::BareEqual && version.release_len < 3 && version.pre.is_none() && version.post.is_none() && version.dev.is_none() {
+    if operator == Operator::BareEqual
+        && version.release_len < 3
+        && version.pre.is_none()
+        && version.post.is_none()
+        && version.dev.is_none()
+    {
         return Ok(vec![Clause::PrefixEqual {
             epoch: version.epoch,
             prefix: version.release[..version.release_len].to_vec(),
@@ -537,30 +638,56 @@ fn expand_clause(operator: Operator, version_text: &str, full_text: &str, source
         Operator::BareEqual => Ok(vec![Clause::Compare(Operator::Equal, version)]),
         Operator::Compatible => {
             if version.release_len < 2 {
-                return invalid_specifier(source, full_text, "~= needs at least two release segments");
+                return invalid_specifier(
+                    source,
+                    full_text,
+                    "~= needs at least two release segments",
+                );
             }
             let upper = compatible_upper(&version);
             Ok(vec![
                 Clause::Compare(Operator::GreaterEqual, version),
-                Clause::PrefixEqual { epoch: upper.1.epoch, prefix: upper.0 },
+                Clause::PrefixEqual {
+                    epoch: upper.1.epoch,
+                    prefix: upper.0,
+                },
                 Clause::Compare(Operator::Less, upper.1),
             ])
         }
         Operator::PoetryCaret => {
             let mut release = version.release.clone();
-            let index = release.iter().position(|value| *value != 0).unwrap_or(release.len().saturating_sub(1));
-            release[index] = release[index].checked_add(1).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "version is too large"))?;
+            let index = release
+                .iter()
+                .position(|value| *value != 0)
+                .unwrap_or(release.len().saturating_sub(1));
+            release[index] = release[index].checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "version is too large")
+            })?;
             release.truncate(index + 1);
             let epoch = version.epoch;
-            Ok(vec![Clause::Compare(Operator::GreaterEqual, version), Clause::Compare(Operator::Less, Version::from_release_with_epoch(release, epoch))])
+            Ok(vec![
+                Clause::Compare(Operator::GreaterEqual, version),
+                Clause::Compare(
+                    Operator::Less,
+                    Version::from_release_with_epoch(release, epoch),
+                ),
+            ])
         }
         Operator::PoetryTilde => {
             let mut release = version.release.clone();
             let index = if release.len() == 1 { 0 } else { 1 };
-            release[index] = release[index].checked_add(1).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "version is too large"))?;
+            release[index] = release[index].checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "version is too large")
+            })?;
             release.truncate(index + 1);
             let epoch = version.epoch;
-            Ok(vec![Clause::Compare(Operator::GreaterEqual, version), Clause::Compare(Operator::Less, Version::from_release_with_epoch(release, epoch))])
+            Ok(vec![
+                Clause::Compare(Operator::GreaterEqual, version),
+                Clause::Compare(
+                    Operator::Less,
+                    Version::from_release_with_epoch(release, epoch),
+                ),
+            ])
         }
         _ => Ok(vec![Clause::Compare(operator, version)]),
     }
@@ -572,31 +699,52 @@ fn compatible_upper(version: &Version) -> (Vec<u64>, Version) {
     let mut upper = prefix.clone();
     let index = upper.len() - 1;
     upper[index] += 1;
-    (prefix, Version::from_release_with_epoch(upper, version.epoch))
+    (
+        prefix,
+        Version::from_release_with_epoch(upper, version.epoch),
+    )
 }
 
 fn clause_matches(clause: &Clause, version: &Version) -> bool {
     match clause {
         Clause::Any => true,
         Clause::Literal(text) => version.raw() == text,
-        Clause::PrefixEqual { epoch, prefix } => version.epoch == *epoch && prefix.iter().enumerate().all(|(index, value)| {
-            version.release().get(index).copied().unwrap_or(0) == *value
-        }),
-        Clause::PrefixNotEqual { epoch, prefix } => version.epoch != *epoch || prefix.iter().enumerate().any(|(index, value)| {
-            version.release().get(index).copied().unwrap_or(0) != *value
-        }),
+        Clause::PrefixEqual { epoch, prefix } => {
+            version.epoch == *epoch
+                && prefix.iter().enumerate().all(|(index, value)| {
+                    version.release().get(index).copied().unwrap_or(0) == *value
+                })
+        }
+        Clause::PrefixNotEqual { epoch, prefix } => {
+            version.epoch != *epoch
+                || prefix.iter().enumerate().any(|(index, value)| {
+                    version.release().get(index).copied().unwrap_or(0) != *value
+                })
+        }
         Clause::Compare(operator, target) => match operator {
             Operator::Equal => {
-                if target.has_local() { version.same_public(target) && version.local == target.local } else { version.same_public(target) }
+                if target.has_local() {
+                    version.same_public(target) && version.local == target.local
+                } else {
+                    version.same_public(target)
+                }
             }
             Operator::NotEqual => {
-                if target.has_local() { !(version.same_public(target) && version.local == target.local) } else { !version.same_public(target) }
+                if target.has_local() {
+                    !(version.same_public(target) && version.local == target.local)
+                } else {
+                    !version.same_public(target)
+                }
             }
             Operator::GreaterEqual => compare_public(version, target) != Ordering::Less,
             Operator::Greater => exclusive_greater(version, target),
             Operator::LessEqual => compare_public(version, target) != Ordering::Greater,
             Operator::Less => exclusive_less(version, target),
-            Operator::ArbitraryEqual | Operator::Compatible | Operator::PoetryCaret | Operator::PoetryTilde | Operator::BareEqual => false,
+            Operator::ArbitraryEqual
+            | Operator::Compatible
+            | Operator::PoetryCaret
+            | Operator::PoetryTilde
+            | Operator::BareEqual => false,
         },
     }
 }
@@ -647,7 +795,10 @@ fn exclusive_less(candidate: &Version, target: &Version) -> bool {
 /// used for pinned Python and for versions read from package lock files.
 pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
     let candidate = Version::parse(version).map_err(|why| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("specifier: invalid PEP 440 version `{version}`: {why}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("specifier: invalid PEP 440 version `{version}`: {why}"),
+        )
     })?;
     Ok(SpecifierSet::parse(specifier, "specifier")?.matches(&candidate))
 }
@@ -665,13 +816,21 @@ pub fn matches_specifiers_with_candidates(
         .map(|specifier| SpecifierSet::parse(specifier, "specifier"))
         .collect::<io::Result<Vec<_>>>()?;
     let candidate = Version::parse(version).map_err(|why| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("specifier: invalid PEP 440 version `{version}`: {why}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("specifier: invalid PEP 440 version `{version}`: {why}"),
+        )
     })?;
     let parsed_candidates = candidates
         .iter()
-        .map(|candidate| Version::parse(candidate).map_err(|why| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("specifier: invalid PEP 440 version `{candidate}`: {why}"))
-        }))
+        .map(|candidate| {
+            Version::parse(candidate).map_err(|why| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("specifier: invalid PEP 440 version `{candidate}`: {why}"),
+                )
+            })
+        })
         .collect::<io::Result<Vec<_>>>()?;
     let raw_matches = sets.iter().all(|set| set.matches_raw(&candidate));
     if !raw_matches {
@@ -679,9 +838,9 @@ pub fn matches_specifiers_with_candidates(
     }
     if candidate.is_prerelease()
         && !sets.iter().any(SpecifierSet::allows_prereleases)
-        && parsed_candidates.iter().any(|other| {
-            !other.is_prerelease() && sets.iter().all(|set| set.matches_raw(other))
-        })
+        && parsed_candidates
+            .iter()
+            .any(|other| !other.is_prerelease() && sets.iter().all(|set| set.matches_raw(other)))
     {
         return Ok(false);
     }
@@ -695,19 +854,43 @@ mod tests {
     #[test]
     fn packaging_ordering_examples() {
         let ordered = [
-            "1.dev0", "1.0.dev456", "1.0a1", "1.0a2.dev456", "1.0a12.dev456", "1.0a12",
-            "1.0b1.dev456", "1.0b2", "1.0b2.post345.dev456", "1.0b2.post345",
-            "1.0rc1.dev456", "1.0rc1", "1.0", "1.0+abc.5", "1.0+abc.7", "1.0+5",
-            "1.0.post456.dev34", "1.0.post456", "1.0.15", "1.1.dev1", "2!1.0",
+            "1.dev0",
+            "1.0.dev456",
+            "1.0a1",
+            "1.0a2.dev456",
+            "1.0a12.dev456",
+            "1.0a12",
+            "1.0b1.dev456",
+            "1.0b2",
+            "1.0b2.post345.dev456",
+            "1.0b2.post345",
+            "1.0rc1.dev456",
+            "1.0rc1",
+            "1.0",
+            "1.0+abc.5",
+            "1.0+abc.7",
+            "1.0+5",
+            "1.0.post456.dev34",
+            "1.0.post456",
+            "1.0.15",
+            "1.1.dev1",
+            "2!1.0",
         ];
         for pair in ordered.windows(2) {
-            assert!(Version::parse(pair[0]).unwrap() < Version::parse(pair[1]).unwrap(), "{} < {}", pair[0], pair[1]);
+            assert!(
+                Version::parse(pair[0]).unwrap() < Version::parse(pair[1]).unwrap(),
+                "{} < {}",
+                pair[0],
+                pair[1]
+            );
         }
         assert!(matches_specifier(">=1", "1.0.0.post1").unwrap());
         assert!(!matches_specifier(">=1.0.0", "1.0.0-beta").unwrap());
         assert!(matches_specifier(">=1.0.0b0", "1.0.0-beta").unwrap());
         assert!(matches_specifiers_with_candidates(&[">=1"], "2.0rc1", &["2.0rc1"]).unwrap());
-        assert!(!matches_specifiers_with_candidates(&[">=1"], "2.0rc1", &["2.0rc1", "2.0"]).unwrap());
+        assert!(
+            !matches_specifiers_with_candidates(&[">=1"], "2.0rc1", &["2.0rc1", "2.0"]).unwrap()
+        );
         assert!(matches_specifier("~=1.4.5", "1.4.9").unwrap());
         assert!(!matches_specifier("~=1.4.5", "1.5.0").unwrap());
         assert!(matches_specifier("==1.0.*", "1.0.post1").unwrap());
@@ -740,7 +923,11 @@ mod tests {
             ("<1.0rc2", "1.0rc1", true),
         ];
         for (specifier, version, expected) in cases {
-            assert_eq!(matches_specifier(specifier, version).unwrap(), expected, "{specifier} / {version}");
+            assert_eq!(
+                matches_specifier(specifier, version).unwrap(),
+                expected,
+                "{specifier} / {version}"
+            );
         }
         assert!(!matches_specifiers_with_candidates(&["<1.0"], "1.0rc1", &["1.0rc1"]).unwrap());
     }
@@ -760,7 +947,10 @@ mod tests {
         for (spelling, canonical) in cases {
             let spelling = Version::parse(spelling).unwrap();
             let canonical = Version::parse(canonical).unwrap();
-            assert!(spelling.same_public(&canonical), "{spelling:?} / {canonical:?}");
+            assert!(
+                spelling.same_public(&canonical),
+                "{spelling:?} / {canonical:?}"
+            );
         }
         assert!(!matches_specifier("<=1.0b1", "1.0preview1").unwrap());
     }

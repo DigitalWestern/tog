@@ -20,13 +20,24 @@ impl Identity {
         use sha2::{Digest, Sha256};
         let canon = serde_json::to_vec(self).expect("identity serializes");
         let h = hex::encode(Sha256::digest(&canon));
-        format!("{}-{}-{}", &h[..40], sanitize(&self.name), sanitize(&self.version))
+        format!(
+            "{}-{}-{}",
+            &h[..40],
+            sanitize(&self.name),
+            sanitize(&self.version)
+        )
     }
 }
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 

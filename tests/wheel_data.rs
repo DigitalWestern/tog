@@ -74,16 +74,24 @@ fn greenlet_headers_are_installed_and_importable() {
         .unwrap_or_else(|| temp.0.join("store"));
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "blanket sync");
+    assert_ok(
+        blanket(&binary, &project, &store, &["sync"]),
+        "blanket sync",
+    );
 
     let closure: serde_json::Value = serde_json::from_slice(
         &std::fs::read(project.join(".blanket/closures/python.json")).unwrap(),
     )
     .unwrap();
     let env = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
-    assert!(env.is_dir(), "environment object is missing: {}", env.display());
     assert!(
-        env.join("include/site/python3.12/greenlet/greenlet.h").is_file(),
+        env.is_dir(),
+        "environment object is missing: {}",
+        env.display()
+    );
+    assert!(
+        env.join("include/site/python3.12/greenlet/greenlet.h")
+            .is_file(),
         "greenlet header was not installed under {}",
         env.display()
     );
