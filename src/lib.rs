@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod golang;
 pub mod npm;
 pub mod manifest;
+pub mod pep440;
 pub mod policy;
 pub mod platform;
 pub mod project;

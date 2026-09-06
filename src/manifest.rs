@@ -509,8 +509,11 @@ fn setup_or_requirements_manifest(dir: &Path, cfg: &BlanketPythonConfig) -> io::
             true
         } else {
             let setup_py = read_text(&setup_py_path)?;
-            !setup_py_has_setup_call(&setup_py)
-                || (parsed.install_requires_found && !requirements.is_empty())
+            // A declarative install_requires list is authoritative. An empty
+            // list is not: setup.py may provide the real dependencies, and a
+            // call through an alias (for example `s(...)`) must be probed.
+            setup_py_is_provably_trivial(&setup_py)
+                || (parsed.install_requires_found && !parsed.install_requires.is_empty())
         };
         if setup_py_safe {
             return Ok(Manifest {
@@ -562,7 +565,7 @@ fn setup_or_requirements_manifest(dir: &Path, cfg: &BlanketPythonConfig) -> io::
 
 fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io::Result<Manifest> {
     let source = read_text(path)?;
-    validate_requirement_includes(path, &mut Vec::new(), &mut BTreeSet::new())?;
+    validate_requirement_includes(path, false, &mut Vec::new(), &mut BTreeSet::new())?;
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
     collect_requirement_lines(
@@ -1222,6 +1225,10 @@ fn select_poetry_package<'a>(
     let Some(variants) = variants else {
         return Ok(None);
     };
+    let candidate_versions = variants
+        .iter()
+        .filter_map(|package| package.as_table()?.get("version")?.as_str())
+        .collect::<Vec<_>>();
     if let Some(preferred) = preferred {
         for package in variants {
             if *package == preferred
@@ -1235,6 +1242,7 @@ fn select_poetry_package<'a>(
                     python_version,
                     platform,
                     constraints.unwrap_or(&[]),
+                    &candidate_versions,
                 )?
             {
                 return Ok(Some(*package));
@@ -1253,6 +1261,7 @@ fn select_poetry_package<'a>(
             python_version,
             platform,
             constraints.unwrap_or(&[]),
+            &candidate_versions,
         )? {
             // Poetry's forked package entries are expected to be disjoint.
             // Selecting the first matching entry preserves the lock's order
@@ -1269,6 +1278,7 @@ fn poetry_package_matches(
     python_version: &str,
     platform: Platform,
     constraints: &[String],
+    candidate_versions: &[&str],
 ) -> io::Result<bool> {
     if let Some(versions) = package.get("python-versions").and_then(toml::Value::as_str) {
         let pep440 = poetry_constraint_to_pep440(versions)?;
@@ -1286,17 +1296,23 @@ fn poetry_package_matches(
             .get("version")
             .and_then(toml::Value::as_str)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "poetry.lock package has no version"))?;
-        let version = normalize_locked_version(version).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("poetry.lock package has an unmatchable version `{version}`"),
-            )
-        })?;
-        for constraint in constraints {
-            let specifier = poetry_constraint_to_pep440(constraint)?;
-            if !specifier.is_empty() && !pyselect::matches_specifier(&specifier, &version)? {
-                return Ok(false);
-            }
+        let specifiers = constraints
+            .iter()
+            .map(|constraint| poetry_constraint_to_pep440(constraint))
+            .collect::<io::Result<Vec<_>>>()?;
+        let specifiers = specifiers
+            .iter()
+            .filter(|specifier| !specifier.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if !specifiers.is_empty()
+            && !crate::pep440::matches_specifiers_with_candidates(
+                &specifiers,
+                version,
+                candidate_versions,
+            )?
+        {
+            return Ok(false);
         }
     }
     Ok(true)
@@ -1362,11 +1378,39 @@ fn parse_poetry_lock_extra_dependency(value: &str) -> io::Result<PoetryDependenc
             format!("malformed Poetry lock extra dependency `{value}`"),
         ));
     }
+    let (name, extras) = parse_dependency_extras(name)?;
     Ok(PoetryDependency {
         name: dependency_name(name),
         version: version.trim().to_string(),
-        extras: BTreeSet::new(),
+        extras,
     })
+}
+
+fn parse_dependency_extras(value: &str) -> io::Result<(&str, BTreeSet<String>)> {
+    let value = value.trim();
+    let Some(open) = value.find('[') else {
+        return Ok((value, BTreeSet::new()));
+    };
+    let Some(relative_close) = value[open + 1..].find(']') else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed dependency extras `{value}`"),
+        ));
+    };
+    let close = open + 1 + relative_close;
+    if !value[close + 1..].trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed dependency extras `{value}`"),
+        ));
+    }
+    let extras = value[open + 1..close]
+        .split(',')
+        .map(str::trim)
+        .filter(|extra| !extra.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    Ok((value[..open].trim(), extras))
 }
 
 fn poetry_root_dependencies(
@@ -1490,20 +1534,6 @@ fn dependency_name(value: &str) -> String {
     normalize_name(value.split('[').next().unwrap_or(value).trim())
 }
 
-fn normalize_locked_version(version: &str) -> Option<String> {
-    let mut pieces = version.split('.').collect::<Vec<_>>();
-    if pieces.is_empty() || pieces.len() > 3 || pieces.iter().any(|piece| piece.is_empty()) {
-        return None;
-    }
-    if pieces.iter().any(|piece| !piece.bytes().all(|byte| byte.is_ascii_digit())) {
-        return None;
-    }
-    while pieces.len() < 3 {
-        pieces.push("0");
-    }
-    Some(pieces.join("."))
-}
-
 fn poetry_dependency_variant_matches(
     value: &toml::Value,
     python_version: &str,
@@ -1601,7 +1631,7 @@ fn marker_matches_for_extra(
         return marker_matches_for_extra(rest, python_version, platform, extra).map(|value| !value);
     }
 
-    let operators = [" not in ", " in ", ">=", "<=", "==", "!=", ">", "<"];
+    let operators = [" not in ", " in ", ">=", "<=", "===", "==", "!=", ">", "<"];
     let (left, operator, right) = operators
         .iter()
         .find_map(|operator| {
@@ -1630,8 +1660,30 @@ fn marker_matches_for_extra(
         .and_then(|value| value.strip_suffix('"'))
         .or_else(|| right.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))
         .unwrap_or(right);
-    let numeric = matches!(left, "python_version" | "python_full_version");
-    Ok(compare_marker(left_value.as_str(), right_value, operator, numeric))
+    // PEP 508 defines membership as a string operation, including when the
+    // left operand is python_version.
+    if operator == " in " {
+        return Ok(right_value.contains(left_value.as_str()));
+    }
+    if operator == " not in " {
+        return Ok(!right_value.contains(left_value.as_str()));
+    }
+    if matches!(left, "python_version" | "python_full_version") {
+        return crate::pep440::matches_specifier(
+            &format!("{}{}", operator.trim(), right_value),
+            &left_value,
+        );
+    }
+    Ok(match operator {
+        "==" => left_value == right_value,
+        "!=" => left_value != right_value,
+        ">=" => left_value.as_str() >= right_value,
+        "<=" => left_value.as_str() <= right_value,
+        ">" => left_value.as_str() > right_value,
+        "<" => left_value.as_str() < right_value,
+        "===" => left_value == right_value,
+        _ => false,
+    })
 }
 
 fn marker_value(
@@ -1664,53 +1716,6 @@ fn marker_value(
         "extra" => extra.unwrap_or_default().to_string(),
         _ => return None,
     })
-}
-
-fn compare_marker(left: &str, right: &str, operator: &str, numeric: bool) -> bool {
-    // PEP 508 defines membership as a string operation. In particular,
-    // `python_version in '3.12'` asks whether the left string is a substring
-    // of the right literal; it is not a version comparison.
-    if operator == " in " {
-        return right.contains(left);
-    }
-    if operator == " not in " {
-        return !right.contains(left);
-    }
-    if numeric {
-        let parse = |value: &str| {
-            value
-                .split('.')
-                .map(|part| part.parse::<u64>().ok())
-                .collect::<Option<Vec<_>>>()
-        };
-        if let (Some(mut left), Some(mut right)) = (parse(left), parse(right)) {
-            let length = left.len().max(right.len());
-            left.resize(length, 0);
-            right.resize(length, 0);
-            return compare_order(left.cmp(&right), operator);
-        }
-    }
-    match operator {
-        "==" => left == right,
-        "!=" => left != right,
-        ">=" => left >= right,
-        "<=" => left <= right,
-        ">" => left > right,
-        "<" => left < right,
-        _ => false,
-    }
-}
-
-fn compare_order(order: std::cmp::Ordering, operator: &str) -> bool {
-    match operator {
-        "==" => order == std::cmp::Ordering::Equal,
-        "!=" => order != std::cmp::Ordering::Equal,
-        ">=" => order != std::cmp::Ordering::Less,
-        "<=" => order != std::cmp::Ordering::Greater,
-        ">" => order == std::cmp::Ordering::Greater,
-        "<" => order == std::cmp::Ordering::Less,
-        _ => false,
-    }
 }
 
 fn strip_marker_parens(mut expression: &str) -> &str {
@@ -2330,15 +2335,16 @@ fn select_uv_package<'a>(
         let version_matches = if constraints.is_empty() {
             true
         } else {
-            let Some(version) = normalize_locked_version(&package.version) else {
-                continue;
-            };
-            constraints
+            let specifiers = constraints.iter().map(String::as_str).collect::<Vec<_>>();
+            let candidates = variants
                 .iter()
-                .map(|constraint| pyselect::matches_specifier(constraint, &version))
-                .collect::<io::Result<Vec<_>>>()?
-                .into_iter()
-                .all(|matches| matches)
+                .map(|variant| variant.version.as_str())
+                .collect::<Vec<_>>();
+            crate::pep440::matches_specifiers_with_candidates(
+                &specifiers,
+                &package.version,
+                &candidates,
+            )?
         };
         if version_matches
             && (package.resolution_markers.is_empty()
@@ -2468,11 +2474,17 @@ fn requirements_directory_candidate(
     Ok(None)
 }
 
-fn validate_requirement_includes(path: &Path, stack: &mut Vec<PathBuf>, seen: &mut BTreeSet<PathBuf>) -> io::Result<()> {
+fn validate_requirement_includes(
+    path: &Path,
+    constraints_only: bool,
+    stack: &mut Vec<(PathBuf, bool)>,
+    seen: &mut BTreeSet<(PathBuf, bool)>,
+) -> io::Result<()> {
     let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
-    if stack.contains(&path) { return Err(unreadable(&path, format!("requirements include cycle: {}", stack.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" -> ")))); }
-    if !seen.insert(path.clone()) { return Ok(()); }
-    stack.push(path.clone());
+    let key = (path.clone(), constraints_only);
+    if stack.contains(&key) { return Err(unreadable(&path, format!("requirements include cycle: {}", stack.iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>().join(" -> ")))); }
+    if !seen.insert(key.clone()) { return Ok(()); }
+    stack.push(key);
     let text = read_text(&path)?;
     for line in pypi::logical_requirement_lines(&text) {
         if let Some(include) = parse_include_directive(&line) {
@@ -2483,7 +2495,7 @@ fn validate_requirement_includes(path: &Path, stack: &mut Vec<PathBuf>, seen: &m
             if !child.is_file() {
                 return Err(unreadable(&child, "included requirements file is missing"));
             }
-            validate_requirement_includes(&child, stack, seen)?;
+            validate_requirement_includes(&child, constraints_only || include.constraint, stack, seen)?;
         }
     }
     stack.pop();
@@ -2497,8 +2509,9 @@ fn validate_requirement_includes(path: &Path, stack: &mut Vec<PathBuf>, seen: &m
 pub fn requirements_tree_hash(path: &Path) -> io::Result<String> {
     let top = path.canonicalize().map_err(|e| unreadable(path, e))?;
     let root = top.parent().unwrap_or(Path::new("."));
+    let mut visited = BTreeSet::new();
     let mut files = BTreeSet::new();
-    collect_requirement_files(&top, &mut Vec::new(), &mut files)?;
+    collect_requirement_files(&top, false, &mut Vec::new(), &mut visited, &mut files)?;
     let mut hasher = Sha256::new();
     for file in files {
         let relative = file.strip_prefix(root).unwrap_or(&file);
@@ -2512,22 +2525,32 @@ pub fn requirements_tree_hash(path: &Path) -> io::Result<String> {
 
 fn collect_requirement_files(
     path: &Path,
-    stack: &mut Vec<PathBuf>,
+    constraints_only: bool,
+    stack: &mut Vec<(PathBuf, bool)>,
+    visited: &mut BTreeSet<(PathBuf, bool)>,
     files: &mut BTreeSet<PathBuf>,
 ) -> io::Result<()> {
     let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
-    if stack.contains(&path) {
+    let key = (path.clone(), constraints_only);
+    if stack.contains(&key) {
         return Err(unreadable(&path, "requirements include cycle"));
     }
-    if !files.insert(path.clone()) {
+    if !visited.insert(key.clone()) {
         return Ok(());
     }
-    stack.push(path.clone());
+    files.insert(path.clone());
+    stack.push(key);
     for line in pypi::logical_requirement_lines(&read_text(&path)?) {
         if let Some(include) = parse_include_directive(&line) {
             let Some(target) = include.target else { continue; };
             let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
-            collect_requirement_files(&child, stack, files)?;
+            collect_requirement_files(
+                &child,
+                constraints_only || include.constraint,
+                stack,
+                visited,
+                files,
+            )?;
         }
     }
     stack.pop();
@@ -2536,20 +2559,21 @@ fn collect_requirement_files(
 
 fn collect_requirement_lines(
     path: &Path,
-    stack: &mut Vec<PathBuf>,
-    seen: &mut BTreeSet<PathBuf>,
+    stack: &mut Vec<(PathBuf, bool)>,
+    seen: &mut BTreeSet<(PathBuf, bool)>,
     output: &mut Vec<String>,
     constraints: &mut Vec<String>,
     constraints_only: bool,
 ) -> io::Result<()> {
     let path = path.canonicalize().map_err(|e| unreadable(path, e))?;
-    if stack.contains(&path) {
+    let key = (path.clone(), constraints_only);
+    if stack.contains(&key) {
         return Err(unreadable(&path, "requirements include cycle"));
     }
-    if !seen.insert(path.clone()) {
+    if !seen.insert(key.clone()) {
         return Ok(());
     }
-    stack.push(path.clone());
+    stack.push(key);
     for line in pypi::logical_requirement_lines(&read_text(&path)?) {
         if let Some(include) = parse_include_directive(&line) {
             let target = include.target.ok_or_else(|| {
@@ -2707,17 +2731,114 @@ fn is_trivial_setup_py(text: &str) -> bool {
 }
 
 fn setup_py_has_setup_call(text: &str) -> bool {
-    let mut code = String::new();
-    for line in text.lines() {
-        let line = strip_inline_comment(line).trim();
-        if !line.is_empty() {
-            code.push_str(line);
-            code.push('\n');
+    let mut setup_names = BTreeSet::from(["setup".to_string()]);
+    let mut setuptools_names = BTreeSet::from(["setuptools".to_string()]);
+    for raw in text.lines() {
+        let line = strip_inline_comment(raw).trim();
+        for statement in line.split(';').map(str::trim) {
+            if let Some(imports) = statement.strip_prefix("from setuptools import") {
+                for item in imports.split(',') {
+                    let words = item.split_whitespace().collect::<Vec<_>>();
+                    if words.first() == Some(&"setup") {
+                        setup_names.insert(
+                            words
+                                .iter()
+                                .position(|word| *word == "as")
+                                .and_then(|position| words.get(position + 1))
+                                .copied()
+                                .unwrap_or("setup")
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            if let Some(imports) = statement.strip_prefix("import ") {
+                for item in imports.split(',') {
+                    let words = item.split_whitespace().collect::<Vec<_>>();
+                    if words.first() == Some(&"setuptools") {
+                        setuptools_names.insert(
+                            words
+                                .iter()
+                                .position(|word| *word == "as")
+                                .and_then(|position| words.get(position + 1))
+                                .copied()
+                                .unwrap_or("setuptools")
+                                .to_string(),
+                        );
+                    }
+                }
+            }
         }
     }
-    code.find("setuptools.setup(")
-        .or_else(|| code.find("setup("))
-        .is_some()
+    let code = python_code_without_strings(text);
+    setup_names
+        .iter()
+        .any(|name| python_call_named(&code, name))
+        || setuptools_names
+            .iter()
+            .any(|name| python_call_named(&code, &format!("{name}.setup")))
+}
+
+fn setup_py_is_provably_trivial(text: &str) -> bool {
+    let code = python_code_without_strings(text);
+    !setup_py_has_setup_call(text) && !code.contains('(')
+}
+
+fn python_call_named(code: &str, name: &str) -> bool {
+    code.match_indices(name).any(|(start, _)| {
+        let before = code[..start].chars().next_back();
+        let after = &code[start + name.len()..];
+        let valid_before = before.is_none_or(|character| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '.'
+        });
+        let mut after = after.chars();
+        let valid_after = after
+            .by_ref()
+            .find(|character| !character.is_ascii_whitespace())
+            == Some('(');
+        valid_before && valid_after
+    })
+}
+
+fn python_code_without_strings(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    for character in text.chars() {
+        if comment {
+            if character == '\n' {
+                comment = false;
+                output.push(character);
+            } else {
+                output.push(' ');
+            }
+            continue;
+        }
+        if let Some(current) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == current {
+                quote = None;
+            }
+            output.push(if character == '\n' { '\n' } else { ' ' });
+            continue;
+        }
+        match character {
+            '#' => {
+                comment = true;
+                output.push(' ');
+            }
+            '\'' | '"' => {
+                quote = Some(character);
+                output.push(' ');
+            }
+            _ => output.push(character),
+        }
+    }
+    output
 }
 
 fn parse_requires_python_metadata(text: &str) -> Option<String> {
@@ -3280,7 +3401,7 @@ files = [{ file = "dep-1.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 [[package]]
 name = "dep"
-version = "2.0.0"
+version = "2.0.0.post1"
 python-versions = "*"
 groups = ["main"]
 files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
@@ -3295,7 +3416,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
             "3.12.14",
         )
         .unwrap();
-        assert!(output.iter().any(|line| line.starts_with("dep==2.0.0")));
+        assert!(output.iter().any(|line| line.starts_with("dep==2.0.0.post1")));
         assert!(!output.iter().any(|line| line.starts_with("dep==1.0.0")));
     }
 
@@ -3493,6 +3614,52 @@ sdist = { url = "https://files.example/bar-1.0.0.tar.gz", hash = "sha256:bbbbbbb
     }
 
     #[test]
+    fn poetry_serialized_extra_requirements_activate_nested_extras_to_fixpoint() {
+        let project: toml::Value = toml::from_str(
+            r#"[tool.poetry.dependencies]
+pbs-installer = { version = "*", extras = ["all"] }
+"#,
+        )
+        .unwrap();
+        let lock: toml::Value = toml::from_str(
+            r#"[[package]]
+name = "pbs-installer"
+version = "1.0.0"
+groups = ["main"]
+files = [{ file = "pbs-installer.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+
+[package.extras]
+all = ["pbs-installer[download,install]"]
+download = ["download-dep"]
+install = ["install-dep"]
+
+[[package]]
+name = "download-dep"
+version = "1.0.0"
+groups = ["main"]
+files = [{ file = "download-dep.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
+
+[[package]]
+name = "install-dep"
+version = "1.0.0"
+groups = ["main"]
+files = [{ file = "install-dep.whl", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
+"#,
+        )
+        .unwrap();
+        let output = poetry_lock_requirements(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &lock,
+            &BlanketPythonConfig::default(),
+            "3.12.14",
+        )
+        .unwrap();
+        assert!(output.iter().any(|line| line.starts_with("download-dep==")));
+        assert!(output.iter().any(|line| line.starts_with("install-dep==")));
+    }
+
+    #[test]
     fn poetry_lock_extra_edges_preserve_their_constraints() {
         let project: toml::Value = toml::from_str(
             r#"[tool.poetry.dependencies]
@@ -3643,6 +3810,15 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             Platform::X86_64UnknownLinuxGnu,
         )
         .unwrap());
+        let cases = [
+            ("python_version == '3.12.*'", true),
+            ("python_version != '3.12.*'", false),
+            ("python_full_version >= '3.12.0'", true),
+            ("python_full_version < '3.12.14'", false),
+        ];
+        for (marker, expected) in cases {
+            assert_eq!(marker_matches(marker, "3.12.14", Platform::X86_64UnknownLinuxGnu).unwrap(), expected, "{marker}");
+        }
     }
 
     #[test]
@@ -3683,6 +3859,46 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
     }
 
     #[test]
+    fn a_constraint_then_requirement_include_uses_both_contexts() {
+        let dir = temp_project("include-context");
+        fs::write(dir.join("requirements.txt"), "-c deps.txt\n-r deps.txt\n").unwrap();
+        fs::write(dir.join("deps.txt"), "six\n").unwrap();
+        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        assert_eq!(manifest.normalized_requirements_text(), "six\n");
+        assert_eq!(manifest.constraints_text(), "six\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn uv_locked_postrelease_satisfies_a_normal_package_constraint() {
+        let package = UvPackage {
+            name: "foo".into(),
+            version: "1.0.0.post1".into(),
+            source: "registry".into(),
+            files: vec![UvFile {
+                url: "https://files.example/foo-1.0.0.post1.tar.gz".into(),
+                hash: "a".repeat(64),
+                filename: "foo-1.0.0.post1.tar.gz".into(),
+                kind: ArtifactKind::Sdist,
+            }],
+            dependencies: Vec::new(),
+            resolution_markers: Vec::new(),
+            dependency_edges: Vec::new(),
+            optional_dependencies: BTreeMap::new(),
+        };
+        let selected = uv_lock_manifest(
+            &[package],
+            &["foo>=1; python_version == '3.12.*'".into()],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected[0].version, "1.0.0.post1");
+    }
+
+    #[test]
     fn setup_hash_covers_imported_sources_but_excludes_generated_outputs() {
         let dir = temp_project("setup-tree-hash");
         fs::write(dir.join("setup.py"), "from deps import requirements\n").unwrap();
@@ -3706,13 +3922,13 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("setup.cfg"), "[options]\ninstall_requires =\n").unwrap();
         fs::write(
             dir.join("setup.py"),
-            "from setuptools import setup\nsetup(install_requires=['six'])\n",
+            "from setuptools import setup as s\ns(install_requires=['six'])\n",
         )
         .unwrap();
         let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
         assert_eq!(manifest.input, "setup.py");
         assert!(manifest.requires_setup());
-        assert!(!is_trivial_setup_py("from setuptools import setup\nsetup(install_requires=['six'])\n"));
+        assert!(!is_trivial_setup_py("from setuptools import setup as s\ns(install_requires=['six'])\n"));
         let _ = fs::remove_dir_all(dir);
     }
 
