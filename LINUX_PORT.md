@@ -18,6 +18,22 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — adversarial review follow-up
+
+Implementation commit `61c8b50` rechecks the CLI and review debt listed in
+REVIEW.md. Git source packing uses sorted null-delimited paths with explicit
+nonrecursive tar input; GNU tar receives `--verbatim-files-from`, while BSD
+tar relies on `--null`. All entry mtimes use `utimensat` with no symlink
+following. Tar failure cannot be hidden by gzip success or hang on a full
+diagnostic pipe. Git source identities move to `git-source/2`; registry
+identity goldens remain unchanged.
+
+The Go integration fixture now selects the locale its greeting assertion
+expects. Validation uses disk-backed TMPDIR and Cargo's `--target-dir`
+argument; exporting `CARGO_TARGET_DIR` redirected a nested native fixture
+build into the outer test target directory. Final gate outcomes and the
+remaining macOS arm64 validation are in REVIEW-2026-09-06.md.
+
 ### 2026-09-05 — plan written, Linux baseline measured
 
 - Cloned to `~/repos/blanket` on m6-fedora; installed stable Rust via

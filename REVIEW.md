@@ -1,7 +1,6 @@
 # Review queue
 
-What still needs an **independent adversarial review**, why it matters, and
-where to look. NEXT.md tracks what to *build*; this file tracks what has not
+Independent adversarial review coverage, original briefs, and completed rounds. NEXT.md tracks what to *build*; this file tracks what has not
 been independently *checked*. They are different debts and they were getting
 confused inside one paragraph of NEXT.md.
 
@@ -17,14 +16,18 @@ confused inside one paragraph of NEXT.md.
 - Record every completed round in the log at the bottom. An entry leaves this
   file only when it is ✅.
 
-Legend: ⬛ never reviewed · 🟡 partial, final round missing · ✅ done
+Current status: all five review entries are ✅. The briefs below preserve the
+original risk questions; gate outcomes and remaining platform validation are
+in [REVIEW-2026-09-06.md](REVIEW-2026-09-06.md).
+
+Legend: ⬛ never reviewed · 🟡 partial, final round missing · ✅ reviewed and fixes rechecked
 
 ---
 
-## 1. ⬛ CLI levels one and two — PR #20, branch `cli/levels-1-2`
+## 1. ✅ CLI levels one and two — PR #20, branch `cli/levels-1-2`
 
-The largest unreviewed surface in the project: ~5,970 lines, none of it seen by
-an independent reviewer.
+Original review brief: approximately 5,970 lines. Reviewed by Astra on
+2026-09-06; findings R1–R4, R11, R13–R15 and rechecks are in the report.
 
 | Area | Files |
 |---|---|
@@ -54,12 +57,12 @@ destructive; the requirements-file text append corrupting an existing file
 that `x` creates and never removes; `-C <dir>` path handling; usage errors
 leaking an exit code other than 2, and command failures leaking 2.
 
-**Also unreviewed in this branch:** the merge commit `1b63849` and the
+**Also included in this review:** the merge commit `1b63849` and the
 test-locking changes in `9dd1f94`, which touch `store.rs`, `cargo.rs`,
 `golang.rs`, `inspect.rs` and `policy.rs`. Test-only code, but it changed
 locking, and locking changes deserve an adversary too.
 
-## 2. ⬛ Item 4, git dependencies — PRs #14 (npm), #15 (python), #16 (cargo)
+## 2. ✅ Item 4, git dependencies — PRs #14 (npm), #15 (python), #16 (cargo)
 
 Files: `src/gitsrc.rs`, `src/npm.rs`, `src/npm_lock_import.rs`, `src/pypi.rs`,
 `src/cargo.rs`, `tests/git_deps.rs`.
@@ -68,7 +71,7 @@ Files: `src/gitsrc.rs`, `src/npm.rs`, `src/npm_lock_import.rs`, `src/pypi.rs`,
 identified by a URL, and it **deliberately skips three checks that exist for
 tarballs** — the "only https registry tarballs" gate, the missing-integrity
 error, and the SRI policy check — on the argument that the commit hash *is* the
-verification. That argument is probably right. It has never been attacked.
+verification. That argument was tested in this round; see R5–R7 and R10.
 
 **Look for:** whether the `rev-parse HEAD` check can be bypassed or satisfied by
 something other than the requested commit; the full-history fallback path used
@@ -78,7 +81,7 @@ paths; URL normalization collisions, where two different repositories normalize
 to one store identity; symlinks or paths in the fetched tree escaping the store
 object.
 
-## 3. ⬛ Item 5, artifacts and electron provisioning — PRs #13, #17
+## 3. ✅ Item 5, artifacts and electron provisioning — PRs #13, #17
 
 Files: `src/artifacts.rs`, `src/npm.rs`, `tests/electron_provision.rs`.
 
@@ -89,13 +92,13 @@ disable a security control rather than a download; the electron release zip
 landing in the cache its installer reads without an integrity check on the way
 in.
 
-## 4. ⬛ PR #19 review fixes — supervising agent only
+## 4. ✅ PR #19 review fixes — supervising agent only
 
 Commits `2967d4a` (lockfile attestation, portable deterministic packing, input
-validation) and `c3de1bd`. These are *fixes produced by review*, which never
-themselves went through review — historically a good place to find defects.
+validation) and `c3de1bd`. These fixes had only supervisor verification before this round. R7 and R8
+record gaps found during the independent recheck.
 
-## 5. 🟡 Items 7, 10, 12 and gc — final round missing
+## 5. ✅ Items 7, 10, 12 and gc — final round rechecked
 
 These had one to five Astra rounds each. Only the **last** round's fixes went
 unverified: Codex hit its usage limit and the supervising agent verified them
@@ -118,7 +121,7 @@ these first in any new area; they have each already been real here at least
 once.
 
 - **Argument injection** into a delegated tool's command line (found in tar
-  handling; `deps.rs` is now the biggest untested instance of the same shape).
+  handling and dependency-edit delegation).
 - **Archive links escaping** the extraction root.
 - **Sandbox escape by delegation** — a resolver executing build backends outside
   the sandbox.
@@ -128,6 +131,23 @@ once.
 - **Process-global state in tests** — `BLANKET_STORE` and `policy`'s pending
   exception list have both produced non-deterministic suite failures that
   masked, rather than revealed, real behaviour.
+
+## Logistics
+
+- **2026-09-06 review complete:** Astra reviewed all five entries; Luna agents
+  implemented fixes and Astra rechecked them. See
+  [the written findings and validation](REVIEW-2026-09-06.md).
+- **Gates:** `cargo test` for unit/integration tests without network;
+  `cargo test -- --ignored` for network and real toolchains. On Linux use
+  disk-backed `TMPDIR`, a disposable `BLANKET_STORE`, and
+  `BLANKET_SANDBOX_TESTS=required`.
+- Use `--target-dir` for a separate Cargo build directory. Exporting
+  `CARGO_TARGET_DIR` also redirects nested fixture builds.
+- The original queue incorrectly claimed per-ecosystem dependency-edit tests
+  existed. They are now implemented in `tests/deps_e2e.rs`.
+- The new CLI and follow-up fixes still need validation on macOS arm64;
+  previous macOS acceptance results predate them.
+- Capture Cargo's exit status directly; piping to `tail` can hide failures.
 
 ## Logistics
 
@@ -149,4 +169,4 @@ Completed rounds. Add a row when an entry above reaches ✅.
 |---|---|---|---|---|---|
 | ≤2026-09-06 | items 7, 10, 12, gc, and earlier work | GPT-6 Astra | 1–5 each | ~70 fixed, several security-relevant | 🟡 final round unverified |
 | 2026-09-06 | items 4 and 5 | supervising agent only | — | — | ⬛ not independent |
-| 2026-09-06 | CLI levels 1–2 (PR #20) | none | 0 | — | ⬛ queued |
+| 2026-09-06 | CLI levels 1–2 (PR #20), Git, artifacts, #19, final fixes of #8/#10/#11/#12 | GPT-6 Astra | review + iterative fix rechecks | 15 categories; see report | ✅ reviewed and fixes rechecked; macOS validation outstanding |

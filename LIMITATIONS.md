@@ -158,16 +158,22 @@ sandbox, and uv fallback still delegates resolution.
   item 4). A lockfile entry naming a 40-character commit — `git+https`,
   `git+ssh`, a GitHub codeload/archive tarball, or a pnpm `{repo, commit}`
   resolution — is fetched by that commit, stripped of `.git`, and stored as a
-  `git-source` object whose identity is (normalized URL, commit); the commit
-  is the verification, so no SRI is required or recorded. A branch, tag or
+  `git-source/2` object whose identity includes the normalized URL and commit.
+  Explicit Git sources use commit verification; codeload/archive URLs with
+  supplied integrity retain tarball verification across npm, pnpm and Yarn.
+  Checkout blobs and recursive submodule pins are checked before publication;
+  attribute-transformed content, escaping symlinks and symlink cycles fail
+  closed. Ambient Git configuration is disabled, so custom credential helpers,
+  URL rewrites and Git proxy settings are unavailable (SSH agents remain usable).
+  A branch, tag or
   bare repository URL still fails closed as `npm_git_dep`, because the bytes
   it names can change. npm runs a git dependency's `prepare` script; blanket
   does not (it is unsandboxed build logic with its own dependency needs) and
   records `git-dependency` naming the package. Python and Cargo git dependencies work the
   same way: a python `pkg @ git+URL@<commit>` checkout is packed into a
   deterministic sdist and built through the ordinary sdist path, and a cargo
-  `git+…#<commit>` source is vendored as a directory source whose commit is an
-  identity input. Cargo git dependencies are NOT re-verified against the
+  `git+…#<commit>` source is vendored as a directory source whose Git source
+  object id is an identity input. Cargo git dependencies are NOT re-verified against the
   project's Cargo.lock at `blanket run` time: the config stanzas are rebuilt
   from that lock, so a lock edited after a sync is caught by cargo, not by
   blanket. Local `file:` links are projected when
@@ -210,7 +216,10 @@ sandbox, and uv fallback still delegates resolution.
 
 ## Rust / cargo
 
-- **git dependencies fail closed.** Loud.
+- **Pinned Git dependencies work for standalone crates.** Crate selection
+  matches the locked name and version. Workspace-inherited manifests and
+  symlinks escaping the copied crate fail closed before publication; workspace
+  metadata is not yet rewritten into standalone vendor manifests.
 - **Alternative registries fail closed.** Loud.
 - **Extra rust-toolchain components** are permissive with exception
   `toolchain-component-unavailable`; strict via policy.

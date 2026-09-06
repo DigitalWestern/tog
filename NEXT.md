@@ -1,79 +1,35 @@
-# Blanket — next actions (2026-09-05)
+# Blanket — next actions (2026-09-06)
 
-**Status for a fresh agent (2026-09-06, early morning):** blanket is a Rust
-package-manager kernel (read ARCHITECTURE.md). It runs on macOS arm64 and
-Linux x86_64; LINUX_PORT.md is the port's changelog and the Mac verification
-is complete (acceptance 35/35 on both platforms).
+Blanket is a Rust package-manager kernel for macOS arm64 and Linux x86_64.
+Read ARCHITECTURE.md for the design and LINUX_PORT.md for platform validation.
+Items 1–13 below landed in PRs #5–#19; the detailed entries retain their
+implementation history.
 
-**Everything in this file is merged except items 4 and 5.** In one overnight
-session (PRs #5–#12): item 9 wheel `.data` schemes, item 8 interpreter
-selection with CPython 3.10/3.11/3.14 pins, item 11 build isolation for
-compiled sdists (PEP 517 build requires, Rust toolchain + vendored crates),
-item 12 the pinned native library set (Linux), item 7 pnpm/yarn lockfile
-importers with per-workspace `node_modules`, item 10 manifest coverage
-(poetry/PDM/uv/hatch/setup.py/requirements dirs) with one shared PEP 440
-implementation in `src/pep440.rs`, and item 13 `blanket gc`.
+**CLI and independent review:** PR #20 adds CLI.md levels one and two:
+validated grammar, help/version, `-C`, output controls, script dispatch,
+inspection, completions, dependency edits, and `x`. Astra has reviewed the
+previously unreviewed work and the final fix commits listed in REVIEW.md;
+Luna agents implemented the follow-up fixes. Findings and final validation
+are recorded in [REVIEW-2026-09-06.md](REVIEW-2026-09-06.md).
 
-Measured effects: the 8 pnpm/yarn monorepo misses went 0/8 → 5/8; 3b1b/manim
-now syncs (native libraries); vllm stopped reporting a false success and now
-fails loudly. Each item went through Codex Luna implementation and one to five
-GPT-6 Astra adversarial review rounds; roughly seventy findings were fixed,
-several of them security-relevant (tar argument injection, escaping archive
-links, a resolver executing build backends outside the sandbox, gc deleting a
-pre-registry project's objects). The final review round for items 7, 10, 12
-and gc could not run — Codex hit its usage limit (resets 2026-09-12) — so
-those last fixes were verified against the findings and the gate by the
-supervising agent, not independently.
+**Remaining validation:** the new CLI and review fixes need a macOS arm64
+run. Earlier 35/35 macOS acceptance results predate this change and do not
+validate it. The optional stage-6 shared-store check needs both machines.
+On Linux, run integration gates with disk-backed `TMPDIR`, a disposable
+`BLANKET_STORE`, and `BLANKET_SANDBOX_TESTS=required`. Use Cargo's
+`--target-dir` argument rather than exporting `CARGO_TARGET_DIR`, which can
+redirect nested Cargo builds inside integration fixtures.
 
-**Every item in this file is now merged** (PRs #5–#19). Items 4 and 5 were
-finished on 2026-09-06 morning: git dependencies are realized from their commit
-in npm, python and cargo, and electron's release zip is provisioned into the
-cache its own installer reads.
+**Open product work:** SBOM `vcs` external references for Git components;
+standalone vendoring of workspace-inherited Cargo Git crates; more artifact
+provisioning entries (sharp <0.33, node-sass, sentry-cli) when a real project
+needs them. The acceptance bar remains the author's repositories on both
+platforms; the hit-rate corpus is a regression metric.
 
-**CLI (2026-09-06, branch `cli/levels-1-2`):** the command surface was rebuilt
-per CLI.md levels one and two — validated grammar with help/version/-C/-q/-v,
-bare `blanket` = sync, `blanket <script>`, `status`, `ls`, `doctor`,
-`completions`, `add`/`remove`/`update` (evidence ladder + delegation table),
-and `x`. Open as PR #20, carrying main up to PR #19; not merged. Needs:
-independent review (REVIEW.md entry 1), the Mac run, and the ignored
-per-ecosystem e2e tests for `add`. Unit tests pass: 342, none ignored-and-run.
-
-**Open:** SBOM `vcs` external references for git components; more provisioning
-entries (sharp <0.33, node-sass, sentry-cli) when a real project needs them;
-the optional stage-6 live shared-store check, which wants both machines. On
-Linux run e2e gates with `TMPDIR` on a real disk.
-
-**Review debt (read this before trusting the last stretch):** the queue lives
-in **REVIEW.md** — what has not been independently reviewed, why each entry
-matters, and where to look. In short: items 4 and 5 and the whole CLI branch
-have had no independent adversarial review, and the final round for items 7,
-10, 12 and gc was verified by the supervising agent rather than by Astra.
-Codex hit its usage limit at 03:18 on 2026-09-06 and resets 2026-09-12. Astra
-found roughly seventy real defects across the rounds that did run, several
-security-relevant, which is the measure of what an unreviewed stretch is worth.
-
-Delegation: Codex Luna implements, Astra reviews (Claude subagents when Codex
-is rate-limited); unit tests `cargo test`, e2e `cargo test -- --ignored`.
-
-**What actually matters, in order** (the rest of this file is the
-backlog; this paragraph is the priority): the product is "one command in
-any repo gives a hermetic, cached, reproducible environment, identical on
-the Mac and the Linux box." Necessary and open: the two review fixes,
-merge, the Mac run, interpreter selection from `requires-python` with
-CPython 3.10/3.11 pins (item 8), the wheel `headers` scheme (item 9).
-Makes it a tool rather than a demo: poetry/PDM/setup.py manifests (item
-10), build isolation for compiled sdists (item 11). Optional until a
-project the author actually uses needs it: pinned native libraries (item
-12), hardware-specific requirement files, 30/30 as a number. The real
-acceptance bar is the author's own repos on both machines; the hit-rate
-corpus is a regression metric, not the goal.
-
-*From a conversation about whether the product works yet. Thesis: the
-reason blanket exists is that people are lazy. Every "fail closed, loud"
-in LIMITATIONS.md is correct engineering and a lost user. Bun and uv won
-by working on nearly every project first and being strict never; Nix was
-strict first and nobody came. Blanket should be permissive by default
-with strictness as a company-controlled switch.*
+Delegation: Luna implements, Astra independently reviews and rechecks fixes.
+Unit gate: `cargo test`; network/toolchain gate: `cargo test -- --ignored`.
+The dependency round trips live in `tests/deps_e2e.rs` (added during review;
+the original handoff incorrectly said they already existed).
 
 ## 1. Measure the hit rate (do this first) — DONE (2026-09-02)
 
@@ -144,8 +100,9 @@ Cargo is done too (2026-09-06): a lock `source = "git+<url>?rev=<ref>#<commit>"`
 as a directory source with `{"files":{},"package":null}`, and the generated
 cargo config carries one `[source."git+…"]` stanza per source — keyed by the
 lockfile's exact string, which is what cargo matches — replaced by the vendor
-directory. The commit is an input of the vendor object's identity, so a
-different commit is a different object. An unpinned git source is refused,
+directory. The Git source object id (URL, commit and source recipe) is an
+input of the vendor identity. Workspace-inherited crates currently fail closed
+before publication rather than producing a broken standalone vendor tree. An unpinned git source is refused,
 telling the user to add a `rev=` or regenerate the lock.
 
 Open: SBOM `vcs` external references for git components, and `blanket run`'s

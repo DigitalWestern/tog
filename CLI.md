@@ -208,7 +208,7 @@ question ROADMAP.md deferred until a real polyglot need appears.
 
 ```
 blanket add <spec>...    [--dev] [--no-sync]
-blanket remove <name>... [--no-sync]
+blanket remove <name>... [--dev] [--no-sync]
 blanket update [<name>...] [--no-sync]
 ```
 
@@ -216,7 +216,8 @@ Flow, identical for the three: pick the ecosystem → delegate the manifest
 and lock edit to the store tool → run the ordinary sync → print what changed
 (`added requests 2.32.5 (requirements.txt, requirements.lock.txt)`).
 `--no-sync` stops after the lock edit, for people who want to review the
-diff first.
+diff first. `remove --dev` selects development dependencies for uv and Cargo,
+matching `add --dev`. All dependency arguments are validated before delegation.
 
 **Choosing the ecosystem (decided 2026-09-06: infer from evidence, then
 ask; no required syntax).** Blanket never picks an ecosystem on a coin flip,
@@ -248,15 +249,15 @@ exit 1, no writes.
 
 | ecosystem | project shape | add | remove | update |
 |---|---|---|---|---|
-| Python | `requirements.txt` (blanket's own lock flow) | blanket appends the spec to requirements.txt, then the existing uv `pip compile` re-lock runs | blanket deletes the line (exact-name match; refuse if the name appears via `-r` include) | delete the lock stamp and re-lock with `--upgrade` / `--upgrade-package <name>` |
+| Python | `requirements.txt` (blanket's own lock flow) | blanket adds or replaces a logical requirements record, then the existing uv `pip compile` re-lock runs | blanket deletes the full record, including hash continuations (exact-name match; ambiguous declarations and names available only through `-r` includes are refused) | delete the lock stamp and re-lock with `--upgrade` / `--upgrade-package <name>` |
 | Python | `pyproject.toml` with `[project]`, no foreign lock | store uv: `uv add --no-sync`, `uv remove --no-sync`, `uv lock --upgrade[-package]`; uv edits pyproject.toml format-preservingly and writes uv.lock, which item 10 already imports | same | same |
 | Python | `poetry.lock` / `pdm.lock` present, or `[tool.poetry]` | refuse (poetry/pdm are not pinned; uv would create a second lock) | refuse | refuse |
 | Python | `setup.py` / `setup.cfg` only | refuse with the `install_requires` line | refuse | n/a |
 | Node | `package-lock.json` or no lock | store npm: `npm install --package-lock-only --ignore-scripts [--save-dev] <spec>`, `npm uninstall --package-lock-only`, `npm update --package-lock-only [<name>]` | same | same |
 | Node | `pnpm-lock.yaml` / `yarn.lock` | refuse with `pnpm add <spec>` / `yarn add <spec>` (pnpm and yarn are not pinned; running npm would create a second lock). Pinning pnpm via the store node's corepack is the follow-up that turns this row green | same | same |
 | Cargo | any | store cargo: `cargo add`, `cargo remove`, `cargo update [-p <name>]` with network, exactly as `generate-lockfile` runs today | same | same |
-| Go | any | store go: `go get <mod>[@ver]`, `go get <mod>@none`, `go get -u [<mod>]`; then `go mod tidy` | same | same |
-| Ruby | any | store bundler: `bundle add <gem>`, `bundle remove <gem>`, `bundle update [<gem>]` under the same `BUNDLE_IGNORE_CONFIG` enforcement the planner uses | same | same |
+| Go | any | store go: `go get <mod>[@ver]`, `go get <mod>@none`, `go get -u [<mod>]`; later sync owns tidy resolution | same | same |
+| Ruby | any | store bundler: `bundle add <gem>`, `bundle remove <gem>`, `bundle update [<gem>]` with `BUNDLE_IGNORE_CONFIG` enforced and `BUNDLE_FROZEN=false` for edits; realization remains frozen | same | same |
 | Elixir | any | refuse with the `{:name, "~> x.y"}` line for mix.exs (there is no `mix add`) | refuse | store mix: `mix deps.update [<name>]` |
 | .NET | any | refuse with `dotnet add package <name>` + `dotnet restore --force-evaluate` (restore evaluates MSBuild on the host, which blanket never does outside the sandbox — the mandatory-lock rule) | refuse | refuse |
 
@@ -327,11 +328,10 @@ Implemented on branch `cli/levels-1-2`: phase B (bare `blanket` → sync,
 ladder and the delegation table; `src/deps.rs`) and phase D (`x` for PyPI
 and npm; `src/xrun.rs`). Python and Node closures carry an additive
 `inputs` field (root manifest and lock file hashes) that `status` compares.
-Offline paths are covered by `tests/cli.rs`; the delegating rows were
-smoke-tested against a throwaway store on Linux (pip-compile add/remove/
-update, npm add, the registry ladder in a polyglot directory, `x` for
-cowsay from both registries) and need the ignored per-ecosystem e2e tests
-and the Mac run before merging.
+Offline paths are covered by `tests/cli.rs`. The six delegating shapes now
+have real add/update/remove round trips in `tests/deps_e2e.rs`, including
+uv development dependencies. Astra review findings and final Linux gate
+results are in REVIEW-2026-09-06.md. The macOS arm64 run remains outstanding.
 
 ### 2.8 Deferred within level two
 
