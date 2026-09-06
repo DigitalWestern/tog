@@ -1,13 +1,13 @@
 //! CPython constraint parsing and selection.
 //!
-//! The parser intentionally implements the small, useful subset of PEP 440
-//! and Poetry syntax needed to choose one of blanket's pinned interpreters.
-//! It is pure once the project files have been collected: selection never
-//! consults the host Python or a package index.
+//! Version parsing and matching lives in `pep440`; this module only collects
+//! interpreter inputs and chooses one of blanket's pinned CPython builds. It
+//! is pure once project files have been collected: selection never consults
+//! the host Python or a package index.
 
 use crate::platform::Platform;
 use crate::python::{PinnedPython, PYTHONS};
-use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -34,11 +34,32 @@ pub struct PythonInputs {
     pub constraints: Vec<ConstraintSource>,
 }
 
+/// The dependency-bearing subset of setuptools' setup.cfg metadata.
+///
+/// This is intentionally parsed here, next to the interpreter constraint
+/// extractor, so manifest discovery and Python selection share ConfigParser's
+/// continuation rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupCfgMetadata {
+    pub install_requires: Vec<String>,
+    pub install_requires_found: bool,
+    pub python_requires: Option<String>,
+    pub extras_require: BTreeMap<String, Vec<String>>,
+    pub packages_find: Option<SetupCfgPackagesFind>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupCfgPackagesFind {
+    pub where_: Vec<String>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExplicitPython {
     pub raw: String,
     pub source: String,
-    version: Version,
+    version: crate::pep440::Version,
 }
 
 #[derive(Debug)]
@@ -83,349 +104,9 @@ impl PythonSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Version {
-    major: u64,
-    minor: u64,
-    patch: u64,
-    /// Number of components written by the user. This matters only for
-    /// exact equality: `==3.12` is not a prefix request.
-    len: usize,
-}
-
-impl Version {
-    fn triple(self) -> [u64; 3] {
-        [self.major, self.minor, self.patch]
-    }
-
-    fn target(self) -> Self {
-        Self { len: 3, ..self }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Operator {
-    GreaterEqual,
-    Greater,
-    LessEqual,
-    Less,
-    Equal,
-    NotEqual,
-    Compatible,
-    PoetryCaret,
-    PoetryTilde,
-    ArbitraryEqual,
-    BareEqual,
-}
-
-#[derive(Clone, Debug)]
-enum Clause {
-    Any,
-    /// PEP 440 arbitrary equality (`===`): plain string comparison against
-    /// the candidate's `X.Y.Z` text, no wildcard expansion, no numeric
-    /// normalization.
-    Literal(String),
-    Compare(Operator, Version),
-    PrefixEqual(Vec<u64>),
-    PrefixNotEqual(Vec<u64>),
-}
-
-#[derive(Clone, Debug)]
-struct SpecifierSet {
-    alternatives: Vec<Vec<Clause>>,
-}
-
-impl SpecifierSet {
-    fn parse(text: &str, source: &str) -> io::Result<Self> {
-        if text.trim().is_empty() {
-            // `requires-python = ""` is valid metadata meaning "no constraint".
-            return Ok(Self { alternatives: vec![vec![Clause::Any]] });
-        }
-        let alternatives = text
-            .split("||")
-            .map(|alternative| parse_alternative(alternative, text, source))
-            .collect::<io::Result<Vec<_>>>()?;
-        if alternatives.is_empty() {
-            return invalid_specifier(source, text, "empty expression");
-        }
-        Ok(Self { alternatives })
-    }
-
-    fn matches(&self, version: Version) -> bool {
-        self.alternatives
-            .iter()
-            .any(|clauses| clauses.iter().all(|clause| clause_matches(clause, version)))
-    }
-}
-
-fn invalid_specifier<T>(source: &str, text: &str, why: &str) -> io::Result<T> {
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("{source}: invalid Python specifier `{text}`: {why}"),
-    ))
-}
-
-fn parse_alternative(alternative: &str, full_text: &str, source: &str) -> io::Result<Vec<Clause>> {
-    let mut clauses = Vec::new();
-    let bytes = alternative.as_bytes();
-    let mut pos = 0;
-    let mut saw_token = false;
-    let mut after_comma = false;
-    while pos < bytes.len() {
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos == bytes.len() {
-            if after_comma {
-                return invalid_specifier(source, full_text, "trailing comma");
-            }
-            break;
-        }
-        if bytes[pos] == b',' {
-            if after_comma || !saw_token {
-                return invalid_specifier(source, full_text, "empty comma-separated clause");
-            }
-            after_comma = true;
-            pos += 1;
-            continue;
-        }
-        if bytes[pos] == b'|' {
-            return invalid_specifier(source, full_text, "empty OR alternative");
-        }
-        after_comma = false;
-        let (operator, consumed) = parse_operator(&alternative[pos..]);
-        let Some(operator) = operator else {
-            return invalid_specifier(source, full_text, "expected a supported operator");
-        };
-        pos += consumed;
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        let start = pos;
-        while pos < bytes.len()
-            && !bytes[pos].is_ascii_whitespace()
-            && bytes[pos] != b','
-        {
-            pos += 1;
-        }
-        if start == pos {
-            return invalid_specifier(source, full_text, "operator has no version");
-        }
-        let version_text = &alternative[start..pos];
-        clauses.extend(expand_clause(operator, version_text, full_text, source)?);
-        saw_token = true;
-    }
-    if !saw_token {
-        return invalid_specifier(source, full_text, "empty expression");
-    }
-    Ok(clauses)
-}
-
-fn parse_operator(text: &str) -> (Option<Operator>, usize) {
-    // Longest operators first. `^` and `~` are Poetry-only but harmless in
-    // the shared parser because all constraints are selected, not resolved.
-    for (operator, spelling) in [
-        (Operator::GreaterEqual, ">="),
-        (Operator::LessEqual, "<="),
-        (Operator::NotEqual, "!="),
-        (Operator::Compatible, "~="),
-        (Operator::ArbitraryEqual, "==="),
-        (Operator::Equal, "=="),
-        (Operator::Greater, ">"),
-        (Operator::Less, "<"),
-        (Operator::PoetryCaret, "^"),
-        (Operator::PoetryTilde, "~"),
-    ] {
-        if text.starts_with(spelling) {
-            return (Some(operator), spelling.len());
-        }
-    }
-    // A bare version is Poetry's `3.11` / `3.11.*` form.
-    if !text.is_empty() && !text.starts_with(',') && !text.starts_with('|') {
-        return (Some(Operator::BareEqual), 0);
-    }
-    (None, 0)
-}
-
-fn parse_version(text: &str, source_text: &str, source: &str) -> io::Result<(Version, bool)> {
-    let wildcard = text.ends_with(".*");
-    let number_text = if wildcard {
-        &text[..text.len() - 2]
-    } else {
-        text
-    };
-    if number_text.is_empty() {
-        return invalid_specifier(source, source_text, "missing version");
-    }
-    let pieces: Vec<_> = number_text.split('.').collect();
-    if pieces.is_empty() || pieces.len() > 3 || pieces.iter().any(|p| p.is_empty()) {
-        return invalid_specifier(source, source_text, "version must be X, X.Y, or X.Y.Z");
-    }
-    let mut values = [0; 3];
-    for (index, piece) in pieces.iter().enumerate() {
-        if !piece.bytes().all(|byte| byte.is_ascii_digit()) {
-            return invalid_specifier(source, source_text, "version contains a non-numeric suffix");
-        }
-        values[index] = piece.parse::<u64>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{source}: invalid Python specifier `{source_text}`: version is too large"),
-            )
-        })?;
-    }
-    Ok((
-        Version {
-            major: values[0],
-            minor: values[1],
-            patch: values[2],
-            len: pieces.len(),
-        },
-        wildcard,
-    ))
-}
-
-fn expand_clause(
-    operator: Operator,
-    version_text: &str,
-    full_text: &str,
-    source: &str,
-) -> io::Result<Vec<Clause>> {
-    if matches!(operator, Operator::ArbitraryEqual) {
-        return Ok(vec![Clause::Literal(version_text.to_string())]);
-    }
-    if version_text == "*" {
-        return match operator {
-        Operator::Equal | Operator::ArbitraryEqual | Operator::BareEqual => Ok(vec![Clause::Any]),
-            _ => invalid_specifier(source, full_text, "wildcard is only valid with equality"),
-        };
-    }
-    let (version, wildcard) = parse_version(version_text, full_text, source)?;
-    if wildcard {
-        let prefix = version.triple()[..version.len].to_vec();
-        return match operator {
-            Operator::Equal | Operator::ArbitraryEqual | Operator::BareEqual => {
-                Ok(vec![Clause::PrefixEqual(prefix)])
-            }
-            Operator::NotEqual => Ok(vec![Clause::PrefixNotEqual(prefix)]),
-            _ => invalid_specifier(source, full_text, "wildcards need == or !="),
-        };
-    }
-    if matches!(operator, Operator::Equal | Operator::ArbitraryEqual) && version.len < 3 {
-        // PEP 440's equality operator is exact. A bare Poetry version is the
-        // prefix form, and is handled separately below by the caller.
-        return Ok(vec![Clause::Compare(operator, version.target())]);
-    }
-    match operator {
-        Operator::BareEqual if version.len < 3 => {
-            Ok(vec![Clause::PrefixEqual(version.triple()[..version.len].to_vec())])
-        }
-        Operator::BareEqual => Ok(vec![Clause::Compare(Operator::Equal, version.target())]),
-        Operator::Compatible => {
-            let upper = if version.len <= 2 {
-                Version {
-                    major: version.major + 1,
-                    minor: 0,
-                    patch: 0,
-                    len: 3,
-                }
-            } else {
-                Version {
-                    major: version.major,
-                    minor: version.minor + 1,
-                    patch: 0,
-                    len: 3,
-                }
-            };
-            let prefix = if version.len <= 2 {
-                vec![version.major]
-            } else {
-                vec![version.major, version.minor]
-            };
-            Ok(vec![
-                Clause::Compare(Operator::GreaterEqual, version.target()),
-                Clause::PrefixEqual(prefix),
-                Clause::Compare(Operator::Less, upper),
-            ])
-        }
-        Operator::PoetryCaret => {
-            let upper = if version.major > 0 {
-                Version {
-                    major: version.major + 1,
-                    minor: 0,
-                    patch: 0,
-                    len: 3,
-                }
-            } else if version.minor > 0 {
-                Version {
-                    major: 0,
-                    minor: version.minor + 1,
-                    patch: 0,
-                    len: 3,
-                }
-            } else {
-                Version {
-                    major: 0,
-                    minor: 0,
-                    patch: version.patch + 1,
-                    len: 3,
-                }
-            };
-            Ok(vec![
-                Clause::Compare(Operator::GreaterEqual, version.target()),
-                Clause::Compare(Operator::Less, upper),
-            ])
-        }
-        Operator::PoetryTilde => {
-            let upper = Version {
-                major: version.major,
-                minor: version.minor + 1,
-                patch: 0,
-                len: 3,
-            };
-            Ok(vec![
-                Clause::Compare(Operator::GreaterEqual, version.target()),
-                Clause::Compare(Operator::Less, upper),
-            ])
-        }
-        Operator::NotEqual => Ok(vec![Clause::Compare(Operator::NotEqual, version.target())]),
-        _ => Ok(vec![Clause::Compare(operator, version.target())]),
-    }
-}
-
-fn clause_matches(clause: &Clause, version: Version) -> bool {
-    match clause {
-        Clause::Any => true,
-        Clause::Literal(text) => {
-            *text == format!("{}.{}.{}", version.major, version.minor, version.patch)
-        }
-        Clause::PrefixEqual(prefix) => version.triple()[..prefix.len()] == prefix[..],
-        Clause::PrefixNotEqual(prefix) => version.triple()[..prefix.len()] != prefix[..],
-        Clause::Compare(operator, target) => {
-            let ordering = version.cmp(target);
-            match operator {
-                Operator::GreaterEqual => ordering != Ordering::Less,
-                Operator::Greater => ordering == Ordering::Greater,
-                Operator::LessEqual => ordering != Ordering::Greater,
-                Operator::Less => ordering == Ordering::Less,
-                Operator::Equal | Operator::ArbitraryEqual => ordering == Ordering::Equal,
-                Operator::NotEqual => ordering != Ordering::Equal,
-                Operator::Compatible
-                | Operator::PoetryCaret
-                | Operator::PoetryTilde
-                | Operator::BareEqual => false,
-            }
-        }
-    }
-}
-
 /// Pure PEP 440/Poetry matching helper for a pinned X.Y.Z candidate.
 pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
-    let source = "specifier";
-    let (candidate, wildcard) = parse_version(version, specifier, source)?;
-    if wildcard || candidate.len != 3 {
-        return invalid_specifier(source, specifier, "candidate must be a pinned X.Y.Z version");
-    }
-    Ok(SpecifierSet::parse(specifier, source)?.matches(candidate.target()))
+    crate::pep440::matches_specifier(specifier, version)
 }
 
 /// Select a pinned CPython from already-collected declared constraints. With
@@ -455,7 +136,7 @@ pub fn select_python_with_inputs(
         .constraints
         .iter()
         .map(|constraint| {
-            SpecifierSet::parse(&constraint.text, &constraint.source)
+            crate::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)
                 .map(|set| (constraint, set))
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -487,7 +168,7 @@ pub fn select_python_with_inputs(
     let (pin, explicit_request) = if let Some(explicit) = &inputs.explicit {
         let matching = pins.iter().copied().find(|pin| {
             let version = pinned_version(pin.version).expect("pinned CPython version");
-            version.major == explicit.version.major && version.minor == explicit.version.minor
+            version.major() == explicit.version.major() && version.minor() == explicit.version.minor()
         });
         let Some(pin) = matching else {
             return Err(no_satisfying_pin(
@@ -497,7 +178,7 @@ pub fn select_python_with_inputs(
                 &pins,
             ));
         };
-        if explicit.version.len == 3 && pin.version != explicit.raw {
+        if explicit.version.release_len() == 3 && pin.version != explicit.raw {
             warnings.push(format!(
                 "blanket: .python-version requests CPython {}; using pinned patch {}",
                 explicit.raw, pin.version
@@ -506,7 +187,7 @@ pub fn select_python_with_inputs(
         let violated: Vec<_> = parsed
             .iter()
             .filter(|(_, specifier)| {
-                !specifier.matches(pinned_version(pin.version).expect("pinned version"))
+                !specifier.matches(&pinned_version(pin.version).expect("pinned version"))
             })
             .map(|(constraint, _)| constraint)
             .collect();
@@ -527,7 +208,7 @@ pub fn select_python_with_inputs(
     } else {
         let satisfies = |pin: &&PinnedPython| {
             let version = pinned_version(pin.version).expect("pinned CPython version");
-            parsed.iter().all(|(_, specifier)| specifier.matches(version))
+            parsed.iter().all(|(_, specifier)| specifier.matches(&version))
         };
         let default = pins
             .iter()
@@ -574,6 +255,27 @@ pub fn select_python_with_inputs(
     })
 }
 
+/// Reconstruct the selection recorded in a plan when a later metadata phase
+/// (for example sandboxed setup.py `PKG-INFO`) added a constraint that is not
+/// visible to the lightweight preflight collector.
+pub fn select_python_for_version(
+    platform: Platform,
+    inputs: &PythonInputs,
+    version: &str,
+) -> io::Result<PythonSelection> {
+    let current = select_python_with_inputs(platform, inputs)?;
+    if current.pin.version == version {
+        return Ok(current);
+    }
+    let mut forced = inputs.clone();
+    let minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
+    forced.constraints.push(ConstraintSource::new(
+        format!("=={minor}.*"),
+        "locked plan",
+    ));
+    select_python_with_inputs(platform, &forced)
+}
+
 fn no_satisfying_pin(
     platform: Platform,
     constraint: &str,
@@ -594,17 +296,9 @@ fn no_satisfying_pin(
     )
 }
 
-fn pinned_version(text: &str) -> Option<Version> {
-    let pieces: Vec<_> = text.split('.').collect();
-    if pieces.len() != 3 || pieces.iter().any(|piece| !piece.bytes().all(|b| b.is_ascii_digit())) {
-        return None;
-    }
-    Some(Version {
-        major: pieces[0].parse().ok()?,
-        minor: pieces[1].parse().ok()?,
-        patch: pieces[2].parse().ok()?,
-        len: 3,
-    })
+fn pinned_version(text: &str) -> Option<crate::pep440::Version> {
+    let version = crate::pep440::Version::parse(text).ok()?;
+    (version.release_len() == 3 && !version.has_epoch() && !version.is_prerelease()).then_some(version)
 }
 
 /// Parse the first usable line of a `.python-version` file. Unsupported
@@ -653,24 +347,15 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
             format!("{source}: invalid .python-version request `{line}`"),
         ));
     }
-    let mut values = [0; 3];
-    for (index, piece) in pieces.iter().enumerate() {
-        values[index] = piece.parse::<u64>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{source}: invalid .python-version request `{line}`"),
-            )
-        })?;
-    }
     Ok(ExplicitPython {
         raw: line.to_string(),
         source: source.to_string(),
-        version: Version {
-            major: values[0],
-            minor: values[1],
-            patch: values[2],
-            len: pieces.len(),
-        },
+        version: crate::pep440::Version::parse(numeric).map_err(|why| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{source}: invalid .python-version request `{line}`: {why}"),
+            )
+        })?,
     })
 }
 
@@ -755,7 +440,7 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
     if setup_cfg.is_file() {
         let text = std::fs::read_to_string(&setup_cfg)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", setup_cfg.display())))?;
-        if let Some(value) = extract_setup_cfg_python_requires(&text) {
+        if let Some(value) = parse_setup_cfg(&text).python_requires {
             inputs
                 .constraints
                 .push(ConstraintSource::new(value, "setup.cfg"));
@@ -777,54 +462,137 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
     Ok(inputs)
 }
 
-pub fn extract_setup_cfg_python_requires(text: &str) -> Option<String> {
-    // configparser semantics: a line is a continuation of the current option
-    // only when it is indented deeper than that option's own key line;
-    // otherwise it starts a new option (keys may themselves be indented).
+/// Parse the setup.cfg sections used by manifest discovery.
+///
+/// ConfigParser treats a physical line as a continuation only when it is
+/// indented more deeply than the option key. In particular, an indented key
+/// is still a key, not a continuation of the previous option.
+pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
     let mut section = String::new();
-    let mut value: Option<String> = None;
-    let mut current_is_python_requires = false;
+    let mut current_key: Option<String> = None;
+    let mut current_values = Vec::new();
     let mut option_indent: Option<usize> = None;
-    for line in text.lines() {
+    let mut metadata = SetupCfgMetadata::default();
+
+    let finish = |section: &str,
+                  key: Option<String>,
+                  values: &[String],
+                  metadata: &mut SetupCfgMetadata| {
+        let Some(key) = key else { return; };
+        if section.eq_ignore_ascii_case("options") {
+            match key.as_str() {
+                "install_requires" => {
+                    metadata.install_requires_found = true;
+                    metadata.install_requires.extend(
+                        values
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_string),
+                    );
+                }
+                "python_requires" => {
+                    let value = values
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !value.is_empty() {
+                        metadata.python_requires = Some(value);
+                    }
+                }
+                _ => {}
+            }
+        } else if section.eq_ignore_ascii_case("options.extras_require") {
+            for value in values.iter().filter(|value| !value.trim().is_empty()) {
+                metadata
+                    .extras_require
+                    .entry(key.clone())
+                    .or_default()
+                    .push(value.trim().to_string());
+            }
+        } else if section.eq_ignore_ascii_case("options.packages.find") {
+            let packages = metadata.packages_find.get_or_insert_with(Default::default);
+            for value in values.iter().filter(|value| !value.trim().is_empty()) {
+                let values = value
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                match key.as_str() {
+                    "where" => packages.where_.extend(values),
+                    "include" => packages.include.extend(values),
+                    "exclude" => packages.exclude.extend(values),
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    for raw in text.lines() {
+        // ConfigParser ignores full-line comments before it applies the
+        // continuation indentation rule. An unindented `; comment` therefore
+        // cannot terminate a multi-line install_requires value.
+        let raw_trimmed = raw.trim_start();
+        if raw_trimmed.starts_with('#') || raw_trimmed.starts_with(';') {
+            continue;
+        }
+        let line = strip_setup_cfg_comment(raw);
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+        if trimmed.is_empty() {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
-        if let Some(active) = option_indent {
-            if indent > active {
-                if current_is_python_requires {
-                    if let Some(v) = value.as_mut() {
-                        v.push(' ');
-                        v.push_str(trimmed);
-                    }
-                }
-                continue;
-            }
+        if option_indent.is_some_and(|active| indent > active) {
+            current_values.push(trimmed.to_string());
+            continue;
         }
+
+        finish(
+            &section,
+            current_key.take(),
+            &current_values,
+            &mut metadata,
+        );
+        current_values.clear();
+        option_indent = None;
+
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            section = trimmed.trim_matches(&['[', ']'][..]).trim().to_string();
-            option_indent = None;
-            current_is_python_requires = false;
+            section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
             continue;
         }
+
         option_indent = Some(indent);
-        if !section.eq_ignore_ascii_case("options") {
-            current_is_python_requires = false;
-            continue;
-        }
         let Some(separator) = trimmed.find(['=', ':']) else {
-            current_is_python_requires = false;
             continue;
         };
-        current_is_python_requires = trimmed[..separator]
-            .trim()
-            .eq_ignore_ascii_case("python_requires");
-        if current_is_python_requires {
-            value = Some(trimmed[separator + 1..].trim().to_string());
+        current_key = Some(trimmed[..separator].trim().to_ascii_lowercase());
+        let value = trimmed[separator + 1..].trim();
+        if !value.is_empty() {
+            current_values.push(value.to_string());
         }
     }
-    value.map(|v| v.trim().to_string())
+    finish(
+        &section,
+        current_key,
+        &current_values,
+        &mut metadata,
+    );
+    metadata
+}
+
+fn strip_setup_cfg_comment(line: &str) -> &str {
+    line.char_indices()
+        .find(|(index, character)| {
+            *character == '#'
+                && (*index == 0 || line.as_bytes()[*index - 1].is_ascii_whitespace())
+        })
+        .map(|(index, _)| &line[..index])
+        .unwrap_or(line)
+}
+
+pub fn extract_setup_cfg_python_requires(text: &str) -> Option<String> {
+    parse_setup_cfg(text).python_requires
 }
 
 pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
@@ -948,7 +716,7 @@ mod tests {
                 parse_python_version_file(text, ".python-version")
                     .unwrap()
                     .version
-                    .major,
+                    .major(),
                 3
             );
         }
@@ -1024,6 +792,25 @@ mod tests {
             extract_setup_py_python_requires("setup(python_requires = \"<3.12\")"),
             Some("<3.12".into())
         );
+    }
+
+    #[test]
+    fn setup_cfg_metadata_parser_returns_dependency_sections() {
+        let cfg = "[options]\n  install_requires =\n    six\n  python_requires = >=3.9,\n    <3.13\n[options.extras_require]\n  test =\n    pytest\n[options.packages.find]\n  where = src\n  include = demo*\n";
+        let metadata = parse_setup_cfg(cfg);
+        assert_eq!(metadata.install_requires, ["six"]);
+        assert_eq!(metadata.python_requires.as_deref(), Some(">=3.9, <3.13"));
+        assert_eq!(metadata.extras_require["test"], ["pytest"]);
+        let packages = metadata.packages_find.unwrap();
+        assert_eq!(packages.where_, ["src"]);
+        assert_eq!(packages.include, ["demo*"]);
+    }
+
+    #[test]
+    fn setup_cfg_full_line_comments_do_not_end_install_requires() {
+        let cfg = "[options]\ninstall_requires =\n  six\n; an unindented comment\n  idna\n# another comment\n  packaging\n";
+        let metadata = parse_setup_cfg(cfg);
+        assert_eq!(metadata.install_requires, ["six", "idna", "packaging"]);
     }
 
     #[test]

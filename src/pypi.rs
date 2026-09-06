@@ -143,6 +143,91 @@ fn logical_lines(text: &str) -> Vec<String> {
     logical
 }
 
+/// Expose pip's logical-line handling to manifest discovery. Comments are
+/// removed only when `#` is at the start or follows whitespace, so URLs and
+/// hashes remain intact.
+pub fn logical_requirement_lines(text: &str) -> Vec<String> {
+    logical_lines(text)
+}
+
+/// Whether a logical line is one of the include/index directives that the
+/// manifest layer handles before resolution.
+pub fn is_requirement_option(line: &str) -> bool {
+    let first = line.split_whitespace().next().unwrap_or_default();
+    matches!(
+        first,
+        "-r"
+            | "--requirement"
+            | "-c"
+            | "--constraint"
+            | "--index-url"
+            | "--extra-index-url"
+            | "--find-links"
+            | "--trusted-host"
+    ) || first.starts_with("--index-url=")
+        || first.starts_with("--extra-index-url=")
+        || first.starts_with("--find-links=")
+        || first.starts_with("--trusted-host=")
+        || first.starts_with("-r=")
+        || first.starts_with("--requirement=")
+        || first.starts_with("-c=")
+        || first.starts_with("--constraint=")
+}
+
+/// Index configuration is deliberately data-only: blanket reports it as an
+/// unattested input and never follows the configured index during locking.
+pub fn unattested_index_options(text: &str) -> Vec<String> {
+    logical_lines(text)
+        .into_iter()
+        .filter(|line| {
+            let first = line.split_whitespace().next().unwrap_or_default();
+            matches!(
+                first,
+                "--index-url"
+                    | "--extra-index-url"
+                    | "--find-links"
+                    | "--trusted-host"
+            ) || first.starts_with("--index-url=")
+                || first.starts_with("--extra-index-url=")
+                || first.starts_with("--find-links=")
+                || first.starts_with("--trusted-host=")
+        })
+        .collect()
+}
+
+/// Parse setuptools' generated `requires.txt`. Unnamed lines are install
+/// requirements; extra sections are intentionally skipped, while a section
+/// such as `[:python_version < '3.9']` contributes that marker.
+pub fn parse_requires_txt(text: &str) -> io::Result<Vec<String>> {
+    enum Section {
+        Extra,
+        Marker(String),
+    }
+    let mut section: Option<Section> = None;
+    let mut output = Vec::new();
+    for raw in text.lines() {
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            section = if let Some(marker) = name.strip_prefix(':') {
+                Some(Section::Marker(marker.trim().to_string()))
+            } else {
+                Some(Section::Extra)
+            };
+            continue;
+        }
+        match &section {
+            Some(Section::Marker(marker)) => output.push(format!("{line}; {marker}")),
+            Some(Section::Extra) => {}
+            None => output.push(line.to_string()),
+        }
+    }
+    Ok(output)
+}
+
 /// Return project-local/direct specs without recording policy exceptions.
 pub fn skippable_specs(text: &str) -> Vec<String> {
     logical_lines(text)
@@ -187,6 +272,11 @@ pub fn is_skippable_spec(spec: &str) -> bool {
 pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
     let mut reqs = Vec::new();
     for line in logical_lines(text) {
+        if is_requirement_option(&line) {
+            // Includes and index directives are validated/recorded by the
+            // manifest layer. They are not package requirements themselves.
+            continue;
+        }
         let mut spec = String::new();
         let mut hashes: Vec<String> = Vec::new();
         for tok in line.split_whitespace() {
@@ -710,6 +800,22 @@ six==1.17.0 \\\n\
     }
 
     #[test]
+    fn requires_txt_sections_keep_markers_and_drop_extras() {
+        let text = "base>=1\n[dev]\npytest\n[:python_version < '3.12']\nolddep==1\n";
+        assert_eq!(
+            parse_requires_txt(text).unwrap(),
+            ["base>=1", "olddep==1; python_version < '3.12'"]
+        );
+    }
+
+    #[test]
+    fn requirements_options_and_inline_comments_are_data_only() {
+        let text = "--index-url https://private.invalid/simple\nsix==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001 # note\n";
+        assert_eq!(parse_requirements(text).unwrap().len(), 1);
+        assert_eq!(unattested_index_options(text), vec!["--index-url https://private.invalid/simple"]);
+    }
+
+    #[test]
     fn rejects_duplicates_and_bad_abi_wheels() {
         let dup = "six==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001\n\
 Six==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000002\n";
@@ -731,10 +837,10 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
             "six==1.0; python_version<'3' --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
             "-e sixpkg",                  // editable that is neither local nor a URL
             "six==1.0 --hash=md5:abc",
-            "-r other.txt",
         ] {
             assert!(parse_requirements(bad).is_err(), "should reject: {bad}");
         }
+        assert!(parse_requirements("-r other.txt\n--index-url https://private.invalid/simple\n").unwrap().is_empty());
     }
 
     #[test]

@@ -125,21 +125,26 @@ Pinned CPython 3.10.21, 3.11.16, and 3.14.7 on both platforms with cache/closure
 - Implemented pip/uv-compatible `headers` placement, preserving raw metadata distribution names and existing collision behavior.
 - Audited `scripts`/`data` routing and containment, with unit coverage plus the ignored greenlet 3.5.5 sync/import e2e on both supported platforms.
 
-## 10. Manifest coverage: poetry, PDM, setup.py, requirements dirs
+## 10. Manifest coverage: poetry, PDM, setup.py, requirements dirs — DONE
 
-Three misses are `no_inputs`, and one of them is not a miss at all.
+Implemented in `src/manifest.rs` with one normalized requirement intermediate,
+separate `no_manifest`/`unreadable_manifest` diagnostics, and successful
+interpreter-only empty plans.
 
 - **poetry** (specimen: sherlock-project/sherlock) —
   `[tool.poetry.dependencies]` with caret/tilde constraints (`^0.4.1` →
-  `>=0.4.1,<0.5`, `~1.2` → `>=1.2,<1.3`), the `python` row excluded and
+  `>=0.4.1,<0.5.0`, `~1.2` → `>=1.2,<1.3`), the `python` row excluded and
   fed to item 8, table-form deps (`{version=…, optional=true, markers=…,
   extras=[…]}`), optional deps skipped unless an extra names them,
   `[tool.poetry.group.*.dependencies]` excluded by default. If a
   `poetry.lock` exists prefer it (it carries hashes) — a lockfile
-  importer, same argument as item 7.
+  importer, same argument as item 7. Implemented, including Poetry constraint
+  conversion, table dependencies, optional extras, main-group reachability,
+  file hashes, and lock disagreement exceptions.
 - **PDM / uv / hatch** — `[project.dependencies]` already works; add
   `[tool.pdm.dev-dependencies]` and `[dependency-groups]` (PEP 735) as
-  excluded-by-default groups; honor `uv.lock` when present.
+  excluded-by-default groups; honor `uv.lock` when present. Implemented with
+  host wheel selection and uv fallback when no compatible locked file exists.
 - **setup.py that computes its dependencies** (specimen:
   FoundationAgents/MetaGPT reads requirements.txt at import time;
   vllm-project/vllm builds the list from `requirements/*.txt` with
@@ -147,7 +152,8 @@ Three misses are `no_inputs`, and one of them is not a miss at all.
   `python setup.py egg_info` (or `pip`'s metadata build) **inside the
   sandbox** with the repo checked out read-only and no network, then
   parsing `requires.txt`/`PKG-INFO`. Cache by tree hash of the repo
-  inputs. `setup.cfg` `[options] install_requires` is a plain parse.
+  inputs. `setup.cfg` `[options] install_requires` is a plain parse. Implemented
+  with cached sandboxed egg_info and requires.txt/PKG-INFO parsing.
 - **requirements directories** (specimen: vllm) — `-r`/`-c` includes
   (relative to the including file, cycle-safe), inline `#` comments
   after a requirement, `--extra-index-url`/`--index-url`/`--find-links`
@@ -160,9 +166,10 @@ Three misses are `no_inputs`, and one of them is not a miss at all.
 - **Zero-dependency projects** (specimen: ytdl-org/youtube-dl,
   setup.cfg with no install_requires): a manifest that declares nothing
   is a **successful** sync with an interpreter and an empty env, not
-  `no_inputs`. Split the classes: `no_manifest` (nothing found) vs
-  `empty_manifest` (found, empty) vs `unreadable_manifest` (found, could
-  not parse — always a blanket bug).
+  `no_inputs`; it is reported as an empty manifest. Split the failure
+  classes: `no_manifest` (nothing found) vs `unreadable_manifest` (found,
+  could not parse — always a blanket bug). `empty_manifest` is success-only,
+  never an error.
 
 ## 11. Build isolation for compiled sdists — DONE (2026-09-05)
 

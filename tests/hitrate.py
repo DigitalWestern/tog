@@ -5,7 +5,7 @@ config, on a random popular real project?
     python3 tests/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
 
 Picks the top-starred non-archived GitHub repos per ecosystem that carry a
-manifest (python: requirements.txt/pyproject.toml/setup.py; npm:
+manifest (python: requirements.txt/pyproject.toml/setup.cfg/setup.py; npm:
 package.json), shallow-clones each into a scratch dir, runs the release
 binary's `sync` with a throwaway BLANKET_STORE, and records outcome +
 failure class. Everything but the toolchain objects is pruned from the
@@ -26,7 +26,8 @@ SKIP_NAMES = re.compile(
 # (class, regex over the combined stderr tail); first match wins.
 CLASSES = [
     ("platform_unsupported", r"LINUX_PORT\.md"),
-    ("no_inputs", r"nothing to sync here"),
+    ("no_manifest", r"\bno_manifest\b"),
+    ("unreadable_manifest", r"unreadable_manifest"),
     ("py_editable", r"editable requirements"),
     ("py_markers", r"environment markers are not supported"),
     ("py_extras", r"extras are not supported"),
@@ -365,7 +366,7 @@ def main():
     a = ap.parse_args()
 
     manifests = {
-        "python": ["requirements.txt", "pyproject.toml", "setup.py"],
+        "python": ["requirements.txt", "pyproject.toml", "setup.cfg", "setup.py"],
         "npm": ["package.json"],
     }
     targets = []
@@ -436,7 +437,7 @@ def main():
                 err = out.strip()[-300:]
             else:
                 inputs = ",".join(
-                    n for n in ["requirements.txt", "pyproject.toml", "setup.py", "package.json",
+                    n for n in ["requirements.lock.txt", "requirements.txt", "pyproject.toml", "poetry.lock", "uv.lock", "setup.cfg", "setup.py", "requirements",
                                 "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]
                     if os.path.exists(os.path.join(clone, n))
                 )

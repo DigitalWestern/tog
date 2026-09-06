@@ -67,9 +67,17 @@ Use `blanket sync --strict` or `BLANKET_STRICT=1` to deny every exception.
 
 `blanket run dev` / `blanket run test` runs the `package.json` script inside the projected env; the script wins over a same-named PATH executable.
 
-`sync` meets projects where they are: a ranged `requirements.txt` or
-`pyproject.toml` project dependency table is locked via uv
-(`requirements.lock.txt`, hash-pinned, auto-refreshed). For JavaScript,
+`sync` meets projects where they are: it discovers `requirements.txt`,
+Poetry/PDM/uv/hatch `pyproject.toml` metadata, `setup.cfg`, computed
+`setup.py` metadata, and conventional `requirements/` files in that order.
+Ranged inputs are locked via the store uv (`requirements.lock.txt`,
+hash-pinned, auto-refreshed); Poetry and uv lockfiles are imported when their
+host-compatible hashes are available. Optional/dev groups are excluded by
+default. A found manifest with no dependencies succeeds as an interpreter-only
+empty environment, while a directory with no Python manifest reports
+`no_manifest` and a broken found file reports `unreadable_manifest`. A
+`setup.py egg_info` probe runs read-only in the network-denied build sandbox
+and is cached by the manifest tree hash. For JavaScript,
 `package-lock.json` wins; otherwise pnpm v9 (and the compatible v6 importer
 shape) or Yarn classic v1 is imported directly, including workspace links.
 Only a lockfile-less project is resolved by the store npm. An existing real

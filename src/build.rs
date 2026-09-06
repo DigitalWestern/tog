@@ -958,3 +958,15 @@ mod tests {
         assert!(sdist_build_env(Platform::Aarch64AppleDarwin).is_empty());
     }
 }
+
+/// Realize the pinned setuptools/pip/wheel environment used by sandboxed
+/// metadata probes such as `setup.py egg_info`. The rest of this branch's
+/// former copies of the build helpers were dropped in favour of main's
+/// restructured versions.
+pub fn ensure_build_environment(
+    store: &Store,
+    platform: Platform,
+    python_version: &str,
+) -> io::Result<PathBuf> {
+    project::realize_env(store, platform, &build_toolchain_plan(python_version))
+}

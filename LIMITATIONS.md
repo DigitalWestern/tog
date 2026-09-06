@@ -80,6 +80,16 @@ two supported host platforms; explicit `.python-version` requests win over
 metadata conflicts with a warning, while unsupported implementations and
 unsatisfiable constraints fail closed.
 
+Manifest discovery covers Poetry/PDM/uv/hatch metadata, Poetry/uv lockfile
+hashes, setup.cfg, sandboxed setup.py egg_info, and requirements directories.
+It reports `no_manifest` when no Python input exists, treats an empty found
+manifest as a successful interpreter-only environment, and reports
+`unreadable_manifest` for a found file that cannot be parsed or whose
+sandboxed metadata probe fails. Optional/development groups and private index
+configuration are recorded or skipped rather than silently trusted. setup.py
+remains a cooperative metadata execution boundary inside the existing
+sandbox, and uv fallback still delegates resolution.
+
 - **RECORD files are left as shipped**: not verified on install, not
   rewritten; importlib file listings can lie. Silent. Wheel `.data`
   `purelib`, `platlib`, `headers`, `scripts`, and `data` schemes are routed.
