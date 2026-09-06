@@ -1583,11 +1583,11 @@ fn run_install_scripts_staged(
                     .display()
                     .to_string(),
             ),
-            // NOTE: npm_config_build_from_source is deliberately NOT set:
-            // it would make packages like sharp skip their local-cache
-            // lookup (where declared artifacts land). Downloaders fail
-            // fast against the denied network and fall through to their
-            // source-build path on their own.
+            // NOTE: npm_config_build_from_source is not set globally here: it
+            // would make packages like sharp skip their local-cache lookup
+            // (where declared artifacts land). It is set per package, below,
+            // only for prebuilt-binary downloaders with no declared artifacts
+            // (NEXT.md item 5).
             // Deterministic npm cache location inside the scratch HOME —
             // also where declared artifacts under .npm/ land.
             (
@@ -1604,6 +1604,34 @@ fn run_install_scripts_staged(
             // only compiler selections visible to the lifecycle process.
             envs.push(("CC".into(), "gcc".into()));
             envs.push(("CXX".into(), "g++".into()));
+        }
+        // NEXT.md item 5: packages whose installers download at install time.
+        // A documented skip switch turns a doomed fetch into a recorded
+        // exception naming what the user runs later; a prebuilt-binary
+        // downloader is told to compile instead, which is the path it would
+        // have fallen back to anyway once the network denied it.
+        let script_text = phases
+            .iter()
+            .map(|(_, script)| script.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let declared_here = !artifacts.is_empty();
+        if let Some(skip) = crate::artifacts::skip_download_for(&p.name) {
+            for (key, value) in skip.envs {
+                envs.push(((*key).to_string(), (*value).to_string()));
+            }
+            crate::policy::record(
+                crate::policy::ARTIFACT_NOT_PROVISIONED,
+                &format!("{}@{}", p.name, p.version),
+                &format!("install-time download skipped; run: {}", skip.hint),
+            )?;
+        } else if crate::artifacts::wants_source_build(&script_text, declared_here) {
+            envs.extend(crate::artifacts::source_build_envs());
+            crate::policy::record(
+                crate::policy::BUILT_FROM_SOURCE,
+                &format!("{}@{}", p.name, p.version),
+                "prebuilt binary not downloaded; compiled from source in the sandbox",
+            )?;
         }
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {

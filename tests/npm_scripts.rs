@@ -110,6 +110,48 @@ fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
     }
 }
 
+/// Same as `make_pkg_tarball`, but the package can be named: the item-5 policy
+/// table is keyed by package name.
+fn make_named_pkg_tarball(
+    dir: &std::path::Path,
+    name: &str,
+    script: &str,
+) -> (PathBuf, String) {
+    let pkg = dir.join("package");
+    let _ = std::fs::remove_dir_all(&pkg);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        format!(
+            r#"{{"name":{},"version":"1.0.0","scripts":{{"postinstall":{}}}}}"#,
+            serde_json::to_string(name).unwrap(),
+            serde_json::to_string(script).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(pkg.join("index.js"), "module.exports = 1;\n").unwrap();
+    let tarball = dir.join(format!("{name}-1.0.0.tgz"));
+    let status = Command::new("/usr/bin/tar")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(dir)
+        .arg("package")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let bytes = std::fs::read(&tarball).unwrap();
+    let sri = format!("sha512-{}", b64(&Sha512::digest(&bytes)));
+    (tarball, sri)
+}
+
+fn plan_named(tarball: &std::path::Path, sri: &str, name: &str) -> NpmPlan {
+    let mut plan = plan_for(tarball, sri);
+    plan.packages[0].name = name.to_string();
+    plan.packages[0].path = format!("node_modules/{name}");
+    plan
+}
+
 fn store_at(dir: &std::path::Path) -> Store {
     let root = dir.join("store");
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
@@ -543,4 +585,59 @@ console.log('linux-npm-roundtrip-ok');
     );
     let repeated_run = blanket(binary, project, &store_root, &["run", "node", "-e", node_check]);
     assert_success(&repeated_run, "repeat blanket run Node/esbuild/addon check");
+}
+
+#[test]
+#[ignore]
+fn skip_download_switch_is_injected_and_recorded() {
+    // puppeteer's installer reads PUPPETEER_SKIP_DOWNLOAD (verified against the
+    // package's own getConfiguration.js). The script here asserts the switch is
+    // visible to the lifecycle process, which is what makes the real installer
+    // return without touching the denied network.
+    let platform = Platform::host().expect("host platform");
+    let dir = std::env::temp_dir().join(format!("blanket-skip-npm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (tarball, sri) = make_named_pkg_tarball(
+        &dir,
+        "puppeteer",
+        "node -e \"if(process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){process.exit(3)};require('fs').writeFileSync('skipped.txt','ok')\"",
+    );
+    let store = store_at(&dir);
+    let env = npm::realize_node_env(&store, platform, &plan_named(&tarball, &sri, "puppeteer"), &[])
+        .expect("realize");
+    assert_eq!(
+        std::fs::read_to_string(env.join("node_modules/puppeteer/skipped.txt")).unwrap(),
+        "ok"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore]
+fn prebuilt_downloader_is_told_to_build_from_source() {
+    // A prebuild-install style script: with the network denied the download can
+    // never succeed, so blanket asks for the source build up front.
+    let platform = Platform::host().expect("host platform");
+    let dir = std::env::temp_dir().join(format!("blanket-src-npm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (tarball, sri) = make_named_pkg_tarball(
+        &dir,
+        "fake-prebuilt",
+        "node -e \"if(process.env.npm_config_build_from_source!=='true'){process.exit(3)};require('fs').writeFileSync('compiled.txt','ok')\" # prebuild-install",
+    );
+    let store = store_at(&dir);
+    let env = npm::realize_node_env(
+        &store,
+        platform,
+        &plan_named(&tarball, &sri, "fake-prebuilt"),
+        &[],
+    )
+    .expect("realize");
+    assert_eq!(
+        std::fs::read_to_string(env.join("node_modules/fake-prebuilt/compiled.txt")).unwrap(),
+        "ok"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
