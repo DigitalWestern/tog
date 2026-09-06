@@ -85,12 +85,6 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
     ok(blanket(&bin, &node, &store, &["sync"]), "sync proj-npm");
     fs::remove_dir_all(&node).unwrap();
 
-    let dry = ok(
-        blanket(&bin, &python, &store, &["gc", "--dry-run", "--keep-days", "0"]),
-        "gc dry-run",
-    );
-    assert!(dry.contains("node-env"), "dry-run did not list node objects:\n{dry}");
-
     // The production safeguard intentionally keeps objects touched in the
     // last ten minutes. Age only the now-unrooted node objects so this test
     // exercises the sweep without sleeping.
@@ -110,6 +104,15 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
             assert!(status.success());
         }
     }
+
+    // Only now, with the node objects aged past the safeguard, does a dry run
+    // report them: the ten-minute window applies to --dry-run too, so its
+    // output is what a real sweep would do.
+    let dry = ok(
+        blanket(&bin, &python, &store, &["gc", "--dry-run", "--keep-days", "0"]),
+        "gc dry-run",
+    );
+    assert!(dry.contains("node-env"), "dry-run did not list node objects:\n{dry}");
 
     ok(blanket(&bin, &python, &store, &["gc"]), "gc");
     let objects = fs::read_dir(store.join("objects"))
