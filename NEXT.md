@@ -9,11 +9,14 @@ offline unit tests, every ignored e2e gate green with
 on the same 60 pinned repos: **python Linux 16/30 vs macOS 18/30; npm
 21/30 on both** (HITRATE.md). Two adversarial reviews (Claude, GPT-6
 Astra) returned MERGE-AFTER-FIXES; their fixes are listed at the top of
-item 8. **Still owed and only possible on the Mac:** `cargo test`, a
-resync cache-hit check, `bash tests/acceptance.sh`, and the stage-6
-shared-store check — the darwin identity goldens and pins are
-byte-identical to `main`, but the Seatbelt path has not executed since
-the refactor. On Linux run e2e gates with `TMPDIR` on a real disk. Items
+item 8. **Mac verification is done** (2026-09-05, dbf7ac4): `cargo test`,
+`bash tests/acceptance.sh` 35/35, and cold-then-warm syncs of the
+python/go/node fixtures (warm runs re-project the same objects in ~10 ms
+with no fetch/plan/lock/build lines). The three rounds found a
+locale-dependent Go fixture and a latent macOS dotnet bug, both fixed.
+Only the optional stage-6 live shared-store check (rsync a Mac store onto
+the Linux box) remains undone. On Linux run e2e gates with `TMPDIR` on a
+real disk. Items
 1–3 are done; 4, 5, 7 are not started; **items 8–12 are the Python
 coverage plan** written from the actual misses, with the specimen repo
 for every edge case so nobody has to rediscover them. Delegation: Codex

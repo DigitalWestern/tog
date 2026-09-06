@@ -15,7 +15,7 @@ realizes into a **comforter** (an immutable, shareable environment) kept
 in the **closet** (the store). Your `.venv` and `node_modules` are
 comforters.
 
-**Status: all seven ecosystems pass the acceptance checklist on Linux x86_64 (Fedora 44, 2026-09-05) and, before the Linux refactor, on macOS arm64.** The macOS re-run on real hardware is the one open item in LINUX_PORT.md; every darwin pin and store identity is byte-identical to the pre-port tree. Python + Node are proven on real projects; the others on the fixtures in `tests/`.
+**Status: all seven ecosystems pass the acceptance checklist on both platforms: Linux x86_64 (Fedora 44) and macOS arm64 (macOS 26.6.2), both on 2026-09-05 at commit dbf7ac4.** Every darwin pin and store identity is byte-identical to the pre-port tree; the Mac runs after the merge found two fixture/latent bugs, both fixed (LINUX_PORT.md changelog). Python + Node are proven on real projects; the others on the fixtures in `tests/`.
 Proven on: Next.js 15 (build + vitest), vite apps (build AND dev server),
 prisma (generate/query), native addons compiled hermetically
 (better-sqlite3 from source, sharp via declared artifacts), npm
