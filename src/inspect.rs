@@ -1057,6 +1057,9 @@ mod tests {
 
     #[test]
     fn doctor_reports_host_and_project() {
+        let _lock = crate::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new("doctor");
         let store = temp.0.join("store");
         let old_store = std::env::var_os("BLANKET_STORE");

@@ -1347,6 +1347,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&temp).unwrap();
+        let _lock = crate::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("BLANKET_STORE", temp.join("store"));
         let store = Store::open().unwrap();
         std::env::remove_var("BLANKET_STORE");

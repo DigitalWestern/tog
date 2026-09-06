@@ -1309,7 +1309,7 @@ mod tests {
         }
     }
 
-    static STORE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::store::STORE_ENV_LOCK;
 
     struct StoreEnv(Option<OsString>);
 
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     fn with_temp_store(f: impl FnOnce(&Store, &Path)) {
-        let _lock = STORE_ENV_LOCK.lock().unwrap();
+        let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new("blanket-cargo-store");
         let old = env::var_os("BLANKET_STORE");
         env::set_var("BLANKET_STORE", temp.path());

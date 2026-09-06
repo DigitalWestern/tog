@@ -268,6 +268,17 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
 mod tests {
     use super::*;
 
+    /// The pending-exception list is process-global, so the tests that assert
+    /// on its contents must not overlap — with each other or with any other
+    /// test that records. Same guard the npm_scripts integration tests use:
+    /// take the lock, then start from an empty list.
+    fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear();
+        guard
+    }
+
     #[test]
     fn parses_policy_and_rejects_unknown_keys() {
         let policy = toml::from_str::<Policy>(
@@ -296,7 +307,7 @@ deny = ["git-dependency"]"#,
 
     #[test]
     fn record_denied_and_allowed() {
-        let _ = drain();
+        let _guard = exception_guard();
         assert!(record_with(
             &Policy {
                 strict: true,
@@ -313,7 +324,7 @@ deny = ["git-dependency"]"#,
 
     #[test]
     fn drain_clears() {
-        let _ = drain();
+        let _guard = exception_guard();
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
         assert!(drain().is_empty());
