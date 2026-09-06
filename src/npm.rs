@@ -557,6 +557,198 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn tarball_has_binding_gyp(path: &Path) -> io::Result<bool> {
+    let output = Command::new("/usr/bin/tar")
+        .args(["-tzf"])
+        .arg(path)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("list npm tarball {}: {e}", path.display())))?;
+    if !output.status.success() {
+        return Err(err(format!(
+            "list npm tarball {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|entry| entry.trim_end_matches('/'))
+        .any(|entry| entry == "binding.gyp" || entry.ends_with("/binding.gyp")))
+}
+
+const ARCHIVE_CLASSIFICATION_SCHEMA: &str = "npm-archive-classification/1";
+
+fn archive_classification_path(store: &Store, digest: &Digest) -> PathBuf {
+    store.cache_path(
+        "npm-archive-classification",
+        &format!("{}-{}.json", digest.algo(), digest.hex()),
+    )
+}
+
+/// Read the verified archive inspection result without requiring the archive
+/// itself to remain in the download cache. The digest and schema are checked
+/// because this file participates in derivation planning.
+fn read_archive_classification(store: &Store, digest: &Digest) -> io::Result<Option<bool>> {
+    let path = archive_classification_path(store, digest);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("read npm archive classification {}: {error}", path.display()),
+            ))
+        }
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse npm archive classification {}: {error}", path.display()),
+        )
+    })?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some(ARCHIVE_CLASSIFICATION_SCHEMA)
+        || value.get("digest").and_then(serde_json::Value::as_str)
+            != Some(&format!("{}:{}", digest.algo(), digest.hex()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("npm archive classification {} has the wrong identity", path.display()),
+        ));
+    }
+    value
+        .get("binding_gyp")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("npm archive classification {} has no binding_gyp result", path.display()),
+            )
+        })
+        .map(Some)
+}
+
+fn write_archive_classification(
+    store: &Store,
+    digest: &Digest,
+    binding_gyp: bool,
+) -> io::Result<()> {
+    if let Some(existing) = read_archive_classification(store, digest)? {
+        if existing != binding_gyp {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "npm archive classification changed for {}:{}",
+                    digest.algo(),
+                    digest.hex()
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    let destination = archive_classification_path(store, digest);
+    fs::create_dir_all(destination.parent().expect("classification cache parent"))?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let temporary = store.root.join("tmp").join(format!(
+        "npm-archive-classification-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let value = serde_json::json!({
+        "schema": ARCHIVE_CLASSIFICATION_SCHEMA,
+        "digest": format!("{}:{}", digest.algo(), digest.hex()),
+        "binding_gyp": binding_gyp,
+    });
+    fs::write(&temporary, serde_json::to_vec(&value)?)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o444))?;
+    }
+    match fs::rename(&temporary, &destination) {
+        Ok(()) => Ok(()),
+        Err(_) if destination.is_file() => {
+            let _ = fs::remove_file(&temporary);
+            match read_archive_classification(store, digest)? {
+                Some(existing) if existing == binding_gyp => Ok(()),
+                Some(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "npm archive classification changed for {}:{}",
+                        digest.algo(),
+                        digest.hex()
+                    ),
+                )),
+                None => Err(io::Error::other("npm archive classification disappeared during publication")),
+            }
+        }
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("publish npm archive classification {}: {error}", destination.display()),
+        )),
+    }
+}
+
+fn persisted_archive_classification(
+    store: &Store,
+    packages: &[NpmPackage],
+) -> io::Result<Option<bool>> {
+    let mut has_native = false;
+    for package in packages {
+        let digest = Digest::from_sri(&package.integrity)?;
+        let Some(binding_gyp) = read_archive_classification(store, &digest)? else {
+            return Ok(None);
+        };
+        has_native |= binding_gyp;
+    }
+    Ok(Some(has_native))
+}
+
+fn classify_downloaded_archives(
+    store: &Store,
+    tarballs: &[(&NpmPackage, crate::fetch::CacheLease)],
+) -> io::Result<bool> {
+    let mut has_native = false;
+    for (package, tarball) in tarballs {
+        let digest = Digest::from_sri(&package.integrity)?;
+        // The tarball was returned by download_verified_digest, so inspect the
+        // verified bytes and persist the result before planning the identity.
+        let binding_gyp = tarball_has_binding_gyp(tarball)?;
+        write_archive_classification(store, &digest, binding_gyp)?;
+        has_native |= binding_gyp;
+    }
+    Ok(has_native)
+}
+
+fn fetch_npm_tarballs<'a>(
+    store: &Store,
+    packages: &'a [NpmPackage],
+) -> io::Result<Vec<(&'a NpmPackage, crate::fetch::CacheLease)>> {
+    packages
+        .iter()
+        .map(|p| {
+            let digest = Digest::from_sri(&p.integrity)?;
+            let tarball = download_verified_digest_held(store, &p.url, &digest).map_err(|e| {
+                io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+            })?;
+            Ok((p, tarball))
+        })
+        .collect()
+}
+
+fn native_libs_identity_id(
+    store: &Store,
+    platform: Platform,
+    has_native: bool,
+) -> io::Result<Option<String>> {
+    if has_native && matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        Ok(Some(crate::nativelibs::object_id_for(store, platform)?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Realize the node_modules tree as an immutable store object.
 /// Object content root contains exactly `node_modules/`.
 pub fn realize_node_env(
@@ -567,7 +759,16 @@ pub fn realize_node_env(
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "node environment", "stage 2")?;
     let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
+    realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
+}
 
+fn node_env_identity(
+    store: &Store,
+    node_obj: &Path,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    native_libs_id: Option<&str>,
+) -> io::Result<Identity> {
     let mut inputs = BTreeMap::new();
     // /3: install scripts run sandboxed; name@version joined the per-pkg
     // identity (they reach scripts as npm_package_* env). Remaining known
@@ -615,19 +816,54 @@ pub fn realize_node_env(
             return Err(err(format!("duplicate artifact path: {}", a.path)));
         }
     }
-    let identity = Identity {
+    if let Some(native_libs_id) = native_libs_id {
+        inputs.insert("native_libs".into(), native_libs_id.into());
+    }
+    Ok(Identity {
         kind: "node-env".into(),
         name: "env".into(),
         version: plan.node_version.clone(),
         inputs,
+    })
+}
+
+fn realize_node_env_with_node_object(
+    store: &Store,
+    platform: Platform,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    node_obj: &Path,
+) -> io::Result<PathBuf> {
+    // Linux needs archive inspection to decide whether node-gyp will mount the
+    // native library set. The inspection result is persisted by archive
+    // digest, so a warm environment can be identified before its tarballs are
+    // fetched. Darwin deliberately does not mount this Linux-only set.
+    let mut classification_tarballs: Vec<(&NpmPackage, crate::fetch::CacheLease)> = Vec::new();
+    let native_libs_id = if platform.is_macos() {
+        None
+    } else {
+        let has_native = match persisted_archive_classification(store, &plan.packages)? {
+            Some(has_native) => has_native,
+            None => {
+                classification_tarballs = fetch_npm_tarballs(store, &plan.packages)?;
+                classify_downloaded_archives(store, &classification_tarballs)?
+            }
+        };
+        native_libs_identity_id(store, platform, has_native)?
     };
+    let identity = node_env_identity(store, node_obj, plan, artifacts, native_libs_id.as_deref())?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
-    // Fetch everything first.
+    // A warm sync returned at the cache lookup above, so reaching here means a
+    // cold realization: take a lease on every tarball for the extraction below
+    // so gc cannot collect the cached bytes mid-use. Anything fetched for
+    // classification is already in the cache, so this costs a verify, not a
+    // download.
+    drop(classification_tarballs);
     let mut tarballs: Vec<(&NpmPackage, crate::fetch::CacheLease)> = Vec::new();
     for p in &plan.packages {
         let digest = Digest::from_sri(&p.integrity)?;
@@ -636,6 +872,12 @@ pub fn realize_node_env(
         })?;
         tarballs.push((p, t));
     }
+
+    let native_libs = if native_libs_id.is_some() {
+        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+    } else {
+        None
+    };
 
     let staged = store.stage()?;
     fs::create_dir_all(staged.join("node_modules"))?;
@@ -757,7 +999,15 @@ pub fn realize_node_env(
     // Lifecycle setup may fetch declared artifacts and a pinned Python for
     // node-gyp; the package tarballs have already been fully extracted.
     drop(tarballs);
-    run_install_scripts(store, platform, &staged, &node_obj, plan, artifacts)?;
+    run_install_scripts(
+        store,
+        platform,
+        &staged,
+        &node_obj,
+        plan,
+        artifacts,
+        native_libs.as_ref().map(|set| set.path.as_path()),
+    )?;
 
     let candidate = crate::policy::object_exceptions();
     let (object, applied) = store
@@ -806,6 +1056,7 @@ fn run_install_scripts(
     node_obj: &Path,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
+    native_libs: Option<&Path>,
 ) -> io::Result<()> {
     // Scratch stage dirs (tool shims, per-package HOMEs, snapshots) are
     // removed on every exit, including the fatal Unsupported paths (missing
@@ -818,6 +1069,7 @@ fn run_install_scripts(
         node_obj,
         plan,
         artifacts,
+        native_libs,
         &mut cleanup,
     );
     for t in cleanup {
@@ -833,6 +1085,7 @@ fn run_install_scripts_staged(
     node_obj: &Path,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
+    native_libs: Option<&Path>,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     // Deepest first: nested deps build before their dependents.
@@ -976,9 +1229,21 @@ fn run_install_scripts_staged(
             envs.push(("CC".into(), "gcc".into()));
             envs.push(("CXX".into(), "g++".into()));
         }
+        envs.push(("PATH".into(), path_env.clone()));
+        if let Some(native_libs) = native_libs {
+            envs = crate::nativelibs::compose_env(native_libs, &envs);
+        }
+        let path_env = envs
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("/usr/bin:/bin");
         // Tools dir is readable+executable but NOT writable in-sandbox.
         let sandbox = crate::sandbox::Sandbox {
-            read: vec![staged, node_obj, &python, &tools_dir],
+            read: vec![staged, node_obj, &python, &tools_dir]
+                .into_iter()
+                .chain(native_libs)
+                .collect(),
             write: vec![&pkg_dir, &tmp],
         };
         for (phase, script) in &phases {
@@ -1299,11 +1564,13 @@ pub fn project_node_env(
         .filter(|p| mutable.iter().any(|m| *m == p.name))
         .map(|p| p.path.as_str())
         .collect();
+    let native_reference = crate::nativelibs::env_reference(env_obj)?;
 
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
     let body = serde_json::json!({
         "env_object": env_obj,
+        "native_libs": native_reference,
         "projection_schema": "node-forest/1",
         "projection_id": proj_id,
         "node_version": plan.node_version,
@@ -1427,6 +1694,110 @@ mod tests {
             identity.object_id(),
             "174e755a9fcb532c2addfefb93562ba28874abdc-nodejs-24.20.0"
         );
+    }
+
+    #[test]
+    fn darwin_binding_gyp_keeps_legacy_identity_inputs() {
+        let store = Store {
+            root: PathBuf::from("/nonexistent/blanket-test-store"),
+        };
+        assert_eq!(
+            native_libs_identity_id(&store, Platform::Aarch64AppleDarwin, true).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn darwin_warm_sync_does_not_fetch_package_tarballs() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-npm-darwin-warm-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store { root: root.canonicalize().unwrap() };
+        let node_obj = store.object_path("node-cache");
+        std::fs::create_dir_all(&node_obj).unwrap();
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "node_modules/unreachable".into(),
+                name: "unreachable".into(),
+                version: "1.0.0".into(),
+                url: "https://127.0.0.1:9/never-requested.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                optional: false,
+            }],
+            links: Vec::new(),
+        };
+        let identity = node_env_identity(&store, &node_obj, &plan, &[], None).unwrap();
+        let staged = store.stage().unwrap();
+        std::fs::create_dir_all(staged.join("node_modules")).unwrap();
+        let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
+
+        let realized = realize_node_env_with_node_object(
+            &store,
+            Platform::Aarch64AppleDarwin,
+            &plan,
+            &[],
+            &node_obj,
+        )
+        .unwrap();
+        assert_eq!(realized, expected);
+        assert_eq!(std::fs::read_dir(store.root.join("cache/sha256")).unwrap().count(), 0);
+        crate::store::remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn linux_warm_sync_uses_persisted_archive_classification() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-npm-linux-warm-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store { root: root.canonicalize().unwrap() };
+        let node_obj = store.object_path("node-cache");
+        std::fs::create_dir_all(&node_obj).unwrap();
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "node_modules/pure-js".into(),
+                name: "pure-js".into(),
+                version: "1.0.0".into(),
+                url: "https://127.0.0.1:9/never-requested.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                optional: false,
+            }],
+            links: Vec::new(),
+        };
+        let digest = Digest::from_sri(TEST_SRI).unwrap();
+        write_archive_classification(&store, &digest, false).unwrap();
+        let identity = node_env_identity(&store, &node_obj, &plan, &[], None).unwrap();
+        let staged = store.stage().unwrap();
+        std::fs::create_dir_all(staged.join("node_modules")).unwrap();
+        let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
+
+        // Simulate the user clearing all downloaded package archives. The
+        // persisted inspection result is the only input available to the
+        // Linux warm lookup below.
+        let realized = realize_node_env_with_node_object(
+            &store,
+            Platform::X86_64UnknownLinuxGnu,
+            &plan,
+            &[],
+            &node_obj,
+        )
+        .unwrap();
+        assert_eq!(realized, expected);
+        assert_eq!(std::fs::read_dir(store.root.join("cache/sha256")).unwrap().count(), 0);
+        crate::store::remove_tree(&root).unwrap();
     }
 
     #[test]

@@ -520,10 +520,18 @@ console.log('linux-npm-roundtrip-ok');
     assert_success(&run, "blanket run Node/esbuild/addon check");
     assert!(String::from_utf8_lossy(&run.stdout).contains("linux-npm-roundtrip-ok"));
 
-    // Re-project with identical inputs: the immutable environment object must
-    // be reused, and its compiled addon remains loadable.
+    // Re-project with identical inputs after clearing every downloaded npm
+    // archive. Archive classification is persisted separately, so the Linux
+    // warm lookup must find the environment before it attempts any fetch.
+    for entry in std::fs::read_dir(store_root.join("cache/sha512")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    assert_eq!(std::fs::read_dir(store_root.join("cache/sha512")).unwrap().count(), 0);
     let repeated = blanket(binary, project, &store_root, &["sync", "--strict"]);
-    assert_success(&repeated, "repeat blanket sync --strict");
+    assert_success(&repeated, "offline warm sync --strict");
     let repeated_closure = project::read_closure(project, "node").unwrap();
     assert_eq!(
         repeated_closure["env_object"],

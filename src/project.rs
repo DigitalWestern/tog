@@ -241,16 +241,11 @@ pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result
     realize_env_at_depth(store, platform, plan, 0)
 }
 
-/// Compute an environment object id without realizing its files. Build
-/// planning uses this so an isolated sdist can commit its schema-3 identity
-/// into the parent before the parent cache lookup.
-pub(crate) fn planned_env_object_id(
-    store: &Store,
-    platform: Platform,
-    plan: &Plan,
-) -> io::Result<String> {
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+/// Canonical package order and duplicate rejection shared by planning and
+/// realization.
+fn canonical_packages<'a>(
+    plan: &'a Plan,
+) -> io::Result<Vec<&'a crate::types::LockedPackage>> {
     let mut packages: Vec<&crate::types::LockedPackage> = plan.packages.iter().collect();
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     for w in packages.windows(2) {
@@ -261,34 +256,71 @@ pub(crate) fn planned_env_object_id(
             ));
         }
     }
+    Ok(packages)
+}
 
+/// Build the one canonical environment identity used by both planning and
+/// realization. `cpython_id` is pure during planning and is the realized
+/// interpreter object's id during execution; every other input is shared.
+fn environment_identity(
+    store: &Store,
+    platform: Platform,
+    plan: &Plan,
+    cpython_id: &str,
+) -> io::Result<Identity> {
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
     inputs.insert("schema".to_string(), "python-env/2".to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
     );
-    inputs.insert("cpython".to_string(), python::object_id_for(platform, &pin.version)?);
+    inputs.insert("cpython".to_string(), cpython_id.to_string());
+    let mut native_libs_id = None;
     for p in packages {
         let value = match p.kind {
             ArtifactKind::Wheel => format!("Wheel:{}", p.sha256),
-            ArtifactKind::Sdist => crate::build::sdist_identity_input(
-                store,
-                platform,
-                p,
-                &pin.version,
-                Some(plan),
-            )?,
+            ArtifactKind::Sdist => {
+                let sdist = crate::build::plan_sdist_identity_input(
+                    store,
+                    platform,
+                    p,
+                    &pin.version,
+                    Some(plan),
+                )?;
+                if native_libs_id.is_none() {
+                    native_libs_id = sdist.native_libs_id;
+                }
+                sdist.input
+            }
         };
         inputs.insert(format!("pkg:{}", p.name), value);
+    }
+    if let Some(native_libs_id) = native_libs_id {
+        inputs.insert("native_libs".into(), native_libs_id);
     }
     Ok(Identity {
         kind: "python-env".into(),
         name: "env".into(),
         version: plan.python_version.clone(),
         inputs,
-    }
-    .object_id())
+    })
+}
+
+/// Compute an environment object id without realizing its files. Build
+/// planning uses this so an isolated sdist can commit its schema-3 identity
+/// into the parent before the parent cache lookup.
+pub(crate) fn planned_env_object_id(
+    store: &Store,
+    platform: Platform,
+    plan: &Plan,
+) -> io::Result<String> {
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
+    let cpython_id = python::object_id_for(platform, &pin.version)?;
+    Ok(environment_identity(store, platform, plan, &cpython_id)?.object_id())
 }
 
 /// Internal realization entry point used by sdist build environments. The
@@ -305,57 +337,24 @@ pub(crate) fn realize_env_at_depth(
         .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform, "stage 2"))?;
     let python_obj = python::ensure_python_for(store, pin, platform)?;
 
-    // Canonical package order + duplicate rejection: identity must commit
-    // to exactly one artifact per name, installed in a deterministic order.
-    let mut packages: Vec<&crate::types::LockedPackage> = plan.packages.iter().collect();
-    packages.sort_by(|a, b| a.name.cmp(&b.name));
-    for w in packages.windows(2) {
-        if w[0].name == w[1].name {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("duplicate package in plan: {}", w[0].name),
-            ));
-        }
-    }
-
-    let mut inputs = BTreeMap::new();
-    inputs.insert("schema".to_string(), "python-env/2".to_string());
-    inputs.insert(
-        "store_root".to_string(),
-        store.root.to_string_lossy().into_owned(),
-    );
-    inputs.insert(
-        "cpython".to_string(),
-        python_obj
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-    );
-    for p in &packages {
-        let value = match p.kind {
-            ArtifactKind::Wheel => format!("Wheel:{}", p.sha256),
-            ArtifactKind::Sdist => crate::build::sdist_identity_input(
-                store,
-                platform,
-                p,
-                &pin.version,
-                Some(plan),
-            )?,
-        };
-        inputs.insert(format!("pkg:{}", p.name), value);
-    }
-    let identity = Identity {
-        kind: "python-env".into(),
-        name: "env".into(),
-        version: plan.python_version.clone(),
-        inputs,
-    };
+    // Identity planning and realization use exactly the same input builder.
+    // In particular, native sdist requirements contribute the pure libset id;
+    // the libset itself is realized only by a build that actually runs.
+    let cpython_id = python_obj
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let identity = environment_identity(store, platform, plan, &cpython_id)?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
+
+    // Canonical package order + duplicate rejection: identity uses the same
+    // helper, and this borrowed list drives deterministic installation.
+    let packages = canonical_packages(plan)?;
 
     // Fetch everything first (all-or-nothing before assembly starts).
     let mut artifacts: Vec<(&crate::types::LockedPackage, PathBuf)> = Vec::new();
@@ -540,11 +539,13 @@ fn project_env_inner(
                 "constraint_source": serde_json::Value::Null,
             })
         });
+    let native_reference = crate::nativelibs::env_reference(env_obj)?;
     write_closure(
         project_dir,
         "python",
         serde_json::json!({
             "env_object": env_obj,
+            "native_libs": native_reference,
             "plan": plan,
             "python": python,
         }),
@@ -587,6 +588,38 @@ mod closure_platform_tests {
         assert!(status.success());
         let bytes = fs::read(&archive).unwrap();
         let sha256 = hex::encode(sha2::Sha256::digest(bytes));
+        let _ = fs::remove_dir_all(source);
+        LockedPackage {
+            name: name.into(),
+            version: "1.0".into(),
+            filename: format!("{name}-1.0.tar.gz"),
+            url: format!("file://{}", archive.display()),
+            sha256,
+            kind: ArtifactKind::Sdist,
+        }
+    }
+
+    fn local_native_sdist(store: &Store, name: &str) -> LockedPackage {
+        let source = store.root.join(format!("{name}-native-source"));
+        let root = source.join(format!("{name}-1.0"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            "[build-system]\nrequires = [\"setuptools>=40.8\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("binding.gyp"), "{}").unwrap();
+        let archive = store.root.join(format!("{name}-1.0.tar.gz"));
+        let status = std::process::Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&archive)
+            .args(["-C"])
+            .arg(&source)
+            .arg(format!("{name}-1.0"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let sha256 = hex::encode(sha2::Sha256::digest(fs::read(&archive).unwrap()));
         let _ = fs::remove_dir_all(source);
         LockedPackage {
             name: name.into(),
@@ -710,6 +743,30 @@ mod closure_platform_tests {
             &["setuptools~=83.1".into()],
             None,
         ));
+        let _ = fs::remove_dir_all(&store.root);
+    }
+
+    #[test]
+    fn planned_and_realized_env_id_match_for_a_native_sdist() {
+        let store = test_store("native-sdist-identity");
+        let platform = Platform::host().unwrap();
+        let native = local_native_sdist(&store, "native-sdist-identity");
+        let plan = Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: vec![native],
+        };
+        let planned = planned_env_object_id(&store, platform, &plan).unwrap();
+        let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
+        let realized = environment_identity(&store, platform, &plan, &cpython_id).unwrap();
+        assert_eq!(planned, realized.object_id());
+        if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+            let native_id = crate::nativelibs::object_id_for(&store, platform).unwrap();
+            assert_eq!(
+                realized.inputs.get("native_libs").map(String::as_str),
+                Some(native_id.as_str())
+            );
+        }
         let _ = fs::remove_dir_all(&store.root);
     }
 }
