@@ -31,7 +31,7 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = blanket::store::remove_tree(&self.0);
     }
 }
 
@@ -78,10 +78,10 @@ fn age(path: &Path) {
 #[test]
 #[ignore]
 fn gc_drops_deleted_node_project_but_keeps_python_root() {
-    let store = std::env::var_os("BLANKET_STORE")
-        .map(PathBuf::from)
-        .expect("gc e2e requires BLANKET_STORE to be a throwaway store");
     let temp = TempDir::new();
+    // Keep this test independent of the shared store used by the ignored
+    // end-to-end suite. Other projects may legitimately retain node objects.
+    let store = temp.0.join("store");
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let python = temp.0.join("proj-a");
     let node = temp.0.join("proj-npm");
