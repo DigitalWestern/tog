@@ -1433,6 +1433,10 @@ fn realize_node_env_with_node_object(
         // `cp -a src dest` copies INTO dest when dest already exists, which it
         // does whenever this package has nested dependencies (their directories
         // are created first). Copy into a fresh sibling and move it into place.
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::create_dir_all(&dest)?;
         let staging = dest.with_file_name(format!(
             ".blanket-git-{}",
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
