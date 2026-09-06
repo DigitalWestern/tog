@@ -112,36 +112,10 @@ package; import it directly (registry tarball URLs are derivable) instead
 of re-resolving through npm. yarn berry similar. Not on the original list;
 the measurement put it there.
 
-## 8. Interpreter selection + CPython 3.10/3.11 pins — from the Linux data
+## 8. Interpreter selection + CPython 3.10/3.11/3.14 pins — DONE (2026-09-05)
 
-Blanket forces CPython 3.12. Three of fourteen Python misses are that
-alone: fastapi (`requires-python >=3.10`, wants 3.11 today), autoresearch
-(3.10), MetaGPT (`python_requires=">=3.9, <3.12"` → uv correctly finds no
-cp312 wheel for faiss-cpu 1.7.4, reported as `py_uv_resolve_failed`).
-
-- Pin rows for 3.10 and 3.11 (both platforms, python-build-standalone,
-  sha256 verified at pin time, darwin rows first). Consider 3.14 too.
-- Selection: read `requires-python` (pyproject) or `python_requires`
-  (setup.py/setup.cfg, via the egg-info dump in item 10) or
-  `.python-version`; choose the **newest pinned CPython that satisfies
-  it**; record the chosen version in the closure and in the planner key.
-  No constraint → newest pinned. Unsatisfiable → loud error naming the
-  pinned versions (already the shape of the `platform_unsupported` text).
-- Edge cases to test: PEP 440 specifiers with `~=`, `!=3.9.*`, and
-  `<4`; poetry's `python = "^3.9"` (caret → `>=3.9,<4`), which is an
-  interpreter constraint that must NOT be treated as a package; a
-  `.python-version` that names a patch release not pinned (satisfy on
-  major.minor, warn).
-- Review fixes carried here from PR #1 — **all four DONE in the review round (LINUX_PORT.md changelog)**; kept for the record:
-  (a) an undeclared cwd on Linux is `--ro-bind`-ed wholesale
-  (`src/sandbox.rs`), so mount `--tmpfs <cwd>` instead and invert
-  `linux_unbound_tmp_cwd_is_readable`; (b) drop the platform triple from
-  `lock_source_hash` in `src/main.rs` (it is per-machine state; keeping
-  it forces one needless `uv pip compile` on the Mac) — `planner_input_hash`
-  keeps it; (c) LIMITATIONS: OTP `Install -cross -minimal` and the OTP
-  runtime probe run as direct children, not through the sandbox; (d)
-  README's "passes acceptance on macOS" sentence is pre-refactor until
-  the Mac run happens.
+Implemented constraint-aware CPython selection with explicit `.python-version` precedence and PEP 440/Poetry metadata sources.
+Pinned CPython 3.10.21, 3.11.16, and 3.14.7 on both platforms with cache/closure/e2e coverage.
 
 ## 9. Wheel `.data/headers` scheme — DONE
 

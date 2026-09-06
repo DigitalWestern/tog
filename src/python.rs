@@ -11,6 +11,7 @@ use std::process::Command;
 /// 20260825, per-platform rows, install_only). Checksums verified at pin
 /// time (trust-on-first-use; a signed provider manifest replaces this table
 /// post-MVP).
+#[derive(Debug)]
 pub struct PinnedPython {
     pub platform: Platform,
     pub version: &'static str,
@@ -19,6 +20,8 @@ pub struct PinnedPython {
 }
 
 pub const PYTHONS: &[PinnedPython] = &[
+    // Keep the existing Darwin rows byte-for-byte and append new rows after
+    // them; their object ids are compatibility goldens.
     PinnedPython {
         platform: Platform::Aarch64AppleDarwin,
         version: "3.12.14",
@@ -32,6 +35,24 @@ pub const PYTHONS: &[PinnedPython] = &[
         sha256: "d681f7cebf4885637242cba807d22f476b9ea8555ac2dc7307172426dbf161e1",
     },
     PinnedPython {
+        platform: Platform::Aarch64AppleDarwin,
+        version: "3.10.21",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.10.21%2B20260825-aarch64-apple-darwin-install_only.tar.gz",
+        sha256: "7fedf2035ce497b0ce01643cc5e8ed2aabfb8cfa730440e97af0330b56ce0608",
+    },
+    PinnedPython {
+        platform: Platform::Aarch64AppleDarwin,
+        version: "3.11.16",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.11.16%2B20260825-aarch64-apple-darwin-install_only.tar.gz",
+        sha256: "2e50ed6ec49d8714a83c093e9ce74e1b8b21a2c64a49c3b603471d9c4caac76b",
+    },
+    PinnedPython {
+        platform: Platform::Aarch64AppleDarwin,
+        version: "3.14.7",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.14.7%2B20260825-aarch64-apple-darwin-install_only.tar.gz",
+        sha256: "4c4a4114bc35f9d76d194fd72f43d8375b2f30686ddfe6b40c9258cfe6c16e40",
+    },
+    PinnedPython {
         platform: Platform::X86_64UnknownLinuxGnu,
         version: "3.12.14",
         url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.12.14%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
@@ -42,6 +63,24 @@ pub const PYTHONS: &[PinnedPython] = &[
         version: "3.13.15",
         url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.13.15%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
         sha256: "8a70011ae25276a9925f89304cdc086466cd269ee6cfe68a9506694ca5ff4f9c",
+    },
+    PinnedPython {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        version: "3.10.21",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.10.21%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        sha256: "b3cfb164a81b8fb16125cc7703689a6181e06983db3220a1765da68ebe430aff",
+    },
+    PinnedPython {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        version: "3.11.16",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.11.16%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        sha256: "25844eb97cdc72cdc78addaad0969ce3b2133a4de54bfcfa4d57f8a6d095eaab",
+    },
+    PinnedPython {
+        platform: Platform::X86_64UnknownLinuxGnu,
+        version: "3.14.7",
+        url: "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.14.7%2B20260825-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        sha256: "d68dfa9c5d37afec0a4c8ffbf5c20d05d34492bd4561c94d7c3c7578e21a7f71",
     },
 ];
 
@@ -196,7 +235,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pin_tables_have_two_cpython_and_one_uv_row_per_platform() {
+    fn pin_tables_have_five_cpython_and_one_uv_row_per_platform() {
         let mut python_keys = std::collections::HashSet::new();
         let mut uv_keys = std::collections::HashSet::new();
         for &platform in Platform::ALL {
@@ -204,7 +243,7 @@ mod tests {
                 .iter()
                 .filter(|pin| pin.platform == platform)
                 .collect();
-            assert_eq!(python_rows.len(), 2, "CPython rows for {platform:?}");
+            assert_eq!(python_rows.len(), 5, "CPython rows for {platform:?}");
             for pin in python_rows {
                 assert!(
                     python_keys.insert((pin.platform, pin.version)),
@@ -233,12 +272,15 @@ mod tests {
             .iter()
             .filter(|pin| pin.platform == Platform::Aarch64AppleDarwin)
             .collect();
-        assert_eq!(darwin_pins.len(), 2);
+        assert_eq!(darwin_pins.len(), 5);
         for pin in darwin_pins {
             let identity = cpython_identity(pin);
             let expected = match pin.version {
                 "3.12.14" => "a1a7472f00bcc8e7432dcaf8e088192eab9ddb63-cpython-3.12.14",
                 "3.13.15" => "3d4cd599c6aa947638318fba6a27cdf922d71e91-cpython-3.13.15",
+                "3.10.21" => "2d325d7de98a5ef468887be7a900ba353393e6d4-cpython-3.10.21",
+                "3.11.16" => "4f5f15e85142c23c54ceb171e28eed8e37868d58-cpython-3.11.16",
+                "3.14.7" => "a08604ddc4f60d6a41bfde528123267824647022-cpython-3.14.7",
                 other => panic!("unexpected Darwin CPython pin {other}"),
             };
             assert_eq!(identity.object_id(), expected);

@@ -96,6 +96,9 @@ Per design review with Sol: **Plan → Realize → Project.**
    universal2 > pure > sdist). Output: a typed `Plan`. Successful plans are
    cached in `.blanket/plan.json` keyed by input hash, so unchanged locks
    never touch the network again.
+   Interpreter selection is performed before locking: an explicit
+   `.python-version` wins, otherwise declared Python constraints are
+   intersected and the compatible pinned CPython is recorded in the plan.
 2. **Realize** (kernel, `store.rs`/`fetch.rs`/`python.rs`/`project.rs`):
    download+verify artifacts into the cache, provision the pinned CPython
    (astral-sh/python-build-standalone, checksums pinned in `python.rs`),

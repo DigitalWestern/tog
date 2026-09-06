@@ -71,6 +71,11 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Python
 
+Interpreter selection is limited to the five pinned CPython builds for the
+two supported host platforms; explicit `.python-version` requests win over
+metadata conflicts with a warning, while unsupported implementations and
+unsatisfiable constraints fail closed.
+
 - **RECORD files are left as shipped**: not verified on install, not
   rewritten; importlib file listings can lie. Silent. Wheel `.data`
   `purelib`, `platlib`, `headers`, `scripts`, and `data` schemes are routed.

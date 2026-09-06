@@ -10,6 +10,7 @@ pub mod policy;
 pub mod platform;
 pub mod project;
 pub mod pypi;
+pub mod pyselect;
 pub mod ruby;
 pub mod python;
 pub mod sandbox;

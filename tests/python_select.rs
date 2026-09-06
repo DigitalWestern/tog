@@ -1,7 +1,6 @@
-//! Linux Python round-trip test. Heavy: downloads CPython, uv, and the
-//! manylinux wheels into a throwaway store, so it is ignored.
+//! Ignored Linux e2e for interpreter selection and warm lock/plan caches.
 
-use blanket::{platform::Platform, python, store::Store};
+use blanket::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,7 +9,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-linux-python-{}-{}",
+            "blanket-python-select-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -63,79 +62,77 @@ fn assert_ok(output: Output, label: &str) -> String {
 
 #[test]
 #[ignore]
-fn linux_python_sync_run_and_uv_round_trip() {
+fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     if !cfg!(target_os = "linux") {
-        eprintln!("linux_python: skipped on non-Linux host");
+        eprintln!("python_select: skipped on non-Linux host");
         return;
     }
     if Platform::host().unwrap() != Platform::X86_64UnknownLinuxGnu {
-        eprintln!("skip linux_python: host is not x86_64-unknown-linux-gnu");
+        eprintln!("skip python_select: host is not x86_64-unknown-linux-gnu");
         return;
     }
 
     let temp = TempDir::new();
-    let project = temp.0.join("proj-a");
+    let project = temp.0.join("proj-py311");
     copy_tree(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-a"),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-py311"),
         &project,
     );
-    let store_path = std::env::var_os("BLANKET_STORE")
+    let store = std::env::var_os("BLANKET_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| temp.0.join("store"));
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
-    assert_ok(
-        blanket(&binary, &project, &store_path, &["sync"]),
-        "sync",
-    );
-
-    let imports = Command::new(project.join(".venv/bin/python"))
-        .args(["-c", "import markupsafe, six; print(markupsafe.__version__, six.__version__)"])
-        .output()
-        .unwrap();
-    let imports = assert_ok(imports, "import markupsafe and six");
-    assert_eq!(imports.trim(), "3.0.2 1.17.0");
+    let first = blanket(&binary, &project, &store, &["sync"]);
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "first sync failed: {first_stderr}");
+    assert!(first_stderr.contains("python 3.11.16 selected"), "{first_stderr}");
+    let closure: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".blanket/closures/python.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(closure["body"]["python"]["version"], "3.11.16");
+    assert_eq!(closure["body"]["python"]["constraint"], ">=3.9,<3.12");
+    assert_eq!(closure["body"]["python"]["constraint_source"], "pyproject.toml");
 
     let run = assert_ok(
         blanket(
             &binary,
             &project,
-            &store_path,
+            &store,
             &[
                 "run",
                 "python",
                 "-c",
-                "import sys, sysconfig; print(sys.version.split()[0]); print(sysconfig.get_platform())",
+                "import sys,six; print(sys.version_info[:2])",
             ],
         ),
         "blanket run python",
     );
-    let mut lines = run.lines();
-    assert_eq!(lines.next(), Some("3.12.14"));
-    assert!(
-        lines
-            .next()
-            .is_some_and(|platform| platform.starts_with("linux-x86_64")),
-        "unexpected sysconfig platform in {run:?}"
-    );
-
-    let store = Store {
-        root: store_path.canonicalize().unwrap(),
-    };
-    let uv = python::ensure_uv_for(&store, Platform::host().unwrap()).unwrap();
-    let uv_version = Command::new(uv.join("uv")).arg("--version").output().unwrap();
-    let uv_version = assert_ok(uv_version, "uv --version");
-    assert!(uv_version.contains("0.12.7"), "{uv_version}");
+    assert_eq!(run.trim(), "(3, 11)");
 
     let plan_path = project.join(".blanket/plan.json");
+    let lock_path = project.join("requirements.lock.txt");
+    let stamp_path = project.join(".blanket/lock-source.hash");
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
-    assert_ok(
-        blanket(&binary, &project, &store_path, &["sync"]),
-        "warm sync",
-    );
+    let lock_mtime = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
+    let stamp_mtime = std::fs::metadata(&stamp_path).unwrap().modified().unwrap();
+
+    let second = blanket(&binary, &project, &store, &["sync"]);
+    assert_ok(second, "warm sync");
     assert_eq!(
         std::fs::metadata(&plan_path).unwrap().modified().unwrap(),
         plan_mtime,
-        "proj-a warm sync replanned"
+        "warm sync replanned"
+    );
+    assert_eq!(
+        std::fs::metadata(&lock_path).unwrap().modified().unwrap(),
+        lock_mtime,
+        "warm sync re-locked"
+    );
+    assert_eq!(
+        std::fs::metadata(&stamp_path).unwrap().modified().unwrap(),
+        stamp_mtime,
+        "warm sync rewrote lock stamp"
     );
 }

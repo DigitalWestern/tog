@@ -9,7 +9,7 @@ use crate::fetch::download_verified;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::{ArtifactKind, Identity, Plan};
-use crate::{python, wheel};
+use crate::{pyselect, python, wheel};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -371,6 +371,27 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
 /// Project an env into a project directory: `.venv` symlink (atomic swap)
 /// plus closure-envelope provenance (.blanket/closures/python.json).
 pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
+    project_env_inner(project_dir, env_obj, plan, None)
+}
+
+/// Project a Python env and retain the exact interpreter constraint that led
+/// to the selected pin. This is separate from `project_env` to keep the
+/// existing kernel-facing helper compatible with hand-built Plans.
+pub fn project_env_with_selection(
+    project_dir: &Path,
+    env_obj: &Path,
+    plan: &Plan,
+    selection: &pyselect::PythonSelection,
+) -> io::Result<()> {
+    project_env_inner(project_dir, env_obj, plan, Some(selection))
+}
+
+fn project_env_inner(
+    project_dir: &Path,
+    env_obj: &Path,
+    plan: &Plan,
+    selection: Option<&pyselect::PythonSelection>,
+) -> io::Result<()> {
     let venv = project_dir.join(".venv");
     backup_real_dir(&venv, env_obj)?;
     let tmp = project_dir.join(format!(
@@ -386,12 +407,28 @@ pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Resul
 
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
+    let python = selection
+        .map(|selection| {
+            serde_json::json!({
+                "version": selection.pin.version,
+                "constraint": selection.constraint,
+                "constraint_source": selection.constraint_source,
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "version": plan.python_version,
+                "constraint": serde_json::Value::Null,
+                "constraint_source": serde_json::Value::Null,
+            })
+        });
     write_closure(
         project_dir,
         "python",
         serde_json::json!({
             "env_object": env_obj,
             "plan": plan,
+            "python": python,
         }),
     )
 }
