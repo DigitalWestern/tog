@@ -1,5 +1,6 @@
 use crate::policy::Exception;
 use crate::types::Identity;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,12 +20,19 @@ pub struct Store {
     pub root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootEntry {
+    pub key: String,
+    pub path: PathBuf,
+    pub registry_path: PathBuf,
+}
+
 impl Store {
     pub fn open() -> io::Result<Store> {
         let root = std::env::var_os("BLANKET_STORE")
             .map(PathBuf::from)
             .unwrap_or_else(|| home().join(".blanket/store"));
-        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(root.join(sub))?;
         }
         // Canonical path: sandbox subpath rules and store identities must
@@ -37,10 +45,68 @@ impl Store {
         self.root.join("objects").join(id)
     }
 
+    /// Register a project whose closure was just written. Registry entries
+    /// are keyed by the canonical project path, so moving a project creates a
+    /// new root instead of accidentally retaining the old location.
+    pub fn register_root(&self, project_dir: &Path) -> io::Result<RootEntry> {
+        let project_dir = project_dir.canonicalize()?;
+        let key = root_key(&project_dir);
+        let roots = self.root.join("roots");
+        fs::create_dir_all(&roots)?;
+        let dest = roots.join(&key);
+        let tmp = roots.join(format!(".{key}.tmp.{}", std::process::id()));
+        fs::write(&tmp, format!("{}\n", project_dir.display()))?;
+        fs::rename(&tmp, &dest)?;
+        Ok(RootEntry {
+            key,
+            path: project_dir,
+            registry_path: dest,
+        })
+    }
+
+    /// Read the roots registry without validating whether projects still
+    /// exist. `blanket store roots` is an inspection command; GC performs the
+    /// stale-root drop during its sweep.
+    pub fn roots(&self) -> io::Result<Vec<RootEntry>> {
+        let roots = self.root.join("roots");
+        fs::create_dir_all(&roots)?;
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(roots)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if !is_sha1(&key) {
+                continue;
+            }
+            let text = fs::read_to_string(entry.path())?;
+            let path = PathBuf::from(text.trim());
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            entries.push(RootEntry {
+                key,
+                path,
+                registry_path: entry.path(),
+            });
+        }
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(entries)
+    }
+
+    pub fn remove_root_entry(&self, entry: &RootEntry) -> io::Result<()> {
+        match fs::remove_file(&entry.registry_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Exclusive cross-process lock guarding publication and sweeping.
     /// Held only for the short rename/chmod/meta window, never during
     /// downloads or builds, so contention is negligible.
-    fn publish_lock(&self) -> io::Result<fs::File> {
+    pub(crate) fn publish_lock(&self) -> io::Result<fs::File> {
         let f = fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -66,24 +132,32 @@ impl Store {
     /// crash mid-publication leaves an invalid object, which is swept and
     /// rebuilt instead of trusted.
     pub fn has(&self, id: &str) -> bool {
+        let Ok(_lock) = self.publish_lock() else {
+            return false;
+        };
         match self.is_complete(id) {
             None => false,
-            Some(true) => true,
+            Some(true) => {
+                // A cache hit is still active use. GC holds this same lock
+                // while sweeping, so the touch and the sweep cannot cross.
+                let _ = touch_path(&self.object_path(id));
+                true
+            }
             Some(false) => {
                 // Looks like a crashed publication — but a CONCURRENT commit
-                // may be in its rename->chmod->meta window and must not be
-                // swept. Re-check under the publish lock; sweep only what is
-                // still incomplete once no publication is in flight.
-                if let Ok(_lock) = self.publish_lock() {
-                    match self.is_complete(id) {
-                        Some(true) => return true,
-                        Some(false) => {
-                            let _ = remove_tree(&self.object_path(id));
-                        }
-                        None => {}
+                // may be in its rename->chmod->meta window. We already hold
+                // the lock, so sweep only what is still incomplete now.
+                match self.is_complete(id) {
+                    Some(true) => {
+                        let _ = touch_path(&self.object_path(id));
+                        true
                     }
+                    Some(false) => {
+                        let _ = remove_tree(&self.object_path(id));
+                        false
+                    }
+                    None => false,
                 }
-                false
             }
         }
     }
@@ -156,6 +230,7 @@ impl Store {
             "identity": identity,
             "created": unix_secs(),
             "exceptions": exceptions,
+            "refs": object_refs(identity),
         });
         // Meta is the completion marker: write via tmp + atomic rename so a
         // crash mid-write can never leave a partial file that has() would
@@ -182,6 +257,9 @@ impl Store {
             }
             Ok((dest.to_path_buf(), winner))
         });
+        if result.is_ok() {
+            let _ = touch_path(dest);
+        }
         let _ = remove_tree(staged);
         result
     }
@@ -251,6 +329,57 @@ fn make_read_only(path: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(e.kind(), format!("chmod {}: {e}", path.display())))
 }
 
+/// The object directory mtime is the cheap activity marker used by GC. The
+/// supported hosts both provide `/usr/bin/touch`; failure is deliberately
+/// best-effort because object correctness is still protected by the publish
+/// lock and read-only publication protocol.
+fn touch_path(path: &Path) -> io::Result<()> {
+    let status = std::process::Command::new("/usr/bin/touch")
+        .arg(path)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("touch {} failed", path.display())))
+    }
+}
+
+pub(crate) fn object_id_token(value: &str) -> Option<String> {
+    value
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'))
+        .find(|token| is_object_id(token))
+        .map(str::to_string)
+}
+
+fn is_object_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() > 41
+        && bytes[..40].iter().all(u8::is_ascii_hexdigit)
+        && bytes[40] == b'-'
+        && bytes[41..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
+}
+
+fn is_sha1(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn root_key(project_dir: &Path) -> String {
+    use sha1::{Digest, Sha1};
+    hex::encode(Sha1::digest(project_dir.to_string_lossy().as_bytes()))
+}
+
+fn object_refs(identity: &Identity) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    for value in identity.inputs.values() {
+        if let Some(id) = object_id_token(value) {
+            refs.insert(id);
+        }
+    }
+    refs.into_iter().collect()
+}
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME set"))
 }
@@ -303,6 +432,21 @@ mod tests {
         let path = store.stage().unwrap();
         fs::write(path.join("content"), b"content").unwrap();
         path
+    }
+
+    #[test]
+    fn roots_registry_adds_atomically_and_drops_entries() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let root = store.register_root(&project).unwrap();
+        assert_eq!(store.roots().unwrap(), vec![root.clone()]);
+        assert_eq!(fs::read_to_string(&root.registry_path).unwrap().trim(), project.canonicalize().unwrap().display().to_string());
+        store.remove_root_entry(&root).unwrap();
+        assert!(store.roots().unwrap().is_empty());
     }
 
     #[test]

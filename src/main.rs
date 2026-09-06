@@ -1,9 +1,10 @@
 use blanket::{
-    cargo, dotnet, elixir, golang, npm, platform::Platform, policy, project, pypi, pyselect,
+    cargo, dotnet, elixir, gc, golang, npm, platform::Platform, policy, project, pypi, pyselect,
     python, ruby, sbom, store, types,
 };
 
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -22,7 +23,10 @@ USAGE:
   blanket run dev/test    run the package.json script inside the projected env
                           (script wins over a same-named PATH executable)
   blanket sbom [--output <file>]  CycloneDX 1.5 SBOM from the synced closures
+  blanket gc [--dry-run] [--keep-days N] [--project]
+                          collect unreferenced objects and cached artifacts
   blanket store path      print the store root
+  blanket store roots     list registered project roots
 
 Project inputs (either or both):
   requirements.txt or pyproject.toml
@@ -64,11 +68,33 @@ fn main() {
         eprint!("{USAGE}");
         exit(2);
     };
-    let supported = matches!(command, "sync" | "plan" | "build" | "run" | "sbom")
-        || (command == "store" && args.get(1).map(String::as_str) == Some("path"));
+    let supported = matches!(command, "sync" | "plan" | "build" | "run" | "sbom" | "gc")
+        || (command == "store"
+            && matches!(args.get(1).map(String::as_str), Some("path") | Some("roots")));
     if !supported {
         eprint!("{USAGE}");
         exit(2);
+    }
+    // Maintenance commands do not need host-platform validation. In
+    // particular, GC must remain usable when inspecting a copied store on a
+    // host that cannot realize its objects.
+    if command == "gc" {
+        let code = run_gc(&args[1..])
+            .map(|_| 0)
+            .unwrap_or_else(|e| {
+                eprintln!("blanket: error: {e}");
+                1
+            });
+        exit(code);
+    }
+    if command == "store" && args.get(1).map(String::as_str) == Some("roots") {
+        let code = run_store_roots(&args[2..])
+            .map(|_| 0)
+            .unwrap_or_else(|e| {
+                eprintln!("blanket: error: {e}");
+                1
+            });
+        exit(code);
     }
     // Help and usage return above without host validation; real subcommands
     // validate once before any store-touching work.
@@ -123,6 +149,60 @@ fn run_sbom(args: &[String]) -> io::Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_store_roots(args: &[String]) -> io::Result<()> {
+    if !args.is_empty() {
+        return Err(io::Error::other("store roots takes no arguments"));
+    }
+    for root in store::Store::open()?.roots()? {
+        println!("{}", root.path.display());
+    }
+    Ok(())
+}
+
+fn run_gc(args: &[String]) -> io::Result<()> {
+    let mut options = gc::Options::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dry-run" => options.dry_run = true,
+            "--project" => options.project = true,
+            "--keep-days" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--keep-days needs N")
+                })?;
+                options.keep_days = value.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--keep-days expects an integer")
+                })?;
+            }
+            value if value.starts_with("--keep-days=") => {
+                options.keep_days = value["--keep-days=".len()..].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--keep-days expects an integer")
+                })?;
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown gc argument: {other}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    let store = store::Store::open()?;
+    let mut stdout = io::stdout().lock();
+    let report = gc::collect(&store, options, &mut stdout)?;
+    let verb = if options.dry_run { "would free" } else { "freed" };
+    writeln!(
+        stdout,
+        "blanket: gc {verb} {} MB ({} objects, {} cached artifacts)",
+        report.freed_bytes / (1024 * 1024),
+        report.objects,
+        report.cached_artifacts
+    )?;
+    Ok(())
 }
 
 fn project_dir() -> PathBuf {

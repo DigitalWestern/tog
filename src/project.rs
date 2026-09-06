@@ -45,6 +45,12 @@ pub fn write_closure(
     // time; readers must not assume the body's object ids are valid for
     // the current host. Additive field, schema unchanged.
     let platform = Platform::host()?.triple();
+    // All tailor closure bodies carry at least one canonical object path. Use
+    // it to register the exact store involved; this keeps unit tests that use
+    // synthetic stores from accidentally creating ~/.blanket/store. The
+    // fallback is for future tailor bodies that do not yet carry an object
+    // path.
+    let store = store_from_closure_body(&body).unwrap_or(Store::open()?);
     let envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
@@ -57,8 +63,32 @@ pub fn write_closure(
     let tmp = dir.join(format!(".{ecosystem}.json.tmp.{}", std::process::id()));
     fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
     fs::rename(&tmp, &dest)?;
+    store.register_root(&project_dir)?;
     crate::policy::clear();
     Ok(())
+}
+
+fn store_from_closure_body(body: &serde_json::Value) -> Option<Store> {
+    fn find(value: &serde_json::Value) -> Option<Store> {
+        match value {
+            serde_json::Value::String(text) if Path::new(text).is_absolute() => {
+                let path = Path::new(text);
+                for ancestor in path.ancestors() {
+                    if ancestor.file_name().and_then(|name| name.to_str()) == Some("objects") {
+                        let root = ancestor.parent()?.to_path_buf();
+                        if root.join("objects").is_dir() {
+                            return Some(Store { root });
+                        }
+                    }
+                }
+                None
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(find),
+            serde_json::Value::Object(values) => values.values().find_map(find),
+            _ => None,
+        }
+    }
+    find(body)
 }
 
 /// Read a tailor's closure body back (for `blanket run` and friends).
