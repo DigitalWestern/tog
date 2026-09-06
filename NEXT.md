@@ -135,7 +135,7 @@ Record repo plus exact commit, fetch, build from source in the sandbox
 a missing feature, not a hole in the model. It's how bun does it.
 Unblocks private forks, unreleased fixes, and unpublished libraries.
 
-## 5. Built-in artifacts list — PARTLY DONE (2026-09-06)
+## 5. Built-in artifacts list — DONE (2026-09-06)
 
 Done (`src/artifacts.rs`): the two families that do not need blanket to host
 a download table. Packages with a documented skip switch (puppeteer,
@@ -148,15 +148,22 @@ the published package's own source — add entries the same way, never from
 memory. Measured: django, earendil-works/pi and louislam/uptime-kuma all sync
 (canvas and sqlite3 compile against item 12's native library set).
 
-Still open — the original idea: **provisioning**, i.e. blanket downloads the
-artifact itself, verifies it, and plants it where the installer's cache lookup
-finds it, so the package really is installed rather than skipped. Electron
-first: the zip is at `https://github.com/electron/electron/releases/download/
-v{version}/electron-v{version}-{platform}.zip` with checksums in the same
-release's `SHASUMS256.txt`. The blocking detail is `@electron/get`'s cache
-layout, which must be verified against a real install rather than guessed.
-Then sharp (<0.33), node-sass, sentry-cli. The per-project escape hatch
-already exists: declare `blanket.artifacts` in package.json.
+Provisioning is done for electron: blanket fetches the release's
+`SHASUMS256.txt`, verifies the zip against it, and writes both into the
+directory `@electron/get` looks in — `<electron_config_cache>/<sha256 of the
+release directory URL>/` — so the installer finds them with the network
+denied. Every detail was read out of `@electron/get`'s published source
+(`install.js` passes `cacheRoot: process.env.electron_config_cache`;
+`Cache.getCacheDirectory` hashes the URL with query/fragment cleared and the
+path replaced by its dirname; the zip is verified against a `SHASUMS256.txt`
+read from the same cache, which is why both files are written). The checksum
+manifest is trust-on-first-use over HTTPS, like the pinned toolchain tables,
+and is recorded as `artifact_provisioned`.
+
+Next entries when a real project needs them: sharp (<0.33), node-sass,
+sentry-cli — add each the same way, by reading the package's own cache lookup
+rather than guessing. The per-project escape hatch remains: declare
+`blanket.artifacts` in package.json.
 
 ## 7. pnpm-lock.yaml (and yarn.lock) importer — DONE (2026-09-06)
 
