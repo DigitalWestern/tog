@@ -227,7 +227,11 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
 /// Plan from project inputs. Planning hits PyPI, so successful plans are
 /// cached in .blanket/plan.json keyed by a hash of the inputs; an unchanged
 /// lock replans offline and instantly.
-fn read_plan(platform: Platform, dir: &Path) -> io::Result<types::Plan> {
+fn read_plan(
+    platform: Platform,
+    dir: &Path,
+    selection: &pyselect::PythonSelection,
+) -> io::Result<types::Plan> {
     let req_path = dir.join("requirements.txt");
     let (input, source) = if req_path.is_file() {
         (
@@ -257,11 +261,9 @@ fn read_plan(platform: Platform, dir: &Path) -> io::Result<types::Plan> {
         ("pyproject.toml".to_string(), source)
     };
     record_skippable_specs(&input, &source)?;
-    let selection = pyselect::select_python_with_inputs(
-        platform,
-        &pyselect::collect_project_inputs(dir)?,
-    )?;
-    selection.emit_warnings();
+    // The caller selected the interpreter once; planning, realization and
+    // the closure all use that same selection even if project files change
+    // underneath a running sync.
     let pin = selection.pin;
 
     let text = if input == "pyproject.toml" {
@@ -444,7 +446,8 @@ fn run_plan(platform: Platform) -> io::Result<()> {
     ensure_npm_lock(platform, &dir)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let plan = read_plan(platform, &dir)?;
+        let selection = select_python_for(platform, &dir)?;
+        let plan = read_plan(platform, &dir, &selection)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
@@ -509,6 +512,15 @@ fn run_plan(platform: Platform) -> io::Result<()> {
         return Err(no_inputs());
     }
     Ok(())
+}
+
+/// One interpreter selection per command, shared by planning, realization and
+/// the closure so they can never disagree.
+fn select_python_for(platform: Platform, dir: &Path) -> io::Result<pyselect::PythonSelection> {
+    let selection =
+        pyselect::select_python_with_inputs(platform, &pyselect::collect_project_inputs(dir)?)?;
+    selection.emit_warnings();
+    Ok(selection)
 }
 
 fn no_inputs() -> io::Error {
@@ -647,12 +659,9 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     ensure_npm_lock(platform, &dir)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let plan = read_plan(platform, &dir)?;
+        let selection = select_python_for(platform, &dir)?;
+        let plan = read_plan(platform, &dir, &selection)?;
         let env = project::realize_env(&store, platform, &plan)?;
-        let selection = pyselect::select_python_with_inputs(
-            platform,
-            &pyselect::collect_project_inputs(&dir)?,
-        )?;
         project::project_env_with_selection(&dir, &env, &plan, &selection)?;
         eprintln!("synced: .venv -> {}", env.display());
         any = true;

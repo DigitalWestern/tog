@@ -121,6 +121,10 @@ enum Operator {
 #[derive(Clone, Debug)]
 enum Clause {
     Any,
+    /// PEP 440 arbitrary equality (`===`): plain string comparison against
+    /// the candidate's `X.Y.Z` text, no wildcard expansion, no numeric
+    /// normalization.
+    Literal(String),
     Compare(Operator, Version),
     PrefixEqual(Vec<u64>),
     PrefixNotEqual(Vec<u64>),
@@ -133,6 +137,10 @@ struct SpecifierSet {
 
 impl SpecifierSet {
     fn parse(text: &str, source: &str) -> io::Result<Self> {
+        if text.trim().is_empty() {
+            // `requires-python = ""` is valid metadata meaning "no constraint".
+            return Ok(Self { alternatives: vec![vec![Clause::Any]] });
+        }
         let alternatives = text
             .split("||")
             .map(|alternative| parse_alternative(alternative, text, source))
@@ -282,6 +290,9 @@ fn expand_clause(
     full_text: &str,
     source: &str,
 ) -> io::Result<Vec<Clause>> {
+    if matches!(operator, Operator::ArbitraryEqual) {
+        return Ok(vec![Clause::Literal(version_text.to_string())]);
+    }
     if version_text == "*" {
         return match operator {
         Operator::Equal | Operator::ArbitraryEqual | Operator::BareEqual => Ok(vec![Clause::Any]),
@@ -384,6 +395,9 @@ fn expand_clause(
 fn clause_matches(clause: &Clause, version: Version) -> bool {
     match clause {
         Clause::Any => true,
+        Clause::Literal(text) => {
+            *text == format!("{}.{}.{}", version.major, version.minor, version.patch)
+        }
         Clause::PrefixEqual(prefix) => version.triple()[..prefix.len()] == prefix[..],
         Clause::PrefixNotEqual(prefix) => version.triple()[..prefix.len()] != prefix[..],
         Clause::Compare(operator, target) => {
@@ -764,43 +778,53 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
 }
 
 pub fn extract_setup_cfg_python_requires(text: &str) -> Option<String> {
+    // configparser semantics: a line is a continuation of the current option
+    // only when it is indented deeper than that option's own key line;
+    // otherwise it starts a new option (keys may themselves be indented).
     let mut section = String::new();
     let mut value: Option<String> = None;
-    let mut continuing_python_requires = false;
+    let mut current_is_python_requires = false;
+    let mut option_indent: Option<usize> = None;
     for line in text.lines() {
-        if line.trim().is_empty()
-            || matches!(line.trim_start().chars().next(), Some('#' | ';'))
-        {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
             continue;
         }
-        if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            section = line.trim().trim_matches(&['[', ']'][..]).trim().to_string();
-            continuing_python_requires = false;
-            continue;
-        }
-        if line.starts_with(char::is_whitespace) {
-            if section.eq_ignore_ascii_case("options") && continuing_python_requires {
-                value.as_mut().unwrap().push(' ');
-                value.as_mut().unwrap().push_str(line.trim());
+        let indent = line.len() - line.trim_start().len();
+        if let Some(active) = option_indent {
+            if indent > active {
+                if current_is_python_requires {
+                    if let Some(v) = value.as_mut() {
+                        v.push(' ');
+                        v.push_str(trimmed);
+                    }
+                }
+                continue;
             }
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed.trim_matches(&['[', ']'][..]).trim().to_string();
+            option_indent = None;
+            current_is_python_requires = false;
             continue;
         }
+        option_indent = Some(indent);
         if !section.eq_ignore_ascii_case("options") {
-            continuing_python_requires = false;
+            current_is_python_requires = false;
             continue;
         }
-        let Some(separator) = line.find(['=', ':']) else {
-            continuing_python_requires = false;
+        let Some(separator) = trimmed.find(['=', ':']) else {
+            current_is_python_requires = false;
             continue;
         };
-        continuing_python_requires = line[..separator]
+        current_is_python_requires = trimmed[..separator]
             .trim()
             .eq_ignore_ascii_case("python_requires");
-        if continuing_python_requires {
-            value = Some(line[separator + 1..].trim().to_string());
+        if current_is_python_requires {
+            value = Some(trimmed[separator + 1..].trim().to_string());
         }
     }
-    value
+    value.map(|v| v.trim().to_string())
 }
 
 pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
@@ -963,6 +987,33 @@ mod tests {
         assert!(selection.warnings.iter().any(|warning| {
             warning.contains("3.11.4") && warning.contains("3.11.16")
         }));
+    }
+
+    #[test]
+    fn arbitrary_equality_is_literal_and_empty_set_is_unconstrained() {
+        assert!(matches_specifier("===3.12.14", "3.12.14").unwrap());
+        assert!(!matches_specifier("===3.11.*", "3.11.16").unwrap());
+        assert!(!matches_specifier("===3.12.014", "3.12.14").unwrap());
+        assert!(!matches_specifier("===3.12", "3.12.14").unwrap());
+        assert!(matches_specifier("", "3.12.14").unwrap());
+        assert!(matches_specifier("   ", "3.10.21").unwrap());
+        assert_eq!(
+            select_python(Platform::X86_64UnknownLinuxGnu, &[ConstraintSource::new("", "pyproject.toml")])
+                .unwrap()
+                .pin
+                .version,
+            "3.12.14"
+        );
+    }
+
+    #[test]
+    fn setup_cfg_indented_option_keys_are_options_not_continuations() {
+        let cfg = "[options]\n  python_requires = <3.12\n  zip_safe = False\n";
+        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some("<3.12"));
+        let cfg = "[options]\n  install_requires =\n    six\n  python_requires =\n    >=3.9,\n    <3.12\n[options.extras_require]\n  x = y\n";
+        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some(">=3.9, <3.12"));
+        let cfg = "[options]\npython_requires = >=3.8\n[metadata]\n  python_requires = <3.0\n";
+        assert_eq!(extract_setup_cfg_python_requires(cfg).as_deref(), Some(">=3.8"));
     }
 
     #[test]
