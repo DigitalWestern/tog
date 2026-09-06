@@ -88,6 +88,46 @@ pub struct Requirement {
     pub name: String, // PEP 503 normalized
     pub version: String,
     pub sha256s: Vec<String>, // lowercase hex, no "sha256:" prefix
+    /// A `name @ git+URL@<commit>` requirement (NEXT.md item 4). The commit is
+    /// the verification, so such a line carries no `--hash`.
+    pub git: Option<crate::gitsrc::GitSource>,
+}
+
+/// Parse `name @ git+URL@<40-hex commit>`, optionally with
+/// `#subdirectory=path`. Anything less pinned is not a requirement blanket can
+/// lock, and the caller reports it.
+pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
+    let (name, reference) = spec.split_once('@')?;
+    let name = name.trim();
+    let reference = reference.trim();
+    if name.is_empty() || !reference.starts_with("git+") {
+        return None;
+    }
+    let (reference, subdirectory) = match reference.split_once('#') {
+        Some((before, fragment)) => (
+            before,
+            fragment
+                .split('&')
+                .find_map(|part| part.strip_prefix("subdirectory="))
+                .map(str::to_string),
+        ),
+        None => (reference, None),
+    };
+    let (url, commit) = reference.rsplit_once('@')?;
+    if !crate::gitsrc::is_full_commit(commit) {
+        return None;
+    }
+    Some(Requirement {
+        name: normalize_name(name),
+        // A git requirement has no release version; the commit names it.
+        version: format!("0+git.{}", &commit[..12]),
+        sha256s: Vec::new(),
+        git: Some(crate::gitsrc::GitSource {
+            url: crate::gitsrc::normalize_url(url),
+            commit: commit.to_ascii_lowercase(),
+            subdirectory,
+        }),
+    })
 }
 
 /// PEP 503 name normalization: lowercase; runs of [-_.] collapse to '-'.
@@ -298,6 +338,10 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
         if spec.is_empty() {
             continue;
         }
+        if let Some(requirement) = parse_git_requirement(&spec) {
+            reqs.push(requirement);
+            continue;
+        }
         if is_skippable_spec(&spec) {
             continue;
         }
@@ -351,6 +395,7 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
             name: normalize_name(name),
             version: version.to_string(),
             sha256s: hashes,
+            git: None,
         });
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -618,6 +663,21 @@ pub fn lock_requirements(
 ) -> io::Result<Vec<LockedPackage>> {
     let mut out = Vec::new();
     for r in reqs {
+        // A git requirement is already fully determined by its commit: there
+        // is no index lookup and no wheel to select. The checkout is packed
+        // into an sdist at realization (build::git_sdist_package).
+        if let Some(source) = &r.git {
+            out.push(LockedPackage {
+                name: r.name.clone(),
+                version: r.version.clone(),
+                filename: format!("{}-{}.tar.gz", r.name, r.version),
+                url: format!("git+{}@{}", source.url, source.commit),
+                sha256: String::new(),
+                kind: ArtifactKind::Sdist,
+                git: Some(source.clone()),
+            });
+            continue;
+        }
         let all = fetch_candidates(&r.name, &r.version)?;
         let matching: Vec<FileCandidate> = all
             .iter()
@@ -661,6 +721,7 @@ pub fn lock_requirements(
             url: chosen.url.clone(),
             sha256: chosen.sha256.clone(),
             kind,
+            git: None,
         });
     }
     Ok(out)
@@ -1178,5 +1239,55 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         let exact = score("pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl", "cp312", mac, Glibc(0, 0)).unwrap();
         assert!(score_order(exact) < score_order(abi3));
         assert!(score_order(abi3) < score_order(none));
+    }
+}
+
+#[cfg(test)]
+mod git_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_git_requirements_parse_and_unpinned_ones_do_not() {
+        let commit = "a".repeat(40);
+        let req = parse_git_requirement(&format!("six @ git+https://github.com/benjaminp/six@{commit}"))
+            .expect("a pinned git requirement");
+        assert_eq!(req.name, "six");
+        assert_eq!(req.version, format!("0+git.{}", &commit[..12]));
+        assert!(req.sha256s.is_empty(), "the commit is the verification");
+        let source = req.git.expect("a git source");
+        assert_eq!(source.url, "https://github.com/benjaminp/six");
+        assert_eq!(source.commit, commit);
+        assert_eq!(source.subdirectory, None);
+
+        let with_subdir = parse_git_requirement(&format!(
+            "pkg @ git+https://example.invalid/repo@{commit}#subdirectory=python/pkg"
+        ))
+        .expect("subdirectory form");
+        assert_eq!(
+            with_subdir.git.unwrap().subdirectory.as_deref(),
+            Some("python/pkg")
+        );
+
+        // Unpinned or non-git forms are not git requirements.
+        assert!(parse_git_requirement("six @ git+https://github.com/benjaminp/six@main").is_none());
+        assert!(parse_git_requirement("six @ https://example.invalid/six.tar.gz").is_none());
+        assert!(parse_git_requirement("six==1.17.0").is_none());
+    }
+
+    #[test]
+    fn a_git_line_survives_requirements_parsing() {
+        let commit = "b".repeat(40);
+        let text = format!(
+            "six==1.17.0 --hash=sha256:{}\npkg @ git+https://example.invalid/repo@{commit}\n",
+            "c".repeat(64)
+        );
+        let reqs = parse_requirements(&text).expect("parse");
+        assert_eq!(reqs.len(), 2);
+        let git = reqs.iter().find(|r| r.name == "pkg").expect("the git requirement");
+        assert_eq!(git.git.as_ref().unwrap().commit, commit);
+        // The registry requirement is untouched.
+        let six = reqs.iter().find(|r| r.name == "six").expect("six");
+        assert!(six.git.is_none());
+        assert_eq!(six.version, "1.17.0");
     }
 }

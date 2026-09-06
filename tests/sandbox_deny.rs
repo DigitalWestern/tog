@@ -44,6 +44,7 @@ fn network_access_during_build_fails() {
         url: format!("file://{}", fixture.display()),
         sha256: sha,
         kind: ArtifactKind::Sdist,
+        git: None,
     };
 
     let result = build::build_sdist_wheel(

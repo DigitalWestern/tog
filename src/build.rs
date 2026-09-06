@@ -162,6 +162,7 @@ fn build_toolchain_plan(python_version: &str) -> Plan {
             url: (*url).into(),
             sha256: (*sha).into(),
             kind: ArtifactKind::Wheel,
+                git: None,
         }).collect(),
     }
 }
@@ -532,6 +533,65 @@ pub fn build_sdist_wheel_with_runtime_plan(
     )
 }
 
+/// Turn a git dependency into an ordinary sdist package: realize the commit,
+/// pack the (sub)directory deterministically, and put it in the artifact cache
+/// so `download_verified_held` finds it without touching the network.
+///
+/// Everything after this is the normal sdist path — build-system inspection,
+/// isolated build environments, native libraries, derivation identity — and
+/// the archive's hash is a pure function of the tree, so the same commit
+/// always produces the same wheel identity.
+pub(crate) fn git_sdist_package(
+    store: &Store,
+    pkg: &LockedPackage,
+) -> io::Result<LockedPackage> {
+    let source = pkg.git.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: not a git dependency", pkg.name),
+        )
+    })?;
+    let object = crate::gitsrc::ensure_git_source(store, source)?;
+    let root = match &source.subdirectory {
+        Some(subdir) => {
+            if subdir.contains("..") || subdir.starts_with('/') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: unsafe subdirectory {subdir:?}", pkg.name),
+                ));
+            }
+            object.join(subdir)
+        }
+        None => object,
+    };
+    if !root.join("pyproject.toml").is_file()
+        && !root.join("setup.py").is_file()
+        && !root.join("setup.cfg").is_file()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: git source at {} has no pyproject.toml, setup.py or setup.cfg",
+                pkg.name,
+                source.commit
+            ),
+        ));
+    }
+    let (sha256, filename) =
+        crate::gitsrc::pack_checkout(store, &root, &pkg.name, &pkg.version)?;
+    Ok(LockedPackage {
+        name: pkg.name.clone(),
+        version: pkg.version.clone(),
+        filename,
+        // Informational: the bytes are already cached under their hash, so the
+        // fetch path never dials out for this URL.
+        url: format!("git+{}@{}", source.url, source.commit),
+        sha256,
+        kind: crate::types::ArtifactKind::Sdist,
+        git: None,
+    })
+}
+
 pub(crate) fn build_sdist_wheel_at_depth(
     store: &Store,
     platform: Platform,
@@ -793,6 +853,7 @@ mod tests {
             url: format!("file://{}", archive.display()),
             sha256,
             kind: ArtifactKind::Sdist,
+                git: None,
         }
     }
 
@@ -813,6 +874,7 @@ mod tests {
             url: "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz".into(),
             sha256: "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491".into(),
             kind: ArtifactKind::Sdist,
+                git: None,
         };
         let pin = crate::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
         let identity = sdist_identity(Platform::Aarch64AppleDarwin, &pkg, pin);
@@ -862,6 +924,7 @@ mod tests {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
+                git: None,
         };
         let pin = crate::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
         let identity = isolated_sdist_identity_from_ids(
@@ -890,6 +953,7 @@ mod tests {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
+                git: None,
         };
         let pin = crate::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
         let identity = isolated_sdist_identity_from_ids(
@@ -914,6 +978,7 @@ mod tests {
             url: String::new(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
+                git: None,
         };
         let error = build_sdist_wheel_at_depth(
             &Store { root: PathBuf::from("/does/not/matter") },
@@ -936,6 +1001,7 @@ mod tests {
             url: "https://example.invalid/example.tar.gz".into(),
             sha256: "a".repeat(64),
             kind: ArtifactKind::Sdist,
+                git: None,
         };
         let error = wrap_sandbox_build_error(
             &pkg,

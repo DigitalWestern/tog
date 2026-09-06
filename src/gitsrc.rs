@@ -15,7 +15,7 @@ use std::process::Command;
 
 const GIT: &str = "/usr/bin/git";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitSource {
     /// Normalized: no scheme credentials, no `git+` prefix, no `.git` suffix.
     pub url: String,
@@ -394,4 +394,52 @@ mod realization_tests {
         assert_eq!(resolve_ref(&normalize_url(&url), "main").unwrap(), commit);
         assert_eq!(resolve_ref(&normalize_url(&url), &commit).unwrap(), commit);
     }
+}
+
+/// Pack a realized checkout into a deterministic `.tar.gz` and insert it into
+/// the artifact cache, returning (sha256, filename).
+///
+/// Everything downstream of this — build-system inspection, isolated build
+/// environments, derivation identity — is the ordinary sdist path, so a git
+/// dependency needs no parallel machinery. The archive is reproducible (sorted
+/// names, fixed mtime/owner/mode), so the same commit always yields the same
+/// hash, and that hash is what the wheel's identity commits to.
+pub fn pack_checkout(
+    store: &Store,
+    source_root: &Path,
+    name: &str,
+    version: &str,
+) -> io::Result<(String, String)> {
+    let work = store.stage()?;
+    let prefix = format!("{name}-{version}");
+    let filename = format!("{prefix}.tar.gz");
+    let archive = work.join(&filename);
+    let output = Command::new("/usr/bin/tar")
+        .args([
+            "--sort=name",
+            "--mtime=@0",
+            "--owner=0",
+            "--group=0",
+            "--numeric-owner",
+            "--mode=go-w",
+            "--format=gnu",
+        ])
+        .arg(format!("--transform=s,^\\.,{prefix},"))
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(source_root)
+        .arg(".")
+        .output()?;
+    if !output.status.success() {
+        let _ = crate::store::remove_tree(&work);
+        return Err(err(format!(
+            "packing {} failed: {}",
+            source_root.display(),
+            String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("")
+        )));
+    }
+    let (sha256, _) = crate::fetch::cache_insert(store, &archive)?;
+    let _ = crate::store::remove_tree(&work);
+    Ok((sha256, filename))
 }

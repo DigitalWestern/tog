@@ -107,12 +107,17 @@ object id standing in for the tarball digest in the environment identity. An
 unpinned ref is still refused, loudly: `resolve_ref` can pin one via
 `git ls-remote` when a caller wants that.
 
-Open: **python** (`pkg @ git+URL@sha` → build a wheel from the checkout through
-the item-11 isolated build path; needs an `ArtifactKind::GitSource` and a
-`plan_git_identity_input` mirroring the sdist one) and **cargo** (vendor a git
-source as a directory source with `.cargo-checksum.json` plus the
-`[source."<url>"]` replacement stanza). SBOM `vcs` external references for git
-components are also still to do.
+Python is done too (2026-09-06): `pkg @ git+URL@<40-hex>` (with optional
+`#subdirectory=`) parses into a locked package carrying its git source, and
+realization packs the checkout into a deterministic `.tar.gz` (sorted names,
+fixed mtime/owner/mode), inserts it into the artifact cache under its own
+hash, and hands it to the ordinary sdist path — so build-system inspection,
+isolated build environments, native libraries and derivation identity all work
+unchanged, and the archive hash is a pure function of the commit's tree.
+
+Open: **cargo** (vendor a git source as a directory source with
+`.cargo-checksum.json` plus the `[source."<url>"]` replacement stanza) and SBOM
+`vcs` external references for git components.
 
 
 Record repo plus exact commit, fetch, build from source in the sandbox
