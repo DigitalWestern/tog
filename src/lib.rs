@@ -1,12 +1,16 @@
 pub mod build;
+pub(crate) mod build_requires;
 pub mod cargo;
 pub mod dirhash;
 pub mod dotnet;
 pub mod elixir;
 pub mod fetch;
+pub mod gc;
 pub mod golang;
 pub mod npm;
 pub mod manifest;
+pub mod nativelibs;
+pub mod npm_lock_import;
 pub mod pep440;
 pub mod policy;
 pub mod platform;

@@ -19,6 +19,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel`.
   Pinning a C toolchain as a store object is the roadmap item that
   closes this for both platforms.
+- **Pinned native library objects are store-root-specific**: `native-libs/libset/3`
+  relocates absolute object paths into binaries/configuration and therefore
+  includes the canonical `BLANKET_STORE` root in its identity. Moving a store
+  requires re-realizing the libset (and its dependent builds), not copying the
+  object under the old id. The wrapper, relocation, and identity corrections
+  are the v2 -> v3 bump.
 - **Linux sandbox roots are canonical paths.** bubblewrap binds the
   canonicalized path of every declared root; a caller that declares a
   symlink alias and then refers to files through the alias will not see
@@ -60,8 +66,6 @@ say what breaks, for whom, and how it fails (loud/silent).
 - **Project-side plan caches for go/python lack contained atomic writes**
   (ruby's was removed entirely); a symlinked .blanket could redirect a
   cache write outside the project.
-- **No GC** (`blanket gc` unbuilt): store, forests, backups, and the
-  planner-modcache grow forever.
 - **Reproducibility is asserted, not measured**: no rebuild-twice-and-
   compare checks (the last unimplemented item from Sol's original list).
 - **xcrun cache-write warnings** inside every sandboxed native build
@@ -92,8 +96,18 @@ sandbox, and uv fallback still delegates resolution.
 - **Project-local/editable and direct Python requirements are skipped** with
   exception `requirement-skipped`; strict via policy. Other malformed
   requirements still fail closed.
-- **Sdists with dynamic build requirements** (PEP 517 get_requires jobs)
-  unsupported; setuptools-family only. Loud.
+- **Sdists with dynamic build requirements** (PEP 517
+  `get_requires_for_build_wheel`) are unsupported because inspection is
+  deliberately non-executing. Static PEP 517 backends including hatchling,
+  flit, and setuptools-rust are supported when their declared requirements
+  resolve. Loud.
+- **`setup_requires` in legacy `setup.py` is not handled**: pip would need
+  network access to discover/install it, which is denied in the build
+  sandbox. This is the explicit item-11 boundary; declare the dependency in
+  `pyproject.toml` instead. Loud.
+- **Rust sdists without a shipped `Cargo.lock`** use a store-Cargo-generated
+  lock in the scratch source and record `unattested_cargo_lock`; strict policy
+  rejects that exception.
 - **Immutable venvs are not drop-in venvs**: no activate scripts; pip
   can't mutate them (by design, but surprises tooling that shells out to
   pip). Loud-ish.
@@ -104,12 +118,21 @@ sandbox, and uv fallback still delegates resolution.
 - **Environment markers/extras in a pinned file trigger a full re-lock
   via uv** rather than direct consumption (universal locks get
   platform-re-locked; versions can shift). Semi-silent.
+- **Project-level `uv pip compile` in `src/main.rs` can still execute
+  resolve-time metadata builds outside the sandbox.** This pre-existing
+  exposure is tracked separately; sdist build-requirement resolution now
+  rejects build-time sdists instead.
 
 ## JavaScript / npm
 
-- **Nested per-workspace node_modules rejected** (version conflicts
-  inside workspaces need hoisting). Loud with hint.
-- **git:// and file:// `resolved` URLs fail closed.** Loud.
+- **Workspace-local node_modules are supported for imported pnpm, Yarn
+  classic, and npm v7+ lockfiles**, including conflicting versions. The
+  projection keeps the importer set outside the project under the forest;
+  unsupported local sources still fail closed. Loud.
+- **Git sources are classified but not realized yet.** GitHub codeload,
+  archive, and git URL dependencies fail closed as `npm_git_dep` until NEXT.md
+  item 4 adds commit-source realization. Local `file:` links are projected
+  when the lock records their project-relative target.
 - **Install scripts that need network for LOGIC** (not just artifacts) are
   permissive with exception `install-script-failed`; strict via policy.
   Declared-artifacts only covers downloads whose cache location matches the
@@ -119,16 +142,20 @@ sandbox, and uv fallback still delegates resolution.
   `file-collision`; the later deterministic wheel wins. Strict via policy.
 - **SHA-1 npm integrity** is permissive with exception `weak-integrity`;
   the tarball is still verified. Strict via policy.
-- **Lifecycle scripts run in lockfile order, not dependency order**, and
-  ancestor .bin dirs aren't on script PATH (Sol review 3 leftover).
+- **Lifecycle scripts run in lockfile order, not dependency order**. Their
+  nearest importer `.bin` directory is first on PATH, followed by the root
+  `.bin`; deeper package-local `.bin` directories are not separately built.
   Rarely bites; silent when it does.
 - **npm optional-dependency failure parity is permissive with exception
   `install-script-failed`**; the extracted package is retained. Strict via
   policy.
 - **Process-tree quiescence after scripts not enforced** (a daemon
   started by postinstall can outlive realization).
-- **bun/yarn/pnpm lockfiles are re-resolved via npm** — versions may
-  differ from the original lock. Loud note printed, but versions shift.
+- **Yarn Berry is not imported**: its cache-zip checksums are not tarball
+  integrity values, so item 7 rejects it loudly and names the npm/pnpm
+  conversion path. pnpm/yarn classic imports discover `bin` and legacy
+  `directories.bin` entries from each extracted package.json before launcher
+  generation. Lockfile-less projects still fall back to npm resolution.
 
 ## Rust / cargo
 

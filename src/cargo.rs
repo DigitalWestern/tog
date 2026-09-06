@@ -1,6 +1,6 @@
 //! The Cargo tailor: Cargo.lock importer and registry vendor realization.
 
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -135,6 +135,15 @@ fn rust_identity(platform: Platform, components: &[&'static RustComponent]) -> I
     }
 }
 
+pub(crate) fn rust_object_id(platform: Platform, version: &str) -> io::Result<String> {
+    if version != RUST_VERSION {
+        return Err(err(format!(
+            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
+        )));
+    }
+    Ok(rust_identity(platform, &rust_components(platform)?).object_id())
+}
+
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
@@ -167,7 +176,7 @@ pub fn ensure_rust_for(
 
     let mut tarballs = Vec::new();
     for component in &components {
-        tarballs.push(download_verified(store, component.url, component.sha256)?);
+        tarballs.push(download_verified_held(store, component.url, component.sha256)?);
     }
 
     let staged = store.stage()?;
@@ -183,15 +192,16 @@ fn extract_rust_components(
     staged: &Path,
     platform: Platform,
     components: &[&RustComponent],
-    tarballs: &[PathBuf],
+    tarballs: &[impl AsRef<Path>],
 ) -> io::Result<()> {
     if components.len() != tarballs.len() {
         return Err(err("Rust component/archive count mismatch"));
     }
     for (component, tarball) in components.iter().zip(tarballs) {
+        let tarball: &Path = tarball.as_ref();
         let status = Command::new("/usr/bin/tar")
             .args(["-xJf"])
-            .arg(tarball)
+            .arg(tarball.as_os_str())
             .args(["-C"])
             .arg(staged)
             .args(["--strip-components", "2"])
@@ -493,34 +503,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
 }
 
 fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
-    let mut crates = plan.crates.clone();
-    crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
-
-    let mut seen = BTreeSet::new();
-    let mut inputs = BTreeMap::from([(String::from("schema"), String::from("cargo-vendor/1"))]);
-    for krate in &mut crates {
-        validate_crate_component("name", &krate.name)?;
-        validate_crate_component("version", &krate.version)?;
-        let checksum = normalize_checksum(&krate.sha256)?;
-        if !seen.insert((krate.name.clone(), krate.version.clone())) {
-            return Err(err(format!(
-                "duplicate Cargo crate {}@{}",
-                krate.name, krate.version
-            )));
-        }
-        krate.sha256 = checksum.clone();
-        inputs.insert(format!("crate:{}@{}", krate.name, krate.version), checksum);
-    }
-    let identity = Identity {
-        kind: "cargo-vendor".into(),
-        name: "vendor".into(),
-        version: if crates.is_empty() {
-            "1".into()
-        } else {
-            crates.len().to_string()
-        },
-        inputs,
-    };
+    let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -529,7 +512,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
 
     let mut archives = Vec::new();
     for krate in &crates {
-        let archive = download_verified(store, &krate.url, &krate.sha256).map_err(|e| {
+        let archive = download_verified_held(store, &krate.url, &krate.sha256).map_err(|e| {
             err(format!(
                 "{}@{}: fetch {}: {e}",
                 krate.name, krate.version, krate.url
@@ -549,7 +532,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         })?;
         let status = Command::new("/usr/bin/tar")
             .args(["-xzf"])
-            .arg(archive)
+            .arg(&*archive)
             .args(["-C"])
             .arg(&crate_dir)
             .args(["--strip-components", "1"])
@@ -596,6 +579,42 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         .commit(&identity, &staged, &[])
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
+}
+
+fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> {
+    let mut crates = plan.crates.clone();
+    crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+
+    let mut seen = BTreeSet::new();
+    let mut inputs = BTreeMap::from([(String::from("schema"), String::from("cargo-vendor/1"))]);
+    for krate in &mut crates {
+        validate_crate_component("name", &krate.name)?;
+        validate_crate_component("version", &krate.version)?;
+        let checksum = normalize_checksum(&krate.sha256)?;
+        if !seen.insert((krate.name.clone(), krate.version.clone())) {
+            return Err(err(format!(
+                "duplicate Cargo crate {}@{}",
+                krate.name, krate.version
+            )));
+        }
+        krate.sha256 = checksum.clone();
+        inputs.insert(format!("crate:{}@{}", krate.name, krate.version), checksum);
+    }
+    let identity = Identity {
+        kind: "cargo-vendor".into(),
+        name: "vendor".into(),
+        version: if crates.is_empty() {
+            "1".into()
+        } else {
+            crates.len().to_string()
+        },
+        inputs,
+    };
+    Ok((crates, identity))
+}
+
+pub(crate) fn vendor_object_id(plan: &CargoPlan) -> io::Result<String> {
+    Ok(vendor_identity(plan)?.1.object_id())
 }
 
 #[derive(Serialize)]
@@ -703,7 +722,7 @@ pub fn lock_digest(lock_toml: &str) -> String {
 
 /// The forced policy config: source replacement into the vendor object plus
 /// offline. Applied via CLI `--config` (outranks every config file).
-fn blanket_config_text(vendor_obj: &Path) -> io::Result<String> {
+pub(crate) fn blanket_config_text(vendor_obj: &Path) -> io::Result<String> {
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
     Ok(format!(
         "[source.crates-io]\n\

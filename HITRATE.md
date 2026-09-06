@@ -272,3 +272,49 @@ dependency).
   never distinguished them, so treat the macOS `ok` as an upper bound.
 - Wall time on the 12-core box was well under the 600 s cap for every
   repo that did not hit a build wall; re-measure here, not on the Mac.
+### NEXT item 7 measurement — 2026-09-05
+
+Command: `python3 tests/hitrate.py --repos $HOME/scratch/tmp/nx7-repos.tsv
+--work $HOME/scratch/tmp/nx7-hr --out $HOME/scratch/tmp/nx7-hr.csv
+--timeout 900 --only npm` after `cargo build --release`.
+
+| repo | result | class | one-line reason |
+|---|---|---|---|
+| vuejs/vue | fail | npm_ws_nested | `@types/estree` 0.0.39 vs 0.0.48 would need a nested workspace install in `packages/compiler-sfc` |
+| deepseek-ai/deepseek-harness | fail | npm_ws_nested | `commander` 8.3.0 vs 15.0.0 would need a nested workspace install in `apps/cli` |
+| shadcn-ui/ui | fail | npm_ws_nested | `@typescript-eslint/parser` 8.54.0 vs 8.39.0 would need a nested workspace install in `apps/v4` |
+| tailwindlabs/tailwindcss | fail | npm_ws_nested | `@emnapi/core` 2.0.0-alpha.3 vs 1.11.3 would need a nested workspace install in `crates/node` |
+| sveltejs/svelte | fail | npm_ws_nested | `esbuild` 0.27.7 vs 0.28.1 would need a nested workspace install in `packages/svelte` |
+| vitejs/vite | fail | npm_ws_nested | `magic-string` 0.30.21 vs 1.2.3 would need a nested workspace install in `packages/plugin-legacy` |
+| hoppscotch/hoppscotch | fail | npm_ws_nested | `rollup` 2.80.0 vs 4.59.0 would need a nested workspace install in `packages/codemirror-lang-graphql` |
+| Eugeny/tabby | fail | npm_script_failed | Yarn’s `@electron/node-gyp` GitHub tarball did not match its lock hash during realization |
+
+This run is 0/8, below the requested 5/8 target. The seven workspace
+failures are the deliberately fail-closed branch required when the existing
+forest cannot project a package-local `node_modules`; the Yarn miss is an
+artifact/hash failure after direct import, not npm re-resolution.
+
+### After item 7, round 2 — 2026-09-06
+
+Command: `cargo build --release`; then
+`python3 tests/hitrate.py --repos $HOME/scratch/tmp/nx7-repos.tsv
+--work $HOME/scratch/tmp/nx7-hr2 --out $HOME/scratch/tmp/nx7-hr2-rerun3.csv
+--timeout 900 --only npm`. This is the eight pinned repositories from the
+round-1 table, with a fresh CSV. Result: **5/8 syncs ok (62%)**, including
+three with permissive `install-script-failed` exceptions.
+
+| repo | result | class | one-line reason |
+|---|---|---|---|
+| vuejs/vue | ok | ok | pnpm v6 synthetic `file:` root link and workspace-local importer trees projected |
+| deepseek-ai/deepseek-harness | ok | ok | workspace-local version conflicts projected |
+| shadcn-ui/ui | ok | ok | workspace-local version conflicts projected |
+| tailwindlabs/tailwindcss | fail | npm_script_failed | an install script hit `Permission denied (os error 13)` in the required sandbox |
+| sveltejs/svelte | ok | ok | workspace-local version conflicts projected |
+| vitejs/vite | ok | ok | aliased local `file:` dependency projected and workspace trees resolved |
+| hoppscotch/hoppscotch | fail | npm_git_dep | codeload GitHub dependency is deferred to NEXT.md item 4 |
+| Eugeny/tabby | fail | npm_git_dep | GitHub `@electron/node-gyp` dependency is deferred to NEXT.md item 4 |
+
+The measurement exceeded the requested 5/8 target. The tailwind failure is
+not a workspace-placement failure; its exact script-side operation remains
+unverified beyond the sandbox's permission diagnostic. The hoppscotch and
+Tabby misses are intentional future git-source coverage.

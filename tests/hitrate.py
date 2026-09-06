@@ -36,6 +36,7 @@ CLASSES = [
     ("py_sdist_build_failed", r"sdist|build backend|setup\.py|sandbox-exec|bwrap|xcrun|clang|gcc|cc1plus|glibc"),
     ("py_no_wheel", r"no compatible|no wheel|no artifact|manylinux|x86_64-unknown-linux-gnu"),
     ("npm_ws_nested", r"nested inside workspace"),
+    ("npm_git_dep", r"npm_git_dep:.*(?:repo|commit).*NEXT\.md item 4"),
     ("npm_git_or_file_dep", r"resolved.*(git|file|must be https)|'resolved' URL|non-https"),
     ("npm_lockfile_v1", r"unsupported lockfileVersion"),
     ("npm_resolve_failed", r"npm install --package-lock-only failed"),

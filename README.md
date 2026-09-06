@@ -47,6 +47,8 @@ blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
 blanket build                   # sandboxed Cargo build (network denied)
 blanket store path              # where the store lives
+blanket store roots             # registered project roots
+blanket gc --dry-run            # preview unreferenced store/cache cleanup
 blanket sync --fresh            # rebuild the projection (drops caches)
 ```
 
@@ -75,11 +77,20 @@ default. A found manifest with no dependencies succeeds as an interpreter-only
 empty environment, while a directory with no Python manifest reports
 `no_manifest` and a broken found file reports `unreadable_manifest`. A
 `setup.py egg_info` probe runs read-only in the network-denied build sandbox
-and is cached by the manifest tree hash. A
-`package.json` without `package-lock.json` (bun/yarn projects) gets one
-via npm; an existing real `node_modules`/`.venv` is moved aside to
-`~/.blanket/backups/`. Resolution belongs to the ecosystem's tools —
-realization, verification, and provenance belong to blanket.
+and is cached by the manifest tree hash. For JavaScript,
+`package-lock.json` wins; otherwise pnpm v9 (and the compatible v6 importer
+shape) or Yarn classic v1 is imported directly, including workspace links.
+Only a lockfile-less project is resolved by the store npm. An existing real
+`node_modules`/`.venv` is moved aside to `~/.blanket/backups/`. Resolution
+belongs to the ecosystem's tools — realization, verification, and provenance
+belong to blanket.
+
+`blanket gc` follows every registered project closure, removes unreachable
+store objects and old unreferenced `cache/sha256` artifacts, and cleans stale
+staging directories. It keeps a ten-minute activity window so a concurrent
+sync cannot lose an object. Use `blanket gc --project` separately to collect
+old unused forests and backups; ordinary GC never deletes inside project
+projections.
 
 Python uses the explicit `.python-version` request when present; otherwise
 it intersects `requires-python`/`python_requires` metadata and selects the

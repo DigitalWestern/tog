@@ -9,7 +9,7 @@
 //! env vars, so every blanket-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
@@ -230,7 +230,7 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified(store, pin.url, pin.sha256)?;
+    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     if let Err(error) = extract_ruby_bottle(&tarball, &staged) {
         let _ = crate::store::remove_tree(&staged);
@@ -683,20 +683,23 @@ pub fn realize_gems(
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
         let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let file = download_verified(store, &url, &g.sha256).map_err(|e| {
-            io::Error::new(e.kind(), format!("{}: {e}", g.full_name))
-        })?;
-        let out = run_ruby(
-            ruby_obj,
-            &scratch,
-            &scratch,
-            &[
-                "ruby",
-                helper.to_str().unwrap(),
-                "spec",
-                file.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
-            ],
-        )?;
+        let (out, file_path) = {
+            let file = download_verified_held(store, &url, &g.sha256).map_err(|e| {
+                io::Error::new(e.kind(), format!("{}: {e}", g.full_name))
+            })?;
+            let out = run_ruby(
+                ruby_obj,
+                &scratch,
+                &scratch,
+                &[
+                    "ruby",
+                    helper.to_str().unwrap(),
+                    "spec",
+                    file.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
+                ],
+            )?;
+            (out, file.to_path_buf())
+        };
         if !out.status.success() {
             return Err(err(format!(
                 "{}: gemspec read failed: {}",
@@ -734,7 +737,17 @@ pub fn realize_gems(
                 }
             }
         }
-        artifacts.push((g, file));
+        artifacts.push((g, file_path));
+    }
+
+    // The gemspec verification above is complete. Re-verify and retain every
+    // cache lease for the sandboxed installs below.
+    let mut _cache_leases = Vec::new();
+    for (g, file) in &mut artifacts {
+        let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
+        let lease = download_verified_held(store, &url, &g.sha256)?;
+        *file = lease.to_path_buf();
+        _cache_leases.push(lease);
     }
 
     let staged = store.stage()?;
