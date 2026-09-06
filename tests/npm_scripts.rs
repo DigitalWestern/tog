@@ -103,6 +103,7 @@ fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
             integrity: sri.into(),
             bin: vec![],
             patch: None,
+            git: None,
             optional: false,
         }],
         links: vec![],
