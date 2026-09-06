@@ -388,9 +388,13 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
     )
     .unwrap();
 
-    let store = home.0.join("store");
+    // Every closure blanket writes holds a path built from the store's own
+    // canonicalized root, so the fixture has to canonicalize too: on macOS the
+    // temp dir sits under /var, a symlink to /private/var, and an
+    // uncanonicalized path here compares unequal to `store.object_path`.
+    std::fs::create_dir_all(home.0.join("store/objects/test-env/bin")).unwrap();
+    let store = home.0.join("store").canonicalize().unwrap();
     let object = store.join("objects/test-env");
-    std::fs::create_dir_all(object.join("bin")).unwrap();
     let executable = object.join("bin/ruff");
     std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -410,7 +414,7 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
     let key = hex::encode(Sha256::digest(
         format!(
             "x/2\0{}\0python\0fake\0\0{}",
-            store.canonicalize().unwrap().display(),
+            store.display(),
             blanket::platform::Platform::host().unwrap().triple()
         )
             .as_bytes(),
@@ -439,5 +443,5 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
 
     let out = blanket(&project.0, &home.0, &["x", "--py", "--from", "fake", "ruff"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("cached object test-env carries exception"));
+    assert!(text(&out.stderr).contains("cached object test-env carries exception"), "{}", text(&out.stderr));
 }

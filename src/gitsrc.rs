@@ -774,22 +774,54 @@ mod realization_tests {
         assert_eq!(hash, same_hash);
     }
 
+    /// Boundaries of the ustar name/prefix split. Verified against bsdtar by
+    /// packing each shape and counting surviving entries; GNU tar agrees.
+    /// Over-rejecting here would refuse trees that pack fine today, so both
+    /// directions matter.
     #[test]
-    fn pack_propagates_tar_failure_instead_of_accepting_gzip_prefix() {
+    fn ustar_fits_matches_the_header_layout() {
+        let seg = |n: usize| "a".repeat(n);
+        let fits = |path: String, is_dir: bool| ustar_fits(path.as_bytes(), is_dir);
+
+        assert!(fits(seg(100), false));
+        assert!(!fits(seg(101), false));
+        // A directory spends one name byte on its trailing slash.
+        assert!(fits(seg(99), true));
+        assert!(!fits(seg(100), true));
+        // Splitting needs a separator at or before byte 155, leaving <= 100.
+        assert!(fits(format!("{}/{}", seg(155), seg(100)), false));
+        assert!(!fits(format!("{}/{}", seg(156), seg(100)), false));
+        assert!(!fits(format!("{}/{}", seg(155), seg(101)), false));
+        assert!(fits(format!("{}/{}/{}", seg(60), seg(94), seg(100)), false));
+        assert!(!fits(format!("{}/{}/{}", seg(60), seg(95), seg(100)), false));
+        // No separator to split on, however long.
+        assert!(!fits(seg(200), false));
+    }
+
+    #[test]
+    fn pack_rejects_paths_and_links_that_no_ustar_header_can_hold() {
+        let platform = crate::platform::Platform::host().unwrap();
+
+        // bsdtar drops an overlong path and still exits 0, so relying on the
+        // subprocess would cache a truncated archive here instead of failing.
         let root = temp("pack-failure");
         let checkout = root.0.join("checkout");
-        // Thousands of invalid ustar entries produce enough diagnostics to
-        // fill a normal pipe. The packer must still return promptly.
-        for index in 0..2048u32 {
-            let long_dir = format!("{}-{index:08x}", "d".repeat(119));
-            let long_file = format!("{}-{index:08x}", "f".repeat(119));
-            fs::create_dir_all(checkout.join(&long_dir)).unwrap();
-            fs::write(checkout.join(&long_dir).join(&long_file), b"too long").unwrap();
-        }
-        let store = store_at(&root.0);
-        let platform = crate::platform::Platform::host().unwrap();
-        let error = pack_checkout(&store, platform, &checkout, "pkg", "1.0")
+        let long_dir = "d".repeat(119);
+        fs::create_dir_all(checkout.join(&long_dir)).unwrap();
+        fs::write(checkout.join(&long_dir).join("f".repeat(119)), b"too long").unwrap();
+        let error = pack_checkout(&store_at(&root.0), platform, &checkout, "pkg", "1.0")
             .expect_err("ustar path overflow must fail packing")
+            .to_string();
+        assert!(error.contains("packing"), "{error}");
+
+        // The linkname field is 100 bytes with no prefix to spill into.
+        let link_root = temp("pack-link-failure");
+        let link_checkout = link_root.0.join("checkout");
+        fs::create_dir_all(&link_checkout).unwrap();
+        fs::write(link_checkout.join("target"), b"content\n").unwrap();
+        std::os::unix::fs::symlink("x".repeat(101), link_checkout.join("link")).unwrap();
+        let error = pack_checkout(&store_at(&link_root.0), platform, &link_checkout, "pkg", "1.0")
+            .expect_err("overlong symlink target must fail packing")
             .to_string();
         assert!(error.contains("packing"), "{error}");
     }
@@ -853,7 +885,23 @@ pub fn pack_checkout(
         use std::os::unix::ffi::OsStrExt;
         let mut bytes = Vec::new();
         for file in &files {
-            bytes.extend_from_slice(file.as_os_str().as_bytes());
+            let path = file.as_os_str().as_bytes();
+            let meta = fs::symlink_metadata(work.join(file))?;
+            if !ustar_fits(path, meta.is_dir()) {
+                return Err(err(format!(
+                    "packing {} failed: {} is too long for a ustar header",
+                    source_root.display(),
+                    file.display()
+                )));
+            }
+            if meta.is_symlink() && fs::read_link(work.join(file))?.as_os_str().len() > 100 {
+                return Err(err(format!(
+                    "packing {} failed: symlink target of {} is too long for a ustar header",
+                    source_root.display(),
+                    file.display()
+                )));
+            }
+            bytes.extend_from_slice(path);
             bytes.push(0);
         }
         fs::File::create(&list)?.write_all(&bytes)?;
@@ -980,6 +1028,21 @@ fn set_mtime_epoch(path: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Can a ustar header hold this path? Name field is 100 bytes, prefix 155,
+/// joined by a `/`, so the split has to land on a separator; directories carry
+/// a trailing `/` that counts against the name field.
+///
+/// We decide this ourselves instead of reading tar's exit code because the two
+/// tars disagree: GNU tar fails the run, while bsdtar prints "Pathname too
+/// long", *skips the entry*, and still exits 0. Trusting the subprocess would
+/// let macOS cache a silently truncated archive under a hash claiming to be
+/// the whole tree.
+fn ustar_fits(path: &[u8], is_dir: bool) -> bool {
+    let len = path.len() + usize::from(is_dir);
+    len <= 100
+        || (1..path.len().min(156)).any(|i| path[i] == b'/' && len - i - 1 <= 100)
 }
 
 /// Every tree entry under `root`, including directories and symlinks, as a

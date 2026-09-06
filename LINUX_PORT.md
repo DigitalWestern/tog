@@ -18,6 +18,35 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — ustar limits validated in-process, not delegated to tar
+
+`pack_checkout` no longer infers ustar representability from the tar
+subprocess. The two tars disagree about what an unrepresentable entry means:
+GNU tar fails the run, while bsdtar prints `Pathname too long` (or
+`Link contents too long`), **skips that entry, and exits 0**. The previous
+code read only the exit status, so on macOS an overlong path produced a
+successful pack of a *truncated* tree, and `cache_insert` stored it under a
+hash asserting the whole checkout. That is a store-integrity bug, not just a
+platform-divergent test: the object is immutable and input-addressed, so a
+silently short archive is indistinguishable from a correct one afterwards.
+
+`ustar_fits` in `src/gitsrc.rs` now checks every collected path before tar is
+spawned — 100-byte name field, 155-byte prefix, split on a `/`, one name byte
+reserved for a directory's trailing slash — plus a 100-byte check on symlink
+targets, which have no prefix field to spill into. The boundaries were derived
+by packing each shape with bsdtar and counting surviving entries, not from the
+spec alone; `ustar_fits_matches_the_header_layout` pins all of them. Packing
+now fails identically on both platforms regardless of which tar is on PATH.
+
+The old test built 2048 overlong entries to prove tar's diagnostics could not
+deadlock the stderr pipe. Pre-flight validation means tar never runs for that
+input, so the case was rewritten to one path and one symlink; the stderr
+drain in `pack_checkout` is unchanged and still covers other tar failures.
+
+Not covered: the ustar 8 GiB octal size field. No checkout is expected to
+carry a file that large, and it has not been tested which tar drops versus
+fails there.
+
 ### 2026-09-06 — adversarial review follow-up
 
 Implementation commit `61c8b50` rechecks the CLI and review debt listed in

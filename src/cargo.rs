@@ -965,16 +965,12 @@ pub fn lock_digest(lock_toml: &str) -> String {
     hex::encode(Sha256::digest(lock_toml.as_bytes()))
 }
 
-/// The forced policy config: source replacement into the vendor object plus
-/// offline. Applied via CLI `--config` (outranks every config file).
-pub(crate) fn blanket_config_text(vendor_obj: &Path) -> io::Result<String> {
-    blanket_config_text_for(vendor_obj, &[])
-}
-
-/// The forced cargo config. Every git source in the plan gets its own
-/// `[source."git+…"]` stanza replaced by the vendor directory, because cargo
-/// matches these keys against the lockfile's source string verbatim; without
-/// them it would try to reach the network for a git dependency.
+/// The forced cargo config: source replacement into the vendor object plus
+/// offline, applied via CLI `--config` (which outranks every config file).
+/// Every git source in the plan gets its own `[source."git+…"]` stanza
+/// replaced by the vendor directory, because cargo matches these keys against
+/// the lockfile's source string verbatim; without them it would try to reach
+/// the network for a git dependency.
 pub(crate) fn blanket_config_text_for(
     vendor_obj: &Path,
     git_sources: &[CargoGitSource],
@@ -1361,7 +1357,6 @@ mod tests {
     }
     use std::env;
     use std::ffi::OsString;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempDir(PathBuf);
