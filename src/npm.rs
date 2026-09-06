@@ -503,7 +503,58 @@ fn safe_workspace_path(workspace: &str) -> bool {
         && !workspace.starts_with('/')
         && Path::new(workspace).components().all(|component| {
             matches!(component, std::path::Component::Normal(_))
-        })
+    })
+}
+
+fn canonical_workspace_parent(path: &Path) -> io::Result<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    loop {
+        match candidate.canonicalize() {
+            Ok(path) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                candidate = candidate
+                    .parent()
+                    .ok_or_else(|| err("workspace path has no existing parent"))?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn validate_workspace_parents(
+    project_dir: &Path,
+    previous: &[String],
+    current: &[String],
+) -> io::Result<()> {
+    let project_root = project_dir.canonicalize()?;
+    for workspace in previous {
+        if !safe_workspace_path(workspace) {
+            continue;
+        }
+        let path = project_dir.join(workspace);
+        let canonical = canonical_workspace_parent(&path)?;
+        if !canonical.starts_with(&project_root) {
+            return Err(err(format!(
+                "workspace path {workspace:?} resolves outside the project"
+            )));
+        }
+    }
+    for workspace in current {
+        if !safe_workspace_path(workspace) {
+            return Err(err(format!(
+                "workspace path {workspace:?} is not a safe project-relative path"
+            )));
+        }
+        let path = project_dir.join(workspace);
+        let canonical = canonical_workspace_parent(&path)?;
+        if !canonical.starts_with(&project_root) {
+            return Err(err(format!(
+                "workspace path {workspace:?} resolves outside the project"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn managed_projection_symlink(path: &Path, project_dir: &Path, home: &Path) -> bool {
@@ -591,7 +642,10 @@ pub(crate) fn git_repo_and_commit(url: &str) -> Option<(String, String)> {
         // An explicit `git+` prefix names the protocol outright, whatever it is.
         || was_git && source.contains("://")
     {
-        repo = Some(source.trim_end_matches(".git").to_string());
+        // Preserve the repository path verbatim. In particular, `.git` is
+        // part of a local file URL and must not be stripped before gitsrc
+        // normalizes and validates it.
+        repo = Some(source.to_string());
         commit = fragment_commit;
     } else if let Some(path) = source.strip_prefix("https://codeload.github.com/") {
         let parts: Vec<&str> = path.split('/').collect();
@@ -2128,6 +2182,10 @@ pub fn project_node_env_recorded(
     let nm = project_dir.join("node_modules");
     let workspaces = workspace_set(plan);
     let previous_workspaces = previous_workspace_set(project_dir);
+    // Resolve every old and new workspace parent before any policy, backup,
+    // removal, or projection mutation. A lexical `packages/lib` can be an
+    // external symlink after the previous closure was written.
+    validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
     let home = env_obj
         .parent()
         .and_then(|p| p.parent())
@@ -2786,6 +2844,59 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn workspace_parent_preflight_rejects_external_stale_workspace() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("blanket-npm-external-workspace-{nonce}"));
+        let project = root.join("project");
+        let external = root.join("external");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(&external, project.join("packages")).unwrap();
+        let marker = external.join("must-remain");
+        fs::write(&marker, "user data").unwrap();
+
+        let error = validate_workspace_parents(
+            &project,
+            &["packages/lib".to_string()],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("outside the project"), "{error}");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "user data");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_parent_preflight_rejects_unsafe_current_workspace() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("blanket-npm-unsafe-workspace-{nonce}"));
+        let project = root.join("project");
+        let external = root.join("external");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        let marker = external.join("must-remain");
+        fs::write(&marker, "user data").unwrap();
+
+        let error = validate_workspace_parents(
+            &project,
+            &[],
+            &["../external".to_string()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("safe project-relative"), "{error}");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "user data");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn git_dependency_urls_are_classified_with_repo_and_commit() {
         let cases = [
@@ -2817,6 +2928,15 @@ mod tests {
             assert!(detail.contains(commit), "{detail}");
             assert!(detail.contains("NEXT.md item 4"), "{detail}");
         }
+    }
+
+    #[test]
+    fn local_git_file_urls_preserve_the_git_suffix() {
+        let source = git_source_from_url(
+            "git+file:///tmp/fixture-repo.git#0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("pinned local git source");
+        assert_eq!(source.url, "file:///tmp/fixture-repo.git");
     }
 
     #[test]

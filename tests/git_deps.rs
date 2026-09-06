@@ -7,6 +7,7 @@
 use blanket::npm::{self, NpmPackage, NpmPlan};
 use blanket::store::Store;
 use blanket::{platform::Platform, policy};
+use blanket::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -130,6 +131,71 @@ fn an_unpinned_git_reference_is_refused() {
 }
 
 fn _unused(_: NpmPlan) {}
+
+/// Build a parent repository with a relative file submodule. The parent has
+/// no usable submodule checkout until the realizing code records `origin`;
+/// Git otherwise resolves `../subrepo` relative to its temporary worktree.
+fn relative_submodule_fixture(root: &Path, transformed: bool) -> (String, String) {
+    let subrepo_name = if transformed { "subrepo-transformed" } else { "subrepo" };
+    let subrepo = root.join(subrepo_name);
+    std::fs::create_dir_all(&subrepo).unwrap();
+    git(&["init", "-q", "-b", "main"], &subrepo);
+    git(&["config", "user.email", "t@example.invalid"], &subrepo);
+    git(&["config", "user.name", "t"], &subrepo);
+    if transformed {
+        std::fs::write(subrepo.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+    }
+    std::fs::write(subrepo.join("sub.txt"), "submodule\n").unwrap();
+    git(&["add", "-A"], &subrepo);
+    git(&["commit", "-qm", "sub"], &subrepo);
+    let sub_commit = git(&["rev-parse", "HEAD"], &subrepo);
+
+    let parent = root.join(if transformed { "parent-transformed" } else { "parent" });
+    std::fs::create_dir_all(&parent).unwrap();
+    git(&["init", "-q", "-b", "main"], &parent);
+    git(&["config", "user.email", "t@example.invalid"], &parent);
+    git(&["config", "user.name", "t"], &parent);
+    std::fs::write(
+        parent.join(".gitmodules"),
+        format!("[submodule \"sub\"]\n\tpath = sub\n\turl = ../{subrepo_name}\n"),
+    )
+    .unwrap();
+    git(&["add", ".gitmodules"], &parent);
+    let gitlink = format!("160000,{sub_commit},sub");
+    git(&["update-index", "--add", "--cacheinfo", &gitlink], &parent);
+    git(&["commit", "-qm", "parent"], &parent);
+    let parent_commit = git(&["rev-parse", "HEAD"], &parent);
+    (format!("file://{}", parent.display()), parent_commit)
+}
+
+#[test]
+fn git_relative_submodule_is_pinned_and_raw() {
+    let root = temp("submodule");
+    let (url, commit) = relative_submodule_fixture(&root.0, false);
+    let store = store_at(&root.0);
+    let source = GitSource {
+        url: normalize_url(&url),
+        commit,
+        subdirectory: None,
+    };
+    let object = ensure_git_source(&store, &source).expect("realize relative submodule");
+    assert_eq!(
+        std::fs::read_to_string(object.join("sub/sub.txt")).unwrap(),
+        "submodule\n"
+    );
+    assert!(!object.join("sub/.git").exists());
+
+    let (url, commit) = relative_submodule_fixture(&root.0, true);
+    let transformed = GitSource {
+        url: normalize_url(&url),
+        commit,
+        subdirectory: None,
+    };
+    let error = ensure_git_source(&store, &transformed)
+        .expect_err("attribute-transformed submodule must be rejected")
+        .to_string();
+    assert!(error.contains("transformed"), "{error}");
+}
 
 /// A minimal installable Python package in a local repository.
 fn python_fixture_repo(root: &Path) -> (String, String) {

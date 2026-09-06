@@ -294,7 +294,7 @@ pub(crate) fn run_checked(
     args: &[&str],
 ) -> io::Result<()> {
     crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_ruby(ruby_obj, cwd, gem_home, args)?;
+    let out = run_ruby_edit(ruby_obj, cwd, gem_home, args)?;
     if crate::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -314,6 +314,28 @@ fn run_ruby(
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
+    run_ruby_with_env(ruby_obj, cwd, args, forced_env(cwd, gem_home))
+}
+
+fn run_ruby_edit(
+    ruby_obj: &Path,
+    cwd: &Path,
+    gem_home: &Path,
+    args: &[&str],
+) -> io::Result<std::process::Output> {
+    let mut env = forced_env(cwd, gem_home);
+    if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "BUNDLE_FROZEN") {
+        *value = "false".to_string();
+    }
+    run_ruby_with_env(ruby_obj, cwd, args, env)
+}
+
+fn run_ruby_with_env(
+    ruby_obj: &Path,
+    cwd: &Path,
+    args: &[&str],
+    environment: Vec<(String, String)>,
+) -> io::Result<std::process::Output> {
     let mut cmd = Command::new(ruby_obj.join(format!("bin/{}", args[0])));
     cmd.args(&args[1..]).current_dir(cwd);
     // Ruby FIRST on PATH: a gem executable named ruby/gem must never shadow.
@@ -327,7 +349,7 @@ fn run_ruby(
         &mut cmd,
         ENV_REMOVE_PREFIXES,
         ENV_REMOVE,
-        &forced_env(cwd, gem_home),
+        &environment,
     );
     cmd.stdin(std::process::Stdio::null());
     cmd.output()

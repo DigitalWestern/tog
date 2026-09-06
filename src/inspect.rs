@@ -4,7 +4,7 @@
 //! only reads.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -379,6 +379,109 @@ fn symlink_target(path: &Path) -> Option<PathBuf> {
     fs::read_link(path).ok()
 }
 
+fn canonical_symlink_target(path: &Path) -> Option<PathBuf> {
+    let target = symlink_target(path)?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent()?.join(target)
+    };
+    target.canonicalize().ok()
+}
+
+fn object_path_exists(body: &Value, fields: &[&str]) -> Option<String> {
+    for field in fields {
+        let Some(path) = body[*field]["path"].as_str() else {
+            continue;
+        };
+        if !Path::new(path).is_dir() {
+            return Some(format!("{field} object"));
+        }
+    }
+    None
+}
+
+fn object_liveness_state(body: &Value, fields: &[&str]) -> Option<State> {
+    object_path_exists(body, fields).map(State::ProjectionMissing)
+}
+
+fn store_home_from_object(path: &Path) -> Option<PathBuf> {
+    let objects = path.parent()?;
+    if objects.file_name()?.to_str()? != "objects" {
+        return None;
+    }
+    Some(objects.parent()?.parent()?.to_path_buf())
+}
+
+fn encoded_workspace(workspace: &str) -> Option<String> {
+    if workspace.is_empty()
+        || workspace.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(workspace.replace('%', "%25").replace('/', "%2F"))
+}
+
+fn node_projection_state(dir: &Path, body: &Value) -> State {
+    let node_modules = dir.join("node_modules");
+    let Some(env_text) = body["env_object"].as_str() else {
+        return if canonical_symlink_target(&node_modules).is_some() && node_modules.is_dir() {
+            State::Unchecked("node projection provenance was not recorded".into())
+        } else {
+            State::ProjectionMissing("node_modules".into())
+        };
+    };
+    let Some(projection_id) = body["projection_id"].as_str() else {
+        return State::ProjectionMissing("node_modules".into());
+    };
+    let Some(home) = store_home_from_object(Path::new(env_text)) else {
+        return State::ProjectionMissing("node_modules".into());
+    };
+    let Ok(project_key) = dir.canonicalize().map(|path| {
+        hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()))[..32].to_string()
+    }) else {
+        return State::ProjectionMissing("node_modules".into());
+    };
+    let expected_root = home
+        .join("forests")
+        .join(project_key)
+        .join(projection_id);
+    let Some(expected) = expected_root.join("node_modules").canonicalize().ok() else {
+        return State::ProjectionMissing("node_modules".into());
+    };
+    if canonical_symlink_target(&node_modules) != Some(expected) {
+        return State::ProjectionMissing("node_modules".into());
+    }
+    if !Path::new(env_text).is_dir() {
+        return State::ProjectionMissing("env object".into());
+    }
+    if let Some(workspaces) = body["workspaces"].as_array() {
+        for workspace in workspaces {
+            let Some(workspace) = workspace.as_str() else {
+                return State::ProjectionMissing("workspace node_modules".into());
+            };
+            let Some(encoded) = encoded_workspace(workspace) else {
+                return State::ProjectionMissing("workspace node_modules".into());
+            };
+            let Some(expected) = expected_root
+                .join("workspaces")
+                .join(encoded)
+                .join("node_modules")
+                .canonicalize()
+                .ok()
+            else {
+                return State::ProjectionMissing("workspace node_modules".into());
+            };
+            if canonical_symlink_target(&dir.join(workspace).join("node_modules"))
+                != Some(expected)
+            {
+                return State::ProjectionMissing("workspace node_modules".into());
+            }
+        }
+    }
+    State::Synced
+}
+
 pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>> {
     let present = detected(dir)?;
     let closures = closures(dir)?;
@@ -428,11 +531,15 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                 }
             }
             "node" => {
-                let node_modules = dir.join("node_modules");
-                if symlink_target(&node_modules).is_none() || !node_modules.is_dir() {
-                    State::ProjectionMissing("node_modules".into())
+                let projection = node_projection_state(dir, body);
+                if matches!(&projection, State::Synced | State::Unchecked(_)) {
+                    match recorded_inputs_state(dir, body)? {
+                        State::Synced if matches!(projection, State::Unchecked(_)) => projection,
+                        State::Synced => State::Synced,
+                        other => other,
+                    }
                 } else {
-                    recorded_inputs_state(dir, body)?
+                    projection
                 }
             }
             "cargo" => {
@@ -442,14 +549,18 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                     lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
                 }
             }
-            "go" => lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?,
-            "ruby" => lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?,
-            "elixir" => lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?,
-            "dotnet" => lock_state(
-                dir,
-                "packages.lock.json",
-                &string(&body["packages_lock_sha256"]),
-            )?,
+            "go" => object_liveness_state(body, &["go_object", "modcache_object"])
+                .unwrap_or(lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?),
+            "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"])
+                .unwrap_or(lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?),
+            "elixir" => object_liveness_state(body, &["beam_object", "deps_object"])
+                .unwrap_or(lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?),
+            "dotnet" => object_liveness_state(body, &["sdk_object", "packages_object"])
+                .unwrap_or(lock_state(
+                    dir,
+                    "packages.lock.json",
+                    &string(&body["packages_lock_sha256"]),
+                )?),
             _ => State::Unchecked("unknown ecosystem".into()),
         };
         rows.push(EcosystemStatus {
@@ -646,11 +757,26 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
 
     match Store::open() {
         Ok(store) => {
-            let probe = store
-                .root
-                .join("tmp")
-                .join(format!(".doctor-{}", std::process::id()));
-            let writable = fs::write(&probe, b"ok").and_then(|()| fs::remove_file(&probe));
+            let probe = store.root.join("tmp").join(format!(
+                ".doctor-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            // create_new is deliberate: fs::write follows a pre-existing
+            // symlink, allowing a hostile or stale probe name to redirect
+            // doctor’s write outside the store.
+            let writable = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe)
+                .and_then(|mut file| {
+                    file.write_all(b"ok")?;
+                    drop(file);
+                    fs::remove_file(&probe)
+                });
             match writable {
                 Ok(()) => checks.push(check(
                     "store",
@@ -1056,6 +1182,97 @@ mod tests {
     }
 
     #[test]
+    fn status_validates_node_forest_and_workspace_links() {
+        let temp = TempDir::new("node-projection");
+        let platform = Platform::host().unwrap();
+        let project = &temp.0;
+        fs::write(project.join("package.json"), "{}\n").unwrap();
+        let store = project.join("store");
+        let env = store.join("objects/env-id");
+        fs::create_dir_all(env.join("node_modules")).unwrap();
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        let project_key = hex::encode(Sha256::digest(
+            project.canonicalize().unwrap().to_string_lossy().as_bytes(),
+        ));
+        let projection = project
+            .join("forests")
+            .join(&project_key[..32])
+            .join("a".repeat(32));
+        let workspace_env = projection.join("workspaces/packages%2Flib/node_modules");
+        fs::create_dir_all(&workspace_env).unwrap();
+        fs::create_dir_all(projection.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            projection.join("node_modules"),
+            project.join("node_modules"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            &workspace_env,
+            project.join("packages/lib/node_modules"),
+        )
+        .unwrap();
+        write_closure(
+            project,
+            "node",
+            platform.triple(),
+            json!({
+                "env_object": env,
+                "projection_schema": "node-forest/2",
+                "projection_id": "a".repeat(32),
+                "workspaces": ["packages/lib"],
+                "inputs": [{"path": "package.json", "sha256": sha256_file(&project.join("package.json")).unwrap()}]
+            }),
+        );
+        let rows = status(platform, project).unwrap();
+        assert_eq!(rows[0].state, State::Synced);
+
+        fs::remove_file(project.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(&env, project.join("node_modules")).unwrap();
+        let rows = status(platform, project).unwrap();
+        assert_eq!(rows[0].state, State::ProjectionMissing("node_modules".into()));
+
+        fs::remove_file(project.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            projection.join("node_modules"),
+            project.join("node_modules"),
+        )
+        .unwrap();
+        fs::remove_file(project.join("packages/lib/node_modules")).unwrap();
+        let rows = status(platform, project).unwrap();
+        assert_eq!(
+            rows[0].state,
+            State::ProjectionMissing("workspace node_modules".into())
+        );
+    }
+
+    #[test]
+    fn status_reports_missing_non_python_toolchain_objects() {
+        let host = Platform::host().unwrap().triple();
+        let cases = [
+            ("go", "go.mod", "go_object", "modcache_object", "go_object object"),
+            ("ruby", "Gemfile", "ruby_object", "gems_object", "ruby_object object"),
+            ("elixir", "mix.exs", "beam_object", "deps_object", "beam_object object"),
+            ("dotnet", "app.csproj", "sdk_object", "packages_object", "sdk_object object"),
+        ];
+        for (ecosystem, marker, first, second, expected) in cases {
+            let temp = TempDir::new(&format!("missing-{ecosystem}"));
+            fs::write(temp.0.join(marker), "").unwrap();
+            let mut body = json!({"inputs": []});
+            body[first] = json!({"path": temp.0.join("missing/first")});
+            body[second] = json!({"path": temp.0.join("missing/second")});
+            write_closure(
+                &temp.0,
+                ecosystem,
+                host,
+                body,
+            );
+            let rows = status(Platform::host().unwrap(), &temp.0).unwrap();
+            let row = rows.iter().find(|row| row.ecosystem == ecosystem).unwrap();
+            assert_eq!(row.state, State::ProjectionMissing(expected.into()));
+        }
+    }
+
+    #[test]
     fn doctor_reports_host_and_project() {
         let _lock = crate::store::STORE_ENV_LOCK
             .lock()
@@ -1076,6 +1293,10 @@ mod tests {
         let store_check = checks.iter().find(|check| check.name == "store").unwrap();
         assert_eq!(store_check.level, Level::Ok, "{}", store_check.detail);
         assert!(store_check.detail.contains("0 objects"));
+        assert!(fs::read_dir(store.join("tmp"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".doctor-")));
         let project = checks.iter().find(|check| check.name == "project").unwrap();
         assert!(project.detail.contains("no project in"));
         let text = render_doctor(&checks, false).unwrap();

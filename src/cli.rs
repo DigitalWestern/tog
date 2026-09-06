@@ -35,7 +35,7 @@ pub enum Command {
     Run { command: Vec<String> },
     Sbom { output: Option<PathBuf> },
     Add { specs: Vec<String>, dev: bool, no_sync: bool },
-    Remove { names: Vec<String>, no_sync: bool },
+    Remove { names: Vec<String>, dev: bool, no_sync: bool },
     Update { names: Vec<String>, no_sync: bool },
     /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
     X {
@@ -232,6 +232,7 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
 The inverse of add, through the same pinned tools with the same ecosystem
 choice. For a plain requirements file blanket deletes the line itself.",
         options: &[
+            ("--dev", "remove from development dependencies (uv --dev, cargo --dev)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'blanket'"),
             HELP_OPTION,
         ],
@@ -778,6 +779,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     let mut passthrough = false;
     for arg in args {
         if passthrough {
+            validate_dependency_arg(name, arg)?;
             positional.push(arg.clone());
             continue;
         }
@@ -785,9 +787,12 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             "--" => passthrough = true,
             "-h" | "--help" => return Ok(None),
             "--no-sync" => no_sync = true,
-            "--dev" | "-D" if name == "add" => dev = true,
+            "--dev" | "-D" if matches!(name, "add" | "remove") => dev = true,
             other if other.starts_with('-') && other.len() > 1 => return Err(reject(name, other)),
-            other => positional.push(other.to_string()),
+            other => {
+                validate_dependency_arg(name, other)?;
+                positional.push(other.to_string());
+            }
         }
     }
     match name {
@@ -806,6 +811,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
         )),
         "remove" => Ok(Some(Command::Remove {
             names: positional,
+            dev,
             no_sync,
         })),
         _ => Ok(Some(Command::Update {
@@ -813,6 +819,22 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             no_sync,
         })),
     }
+}
+
+fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageError> {
+    // Keep malformed argv at the grammar boundary. In particular, a newline
+    // in a requirements spec must never reach a text append or a delegated
+    // package-manager command, and an option-looking package must not become
+    // an option to that tool after `--`.
+    if arg.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+        return Err(UsageError::new(
+            format!("{name}: dependency spec contains CR, LF, or NUL"),
+            Some(name),
+        ));
+    }
+    crate::deps::validate_spec(arg).map_err(|error| {
+        UsageError::new(format!("{name}: {error}"), Some(name))
+    })
 }
 
 fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -828,15 +850,16 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| UsageError::new("--from needs a package name", Some("x")))?;
+                validate_x_package(value)?;
                 from = Some(value.clone());
                 index += 1;
             }
             _ if arg.starts_with("--from=") => {
-                from = Some(
-                    non_empty(&arg["--from=".len()..], "--from", Some("x"))?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
+                let value = non_empty(&arg["--from=".len()..], "--from", Some("x"))?
+                    .to_string_lossy()
+                    .into_owned();
+                validate_x_package(&value)?;
+                from = Some(value);
             }
             "--" => {
                 index += 1;
@@ -864,12 +887,102 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
     if tool.is_empty() {
         return Err(UsageError::new("x: empty tool name", Some("x")));
     }
+    if from.is_some() {
+        let (bin, _) = split_x_version(&tool);
+        validate_x_bin(bin)?;
+    } else {
+        // Without --from the tool is also the package name, so npm scoped
+        // names such as @scope/cli legitimately contain one slash.
+        validate_x_text("tool", &tool, true)?;
+    }
+    validate_x_version_pair(from.as_deref(), &tool)?;
     Ok(Some(Command::X {
         ecosystem,
         from,
         tool,
         args: args[index + 1..].to_vec(),
     }))
+}
+
+fn split_x_version(value: &str) -> (&str, Option<&str>) {
+    match value.rfind('@') {
+        Some(0) | None => (value, None),
+        Some(index) => (&value[..index], Some(&value[index + 1..])),
+    }
+}
+
+fn validate_x_version_pair(from: Option<&str>, tool: &str) -> Result<(), UsageError> {
+    let (_, tool_version) = split_x_version(tool);
+    let from_version = from.and_then(|value| split_x_version(value).1);
+    for version in [from_version, tool_version].into_iter().flatten() {
+        if version.is_empty()
+            || version.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+            || version.chars().any(char::is_whitespace)
+            || version.starts_with('-')
+        {
+            return Err(UsageError::new("x: invalid version", Some("x")));
+        }
+    }
+    if let (Some(from), Some(tool)) = (from_version, tool_version) {
+        if from != tool {
+            return Err(UsageError::new(
+                "x: --from package version conflicts with the tool version; specify only one or use the same version",
+                Some("x"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_x_text(label: &str, value: &str, allow_slash: bool) -> Result<(), UsageError> {
+    if value.is_empty()
+        || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+        || value.chars().any(char::is_whitespace)
+        || value.starts_with('-')
+        || (!allow_slash && (value.contains('/') || value.contains('\\')))
+    {
+        return Err(UsageError::new(
+            format!("x: invalid {label} '{value}'"),
+            Some("x"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_x_package(value: &str) -> Result<(), UsageError> {
+    // A scoped npm package contains one slash, but a filesystem path must
+    // never be accepted as a package name. Version text is checked by xrun
+    // after splitting package@version; these checks keep argv errors at exit 2.
+    validate_x_text("package", value, true)?;
+    if value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.contains("/../")
+        || value.ends_with("/..")
+        || value.contains('\\')
+    {
+        return Err(UsageError::new(
+            format!("x: invalid package '{value}'"),
+            Some("x"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_x_bin(value: &str) -> Result<(), UsageError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ".-_".contains(ch))
+    {
+        return Err(UsageError::new(
+            "x: --from requires a single safe executable name",
+            Some("x"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1563,22 +1676,25 @@ mod tests {
                 no_sync: true,
             }
         );
-        assert_eq!(
-            command(&["add", "-D", "--", "-weird"]),
-            Command::Add {
-                specs: argv(&["-weird"]),
-                dev: true,
-                no_sync: false,
-            }
-        );
+        assert!(message(&["add", "-D", "--", "-weird"])
+            .contains("dependency spec '-weird' looks like a tool option"));
         assert!(message(&["add"]).starts_with("add: no package given"));
         assert_eq!(message(&["add", "--dve", "x"]), "add: unknown option '--dve'; did you mean '--dev'?");
-        assert_eq!(message(&["remove", "--dev", "x"]), "remove: unknown option '--dev'");
+        assert_eq!(message(&["remove", "--dve", "x"]), "remove: unknown option '--dve'; did you mean '--dev'?");
         assert_eq!(
             command(&["remove", "six", "--no-sync"]),
             Command::Remove {
                 names: argv(&["six"]),
+                dev: false,
                 no_sync: true,
+            }
+        );
+        assert_eq!(
+            command(&["remove", "--dev", "six"]),
+            Command::Remove {
+                names: argv(&["six"]),
+                dev: true,
+                no_sync: false,
             }
         );
         assert_eq!(message(&["remove"]), "remove: no package given");
@@ -1630,15 +1746,7 @@ mod tests {
                 args: argv(&["hi"]),
             }
         );
-        assert_eq!(
-            command(&["x", "--", "--weird-tool"]),
-            Command::X {
-                ecosystem: None,
-                from: None,
-                tool: "--weird-tool".into(),
-                args: vec![],
-            }
-        );
+        assert!(message(&["x", "--", "--weird-tool"]).contains("x: invalid tool"));
         assert!(message(&["x"]).starts_with("x: no tool given"));
         assert_eq!(message(&["x", "--from"]), "--from needs a package name");
         assert_eq!(message(&["x", "--pyy", "ruff"]), "x: unknown option '--pyy'; did you mean '--py'?");

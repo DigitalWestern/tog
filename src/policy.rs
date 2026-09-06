@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+#[cfg(not(test))]
+use std::sync::Mutex;
 
 /// A requirement was skipped because it is project-local or a direct reference.
 pub const REQUIREMENT_SKIPPED: &str = "requirement-skipped";
@@ -71,12 +73,33 @@ pub struct Policy {
 }
 
 static POLICY: OnceLock<Policy> = OnceLock::new();
-// ponytail: a global queue is fine here; the realize functions are deep and
-// threading policy through seven tailors is not worth the complexity.
+// Production realization is single-threaded and the queue is deliberately
+// process-wide so nested tailor calls can contribute to one closure.
+#[cfg(not(test))]
 static RECORDED: OnceLock<Mutex<Vec<Exception>>> = OnceLock::new();
 
+#[cfg(not(test))]
 fn recorded() -> &'static Mutex<Vec<Exception>> {
     RECORDED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Unit tests run many independent realizations in parallel. A test-only
+// thread-local queue prevents one test's exception from being drained by
+// another while preserving the production queue and closure semantics.
+#[cfg(test)]
+thread_local! {
+    static RECORDED: std::cell::RefCell<Vec<Exception>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_recorded<R>(f: impl FnOnce(&mut Vec<Exception>) -> R) -> R {
+    #[cfg(not(test))]
+    {
+        f(&mut recorded().lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(test)]
+    {
+        RECORDED.with(|recorded| f(&mut recorded.borrow_mut()))
+    }
 }
 
 fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
@@ -176,14 +199,11 @@ pub fn record_with(
         ));
     }
     eprintln!("blanket: exception {kind}: {subject}: {detail}");
-    recorded()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(Exception {
+    with_recorded(|recorded| recorded.push(Exception {
             kind: kind.into(),
             subject: subject.into(),
             detail: detail.into(),
-        });
+        }));
     Ok(())
 }
 
@@ -193,28 +213,20 @@ pub fn record(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
 
 /// Return and clear all exceptions recorded by this process.
 pub fn drain() -> Vec<Exception> {
-    std::mem::take(&mut *recorded().lock().unwrap_or_else(|e| e.into_inner()))
+    with_recorded(std::mem::take)
 }
 
 pub fn pending() -> Vec<Exception> {
-    recorded()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    with_recorded(|recorded| recorded.clone())
 }
 
 pub fn clear() {
-    recorded()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    with_recorded(|recorded| recorded.clear())
 }
 
 /// Exceptions that change the bytes of the object being built.
 pub fn object_exceptions() -> Vec<Exception> {
-    recorded()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    with_recorded(|recorded| recorded
         .iter()
         .filter(|e| {
             matches!(
@@ -226,7 +238,7 @@ pub fn object_exceptions() -> Vec<Exception> {
             )
         })
         .cloned()
-        .collect()
+        .collect())
 }
 
 /// Refuse a cached object when its recorded exceptions are denied now.
@@ -328,6 +340,18 @@ deny = ["git-dependency"]"#,
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
         assert!(drain().is_empty());
+    }
+
+    #[test]
+    fn recorded_exceptions_do_not_cross_test_threads() {
+        let _guard = exception_guard();
+        std::thread::spawn(|| {
+            record_with(&Policy::default(), "thread-only", "s", "d").unwrap();
+            assert_eq!(drain().len(), 1);
+        })
+        .join()
+        .unwrap();
+        assert!(pending().is_empty());
     }
 
     #[test]

@@ -18,7 +18,8 @@ const GIT: &str = "/usr/bin/git";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitSource {
-    /// Normalized: no scheme credentials, no `git+` prefix, no `.git` suffix.
+    /// Normalized: no `git+` prefix or fragment. HTTP credentials are removed
+    /// from the authority, while SSH usernames and repository paths are kept.
     pub url: String,
     /// Full 40-character commit hash.
     pub commit: String,
@@ -79,9 +80,9 @@ pub fn is_full_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Normalize a repository URL so two spellings of one repository share an
-/// object: drop the `git+` prefix, any credentials, a trailing `.git`, and a
-/// trailing slash. `scp`-style `git@host:owner/repo` becomes `ssh://host/owner/repo`.
+/// Normalize a repository URL without changing the transport username or
+/// repository path. In particular, `@` in a path is not userinfo, `.git` may
+/// be part of a local file URL, and `git@host` is meaningful to SSH.
 pub fn normalize_url(raw: &str) -> String {
     let mut url = raw.trim();
     if let Some(rest) = url.strip_prefix("git+") {
@@ -93,23 +94,28 @@ pub fn normalize_url(raw: &str) -> String {
     let mut url = url.to_string();
     if !url.contains("://") {
         if let Some((host, path)) = url.split_once(':') {
-            let host = host.rsplit('@').next().unwrap_or(host);
             url = format!("ssh://{host}/{}", path.trim_start_matches('/'));
         }
     } else if let Some((scheme, rest)) = url.split_once("://") {
-        // Strip credentials: scheme://user:token@host/path -> scheme://host/path
-        let rest = match rest.split_once('@') {
-            Some((_, after)) => after.to_string(),
-            None => rest.to_string(),
+        // Userinfo belongs to the authority, which ends at the first slash.
+        // Looking for `@` in the complete remainder incorrectly rewrites a
+        // valid path such as `/mirror@other/repo`.
+        let authority_end = rest
+            .find(|character| character == '/' || character == '?')
+            .unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        let path = &rest[authority_end..];
+        let authority = if scheme.eq_ignore_ascii_case("ssh") {
+            authority
+        } else {
+            authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority)
         };
-        url = format!("{scheme}://{rest}");
+        url = format!("{scheme}://{authority}{path}");
     }
-    let url = url.trim_end_matches('/');
-    let url = url.strip_suffix(".git").unwrap_or(url);
     // Lockfile spellings like `github.com/owner/repo` name a host but no
     // protocol; git needs one, and https is what every registry lock means.
     if url.contains("://") {
-        url.to_string()
+        url
     } else {
         format!("https://{url}")
     }
@@ -136,7 +142,7 @@ fn identity(source: &GitSource) -> Identity {
         name: slug(&source.url),
         version: source.commit.clone(),
         inputs: BTreeMap::from([
-            ("schema".to_string(), "git-source/1".to_string()),
+            ("schema".to_string(), "git-source/2".to_string()),
             ("url".to_string(), source.url.clone()),
             ("commit".to_string(), source.commit.clone()),
         ]),
@@ -149,6 +155,22 @@ pub fn object_id(source: &GitSource) -> String {
 
 fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
+    let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK");
+    // Git reads a surprisingly large ambient surface: global/system config,
+    // helper commands, hooks, filters, alternate object stores, and worktree
+    // overrides. A source commit's fingerprint must describe the raw tree,
+    // not this process's environment.
+    command.env_clear();
+    command.env("PATH", "/usr/bin:/bin");
+    command.env("HOME", "/nonexistent");
+    command.env("XDG_CONFIG_HOME", "/nonexistent");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    if let Some(sock) = ssh_auth_sock {
+        // Agent authentication is transport state, not Git configuration.
+        command.env("SSH_AUTH_SOCK", sock);
+    }
     command.args(args);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -212,6 +234,9 @@ fn remove_git_dirs(root: &Path) -> io::Result<()> {
             let path = entry.path();
             let file_type = entry.file_type()?;
             if file_type.is_symlink() {
+                if entry.file_name() == ".git" {
+                    fs::remove_file(path)?;
+                }
                 continue;
             }
             if file_type.is_dir() {
@@ -229,6 +254,176 @@ fn remove_git_dirs(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Verify that symlinks in a checkout can only resolve within that checkout.
+/// `canonicalize` alone is insufficient because a deliberately broken link is
+/// valid source content; resolve existing path components while retaining the
+/// lexical containment check for missing targets.
+pub(crate) fn validate_symlinks(root: &Path) -> io::Result<()> {
+    let root = root.canonicalize()?;
+    let mut links = Vec::new();
+    collect_symlinks(&root, &mut links)?;
+    for link in links {
+        resolve_symlink_path(&root, &link, &mut std::collections::BTreeSet::new())?;
+    }
+    Ok(())
+}
+
+fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            out.push(path);
+        } else if file_type.is_dir() {
+            collect_symlinks(&path, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_symlink_path(
+    root: &Path,
+    link: &Path,
+    seen: &mut std::collections::BTreeSet<PathBuf>,
+) -> io::Result<()> {
+    if !seen.insert(link.to_path_buf()) {
+        // Reject cycles conservatively: they are not useful source content
+        // and make containment dependent on filesystem traversal behavior.
+        return Err(err(format!("symlink cycle involving {}", link.display())));
+    }
+    let target = fs::read_link(link)?;
+    let parent = link.parent().ok_or_else(|| err("symlink has no parent"))?;
+    resolve_target_components(root, parent, &target, seen).map(|_| ())
+}
+
+/// Resolve path components in kernel order. We must process a symlink before
+/// applying a later `..`: `link-to-dot/../outside` escapes even though a
+/// purely lexical normalization would incorrectly keep it under `root`.
+fn resolve_target_components(
+    root: &Path,
+    base: &Path,
+    target: &Path,
+    seen: &mut std::collections::BTreeSet<PathBuf>,
+) -> io::Result<PathBuf> {
+    if target.is_absolute() {
+        return Err(err("symlink target has an absolute path"));
+    }
+    let mut current = base.to_path_buf();
+    if !current.starts_with(root) {
+        return Err(err("symlink target escaped the checkout"));
+    }
+    for component in target.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if current == root || !current.pop() || !current.starts_with(root) {
+                    return Err(err("symlink target escaped the checkout"));
+                }
+            }
+            std::path::Component::Normal(part) => {
+                let candidate = current.join(part);
+                let is_symlink = match fs::symlink_metadata(&candidate) {
+                    Ok(metadata) => metadata.file_type().is_symlink(),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error),
+                };
+                if is_symlink {
+                    let nested = fs::read_link(&candidate)?;
+                    if !seen.insert(candidate.clone()) {
+                        return Err(err(format!(
+                            "symlink cycle involving {}",
+                            candidate.display()
+                        )));
+                    }
+                    current = resolve_target_components(
+                        root,
+                        candidate.parent().ok_or_else(|| err("symlink has no parent"))?,
+                        &nested,
+                        seen,
+                    )?;
+                } else {
+                    current = candidate;
+                }
+                if !current.starts_with(root) {
+                    return Err(err("symlink target escaped the checkout"));
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(err("symlink target has an absolute path"));
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Ensure checkout materialization did not apply `.gitattributes` conversion
+/// or another filter. Git's index stores the raw blob hash; comparing raw
+/// bytes after checkout keeps the commit fingerprint tied to that tree.
+fn validate_checkout_tree(root: &Path) -> io::Result<()> {
+    validate_checkout_tree_at(root, 0)
+}
+
+fn validate_checkout_tree_at(root: &Path, depth: usize) -> io::Result<()> {
+    if depth > 32 {
+        return Err(err("git submodule nesting exceeds 32 levels"));
+    }
+    use std::os::unix::ffi::OsStringExt;
+    let output = run_git(&["ls-files", "-s", "-z"], Some(root))?;
+    if !output.status.success() {
+        return Err(err("git ls-files failed while validating the checkout"));
+    }
+    for record in output.stdout.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| err("malformed git index entry"))?;
+        let metadata = std::str::from_utf8(&record[..tab])
+            .map_err(|_| err("git index entry is not UTF-8"))?;
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().ok_or_else(|| err("git index entry has no mode"))?;
+        let expected = fields.next().ok_or_else(|| err("git index entry has no hash"))?;
+        let path = std::ffi::OsString::from_vec(record[tab + 1..].to_vec());
+        let path = root.join(path);
+        if mode == "160000" {
+            let path_text = path
+                .to_str()
+                .ok_or_else(|| err("git submodule path is not UTF-8"))?;
+            let actual = git_ok(
+                &["-C", path_text, "rev-parse", "HEAD"],
+                Some(root),
+                "git submodule rev-parse",
+            )?;
+            if actual.to_ascii_lowercase() != expected {
+                return Err(err(format!(
+                    "git submodule {} checked out {actual}, expected {expected}",
+                    path.display()
+                )));
+            }
+            validate_checkout_tree_at(&path, depth + 1)?;
+            continue;
+        }
+        let bytes = if mode == "120000" {
+            fs::read_link(&path)?.into_os_string().into_vec()
+        } else {
+            fs::read(&path)?
+        };
+        let header = format!("blob {}\0", bytes.len());
+        let mut hasher = sha1::Sha1::new();
+        use sha1::Digest;
+        hasher.update(header.as_bytes());
+        hasher.update(&bytes);
+        let actual = hex::encode(hasher.finalize());
+        if actual != expected {
+            return Err(err(format!(
+                "git checkout transformed {}; raw blob {expected}, got {actual}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Realize a git source in the store and return its object path.
 pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBuf> {
     validate_source(source)?;
@@ -241,7 +436,19 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
 
     let work = store.stage()?;
     let result = (|| -> io::Result<()> {
-        git_ok(&["init", "-q"], Some(&work), "git init")?;
+        git_ok(
+            &["init", "-q", "--template="],
+            Some(&work),
+            "git init",
+        )?;
+        // Besides naming the fetched repository, origin is what Git uses to
+        // resolve relative URLs in .gitmodules. Without it, a submodule such
+        // as `../shared.git` is resolved against the temporary worktree.
+        git_ok(
+            &["remote", "add", "origin", &source.url],
+            Some(&work),
+            "git remote add origin",
+        )?;
         // A reachable-sha fetch is the cheap path; servers that refuse it
         // (uploadpack.allowReachableSHA1InWant off) need the full history.
         let shallow = run_git(
@@ -250,7 +457,13 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
         )?;
         if !shallow.status.success() {
             git_ok(
-                &["fetch", "--quiet", "--tags", &source.url],
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--tags",
+                    &source.url,
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
                 Some(&work),
                 &format!("git fetch {}", source.url),
             )?;
@@ -268,13 +481,36 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
             )));
         }
         if work.join(".gitmodules").is_file() {
-            git_ok(
-                &["submodule", "update", "--init", "--recursive", "--depth", "1"],
-                Some(&work),
-                "git submodule update",
-            )?;
+            let submodule_args: &[&str] = if source.url.starts_with("file://") {
+                // Git rejects the file transport for submodules by default.
+                // A file:// source was explicitly selected by the lockfile,
+                // so permit its relative submodules while keeping the safer
+                // default for network repositories.
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                    "--depth",
+                    "1",
+                ]
+            } else {
+                &[
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                    "--depth",
+                    "1",
+                ]
+            };
+            git_ok(submodule_args, Some(&work), "git submodule update")?;
         }
-        remove_git_dirs(&work)
+        validate_checkout_tree(&work)?;
+        remove_git_dirs(&work)?;
+        validate_symlinks(&work)
     })();
     if let Err(e) = result {
         let _ = crate::store::remove_tree(&work);
@@ -292,25 +528,32 @@ mod tests {
         let expected = "https://github.com/owner/repo";
         for raw in [
             "https://github.com/owner/repo",
-            "https://github.com/owner/repo.git",
-            "git+https://github.com/owner/repo.git",
-            "https://token:x-oauth-basic@github.com/owner/repo.git",
-            "https://github.com/owner/repo/",
-            "git+https://github.com/owner/repo.git#deadbeef",
+            "git+https://github.com/owner/repo#deadbeef",
+            "https://token:x-oauth-basic@github.com/owner/repo",
         ] {
             assert_eq!(normalize_url(raw), expected, "{raw}");
         }
         assert_eq!(
             normalize_url("git@github.com:owner/repo.git"),
-            "ssh://github.com/owner/repo"
+            "ssh://git@github.com/owner/repo.git"
         );
         assert_eq!(
             normalize_url("git+ssh://git@github.com/owner/repo.git"),
-            "ssh://github.com/owner/repo"
+            "ssh://git@github.com/owner/repo.git"
+        );
+        assert_eq!(
+            normalize_url("https://github.com/mirror@other/repo.git"),
+            "https://github.com/mirror@other/repo.git"
         );
         // A scheme-less repository (how npm lockfiles spell GitHub archives)
         // becomes an https URL git can actually fetch.
         assert_eq!(normalize_url("github.com/owner/repo"), expected);
+        // `.git` is a meaningful path for local repositories and must not be
+        // stripped into a nonexistent sibling.
+        assert_eq!(
+            normalize_url("file:///tmp/repo.git"),
+            "file:///tmp/repo.git"
+        );
     }
 
     #[test]
@@ -344,6 +587,34 @@ mod tests {
         assert_eq!(slug("https://github.com/owner/repo"), "owner-repo");
         assert_eq!(slug("ssh://github.com/owner/repo"), "owner-repo");
         assert_eq!(slug("https://example.com/a/b/c/d"), "c-d");
+    }
+
+    #[test]
+    fn symlinks_must_stay_inside_checkout_even_through_chains() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-gitsrc-links-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("safe.txt"), b"safe").unwrap();
+        std::os::unix::fs::symlink("safe.txt", root.join("safe-link")).unwrap();
+        validate_symlinks(&root).unwrap();
+        std::os::unix::fs::symlink("../outside", root.join("escape")).unwrap();
+        assert!(validate_symlinks(&root).is_err());
+        fs::remove_file(root.join("escape")).unwrap();
+        std::os::unix::fs::symlink(".", root.join("a")).unwrap();
+        std::os::unix::fs::symlink("a/../outside", root.join("escape-via-dot")).unwrap();
+        assert!(validate_symlinks(&root).is_err());
+        fs::remove_file(root.join("a")).unwrap();
+        fs::remove_file(root.join("escape-via-dot")).unwrap();
+        std::os::unix::fs::symlink("chain-end", root.join("chain-start")).unwrap();
+        std::os::unix::fs::symlink("../../outside", root.join("chain-end")).unwrap();
+        assert!(validate_symlinks(&root).is_err());
+        let _ = crate::store::remove_tree(&root);
     }
 }
 
@@ -441,6 +712,95 @@ mod realization_tests {
         assert_eq!(resolve_ref(&normalize_url(&url), "main").unwrap(), commit);
         assert_eq!(resolve_ref(&normalize_url(&url), &commit).unwrap(), commit);
     }
+
+    #[test]
+    fn checkout_rejects_attribute_transformed_content() {
+        let root = temp("attributes");
+        let repo = root.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git_ok(&["init", "-q", "-b", "main"], Some(&repo), "init").unwrap();
+        git_ok(&["config", "user.email", "t@example.invalid"], Some(&repo), "cfg").unwrap();
+        git_ok(&["config", "user.name", "t"], Some(&repo), "cfg").unwrap();
+        fs::write(repo.join(".gitattributes"), b"*.txt text eol=crlf\n").unwrap();
+        fs::write(repo.join("line.txt"), b"line\n").unwrap();
+        git_ok(&["add", "-A"], Some(&repo), "add").unwrap();
+        git_ok(&["commit", "-qm", "attrs"], Some(&repo), "commit").unwrap();
+        let commit = git_ok(&["rev-parse", "HEAD"], Some(&repo), "rev-parse").unwrap();
+        let source = GitSource {
+            url: normalize_url(&format!("file://{}", repo.display())),
+            commit,
+            subdirectory: None,
+        };
+        let error = ensure_git_source(&store_at(&root.0), &source).unwrap_err().to_string();
+        assert!(error.contains("transformed"), "{error}");
+    }
+
+    #[test]
+    fn pack_keeps_safe_links_empty_dirs_and_verbatim_names() {
+        let root = temp("pack");
+        let checkout = root.0.join("checkout");
+        fs::create_dir_all(checkout.join("empty")).unwrap();
+        fs::write(checkout.join("line\nname"), b"content\n").unwrap();
+        std::os::unix::fs::symlink("line\nname", checkout.join("safe-link")).unwrap();
+        let store = store_at(&root.0);
+        let platform = crate::platform::Platform::host().unwrap();
+        let (hash, filename) = pack_checkout(&store, platform, &checkout, "pkg", "1.0").unwrap();
+        let archive = store.cache_path("sha256", &hash);
+        let unpacked = root.0.join("unpacked");
+        fs::create_dir_all(&unpacked).unwrap();
+        let extracted = Command::new("/usr/bin/tar")
+            .args(["-xzf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&unpacked)
+            .output()
+            .unwrap();
+        assert!(extracted.status.success(), "{}", String::from_utf8_lossy(&extracted.stderr));
+        assert!(unpacked.join("pkg-1.0/empty").is_dir());
+        assert!(unpacked.join("pkg-1.0/safe-link").is_symlink());
+        assert_eq!(
+            fs::read_to_string(unpacked.join("pkg-1.0/line\nname")).unwrap(),
+            "content\n"
+        );
+        assert_eq!(filename, "pkg-1.0.tar.gz");
+
+        // Recreate the same tree in a different directory-entry order. The
+        // archive bytes must remain identical after metadata normalization.
+        let checkout_two = root.0.join("checkout-two");
+        fs::create_dir_all(checkout_two.join("empty")).unwrap();
+        std::os::unix::fs::symlink("line\nname", checkout_two.join("safe-link")).unwrap();
+        fs::write(checkout_two.join("line\nname"), b"content\n").unwrap();
+        let (same_hash, _) = pack_checkout(&store, platform, &checkout_two, "pkg", "1.0").unwrap();
+        assert_eq!(hash, same_hash);
+    }
+
+    #[test]
+    fn pack_propagates_tar_failure_instead_of_accepting_gzip_prefix() {
+        let root = temp("pack-failure");
+        let checkout = root.0.join("checkout");
+        // Thousands of invalid ustar entries produce enough diagnostics to
+        // fill a normal pipe. The packer must still return promptly.
+        for index in 0..2048u32 {
+            let long_dir = format!("{}-{index:08x}", "d".repeat(119));
+            let long_file = format!("{}-{index:08x}", "f".repeat(119));
+            fs::create_dir_all(checkout.join(&long_dir)).unwrap();
+            fs::write(checkout.join(&long_dir).join(&long_file), b"too long").unwrap();
+        }
+        let store = store_at(&root.0);
+        let platform = crate::platform::Platform::host().unwrap();
+        let error = pack_checkout(&store, platform, &checkout, "pkg", "1.0")
+            .expect_err("ustar path overflow must fail packing")
+            .to_string();
+        assert!(error.contains("packing"), "{error}");
+    }
+}
+
+struct StageGuard(PathBuf);
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        let _ = crate::store::remove_tree(&self.0);
+    }
 }
 
 /// Pack a realized checkout into a deterministic `.tar.gz` and insert it into
@@ -464,6 +824,7 @@ pub fn pack_checkout(
         )));
     }
     let work = store.stage()?;
+    let _cleanup = StageGuard(work.clone());
     let prefix = format!("{name}-{version}");
     let filename = format!("{prefix}.tar.gz");
     // Copy under the final prefix directory so the archive needs no name
@@ -471,16 +832,32 @@ pub fn pack_checkout(
     // would take a rewrite expression built from these strings.
     let staged = work.join(&prefix);
     crate::project::clone_tree(source_root, &staged)?;
+    validate_symlinks(&staged)?;
     normalize_for_packing(&staged)?;
 
-    // Determinism, portably: an explicit sorted file list (both tars accept
-    // -T), the ustar header format, zeroed mtimes and owners, and gzip -n so
-    // the container carries no timestamp either.
+    // Determinism, portably: an explicit sorted null-delimited list (GNU tar
+    // and bsdtar both accept --null; GNU additionally spells out verbatim
+    // handling), the ustar header format, zeroed mtimes and owners, and gzip
+    // -n so the container
+    // carries no timestamp either. Null + verbatim is required for names
+    // containing newlines, backslashes, or a leading dash.
     let mut files = Vec::new();
-    collect_files(&staged, &work, &mut files)?;
-    files.sort();
+    collect_paths(&staged, &work, &mut files)?;
+    files.sort_by(|a, b| {
+        use std::os::unix::ffi::OsStrExt;
+        a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes())
+    });
     let list = work.join(".blanket-filelist");
-    fs::write(&list, files.join("\n") + "\n")?;
+    {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = Vec::new();
+        for file in &files {
+            bytes.extend_from_slice(file.as_os_str().as_bytes());
+            bytes.push(0);
+        }
+        fs::File::create(&list)?.write_all(&bytes)?;
+    }
 
     let archive = work.join(&filename);
     let owner_flags: &[&str] = if platform.is_macos() {
@@ -490,35 +867,63 @@ pub fn pack_checkout(
         // GNU tar
         &["--owner=0", "--group=0", "--numeric-owner"]
     };
-    let tar = Command::new("/usr/bin/tar")
-        .args(["-cf", "-", "--format=ustar"])
+    let list_flags: &[&str] = if platform.is_macos() {
+        // bsdtar treats --null input as verbatim; it has no GNU
+        // --verbatim-files-from option.
+        &["--null"]
+    } else {
+        &["--null", "--verbatim-files-from"]
+    };
+    let tar_error_path = work.join(".blanket-tar-stderr");
+    let tar_error_file = fs::File::create(&tar_error_path)?;
+    let mut tar = Command::new("/usr/bin/tar")
+        .args(["-cf", "-", "--format=ustar", "--no-recursion"])
         .args(owner_flags)
+        .args(list_flags)
         .arg("-C")
         .arg(&work)
         .arg("-T")
         .arg(&list)
         .stdout(std::process::Stdio::piped())
+        // Do not pipe this stream: tar can emit unbounded diagnostics for a
+        // hostile list, and waiting for gzip before draining it would deadlock
+        // both children once the pipe buffer fills.
+        .stderr(std::process::Stdio::from(tar_error_file))
         .spawn()?;
+    let tar_stdout = tar
+        .stdout
+        .take()
+        .ok_or_else(|| err("tar produced no output"))?;
     let gzip = Command::new("/usr/bin/gzip")
         .args(["-n", "-9", "-c"])
-        .stdin(tar.stdout.ok_or_else(|| err("tar produced no output"))?)
+        .stdin(tar_stdout)
         .stdout(fs::File::create(&archive)?)
-        .output()?;
-    if !gzip.status.success() {
-        let _ = crate::store::remove_tree(&work);
+        .spawn()?;
+    let gzip_output = gzip.wait_with_output()?;
+    let tar_status = tar.wait()?;
+    let tar_error = fs::read(&tar_error_path).unwrap_or_default();
+    if !tar_status.success() || !gzip_output.status.success() {
         return Err(err(format!(
-            "packing {} failed: {}",
+            "packing {} failed (tar {}, gzip {}): {}",
             source_root.display(),
-            String::from_utf8_lossy(&gzip.stderr).lines().next().unwrap_or("")
+            tar_status,
+            gzip_output.status,
+            String::from_utf8_lossy(if tar_error.is_empty() {
+                &gzip_output.stderr
+            } else {
+                &tar_error
+            })
+                .lines()
+                .next()
+                .unwrap_or("")
         )));
     }
     let (sha256, _) = crate::fetch::cache_insert(store, &archive)?;
-    let _ = crate::store::remove_tree(&work);
     Ok((sha256, filename))
 }
 
-/// Zero every mtime and give every entry a fixed mode, so two machines packing
-/// the same commit produce the same bytes.
+/// Give every non-symlink entry a fixed mode and set all tree-entry mtimes to
+/// the epoch without following symlinks.
 fn normalize_for_packing(root: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let epoch = std::time::SystemTime::UNIX_EPOCH;
@@ -545,22 +950,56 @@ fn normalize_for_packing(root: &Path) -> io::Result<()> {
         }
     }
     fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
+    let mut entries = Vec::new();
+    collect_paths(root, root, &mut entries)?;
+    for relative in entries {
+        set_mtime_epoch(&root.join(relative))?;
+    }
     Ok(())
 }
 
-/// Every regular file under `root`, as a path relative to `base`.
-fn collect_files(root: &Path, base: &Path, out: &mut Vec<String>) -> io::Result<()> {
+fn set_mtime_epoch(path: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| err(format!("path contains NUL: {}", path.display())))?;
+    let times = [
+        libc::timespec { tv_sec: 0, tv_nsec: 0 },
+        libc::timespec { tv_sec: 0, tv_nsec: 0 },
+    ];
+    let result = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Every tree entry under `root`, including directories and symlinks, as a
+/// path relative to `base`.
+fn collect_paths(root: &Path, base: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let relative = root
+        .strip_prefix(base)
+        .map_err(|_| err("packed path escaped the staging directory"))?;
+    out.push(relative.to_path_buf());
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_files(&path, base, out)?;
-        } else if file_type.is_file() {
+            collect_paths(&path, base, out)?;
+        } else if file_type.is_file() || file_type.is_symlink() {
             let relative = path
                 .strip_prefix(base)
-                .map_err(|_| err("packed file escaped the staging directory"))?;
-            out.push(relative.to_string_lossy().into_owned());
+                .map_err(|_| err("packed path escaped the staging directory"))?;
+            out.push(relative.to_path_buf());
         }
     }
     Ok(())

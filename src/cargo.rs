@@ -581,20 +581,41 @@ pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
 }
 
 /// Find the directory inside a realized repository that holds the crate with
-/// this name: the root when its own Cargo.toml names it, otherwise the first
-/// matching directory (workspace members live one or two levels down).
-fn crate_dir_in_repo(root: &Path, name: &str) -> io::Result<PathBuf> {
+/// this name and locked version: the root when its own Cargo.toml names it,
+/// otherwise a matching workspace member (members live one or two levels
+/// down).
+fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathBuf> {
     fn package_name(manifest: &Path) -> Option<String> {
         let text = fs::read_to_string(manifest).ok()?;
         let value: toml::Value = toml::from_str(&text).ok()?;
+        value.get("package")?.get("name")?.as_str().map(str::to_string)
+    }
+    fn package_info(manifest: &Path) -> Option<(String, String)> {
+        let text = fs::read_to_string(manifest).ok()?;
+        let value: toml::Value = toml::from_str(&text).ok()?;
+        let package = value.get("package")?;
         value
             .get("package")?
             .get("name")?
             .as_str()
             .map(str::to_string)
+            .zip(package.get("version")?.as_str().map(str::to_string))
     }
-    if package_name(&root.join("Cargo.toml")).as_deref() == Some(name) {
-        return Ok(root.to_path_buf());
+    let mut mismatches = Vec::new();
+    let root_manifest = root.join("Cargo.toml");
+    if package_name(&root_manifest).as_deref() == Some(name) {
+        reject_workspace_inheritance(root, name)?;
+        if let Some((_, package_version)) = package_info(&root_manifest) {
+            if package_version == version {
+                return Ok(root.to_path_buf());
+            }
+            mismatches.push((root.to_path_buf(), package_version));
+        } else {
+            return Err(err(format!(
+                "git crate {name} at {} has no standalone package version",
+                root.display()
+            )));
+        }
     }
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -607,16 +628,64 @@ fn crate_dir_in_repo(root: &Path, name: &str) -> io::Result<PathBuf> {
                 continue;
             }
             let path = entry.path();
-            if package_name(&path.join("Cargo.toml")).as_deref() == Some(name) {
-                return Ok(path);
+            let manifest = path.join("Cargo.toml");
+            if package_name(&manifest).as_deref() == Some(name) {
+                reject_workspace_inheritance(&path, name)?;
+                if let Some((_, package_version)) = package_info(&manifest) {
+                    if package_version == version {
+                        return Ok(path);
+                    }
+                    mismatches.push((path, package_version));
+                } else {
+                    return Err(err(format!(
+                        "git crate {name} at {} has no standalone package version",
+                        path.display()
+                    )));
+                }
+                continue;
             }
             stack.push((path, depth + 1));
         }
     }
-    Err(err(format!(
-        "git source {} contains no crate named {name}",
-        root.display()
-    )))
+    let versions = mismatches
+        .iter()
+        .map(|(path, found)| format!("{} has {found}", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let detail = if versions.is_empty() {
+        format!("contains no crate named {name}")
+    } else {
+        format!("contains {name} at another version (expected {version}; {versions})")
+    };
+    Err(err(format!("git source {} {detail}", root.display())))
+}
+
+/// A workspace member can inherit package metadata or dependencies from its
+/// root manifest. Once copied into Cargo's standalone directory source, those
+/// `workspace = true` references have no parent workspace and produce a
+/// broken vendor tree. Refuse this unsupported shape before publishing it.
+fn reject_workspace_inheritance(crate_dir: &Path, name: &str) -> io::Result<()> {
+    let manifest = crate_dir.join("Cargo.toml");
+    let value: toml::Value = toml::from_str(&fs::read_to_string(&manifest)?).map_err(|e| {
+        err(format!("git crate {name}: parse {}: {e}", manifest.display()))
+    })?;
+    fn contains_workspace_true(value: &toml::Value) -> bool {
+        match value {
+            toml::Value::Table(table) => table.iter().any(|(key, value)| {
+                (key == "workspace" && value.as_bool() == Some(true))
+                    || contains_workspace_true(value)
+            }),
+            toml::Value::Array(values) => values.iter().any(contains_workspace_true),
+            _ => false,
+        }
+    }
+    if contains_workspace_true(&value) {
+        return Err(err(format!(
+            "git crate {name} at {} inherits workspace metadata or dependencies; standalone Cargo vendor is unsupported",
+            crate_dir.display()
+        )));
+    }
+    Ok(())
 }
 
 fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
@@ -661,11 +730,20 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         // Cargo's directory source wants the crate's own directory, so a
         // workspace repository is searched for the crate the lock names.
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
-        let source_dir = crate_dir_in_repo(root, &krate.name)?;
+        let source_dir = crate_dir_in_repo(root, &krate.name, &krate.version)?;
         crate::project::clone_tree(&source_dir, &crate_dir).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
+            )
+        })?;
+        crate::gitsrc::validate_symlinks(&crate_dir).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{}@{}: copied git crate contains escaping symlink: {e}",
+                    krate.name, krate.version
+                ),
             )
         })?;
         // A directory source's files are not checksummed by cargo (the commit
@@ -751,8 +829,9 @@ fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> 
         validate_crate_component("name", &krate.name)?;
         validate_crate_component("version", &krate.version)?;
         let checksum = match &krate.git {
-            // The commit determines the bytes; there is no .crate checksum.
-            Some(git) => format!("git:{}", git.inner.commit),
+            // The realized source tree depends on the normalized repository
+            // URL as well as its commit (including relative submodule bases).
+            Some(git) => format!("git:{}", crate::gitsrc::object_id(&git.inner)),
             None => normalize_checksum(&krate.sha256)?,
         };
         if !seen.insert((krate.name.clone(), krate.version.clone())) {
@@ -1896,5 +1975,68 @@ mod git_source_tests {
             second.object_id(),
             "a different commit must be a different vendor object"
         );
+        let other_url = parse_cargo_git_source(&format!("git+https://github.com/o/other#{commit}"))
+            .unwrap();
+        let (_, other) = vendor_identity(&plan(other_url)).unwrap();
+        assert_ne!(
+            first.object_id(),
+            other.object_id(),
+            "the repository URL must contribute to the vendor identity"
+        );
+    }
+
+    #[test]
+    fn git_crate_selection_uses_the_locked_version() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-cargo-selection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("old")).unwrap();
+        std::fs::create_dir_all(root.join("new")).unwrap();
+        for (dir, version) in [("old", "1.0.0"), ("new", "2.0.0")] {
+            std::fs::write(
+                root.join(dir).join("Cargo.toml"),
+                format!("[package]\nname = \"same\"\nversion = \"{version}\"\n"),
+            )
+            .unwrap();
+        }
+        let selected = crate_dir_in_repo(&root, "same", "2.0.0").unwrap();
+        assert_eq!(selected, root.join("new"));
+        let error = crate_dir_in_repo(&root, "same", "3.0.0")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another version"), "{error}");
+        let _ = crate::store::remove_tree(&root);
+    }
+
+    #[test]
+    fn workspace_inheritance_and_relocated_symlinks_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-cargo-workspace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"inherited\"\nversion.workspace = true\n",
+        )
+        .unwrap();
+        let error = crate_dir_in_repo(&root, "inherited", "1.0.0")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inherits workspace"), "{error}");
+
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"linked\"\nversion = \"1.0.0\"\n").unwrap();
+        std::os::unix::fs::symlink("../../outside", root.join("escape")).unwrap();
+        assert!(crate::gitsrc::validate_symlinks(&root).is_err());
+        let _ = crate::store::remove_tree(&root);
     }
 }

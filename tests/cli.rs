@@ -6,6 +6,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::os::unix::fs::PermissionsExt;
+
+use sha2::{Digest, Sha256};
 
 struct TempDir(PathBuf);
 
@@ -20,6 +23,10 @@ impl TempDir {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&path).unwrap();
+        // Mark the fixture as a project boundary. The review test directory
+        // can itself live below a developer checkout with package manifests;
+        // ancestor discovery must not make those fixtures non-hermetic.
+        std::fs::create_dir_all(path.join(".blanket")).unwrap();
         Self(path)
     }
 }
@@ -112,6 +119,9 @@ fn usage_errors_exit_2_with_a_next_step() {
         (&["run"], "run: no command given", "blanket help run"),
         (&["--dir", "x", "plan"], "unknown option '--dir'; did you mean '--directory'?", "blanket --help"),
         (&["-C"], "-C needs a directory", "blanket --help"),
+        (&["add", "--", "--index-url"], "add: dependency spec '--index-url' looks like a tool option; package options are not allowed", "blanket help add"),
+        (&["add", "requests\n--index-url evil"], "add: dependency spec contains CR, LF, or NUL", "blanket help add"),
+        (&["x", "--from", "six", "/absolute/executable"], "x: --from requires a single safe executable name", "blanket help x"),
     ];
     for (args, message, hint) in cases {
         let out = blanket(&home.0, &home.0, args);
@@ -295,8 +305,10 @@ fn inspect_verbs_offline() {
 #[test]
 fn dependency_verbs_offline_paths() {
     let home = TempDir::new("deps");
-    let nowhere = TempDir::new("deps-nowhere");
-    let out = blanket(&nowhere.0, &home.0, &["add", "requests"]);
+    // The review suite may run below a checkout that has its own manifests;
+    // use the filesystem root for the intentional no-project case so the
+    // ancestor walk cannot discover that unrelated checkout.
+    let out = blanket(Path::new("/"), &home.0, &["add", "requests"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("no project from"), "{}", text(&out.stderr));
 
@@ -364,4 +376,68 @@ fn x_needs_a_registry_outside_a_project() {
     assert!(stderr.contains("blanket x py:ruff"), "{stderr}");
     let out = blanket(&home.0, &home.0, &["x"]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn cached_x_rechecks_object_exceptions_under_project_policy() {
+    let home = TempDir::new("x-policy-home");
+    let project = TempDir::new("x-policy-project");
+    std::fs::write(
+        project.0.join(".blanket/policy.toml"),
+        "deny = [\"file-collision\"]\n",
+    )
+    .unwrap();
+
+    let store = home.0.join("store");
+    let object = store.join("objects/test-env");
+    std::fs::create_dir_all(object.join("bin")).unwrap();
+    let executable = object.join("bin/ruff");
+    std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::create_dir_all(store.join("meta")).unwrap();
+    let exception = serde_json::json!({
+        "kind": "file-collision",
+        "subject": "ruff",
+        "detail": "cached test exception"
+    });
+    std::fs::write(
+        store.join("meta/test-env.json"),
+        serde_json::json!({"id": "test-env", "exceptions": [exception.clone()]}).to_string(),
+    )
+    .unwrap();
+
+    let key = hex::encode(Sha256::digest(
+        format!(
+            "x/2\0{}\0python\0fake\0\0{}",
+            store.canonicalize().unwrap().display(),
+            blanket::platform::Platform::host().unwrap().triple()
+        )
+            .as_bytes(),
+    ));
+    let root = home
+        .0
+        .join(".blanket/x")
+        .join(format!("py-fake-{}", &key[..16]));
+    std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+    std::os::unix::fs::symlink(&object, root.join(".venv")).unwrap();
+    let body = serde_json::json!({
+        "env_object": object,
+        "exceptions": [exception]
+    });
+    std::fs::write(
+        root.join(".blanket/closures/python.json"),
+        serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": blanket::platform::Platform::host().unwrap().triple(),
+            "body": body
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = blanket(&project.0, &home.0, &["x", "--py", "--from", "fake", "ruff"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("cached object test-env carries exception"));
 }

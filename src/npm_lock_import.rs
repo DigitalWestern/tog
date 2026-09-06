@@ -593,7 +593,17 @@ fn pinned_git_source(
             });
         }
     }
-    crate::npm::git_source_from_url(yaml_str(resolution.get("tarball")).unwrap_or_default())
+    // A codeload/archive URL with an SRI is an attested tarball.  Only fall
+    // back to commit-based git realization when the lock gives us no bytes
+    // integrity to verify; explicit git protocols remain git sources.
+    let tarball = yaml_str(resolution.get("tarball")).unwrap_or_default();
+    let integrity = yaml_str(resolution.get("integrity"));
+    crate::npm::explicit_git_source(tarball).or_else(|| {
+        integrity
+            .is_none()
+            .then(|| crate::npm::git_source_from_url(tarball))
+            .flatten()
+    })
 }
 
 fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) -> Option<String> {
@@ -621,13 +631,24 @@ fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) ->
         );
     }
     let tarball = yaml_str(resolution.get("tarball")).unwrap_or_default();
-    if let Some(detail) = crate::npm::git_dependency_detail(name, tarball) {
-        return Some(detail);
+    let has_integrity = yaml_str(resolution.get("integrity")).is_some();
+    if !has_integrity {
+        if let Some(detail) = crate::npm::git_dependency_detail(name, tarball) {
+            return Some(detail);
+        }
     }
     if tarball.starts_with("file:") || tarball.starts_with("link:") {
         return Some(format!("local dependency {tarball}"));
     }
     None
+}
+
+fn lock_git_source(url: &str, has_integrity: bool) -> Option<crate::gitsrc::GitSource> {
+    crate::npm::explicit_git_source(url).or_else(|| {
+        (!has_integrity)
+            .then(|| crate::npm::git_source_from_url(url))
+            .flatten()
+    })
 }
 
 fn dep_version_key(
@@ -1751,8 +1772,10 @@ pub fn plan_yarn(
             .split_once('#')
             .map(|(url, _)| url)
             .unwrap_or(entry.resolved.as_str());
-        let pinned_git = crate::npm::git_source_from_url(&entry.resolved);
+        let pinned_git = lock_git_source(&entry.resolved, entry.integrity.is_some());
         let git_detail = if pinned_git.is_some() {
+            None
+        } else if entry.integrity.is_some() {
             None
         } else {
             crate::npm::git_dependency_detail(&entry.name, &entry.resolved)
@@ -2126,7 +2149,8 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                 }
                 // A git source is verified by its commit, so it legitimately
                 // has no tarball integrity (item 4).
-                if node.integrity.is_empty() && crate::npm::git_source_from_url(&node.url).is_none()
+                let node_git = lock_git_source(&node.url, !node.integrity.is_empty());
+                if node.integrity.is_empty() && node_git.is_none()
                 {
                     if dependency.optional || node.optional {
                         continue;
@@ -2137,7 +2161,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                     )));
                 }
                 // Git sources carry `git:<commit>` instead of an SRI.
-                if crate::npm::git_source_from_url(&node.url).is_none() {
+                if node_git.is_none() {
                     integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
                 }
                 let ancestor = existing_ancestor(
@@ -2307,7 +2331,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             .nodes
             .get(&node_key)
             .ok_or_else(|| err(format!("internal: no package for {path}")))?;
-        let git = crate::npm::git_source_from_url(&node.url);
+        let git = lock_git_source(&node.url, !node.integrity.is_empty());
         packages.push(NpmPackage {
             path,
             name: node.name.clone(),
@@ -2941,10 +2965,26 @@ snapshots:
 
 #[cfg(test)]
 mod git_import_tests {
+    const SRI: &str =
+        "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
+
+    fn project() -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "blanket-lock-git-import-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     #[test]
-    fn a_real_pnpm_git_hosted_resolution_parses() {
-        // Verbatim from clash-verge-rev's pnpm-lock.yaml: an inline map with
-        // gitHosted, an integrity and the codeload tarball.
+    fn pnpm_sri_codeload_resolution_stays_a_tarball() {
+        // A codeload URL with an SRI is an attested tarball. It must not be
+        // converted to a git checkout, whose bytes can differ from the URL.
         let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";
         let lock = format!(
             "lockfileVersion: '9.0'\n\
@@ -2962,10 +3002,62 @@ mod git_import_tests {
             Some(super::YamlValue::Map(map)) => Some(map),
             other => panic!("resolution is not a map: {other:?}"),
         };
-        let source = super::pinned_git_source(resolution)
-            .expect("a gitHosted codeload resolution names a commit");
-        assert_eq!(source.commit, commit);
-        assert_eq!(source.url, "https://github.com/o/r");
+        assert!(super::pinned_git_source(resolution).is_none());
+    }
+
+    #[test]
+    fn pnpm_sri_codeload_plan_preserves_integrity() {
+        let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\
+             importers:\n\
+             \x20\x20.:\n\
+             \x20\x20\x20\x20dependencies:\n\
+             \x20\x20\x20\x20\x20\x20plugin:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: 1.0.0\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: 1.0.0\n\
+             packages:\n\
+             \x20\x20plugin@1.0.0:\n\
+             \x20\x20\x20\x20resolution: {{integrity: {SRI}, tarball: https://codeload.github.com/o/r/tar.gz/{commit}}}\n\
+             snapshots:\n\
+             \x20\x20plugin@1.0.0: {{}}\n"
+        );
+        let project = project();
+        let plan = super::plan_pnpm(
+            crate::platform::Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &project,
+        )
+        .unwrap();
+        let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
+        assert!(package.git.is_none());
+        assert_eq!(package.integrity, SRI);
+        let _ = crate::store::remove_tree(&project);
+    }
+
+    #[test]
+    fn yarn_sri_codeload_plan_preserves_integrity() {
+        let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";
+        let lock = format!(
+            r#"# yarn lockfile v1
+plugin@1.0.0:
+  version "1.0.0"
+  resolved "https://codeload.github.com/o/r/tar.gz/{commit}"
+  integrity {SRI}
+"#
+        );
+        let project = project();
+        let plan = super::plan_yarn(
+            crate::platform::Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            r#"{"dependencies":{"plugin":"1.0.0"}}"#,
+            &project,
+        )
+        .unwrap();
+        let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
+        assert!(package.git.is_none());
+        assert_eq!(package.integrity, SRI);
+        let _ = crate::store::remove_tree(&project);
     }
 
     #[test]

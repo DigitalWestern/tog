@@ -14,7 +14,10 @@
 //! then the human. Never a coin flip.
 
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -136,6 +139,72 @@ fn other(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
 
+/// Validate the untrusted spelling supplied on the command line before it is
+/// used for registry lookups or passed to an ecosystem tool.
+///
+/// Explicit ecosystem prefixes are intentionally checked after they are
+/// removed as well: `npm:--prefix=/tmp` must be rejected just like the
+/// unprefixed spelling.  Keep this separate from `parse_spec`, whose return
+/// type is part of the small public parsing API and cannot report an error.
+pub fn validate_spec(text: &str) -> io::Result<()> {
+    if text.is_empty() || text.trim().is_empty() {
+        return Err(other("dependency spec must not be empty"));
+    }
+    if text != text.trim() {
+        return Err(other("dependency spec must not begin or end with whitespace"));
+    }
+    if text.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+        return Err(other("dependency spec must not contain CR, LF, or NUL"));
+    }
+
+    let candidate = match text.split_once(':') {
+        Some((prefix, rest)) if Eco::from_prefix(prefix).is_some() => rest,
+        _ => text,
+    };
+    if candidate.trim().is_empty() {
+        return Err(other("dependency spec must name a package"));
+    }
+    if candidate != candidate.trim() {
+        return Err(other("dependency spec must not begin or end with whitespace"));
+    }
+    if candidate.trim_start().starts_with('-') {
+        return Err(other(format!(
+            "dependency spec '{text}' looks like a tool option; package options are not allowed"
+        )));
+    }
+    if candidate
+        .split(|character: char| "@><=~![;,".contains(character))
+        .any(|part| part.trim_start().starts_with('-'))
+    {
+        return Err(other(format!(
+            "dependency spec '{text}' contains an option-shaped constraint"
+        )));
+    }
+
+    let parsed = parse_spec(text);
+    if parsed.name.is_empty() {
+        return Err(other(format!(
+            "dependency spec '{text}' must name a package"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_parsed_spec(spec: &Spec) -> io::Result<()> {
+    validate_spec(&spec.text)?;
+    if spec.name.is_empty() || spec.name.trim_start().starts_with('-') {
+        return Err(other("dependency spec must name a package"));
+    }
+    Ok(())
+}
+
+fn validate_delegate_specs(texts: &[String]) -> io::Result<()> {
+    for text in texts {
+        validate_spec(text)?;
+    }
+    Ok(())
+}
+
 /// Rung 1: an explicit `prefix:`. The name is the spec up to the first
 /// version operator (`@` after the first character, `>`, `<`, `=`, `~`,
 /// `!`, `[`, `;`, or a space).
@@ -230,6 +299,7 @@ pub fn choose(
     lookup: &mut dyn FnMut(Eco, &str) -> io::Result<Option<String>>,
     ask: &mut dyn FnMut(&str, &[(Eco, String)]) -> io::Result<Eco>,
 ) -> io::Result<Eco> {
+    validate_parsed_spec(spec)?;
     if let Some(eco) = spec.eco {
         return require_present(eco, &spec.name, present, "you said so");
     }
@@ -392,6 +462,11 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
 /// Entry point for `main`: pick the project, group the specs by ecosystem,
 /// delegate each group.
 pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outcome> {
+    // Validate every spec before discovering the project, opening the store,
+    // looking anything up in a registry, or invoking a package manager.
+    for text in &request.specs {
+        validate_spec(text)?;
+    }
     let (project, present) = nearest_project(cwd)?;
     if project != cwd {
         ui::note(&format!("project: {}", project.display()));
@@ -503,6 +578,7 @@ fn python(
     names: &[String],
     dev: bool,
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     let shape = python_shape(project)?;
     match shape {
         PyShape::Poetry => Err(other(match verb {
@@ -632,44 +708,234 @@ pub fn requirement_name(line: &str) -> Option<String> {
     }
 }
 
-/// Add specs (replacing an existing line for the same name) and remove
-/// names; everything else in the file is preserved byte for byte. Written
-/// atomically.
+/// Add specs (replacing an existing logical record for the same name) and
+/// remove names; everything else in the file is preserved byte for byte.
+/// Written atomically.
 pub fn edit_requirements(path: &Path, add: &[String], remove: &[String]) -> io::Result<()> {
     let text = fs::read_to_string(path)?;
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+
+    for value in add.iter().chain(remove) {
+        if value
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+        {
+            return Err(other(format!(
+                "dependency requirement '{value}' must not contain CR, LF, or NUL"
+            )));
+        }
+    }
+
+    #[derive(Debug)]
+    struct Record {
+        raw: String,
+        name: Option<String>,
+    }
+
+    fn physical_lines(text: &str) -> Vec<&str> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        text.split_inclusive('\n').collect()
+    }
+
+    fn continued(line: &str) -> bool {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        line.trim_end_matches([' ', '\t']).ends_with('\\')
+    }
+
+    // A requirement and its indented `--hash` continuations are one logical
+    // record.  Editing only physical lines is what used to leave orphaned
+    // hash constraints behind after a remove.
+    let physical = physical_lines(&text);
+    let mut records = Vec::new();
+    let mut index = 0;
+    while index < physical.len() {
+        let start = index;
+        while index + 1 < physical.len() && continued(physical[index]) {
+            index += 1;
+        }
+        index += 1;
+        let raw = physical[start..index].concat();
+        let name = requirement_name(physical[start]);
+        records.push(Record { raw, name });
+    }
+    let existing_names: Vec<String> = records
+        .iter()
+        .filter_map(|record| record.name.clone())
+        .collect();
+
     let remove_names: Vec<String> = remove.iter().map(|name| pypi::normalize_name(name)).collect();
     for (name, wanted) in remove.iter().zip(&remove_names) {
-        if !lines
+        let matches: Vec<usize> = records
             .iter()
-            .any(|line| requirement_name(line).as_deref() == Some(wanted))
-        {
+            .enumerate()
+            .filter_map(|(index, record)| (record.name.as_deref() == Some(wanted)).then_some(index))
+            .collect();
+        if matches.is_empty() {
             return Err(other(format!(
                 "'{name}' is not declared in {}",
                 path.display()
             )));
         }
+        if matches.len() > 1 {
+            return Err(other(format!(
+                "'{name}' is declared {} times in {}; refusing an ambiguous edit",
+                matches.len(),
+                path.display()
+            )));
+        }
     }
-    lines.retain(|line| {
-        !requirement_name(line).is_some_and(|name| remove_names.contains(&name))
-    });
+
+    let mut additions = Vec::new();
+    let mut add_names = Vec::new();
     for spec in add {
         let wanted = requirement_name(spec).ok_or_else(|| {
             other(format!("'{spec}' is not a requirement (name first, e.g. 'requests>=2')"))
         })?;
-        match lines
-            .iter_mut()
-            .find(|line| requirement_name(line).as_deref() == Some(&wanted))
+        if add_names.contains(&wanted) {
+            return Err(other(format!(
+                "'{spec}' duplicates another requirement in the same edit"
+            )));
+        }
+        let matches = records
+            .iter()
+            .filter(|record| record.name.as_deref() == Some(&wanted))
+            .count();
+        if matches > 1 {
+            return Err(other(format!(
+                "'{spec}' matches {} declarations in {}; refusing an ambiguous edit",
+                matches,
+                path.display()
+            )));
+        }
+        add_names.push(wanted.clone());
+        additions.push((wanted, spec));
+    }
+
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::with_capacity(text.len());
+    for record in records {
+        if record
+            .name
+            .as_ref()
+            .is_some_and(|name| remove_names.contains(name))
         {
-            Some(line) => *line = spec.clone(),
-            None => lines.push(spec.clone()),
+            continue;
+        }
+        if let Some((_, spec)) = additions
+            .iter()
+            .find(|(wanted, _)| record.name.as_ref() == Some(wanted))
+        {
+            if requirement_has_marker(&record.raw) != requirement_has_marker(spec) {
+                return Err(other(format!(
+                    "'{spec}' would change the environment marker on an existing declaration in {}; specify the marker explicitly",
+                    path.display()
+                )));
+            }
+            // Keep the original logical record's final line ending, so a
+            // no-trailing-newline file stays that way and CRLF files stay
+            // CRLF.  Replacing the whole record also removes all old hashes.
+            let ending = if record.raw.ends_with("\r\n") {
+                "\r\n"
+            } else if record.raw.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            out.push_str(spec);
+            out.push_str(ending);
+        } else {
+            out.push_str(&record.raw);
         }
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    let tmp = path.with_extension(format!("blanket-edit.{}", std::process::id()));
-    fs::write(&tmp, out)?;
-    fs::rename(&tmp, path)?;
+
+    let unmatched: Vec<&String> = additions
+        .iter()
+        .filter_map(|(wanted, spec)| (!existing_names.contains(wanted)).then_some(*spec))
+        .collect();
+    if !unmatched.is_empty() {
+        if !out.is_empty() && !out.ends_with(['\n', '\r']) {
+            out.push_str(newline);
+        }
+        for (index, spec) in unmatched.iter().enumerate() {
+            out.push_str(spec);
+            if text.ends_with(['\n', '\r']) || index + 1 < unmatched.len() {
+                out.push_str(newline);
+            }
+        }
+    }
+
+    write_atomic_requirements(path, &out)
+}
+
+fn requirement_has_marker(value: &str) -> bool {
+    value
+        .split_once('#')
+        .map_or(value, |(before_comment, _)| before_comment)
+        .contains(';')
+}
+
+fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "requirements".into());
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    let mut temp = None;
+    for _ in 0..100 {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{file_name}.blanket-edit-{stamp}-{}-{counter}",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temp = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let (temp, mut file) = temp.ok_or_else(|| other("could not create a unique requirements temp file"))?;
+    #[cfg(unix)]
+    if let Ok(metadata) = fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = fs::set_permissions(
+            &temp,
+            fs::Permissions::from_mode(metadata.permissions().mode()),
+        ) {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+    }
+    if let Err(error) = file.write_all(contents.as_bytes()) {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -733,6 +999,7 @@ fn python_uv(
     texts: &[String],
     dev: bool,
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     let (mut command, _) = uv_command(store, platform, project)?;
     match verb {
         Verb::Add => {
@@ -740,10 +1007,18 @@ fn python_uv(
             if dev {
                 command.arg("--dev");
             }
-            command.args(texts);
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
         Verb::Remove => {
-            command.args(["remove", "--no-sync"]).args(texts);
+            command.args(["remove", "--no-sync"]);
+            if dev {
+                command.arg("--dev");
+            }
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
         Verb::Update => {
             command.arg("lock");
@@ -770,11 +1045,13 @@ fn node(
     texts: &[String],
     dev: bool,
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     let tool_verb = match verb {
         Verb::Add => "add",
         Verb::Remove => "remove",
         Verb::Update => "update",
     };
+    let quiet = !ui::verbose();
     for (lock, tool) in [("pnpm-lock.yaml", "pnpm"), ("yarn.lock", "yarn")] {
         if project.join(lock).is_file() {
             return Err(other(format!(
@@ -786,27 +1063,31 @@ fn node(
     }
     let node_obj = npm::ensure_node_for(store, platform)?;
     let mut command = Command::new(node_obj.join("bin/npm"));
+    if quiet {
+        command.arg("--silent");
+    }
     match verb {
         Verb::Add => {
             command.args(["install", "--package-lock-only", "--ignore-scripts"]);
             if dev {
                 command.arg("--save-dev");
             }
-            command.args(texts);
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
         Verb::Remove => {
-            command
-                .args(["uninstall", "--package-lock-only", "--ignore-scripts"])
-                .args(texts);
+            command.args(["uninstall", "--package-lock-only", "--ignore-scripts"]);
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
         Verb::Update => {
-            command
-                .args(["update", "--package-lock-only", "--ignore-scripts"])
-                .args(texts);
+            command.args(["update", "--package-lock-only", "--ignore-scripts"]);
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
-    }
-    if !ui::verbose() {
-        command.arg("--silent");
     }
     command.current_dir(project).env(
         "PATH",
@@ -834,6 +1115,7 @@ fn cargo_delegate(
     texts: &[String],
     dev: bool,
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     let version = cargo::resolve_toolchain(platform, project)?;
     let rust_obj = cargo::ensure_rust_for(store, platform, version)?;
     let mut command = Command::new(rust_obj.join("bin/cargo"));
@@ -843,10 +1125,18 @@ fn cargo_delegate(
             if dev {
                 command.arg("--dev");
             }
-            command.args(texts);
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
         Verb::Remove => {
-            command.arg("remove").args(texts);
+            command.arg("remove");
+            if dev {
+                command.arg("--dev");
+            }
+            if !texts.is_empty() {
+                command.arg("--").args(texts);
+            }
         }
         Verb::Update => {
             command.arg("update");
@@ -875,12 +1165,13 @@ fn go_delegate(
     texts: &[String],
     dev: bool,
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     if dev {
         return Err(other("--dev has no meaning in Go (one dependency set per module)"));
     }
     let go_obj = golang::ensure_go_for(store, platform)?;
     let scratch = store.stage()?;
-    let mut args: Vec<String> = match verb {
+    let args: Vec<String> = match verb {
         Verb::Add => std::iter::once("get".to_string()).chain(texts.iter().cloned()).collect(),
         Verb::Remove => std::iter::once("get".to_string())
             .chain(texts.iter().map(|name| format!("{name}@none")))
@@ -894,13 +1185,8 @@ fn go_delegate(
             args
         }
     };
-    let result = (|| {
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        golang::run_checked(&go_obj, project, &scratch, false, &refs)?;
-        args = vec!["mod".to_string(), "tidy".to_string()];
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        golang::run_checked(&go_obj, project, &scratch, false, &refs)
-    })();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = golang::run_checked(&go_obj, project, &scratch, false, &refs);
     let _ = crate::store::remove_tree(&scratch);
     result?;
     Ok(vec!["go.mod".to_string(), "go.sum".to_string()])
@@ -917,6 +1203,7 @@ fn ruby_delegate(
     texts: &[String],
     dev: bool,
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     let ruby_obj = ruby::ensure_ruby_for(store, platform)?;
     let scratch = store.stage()?;
     let result = (|| -> io::Result<()> {
@@ -965,6 +1252,7 @@ fn elixir_delegate(
     verb: Verb,
     texts: &[String],
 ) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     match verb {
         Verb::Add => {
             let lines = texts
@@ -1007,6 +1295,7 @@ fn elixir_delegate(
 // .NET
 
 fn dotnet_refuse(verb: Verb, texts: &[String]) -> io::Result<Vec<String>> {
+    validate_delegate_specs(texts)?;
     let names = texts.join(" ");
     Err(other(match verb {
         Verb::Add => format!(
@@ -1047,6 +1336,23 @@ mod tests {
         assert_eq!(spec("unknown:thing").name, "unknown:thing");
         assert_eq!(spec("unknown:thing").eco, None);
         assert_eq!(spec("nuget:Newtonsoft.Json").eco, Some(Eco::Dotnet));
+    }
+
+    #[test]
+    fn specs_reject_empty_options_and_control_bytes() {
+        for text in [
+            "",
+            "   ",
+            "--prefix=/tmp/elsewhere",
+            "npm:--prefix=/tmp/elsewhere",
+            "cargo:--manifest-path=/tmp/Cargo.toml",
+            "npm:\nreact",
+            "requests\0evil",
+        ] {
+            assert!(validate_spec(text).is_err(), "accepted unsafe spec {text:?}");
+        }
+        assert!(validate_spec("npm:react@18").is_ok());
+        assert!(validate_spec("gem:rails@~> 7.1").is_ok());
     }
 
     #[test]
@@ -1134,6 +1440,68 @@ mod tests {
         assert!(error.to_string().contains("'six' is not declared"));
         let error = edit_requirements(&file, &["-e .".into()], &[]).unwrap_err();
         assert!(error.to_string().contains("not a requirement"));
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn requirement_edits_are_logical_lossless_and_ambiguous_edits_fail() {
+        let temp = std::env::temp_dir().join(format!("blanket-deps-logical-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("requirements.txt");
+        fs::write(
+            &file,
+            "# pinned\r\nfoo==1.0 \\\r\n    --hash=sha256:abc\r\nbar==2.0",
+        )
+        .unwrap();
+        edit_requirements(&file, &[], &["foo".into()]).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "# pinned\r\nbar==2.0");
+
+        fs::write(&file, "foo==1; python_version<'3'\nfoo==2; python_version>='3'\n").unwrap();
+        let error = edit_requirements(&file, &["foo==3".into()], &[]).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "foo==1; python_version<'3'\nfoo==2; python_version>='3'\n"
+        );
+
+        fs::write(&file, "foo==1; python_version<'3'\n").unwrap();
+        let error = edit_requirements(&file, &["foo==3".into()], &[]).unwrap_err();
+        assert!(error.to_string().contains("environment marker"), "{error}");
+        edit_requirements(
+            &file,
+            &["foo==3; python_version<'3'".into()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "foo==3; python_version<'3'\n");
+
+        let error = edit_requirements(&file, &["foo\nbar".into()], &[]).unwrap_err();
+        assert!(error.to_string().contains("CR, LF, or NUL"), "{error}");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requirement_edit_does_not_follow_predictable_temp_symlink() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().join(format!("blanket-deps-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("requirements.txt");
+        let target = temp.join("outside");
+        let old_temp = file.with_extension(format!("blanket-edit.{}", std::process::id()));
+        fs::write(&file, "six\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&target, "must remain\n").unwrap();
+        symlink(&target, &old_temp).unwrap();
+
+        edit_requirements(&file, &["requests".into()], &[]).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "must remain\n");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "six\nrequests\n");
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = fs::remove_dir_all(&temp);
     }
 

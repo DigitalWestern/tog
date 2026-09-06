@@ -201,12 +201,12 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
             },
             no_sync,
         ),
-        Remove { names, no_sync } => run_deps(
+        Remove { names, dev, no_sync } => run_deps(
             platform,
             deps::Request {
                 verb: deps::Verb::Remove,
                 specs: names,
-                dev: false,
+                dev,
             },
             no_sync,
         ),
@@ -224,16 +224,24 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
             from,
             tool,
             args,
-        } => xrun::run(
-            platform,
-            &project_dir(),
-            xrun::Request {
-                ecosystem,
-                from,
-                tool,
-                args,
-            },
-        ),
+        } => {
+            let cwd = project_dir();
+            // `x` has its own cached projection path and therefore does not
+            // pass through run_sync's policy initialization. Load the cwd
+            // policy, including all applicable ancestors, before realization
+            // or any cache-hit checks.
+            policy::init(&cwd, false)?;
+            xrun::run(
+                platform,
+                &cwd,
+                xrun::Request {
+                    ecosystem,
+                    from,
+                    tool,
+                    args,
+                },
+            )
+        }
         Status { json } => {
             let dir = project_dir();
             let rows = inspect::status(platform, &dir)?;
@@ -259,6 +267,10 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
 /// ordinary sync in the project the edit landed in.
 fn run_deps(platform: Platform, request: deps::Request, no_sync: bool) -> io::Result<()> {
     let cwd = project_dir();
+    // Dependency edits ensure pinned tools before the ordinary sync. Set the
+    // policy first so cached toolchain objects cannot initialize an empty
+    // default policy and let strict/deny settings be bypassed.
+    policy::init(&cwd, false)?;
     let outcome = deps::run(platform, &cwd, request)?;
     for line in &outcome.lines {
         ui::note(line);

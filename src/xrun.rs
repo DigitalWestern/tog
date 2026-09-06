@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::platform::Platform;
 use crate::store::Store;
-use crate::{inspect, npm, project, pypi, pyselect, python, ui};
+use crate::{inspect, npm, policy, project, pypi, pyselect, python, ui};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -60,24 +60,19 @@ fn home() -> io::Result<PathBuf> {
 }
 
 fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
-    if let Some(name) = request.ecosystem.as_deref() {
-        return match name {
-            "python" => Ok("python"),
-            "node" => Ok("node"),
-            other_name => Err(other(format!("x: unsupported ecosystem '{other_name}'"))),
-        };
+    if request.ecosystem.is_some() {
+        return choose_from_project(request, &[]);
     }
     for dir in cwd.ancestors() {
         let present = inspect::detected(dir)?;
-        if present.contains(&"python") {
-            ui::trace("x: Python, because this project has a Python manifest");
-            return Ok("python");
-        }
-        if present.contains(&"node") {
-            ui::trace("x: npm, because this project has a package.json");
-            return Ok("node");
-        }
         if !present.is_empty() {
+            return choose_from_project(request, &present);
+        }
+        // An existing blanket metadata directory is an explicit project
+        // boundary, even when the project currently has no manifest. This
+        // prevents an unrelated package in an outer checkout from deciding
+        // `x`'s registry.
+        if dir.join(".blanket").is_dir() {
             break;
         }
     }
@@ -87,11 +82,228 @@ fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
     )))
 }
 
+fn choose_from_project(request: &Request, present: &[&str]) -> io::Result<&'static str> {
+    if let Some(name) = request.ecosystem.as_deref() {
+        return match name {
+            "python" => Ok("python"),
+            "node" => Ok("node"),
+            other_name => Err(other(format!("x: unsupported ecosystem '{other_name}'"))),
+        };
+    }
+    let python = present.contains(&"python");
+    let node = present.contains(&"node");
+    match (python, node) {
+        (true, true) => Err(other(
+            "x: both Python and Node projects are present; choose explicitly with --py or --npm",
+        )),
+        (true, false) => {
+            ui::trace("x: Python, because this project has a Python manifest");
+            Ok("python")
+        }
+        (false, true) => {
+            ui::trace("x: npm, because this project has a package.json");
+            Ok("node")
+        }
+        (false, false) => Err(other(format!(
+            "x: say which registry provides '{}': 'blanket x py:{0}' (PyPI) or 'blanket x npm:{0}' (npm)",
+            request.tool
+        ))),
+    }
+}
+
+fn validate_text(label: &str, value: &str) -> io::Result<()> {
+    if value.is_empty()
+        || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+        || value.chars().any(char::is_whitespace)
+        || value.starts_with('-')
+    {
+        return Err(other(format!("x: invalid {label} '{value}'")));
+    }
+    Ok(())
+}
+
+fn validate_package(ecosystem: &str, package: &str) -> io::Result<()> {
+    validate_text("package", package)?;
+    if package.starts_with('/')
+        || package.contains('\\')
+        || package.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || (ecosystem == "python" && package.contains('/'))
+    {
+        return Err(other(format!("x: invalid package '{package}'")));
+    }
+    Ok(())
+}
+
+fn validate_version(version: &str) -> io::Result<()> {
+    validate_text("version", version)
+}
+
+fn validate_from_bin(bin: &str) -> io::Result<()> {
+    if bin.is_empty()
+        || bin == "."
+        || bin == ".."
+        || !bin
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ".-_".contains(ch))
+    {
+        return Err(other(
+            "x: --from requires a single safe executable name",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_link_target(path: &Path) -> Option<PathBuf> {
+    let target = fs::read_link(path).ok()?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent()?.join(target)
+    };
+    target.canonicalize().ok()
+}
+
+fn encoded_workspace(workspace: &str) -> Option<String> {
+    if workspace.is_empty()
+        || workspace.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(workspace.replace('%', "%25").replace('/', "%2F"))
+}
+
+fn check_projection_target(
+    store: &Store,
+    root: &Path,
+    ecosystem: &str,
+    closure: &serde_json::Value,
+    env_path: &Path,
+) -> io::Result<()> {
+    let missing = || {
+        other(format!(
+            "x: cached {ecosystem} projection is missing or points elsewhere; run the command again"
+        ))
+    };
+    match ecosystem {
+        "python" => {
+            if canonical_link_target(&root.join(".venv")) != Some(env_path.to_path_buf()) {
+                return Err(missing());
+            }
+        }
+        "node" => {
+            if closure["projection_schema"] != "node-forest/2" {
+                return Err(missing());
+            }
+            let projection_id = closure["projection_id"].as_str().ok_or_else(missing)?;
+            if projection_id.is_empty()
+                || !projection_id.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(missing());
+            }
+            let home = store
+                .root
+                .parent()
+                .ok_or_else(|| other("x: cannot locate blanket home for cached projection"))?;
+            let project_key = hex::encode(Sha256::digest(
+                root.canonicalize()?.to_string_lossy().as_bytes(),
+            ));
+            let projection = home
+                .join("forests")
+                .join(&project_key[..32])
+                .join(projection_id);
+            let expected = projection.join("node_modules").canonicalize().map_err(|_| missing())?;
+            if canonical_link_target(&root.join("node_modules")) != Some(expected) {
+                return Err(missing());
+            }
+            if let Some(workspaces) = closure["workspaces"].as_array() {
+                for workspace in workspaces {
+                    let source = workspace.as_str().ok_or_else(missing)?;
+                    let encoded = encoded_workspace(source).ok_or_else(missing)?;
+                    let expected = projection
+                        .join("workspaces")
+                        .join(encoded)
+                        .join("node_modules")
+                        .canonicalize()
+                        .map_err(|_| missing())?;
+                    if canonical_link_target(&root.join(source).join("node_modules"))
+                        != Some(expected)
+                    {
+                        return Err(missing());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// A cached `x` projection bypasses the normal realization functions. Check
+/// both the persisted closure and the store metadata before executing it, so
+/// a stricter policy cannot be bypassed by a previously realized tool.
+fn check_cached_projection(store: &Store, root: &Path, ecosystem: &str) -> io::Result<()> {
+    let closure = project::read_closure(root, ecosystem)?;
+    let path_text = closure["env_object"].as_str().ok_or_else(|| {
+        other("x: cached closure has no environment object; run the command again")
+    })?;
+    let path = Path::new(path_text);
+    let id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
+        .ok_or_else(|| other("x: cached closure has a malformed environment object"))?;
+    if path != store.object_path(id) || !store.has(id) {
+        return Err(other(
+            "x: cached environment object is missing or outside the active store; run the command again",
+        ));
+    }
+    let env_path = path
+        .canonicalize()
+        .map_err(|_| other("x: cached environment object is unavailable"))?;
+    check_projection_target(store, root, ecosystem, &closure, &env_path)?;
+    policy::check_cached(store, id)?;
+
+    let persisted: Vec<policy::Exception> = if closure["exceptions"].is_null() {
+        Vec::new()
+    } else {
+        serde_json::from_value(closure["exceptions"].clone())
+            .map_err(|error| other(format!("x: invalid cached closure exceptions: {error}")))?
+    };
+    policy::check_exception_set(id, &persisted)?;
+    let object_exceptions = store.exceptions(id)?;
+    for exception in persisted {
+        if !object_exceptions.contains(&exception) {
+            policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     let ecosystem = choose_ecosystem(&request, cwd)?;
-    let (tool, version) = split_version(&request.tool);
-    let package = request.from.as_deref().unwrap_or(tool);
+    let (tool, tool_version) = split_version(&request.tool);
+    let (package, from_version) = request
+        .from
+        .as_deref()
+        .map_or((tool, None), split_version);
+    validate_package(ecosystem, package)?;
+    if let Some(version) = tool_version {
+        validate_version(version)?;
+    }
+    if let Some(version) = from_version {
+        validate_version(version)?;
+    }
+    let version = match (from_version, tool_version) {
+        (Some(from), Some(tool)) if from != tool => {
+            return Err(other(
+                "x: --from package version conflicts with the tool version; specify only one or use the same version",
+            ));
+        }
+        (Some(from), _) => Some(from),
+        (_, tool) => tool,
+    };
     let bin = if request.from.is_some() {
+        validate_from_bin(tool)?;
         tool
     } else {
         default_bin(tool)
@@ -102,7 +314,8 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     let store = Store::open()?;
     let key = hex::encode(Sha256::digest(
         format!(
-            "{ecosystem}\0{package}\0{}\0{}",
+            "x/2\0{}\0{ecosystem}\0{package}\0{}\0{}",
+            store.root.display(),
             version.unwrap_or(""),
             platform.triple()
         )
@@ -121,6 +334,8 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                 let executable = venv.join("bin").join(bin);
                 if !executable.is_file() {
                     realize_python(&store, platform, &root, package, version)?;
+                } else {
+                    check_cached_projection(&store, &root, "python")?;
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
@@ -138,6 +353,8 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                 let executable = node_modules.join(".bin").join(bin);
                 if !executable.is_file() {
                     realize_node(&store, platform, &root, package, version)?;
+                } else {
+                    check_cached_projection(&store, &root, "node")?;
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
@@ -295,22 +512,30 @@ mod tests {
 
     #[test]
     fn ecosystem_from_spelling_or_project() {
-        let temp = std::env::temp_dir().join(format!("blanket-x-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
         let request = |eco: Option<&str>| Request {
             ecosystem: eco.map(str::to_string),
             from: None,
             tool: "ruff".into(),
             args: vec![],
         };
-        assert_eq!(choose_ecosystem(&request(Some("python")), &temp).unwrap(), "python");
-        let error = choose_ecosystem(&request(None), &temp).unwrap_err();
+        assert_eq!(choose_from_project(&request(Some("python")), &[]).unwrap(), "python");
+        let error = choose_from_project(&request(None), &[]).unwrap_err();
         assert!(error.to_string().contains("blanket x py:ruff"), "{error}");
-        fs::write(temp.join("package.json"), "{}").unwrap();
-        assert_eq!(choose_ecosystem(&request(None), &temp).unwrap(), "node");
-        fs::write(temp.join("requirements.txt"), "six\n").unwrap();
-        assert_eq!(choose_ecosystem(&request(None), &temp).unwrap(), "python");
-        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(
+            choose_from_project(&request(None), &["node"]).unwrap(),
+            "node"
+        );
+        let error = choose_from_project(&request(None), &["python", "node"]).unwrap_err();
+        assert!(error.to_string().contains("both Python and Node"), "{error}");
+    }
+
+    #[test]
+    fn from_version_is_split_and_conflicts_are_rejected() {
+        let (package, version) = split_version("six@1.17.0");
+        assert_eq!((package, version), ("six", Some("1.17.0")));
+        let error = validate_package("python", "/tmp/tool").unwrap_err();
+        assert!(error.to_string().contains("invalid package"), "{error}");
+        assert!(validate_from_bin("../tool").is_err());
+        assert!(validate_version("1.0\n--index-url evil").is_err());
     }
 }
