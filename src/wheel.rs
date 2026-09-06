@@ -299,8 +299,12 @@ fn normalized_relative_path(name: &str) -> io::Result<PathBuf> {
         return Err(invalid_data(format!("unsafe zip entry: {name}")));
     }
 
+    // Zip entry names are POSIX paths: only `/` separates components. A
+    // literal backslash is an ordinary filename byte and must be preserved,
+    // or a wheel that contains one would install differently than it did
+    // before this normalization under the same env identity.
     let mut normalized = PathBuf::new();
-    for component in name.split(['/', '\\']) {
+    for component in name.split('/') {
         match component {
             "" | "." => {}
             ".." => {
@@ -625,6 +629,18 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(site.join("shared.py")).unwrap(), "second\n");
         assert_eq!(crate::policy::drain().len(), 1);
+    }
+
+    #[test]
+    fn literal_backslash_in_entry_name_is_preserved() {
+        assert_eq!(
+            normalized_relative_path("demo/a\\b.txt").unwrap(),
+            PathBuf::from("demo/a\\b.txt")
+        );
+        assert_eq!(normalized_relative_path("./demo//x.py").unwrap(), PathBuf::from("demo/x.py"));
+        assert!(normalized_relative_path("/abs").is_err());
+        assert!(normalized_relative_path("../up").is_err());
+        assert!(normalized_relative_path("demo/../../up").is_err());
     }
 
     #[test]
