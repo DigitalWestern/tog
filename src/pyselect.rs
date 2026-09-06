@@ -8,6 +8,7 @@
 use crate::platform::Platform;
 use crate::python::{PinnedPython, PYTHONS};
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -32,6 +33,27 @@ impl ConstraintSource {
 pub struct PythonInputs {
     pub explicit: Option<ExplicitPython>,
     pub constraints: Vec<ConstraintSource>,
+}
+
+/// The dependency-bearing subset of setuptools' setup.cfg metadata.
+///
+/// This is intentionally parsed here, next to the interpreter constraint
+/// extractor, so manifest discovery and Python selection share ConfigParser's
+/// continuation rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupCfgMetadata {
+    pub install_requires: Vec<String>,
+    pub install_requires_found: bool,
+    pub python_requires: Option<String>,
+    pub extras_require: BTreeMap<String, Vec<String>>,
+    pub packages_find: Option<SetupCfgPackagesFind>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupCfgPackagesFind {
+    pub where_: Vec<String>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -776,7 +798,7 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
     if setup_cfg.is_file() {
         let text = std::fs::read_to_string(&setup_cfg)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", setup_cfg.display())))?;
-        if let Some(value) = extract_setup_cfg_python_requires(&text) {
+        if let Some(value) = parse_setup_cfg(&text).python_requires {
             inputs
                 .constraints
                 .push(ConstraintSource::new(value, "setup.cfg"));
@@ -798,54 +820,130 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
     Ok(inputs)
 }
 
-pub fn extract_setup_cfg_python_requires(text: &str) -> Option<String> {
-    // configparser semantics: a line is a continuation of the current option
-    // only when it is indented deeper than that option's own key line;
-    // otherwise it starts a new option (keys may themselves be indented).
+/// Parse the setup.cfg sections used by manifest discovery.
+///
+/// ConfigParser treats a physical line as a continuation only when it is
+/// indented more deeply than the option key. In particular, an indented key
+/// is still a key, not a continuation of the previous option.
+pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
     let mut section = String::new();
-    let mut value: Option<String> = None;
-    let mut current_is_python_requires = false;
+    let mut current_key: Option<String> = None;
+    let mut current_values = Vec::new();
     let mut option_indent: Option<usize> = None;
-    for line in text.lines() {
+    let mut metadata = SetupCfgMetadata::default();
+
+    let finish = |section: &str,
+                  key: Option<String>,
+                  values: &[String],
+                  metadata: &mut SetupCfgMetadata| {
+        let Some(key) = key else { return; };
+        if section.eq_ignore_ascii_case("options") {
+            match key.as_str() {
+                "install_requires" => {
+                    metadata.install_requires_found = true;
+                    metadata.install_requires.extend(
+                        values
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_string),
+                    );
+                }
+                "python_requires" => {
+                    let value = values
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !value.is_empty() {
+                        metadata.python_requires = Some(value);
+                    }
+                }
+                _ => {}
+            }
+        } else if section.eq_ignore_ascii_case("options.extras_require") {
+            for value in values.iter().filter(|value| !value.trim().is_empty()) {
+                metadata
+                    .extras_require
+                    .entry(key.clone())
+                    .or_default()
+                    .push(value.trim().to_string());
+            }
+        } else if section.eq_ignore_ascii_case("options.packages.find") {
+            let packages = metadata.packages_find.get_or_insert_with(Default::default);
+            for value in values.iter().filter(|value| !value.trim().is_empty()) {
+                let values = value
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                match key.as_str() {
+                    "where" => packages.where_.extend(values),
+                    "include" => packages.include.extend(values),
+                    "exclude" => packages.exclude.extend(values),
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    for raw in text.lines() {
+        let line = strip_setup_cfg_comment(raw);
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+        if trimmed.is_empty() {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
-        if let Some(active) = option_indent {
-            if indent > active {
-                if current_is_python_requires {
-                    if let Some(v) = value.as_mut() {
-                        v.push(' ');
-                        v.push_str(trimmed);
-                    }
-                }
-                continue;
-            }
+        if option_indent.is_some_and(|active| indent > active) {
+            current_values.push(trimmed.to_string());
+            continue;
         }
+
+        finish(
+            &section,
+            current_key.take(),
+            &current_values,
+            &mut metadata,
+        );
+        current_values.clear();
+        option_indent = None;
+
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            section = trimmed.trim_matches(&['[', ']'][..]).trim().to_string();
-            option_indent = None;
-            current_is_python_requires = false;
+            section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
             continue;
         }
+
         option_indent = Some(indent);
-        if !section.eq_ignore_ascii_case("options") {
-            current_is_python_requires = false;
-            continue;
-        }
         let Some(separator) = trimmed.find(['=', ':']) else {
-            current_is_python_requires = false;
             continue;
         };
-        current_is_python_requires = trimmed[..separator]
-            .trim()
-            .eq_ignore_ascii_case("python_requires");
-        if current_is_python_requires {
-            value = Some(trimmed[separator + 1..].trim().to_string());
+        current_key = Some(trimmed[..separator].trim().to_ascii_lowercase());
+        let value = trimmed[separator + 1..].trim();
+        if !value.is_empty() {
+            current_values.push(value.to_string());
         }
     }
-    value.map(|v| v.trim().to_string())
+    finish(
+        &section,
+        current_key,
+        &current_values,
+        &mut metadata,
+    );
+    metadata
+}
+
+fn strip_setup_cfg_comment(line: &str) -> &str {
+    line.char_indices()
+        .find(|(index, character)| {
+            *character == '#'
+                && (*index == 0 || line.as_bytes()[*index - 1].is_ascii_whitespace())
+        })
+        .map(|(index, _)| &line[..index])
+        .unwrap_or(line)
+}
+
+pub fn extract_setup_cfg_python_requires(text: &str) -> Option<String> {
+    parse_setup_cfg(text).python_requires
 }
 
 pub fn extract_setup_py_python_requires(text: &str) -> Option<String> {
@@ -1045,6 +1143,18 @@ mod tests {
             extract_setup_py_python_requires("setup(python_requires = \"<3.12\")"),
             Some("<3.12".into())
         );
+    }
+
+    #[test]
+    fn setup_cfg_metadata_parser_returns_dependency_sections() {
+        let cfg = "[options]\n  install_requires =\n    six\n  python_requires = >=3.9,\n    <3.13\n[options.extras_require]\n  test =\n    pytest\n[options.packages.find]\n  where = src\n  include = demo*\n";
+        let metadata = parse_setup_cfg(cfg);
+        assert_eq!(metadata.install_requires, ["six"]);
+        assert_eq!(metadata.python_requires.as_deref(), Some(">=3.9, <3.13"));
+        assert_eq!(metadata.extras_require["test"], ["pytest"]);
+        let packages = metadata.packages_find.unwrap();
+        assert_eq!(packages.where_, ["src"]);
+        assert_eq!(packages.include, ["demo*"]);
     }
 
     #[test]
