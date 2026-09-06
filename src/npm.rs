@@ -542,11 +542,28 @@ fn managed_projection_symlink(path: &Path, project_dir: &Path, home: &Path) -> b
 /// caller reports it rather than guessing which commit was meant.
 pub(crate) fn git_source_from_url(url: &str) -> Option<crate::gitsrc::GitSource> {
     let (repo, commit) = git_repo_and_commit(url)?;
-    crate::gitsrc::is_full_commit(&commit).then(|| crate::gitsrc::GitSource {
+    if !crate::gitsrc::is_full_commit(&commit) {
+        return None;
+    }
+    let source = crate::gitsrc::GitSource {
         url: crate::gitsrc::normalize_url(&repo),
         commit: commit.to_ascii_lowercase(),
         subdirectory: None,
-    })
+    };
+    crate::gitsrc::validate_source(&source).ok()?;
+    Some(source)
+}
+
+/// A dependency that must be realized from git: the lockfile names the git
+/// protocol outright. A GitHub archive/codeload tarball is deliberately NOT
+/// included — when the lock carries an SRI for it, those bytes are what the
+/// lock attests, and a checkout of the same commit can legitimately differ
+/// (`.gitattributes` export-ignore/export-subst). Such an entry only falls
+/// back to git when the lock gives no integrity to verify.
+pub(crate) fn explicit_git_source(url: &str) -> Option<crate::gitsrc::GitSource> {
+    url.starts_with("git+")
+        .then(|| git_source_from_url(url))
+        .flatten()
 }
 
 pub(crate) fn git_dependency_detail(name: &str, url: &str) -> Option<String> {
@@ -799,7 +816,16 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
         // A git dependency pinned to a full commit is realizable (item 4);
         // anything else (a branch, a tag, a bare repo URL) is not, because the
         // bytes it names can change.
-        let pinned_git = git_source_from_url(resolved);
+        // An explicit git+ URL is always realized from git. Anything else
+        // (a codeload/archive tarball) is only realized from git when the lock
+        // has no integrity to verify it with.
+        let pinned_git = explicit_git_source(resolved).or_else(|| {
+            entry["integrity"]
+                .as_str()
+                .is_none()
+                .then(|| git_source_from_url(resolved))
+                .flatten()
+        });
         if pinned_git.is_none() {
             if let Some(detail) = git_dependency_detail(&name, resolved) {
                 if entry["optional"].as_bool() == Some(true) {
@@ -1120,6 +1146,7 @@ pub fn realize_node_env(
 
 fn node_env_identity(
     store: &Store,
+    platform: Platform,
     node_obj: &Path,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
@@ -1172,6 +1199,16 @@ fn node_env_identity(
             return Err(err(format!("duplicate lockfile path: {}", p.path)));
         }
     }
+    // A provisioned artifact is a build input too: a GitHub release asset can
+    // be replaced, so the package version alone does not determine the bytes
+    // that reach the install script.
+    for p in &plan.packages {
+        if let Some(input) =
+            crate::artifacts::provisioned_identity_input(store, platform, &p.name, &p.version)?
+        {
+            inputs.insert(format!("provisioned:{}", p.path), input);
+        }
+    }
     // Declared artifacts are build inputs: they change what install
     // scripts produce, so they are part of the identity.
     for a in artifacts {
@@ -1217,7 +1254,8 @@ fn realize_node_env_with_node_object(
         };
         native_libs_identity_id(store, platform, has_native)?
     };
-    let identity = node_env_identity(store, node_obj, plan, artifacts, native_libs_id.as_deref())?;
+    let identity =
+        node_env_identity(store, platform, node_obj, plan, artifacts, native_libs_id.as_deref())?;
     let id = identity.object_id();
     if store.has(&id) {
         crate::policy::check_cached(store, &id)?;
@@ -1392,9 +1430,26 @@ fn realize_node_env_with_node_object(
                 source_root.display()
             )));
         }
-        crate::project::clone_tree(&source_root, &dest).map_err(|e| {
+        // `cp -a src dest` copies INTO dest when dest already exists, which it
+        // does whenever this package has nested dependencies (their directories
+        // are created first). Copy into a fresh sibling and move it into place.
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::create_dir_all(&dest)?;
+        let staging = dest.with_file_name(format!(
+            ".blanket-git-{}",
+            dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
+        ));
+        let _ = crate::store::remove_tree(&staging);
+        crate::project::clone_tree(&source_root, &staging).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path))
         })?;
+        for entry in fs::read_dir(&staging)? {
+            let entry = entry?;
+            fs::rename(entry.path(), dest.join(entry.file_name()))?;
+        }
+        let _ = crate::store::remove_tree(&staging);
         normalize_modes(&dest).map_err(|e| {
             io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path))
         })?;
@@ -1740,7 +1795,13 @@ fn run_install_scripts_staged(
             .map(|(_, script)| script.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let declared_here = !artifacts.is_empty();
+        // Only artifacts planted for THIS package suppress the source build:
+        // one declared artifact anywhere must not silently change how every
+        // other package installs.
+        let declared_here = artifacts.iter().any(|a| {
+            a.path.split('/').any(|segment| segment == p.name)
+                || a.url.contains(&format!("/{}/", p.name))
+        });
         // Provisioning comes first: if blanket can supply the artifact, the
         // package is really installed rather than skipped.
         match crate::artifacts::provision(store, platform, &p.name, &p.version, &tmp) {
@@ -2414,7 +2475,7 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
-        let identity = node_env_identity(&store, &node_obj, &plan, &[], None).unwrap();
+        let identity = node_env_identity(&store, Platform::host().unwrap(), &node_obj, &plan, &[], None).unwrap();
         let staged = store.stage().unwrap();
         std::fs::create_dir_all(staged.join("node_modules")).unwrap();
         let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
@@ -2464,7 +2525,7 @@ mod tests {
         };
         let digest = Digest::from_sri(TEST_SRI).unwrap();
         write_archive_classification(&store, &digest, false).unwrap();
-        let identity = node_env_identity(&store, &node_obj, &plan, &[], None).unwrap();
+        let identity = node_env_identity(&store, Platform::host().unwrap(), &node_obj, &plan, &[], None).unwrap();
         let staged = store.stage().unwrap();
         std::fs::create_dir_all(staged.join("node_modules")).unwrap();
         let (expected, _) = store.commit(&identity, &staged, &[]).unwrap();
