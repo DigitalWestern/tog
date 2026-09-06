@@ -263,6 +263,23 @@ before its summary line (30 checks had passed).
   syncs one of the repo's own fixtures twice instead (cold, then warm)
   and reports what the second sync re-does.
 
+### 2026-09-05 (Mac verification, round 3) — macOS closed
+
+Same agent, commit dbf7ac4. `cargo build` with no warnings; `bash
+tests/acceptance.sh` **passed=35 failed=0** end to end, including 10h
+(dotnet) with the pre-created `shm`, 11 (polyglot) and 12 (sbom).
+Cold-then-warm syncs of `proj-a`, `go-hello` and `proj-npm` in one fresh
+store: cold 1.5 s / 8.0 s / 3.1 s, warm 0.01 s / 0.00 s / 0.01 s, each
+warm run printing only the `synced:` line with the same object path as
+its cold run (no fetch, plan, lock, compile or build). Environment
+commands worked in all three (the Go binary printed `Ahoy, world!` when
+run from the agent's C-locale shell, as expected; the acceptance check's
+pinned locale printed `Hello, world.`). Recurring harmless diagnostics:
+`xcrun` cache writes denied under Seatbelt, Mix's TCP event bus `:eperm`,
+NuGet's "issue verifying workloads" notice. macOS verification of the
+port is complete; the only Mac-dependent item left is the optional
+stage-6 live shared-store check. README and NEXT updated.
+
 ---
 
 ## Surface inventory (what is actually macOS-specific)
