@@ -349,7 +349,9 @@ bin/blanket-<sdk-fp>. Build-capable verbs (build/run/test/publish/pack/
 msbuild/restore/clean/watch) are REFUSED by `blanket run` — MSBuild
 executes arbitrary code and belongs only in the sandbox; `blanket run
 dotnet <app.dll>` runs compiled apps. One bounded sandbox write root is
-added for CoreCLR's hardcoded /tmp/.dotnet mutex dir. global.json:
+added for CoreCLR's hardcoded /tmp/.dotnet mutex dir (its `shm` child is
+pre-created: the runtime's own mkdtemp-in-/tmp fallback is denied by both
+sandboxes). global.json:
 exact pin + rollForward=disable, sdk.paths/msbuild-sdks rejected, and
 ancestor global.json/Directory.Packages.props/Directory.Build.rsp/
 packages.config files fail closed.

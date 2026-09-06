@@ -236,6 +236,33 @@ stopped at one failure, section 10e: the Go fixture printed
   and Mix cannot subscribe to its TCP event bus inside Seatbelt (`:eperm`,
   expected — network is denied).
 
+### 2026-09-05 (Mac verification, round 2) — Go passes; dotnet exposes a latent macOS bug
+
+Same agent, commit eb44849. Section 10e passed with the locale pinned;
+10f and 10g passed; 10h (dotnet) failed inside blanket's Seatbelt sandbox:
+`mkdtemp("/tmp/.coreclr.Ypqb8g") == nullptr; errno == EPERM` while
+CoreCLR created the `NuGet-Migrations` named mutex. The script exited
+before its summary line (30 checks had passed).
+
+- **Latent macOS bug, older than the port, exposed by macOS's `/private/
+  tmp` purge.** The Seatbelt profile allows writes under `/private/tmp/
+  .dotnet` and the scratch dir only. When `/private/tmp/.dotnet/shm` is
+  missing, CoreCLR creates it via `mkdtemp("/tmp/.coreclr.XXXXXX")` +
+  `rename`, and the mkdtemp in `/tmp` itself is denied. Every earlier Mac
+  pass ran while `shm` still existed from some previous dotnet run; macOS
+  removes unaccessed `/private/tmp` entries after three days and on
+  reboot, so the pass depended on machine history. Stage 4 had found the
+  same code path failing on Linux (EXDEV across bind mounts) and fixed it
+  by pre-creating `shm`, but deliberately left macOS alone to keep the
+  darwin path untouched. `ensure_dotnet_tmp` now pre-creates `shm` (0700,
+  owned by the invoking uid) on both platforms; the Seatbelt profile is
+  unchanged. Unit test renamed accordingly; LIMITATIONS and ARCHITECTURE
+  updated.
+- Warm-project resync still not done: the agent found no project on the
+  Mac with a pre-existing `.blanket/closures/` directory. Next round
+  syncs one of the repo's own fixtures twice instead (cold, then warm)
+  and reports what the second sync re-does.
+
 ---
 
 ## Surface inventory (what is actually macOS-specific)
