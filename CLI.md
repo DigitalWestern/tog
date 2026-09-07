@@ -25,7 +25,7 @@ USAGE:
 
 EVERYDAY:
   sync       realize and project the environment(s) from the project's inputs
-             (planned: --frozen requires a committed toolchain lock)
+             (planned: --frozen requires a complete lock and performs no writes)
   add        add a dependency, re-lock, sync
   remove     remove a dependency, re-lock, sync
   update     update dependencies within the manifest's constraints, sync
@@ -225,10 +225,14 @@ matching `add --dev`. All dependency arguments are validated before delegation.
 
 **Planned (WP2 design, not implemented in level two):** `blanket sync
 --frozen` reads and validates `blanket-toolchain.toml` without creating or
-updating it. `blanket update --toolchain [<ecosystem>]` is the only command
-that upgrades those exact runtime selections; it may be run for one ecosystem
-or all present ecosystems and then invokes ordinary sync. It is separate from
-dependency update and does not edit the ecosystem's dependency lockfile.
+updating it, including its contained regular-file inputs and complete artifact
+rows for both supported platforms. It performs no resolver or manifest probe that can
+evaluate project code; setup.py/mix.ex compatibility must come from safe
+parsing or the existing sandboxed probe. `blanket update --toolchain
+[<ecosystem>]` is the only command that upgrades those exact runtime
+selections; it may be run for one ecosystem or all present ecosystems and then
+invokes ordinary sync. It is separate from dependency update and does not edit
+the ecosystem's dependency lockfile.
 
 **Choosing the ecosystem (decided 2026-09-06: infer from evidence, then
 ask; no required syntax).** Blanket never picks an ecosystem on a coin flip,

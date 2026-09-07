@@ -27,6 +27,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   Ruby, and Elixir therefore remain single-pin selections, and `status` does
   not report a stale/missing toolchain lock. The design is in
   ARCHITECTURE.md; implementation remains open.
+- **Legacy closures cannot always seed a complete toolchain lock (WP2 design
+  boundary).** Older provenance can lack Rust channel/components/targets,
+  Go source directives, companion-tool refs, or compatibility-input snapshots.
+  Writable sync must refuse those migrations with `blanket update --toolchain`
+  rather than guess; a changed recorded source takes the same loud path. This
+  remains until the WP2 implementation adds complete closure evidence.
 - **`blanket add` / `remove` / `update` delegate to store tools with
   network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
   same trust boundary as missing-lockfile generation. Rows that refuse with
