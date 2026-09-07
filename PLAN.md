@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS
+### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle complete)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -335,3 +335,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
 | 2026-09-06 | WP4 x lifecycle implemented: `x --clean` removes and unregisters safe cached roots, inherited shared locks protect running tools, and GC remains closure-rooted. Unit, offline CLI, and ignored GC/x lifecycle tests added. |
+| 2026-09-06 | WP4 x lifecycle rework: permanent locks survive projection deletion, legacy cleanup matches exact generated packages, partial roots carry realizing markers, and registrations are removed from the closure's originating store. Race, legacy, scoped/`--from`, cross-store, and partial-root regressions added. |

@@ -54,6 +54,27 @@ trend holds; the kernel thesis holds.
   `mutable_state: "unattested"`. `blanket sync --fresh` rebuilds the
   projection, dropping caches and mutable state.
 
+### Cached `x` environments
+
+An `x` environment is owned by a request marker at
+`~/.blanket/x/<root>/.blanket/x.json`. The marker is written with
+`state: "realizing"` before any resolver or realization work and rewritten
+to `state: "ready"` only after projection succeeds, so a failed realization
+leaves a discoverable partial root. A per-root lock at
+`~/.blanket/x/.locks/<root-name>.lock` is outside the removable projection:
+`x` takes a blocking shared lock before checking or recreating its root and
+inherits the descriptor across exec, while cleanup takes a nonblocking
+exclusive lock before removing the tree. Thus a runner waiting during cleanup
+revalidates the root while still holding the stable lock.
+
+The request marker records the ecosystem, package, version, and lifecycle
+state; the executable name is not part of cleanup identity. For pre-marker
+roots, cleanup recovers the exact package from the generated
+`requirements.in` or `package.json` dependencies and skips roots whose
+package cannot be recovered. Closure object paths identify the originating
+store, so cleanup removes the matching canonical registry entry there even
+when the active `BLANKET_STORE` differs.
+
 ## Platforms
 
 `src/platform.rs` defines `Platform` (`aarch64-apple-darwin`,

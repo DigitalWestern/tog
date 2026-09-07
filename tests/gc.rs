@@ -6,9 +6,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 struct TempDir(PathBuf);
 
@@ -70,6 +70,27 @@ fn blanket_home(bin: &Path, cwd: &Path, store: &Path, home: &Path, args: &[&str]
         .args(args)
         .output()
         .unwrap()
+}
+
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn wait_output(mut self) -> Output {
+        self.0
+            .take()
+            .expect("child guard still owns its child")
+            .wait_with_output()
+            .unwrap()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 fn ok(output: Output, label: &str) -> String {
@@ -320,38 +341,52 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         "gc retained the unrooted x environment"
     );
 
+    // Prewarm pytest so the busy process reaches the test body quickly and
+    // the readiness handshake below tests lock inheritance, not PyPI latency.
+    ok(
+        blanket_home(
+            &bin,
+            &project,
+            &store,
+            &home,
+            &["x", "--py", "pytest", "--version"],
+        ),
+        "prewarm x pytest",
+    );
+    let pytest_root = fs::read_dir(&x_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("py-pytest-"))
+                && path.join(".blanket/x.json").is_file()
+        })
+        .expect("prewarmed pytest x root");
+    let ready = project.join("pytest-started");
     fs::write(
         project.join("test_sleep.py"),
-        "import time\n\ndef test_sleep():\n    time.sleep(5)\n",
+        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"BLANKET_TEST_READY\"]).write_text(\"ready\")\n    time.sleep(5)\n",
     )
     .unwrap();
-    let running = Command::new(&bin)
-        .current_dir(&project)
-        .env("BLANKET_STORE", &store)
-        .env("HOME", &home)
-        .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
-        .spawn()
-        .unwrap();
-    let pytest_root = (0..120)
-        .find_map(|_| {
-            let root = fs::read_dir(&x_dir)
-                .ok()?
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .find(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("py-pytest-"))
-                        && path.join(".blanket/x.json").is_file()
-                });
-            if root.is_some() {
-                root
-            } else {
-                thread::sleep(Duration::from_millis(100));
-                None
-            }
-        })
-        .expect("pytest x root became registered");
+    let running = ChildGuard(Some(
+        Command::new(&bin)
+            .current_dir(&project)
+            .env("BLANKET_STORE", &store)
+            .env("HOME", &home)
+            .env("BLANKET_TEST_READY", &ready)
+            .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ready.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        ready.is_file(),
+        "pytest did not reach the readiness handshake"
+    );
     let busy = blanket_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]);
     assert_eq!(busy.status.code(), Some(0), "clean while busy failed");
     let busy_text = String::from_utf8_lossy(&busy.stdout);
@@ -360,7 +395,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         "{busy_text}"
     );
     assert!(pytest_root.exists(), "busy x root was removed");
-    let child = running.wait_with_output().unwrap();
+    let child = running.wait_output();
     assert!(
         child.status.success(),
         "pytest x failed\nstdout:\n{}\nstderr:\n{}",

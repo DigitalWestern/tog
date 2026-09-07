@@ -27,6 +27,14 @@ as in use, and leaves its registered root for a later retry. This uses the
 same advisory-lock contract on Linux and macOS; no sandbox or toolchain pin
 changed.
 
+### 2026-09-06 — `x` cleanup lock made stable across projection deletion
+
+The lifecycle follow-up moved the per-environment `flock` to the permanent
+`~/.blanket/x/.locks/<root-name>.lock` directory. Linux and macOS runners
+share the same blocking shared / nonblocking exclusive contract, so a runner
+waiting behind cleanup revalidates a deleted root while still holding the
+lock. No sandbox, extraction, or toolchain pin changed.
+
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 
 `pack_checkout` no longer infers ustar representability from the tar

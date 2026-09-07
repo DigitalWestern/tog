@@ -303,10 +303,15 @@ selects that tool (all versions when the version is omitted); `--py`, `--npm`,
 and `--from <package>` keep their normal meanings. Cleanup accepts no
 arguments after the tool. It prints one line per removed environment and a
 summary that the immutable store objects remain until the next `blanket gc`.
-A running tool holds a shared lock inherited across exec, so cleanup reports
-it as in use and leaves it for a later retry. The request is recorded in
-`x.json` beside the closure; older roots fall back to their validated package
-prefix and key name.
+A running tool holds a shared lock in the permanent
+`~/.blanket/x/.locks/<root-name>.lock`, inherited across exec, so cleanup
+reports it as in use and leaves it for a later retry. The request and
+ownership state (`realizing` or `ready`) are recorded in `x.json` beside the
+closure before realization begins. For older roots without `x.json`, cleanup
+matches the exact package recovered from the generated `requirements.in` or
+`package.json`; if it cannot recover the package it skips that root with a
+removal hint. A cleanup without a tool still removes every safe x root,
+including partial realizations.
 
 ### 2.5 `blanket status`
 
