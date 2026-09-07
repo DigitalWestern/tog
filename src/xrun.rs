@@ -174,7 +174,7 @@ pub(crate) fn is_exact_version(version: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
                 && (!identifier.bytes().all(|byte| byte.is_ascii_digit())
-                    || (identifier.len() == 1 && identifier != "0")
+                    || identifier.len() == 1
                     || !identifier.starts_with('0'))
         })
 }
@@ -711,7 +711,16 @@ mod tests {
     fn exact_node_tool_versions_are_full_releases() {
         assert!(is_exact_version("9.1.2"));
         assert!(is_exact_version("9.1.2-rc.1"));
-        for version in ["9", "9.x", "^9.1.0", "latest", "9.01.2", "9.1.2+build"] {
+        assert!(is_exact_version("9.12.3-beta.0"));
+        for version in [
+            "9",
+            "9.x",
+            "^9.1.0",
+            "latest",
+            "9.01.2",
+            "9.1.2+build",
+            "9.12.3-beta.01",
+        ] {
             assert!(
                 !is_exact_version(version),
                 "accepted floating version {version}"

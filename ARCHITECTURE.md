@@ -443,11 +443,17 @@ realization.
 
 The same trust boundary applies to pnpm dependency edits. pnpm receives
 `--lockfile-only`, so it edits the selected manifest and lock without creating
-a project `node_modules`; inherited pnpm locks are accepted only when the
-root's `pnpm-workspace.yaml` package globs match the member. Yarn classic has
-no lockfile-only edit mode and remains a refusal; a workspace-faithful scratch
-edit is future work. Yarn Berry remains outside the importer contract because
-its cache checksums do not authenticate npm tarballs.
+a project `node_modules`; an ancestor lock is inherited only from a root with
+both `pnpm-lock.yaml` and `pnpm-workspace.yaml`, whose positive package globs
+match the member and whose negative globs do not, regardless of order. An
+ancestor package-lock, Yarn lock, or unmatched pnpm root is a boundary, so a
+nested independent project falls back to the store npm in its own directory.
+Mixed-root requests are rejected before delegation and name the roots so the
+edits can be run separately. Yarn classic has no lockfile-only edit mode and
+remains a refusal; a workspace-faithful scratch edit is future work. Yarn
+Berry remains outside the importer contract because its cache checksums do
+not authenticate npm tarballs; its dependency-edit refusal names the npm or
+pnpm conversion command rather than delegating to Yarn.
 
 Declared artifacts, honestly: the mechanism is **cache seeding** — it
 works when the declaration matches where a package's downloader looks

@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm done; Yarn classic remains refusal; Poetry/PDM open)
+### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm done; Yarn classic/Berry remain refusal; Poetry/PDM open)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -273,7 +273,8 @@ Any of these may be taken after WP1 merges; each is its own PR.
 **Mac before merge (per item):** editable installs and dev groups exercise
 clonefile projection, so run the Python `--ignored` tests on the Mac; the
 `add/remove/update` delegates run unsandboxed and are platform-neutral, so
-the six `deps_e2e` round trips on the Mac suffice; `x` lifecycle and any
+the six `deps_e2e` round trips (including `pnpm_add_update_remove_roundtrip`
+and `pnpm_workspace_member_and_root_roundtrip`) on the Mac suffice; `x` lifecycle and any
 compiled-tool model for cargo/go tools need a Mac cold/warm run because the
 binaries are per-platform artifacts; the real-project-per-ecosystem proofs
 are measured on both machines and recorded as two columns.
@@ -336,3 +337,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
 | 2026-09-06 | WP4 initial pnpm and Yarn classic dependency edits landed at the prior revision; the rework below removed Yarn scratch edits and returned Yarn classic to refusal. Poetry/PDM remain open. |
 | 2026-09-06 | WP4 rework narrowed dependency edits to pnpm: exact release validation, Corepack SHA-224 verification, workspace-glob lock selection, and isolated pnpm config; Yarn classic scratch delegation was removed and remains a refusal. |
+| 2026-09-06 | WP4 rework round 2 made ancestor lock boundaries pnpm-only, made exclusions order-independent, rejected mixed-root edits before delegation, accepted prerelease numeric zero, clarified pnpm lock-format guidance, strengthened wrong-digest coverage, and distinguished Yarn Berry refusal guidance. |

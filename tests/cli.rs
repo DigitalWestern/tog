@@ -391,7 +391,7 @@ fn dependency_verbs_offline_paths() {
     assert_eq!(out.status.code(), Some(1));
     assert!(
         text(&out.stderr).contains(
-            "lock was written by pnpm major 9; add \"packageManager\": \"pnpm@<major.minor.patch>\" using the exact version the team runs (pnpm --version)"
+            "pnpm-lock.yaml is lockfile format 9.0; set packageManager to the exact pnpm version your team runs, e.g. from `pnpm --version`"
         ),
         "{}",
         text(&out.stderr)

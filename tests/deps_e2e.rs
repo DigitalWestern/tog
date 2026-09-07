@@ -343,6 +343,41 @@ fn pnpm_add_update_remove_roundtrip() {
     assert_eq!(node_env_object_count(&store), first_env_count);
     assert!(temp.0.join("home/.blanket/x").is_dir());
 
+    let wrong_digest = {
+        let mut value = corepack_sha224.clone().into_bytes();
+        value[0] = if value[0] == b'0' { b'1' } else { b'0' };
+        String::from_utf8(value).unwrap()
+    };
+    set_package_manager(project, &format!("pnpm@9.12.3+sha224.{wrong_digest}"));
+    let package_before_wrong = std::fs::read_to_string(project.join("package.json")).unwrap();
+    let lock_before_wrong = std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap();
+    let wrong = run(
+        &bin,
+        project,
+        &store,
+        &["update", "--no-sync", "is-number"],
+        &temp.0,
+    );
+    assert_eq!(
+        wrong.status.code(),
+        Some(1),
+        "wrong digest unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&wrong.stderr).contains("sha224 mismatch"),
+        "wrong digest error:\n{}",
+        String::from_utf8_lossy(&wrong.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("package.json")).unwrap(),
+        package_before_wrong
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
+        lock_before_wrong
+    );
+    set_package_manager(project, &format!("pnpm@9.12.3+sha224.{corepack_sha224}"));
+
     assert_ok(
         run(
             &bin,

@@ -31,13 +31,16 @@ say what breaks, for whom, and how it fails (loud/silent).
   per candidate registry; a private-registry name needs the explicit prefix.
 - **pnpm dependency edits require a root `package.json` `packageManager`
   field** with an exact `MAJOR.MINOR.PATCH` version (an optional prerelease
-  is retained verbatim). A missing field names the pnpm lockfile's major and
-  tells the user to use the exact version from `pnpm --version`; no floating
-  version is suggested. `+sha224.<hash>` suffixes are verified against the
-  realized pnpm package tarball in the verified artifact cache. Delegates are
-  resolved through the store's cached `x` environments under
-  `~/.blanket/x/`, with HOME and XDG directories isolated for pnpm; they
-  remain unsandboxed with network.
+  is retained verbatim). A missing field names the pnpm lockfile format and
+  tells the user to set the exact version from `pnpm --version`; no floating
+  version is suggested. Ancestor locks are never inherited unless a
+  `pnpm-lock.yaml` and `pnpm-workspace.yaml` positively include the member;
+  other locks and excluded members are boundaries. Mixed-root edits are
+  refused before delegation and name both roots. `+sha224.<hash>` suffixes
+  are verified against the realized pnpm package tarball in the verified
+  artifact cache. Delegates are resolved through the store's cached `x`
+  environments under `~/.blanket/x/`, with HOME and XDG directories isolated
+  for pnpm; they remain unsandboxed with network.
 - **Yarn classic dependency edits remain a refusal.** Yarn has no
   lockfile-only edit mode, and a workspace-faithful scratch edit is future
   work; run the Yarn command named by blanket, then `blanket`.
@@ -221,8 +224,8 @@ sandbox, and uv fallback still delegates resolution.
 - **Process-tree quiescence after scripts not enforced** (a daemon
   started by postinstall can outlive realization).
 - **Yarn Berry is not imported**: its cache-zip checksums are not tarball
-  integrity values, so the importer rejects it loudly and names the npm/pnpm
-  conversion path. pnpm/yarn classic imports discover `bin` and legacy
+  integrity values, so dependency edits refuse with the npm/pnpm conversion
+  commands. pnpm/yarn classic imports discover `bin` and legacy
   `directories.bin` entries from each extracted package.json before launcher
   generation. Lockfile-less projects still fall back to npm resolution.
 

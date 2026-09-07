@@ -255,9 +255,9 @@ exit 1, no writes.
 | Python | `poetry.lock` / `pdm.lock` present, or `[tool.poetry]` | refuse (poetry/pdm are not pinned; uv would create a second lock) | refuse | refuse |
 | Python | `setup.py` / `setup.cfg` only | refuse with the `install_requires` line | refuse | n/a |
 | Node | `package-lock.json` or no lock | store npm: `npm install --package-lock-only --ignore-scripts [--save-dev] <spec>`, `npm uninstall --package-lock-only`, `npm update --package-lock-only [<name>]` | same | same |
-| Node | `pnpm-lock.yaml` | store pnpm at the exact version in root `package.json` `packageManager` (for example `pnpm@9.12.3`), then `pnpm add --lockfile-only`, `pnpm remove --lockfile-only`, or `pnpm update --lockfile-only`; workspace-root edits add `-w` | same | same |
+| Node | `pnpm-lock.yaml` | store pnpm at the exact version in root `package.json` `packageManager` (for example `pnpm@9.12.3`), then `pnpm add --lockfile-only`, `pnpm remove --lockfile-only`, or `pnpm update --lockfile-only`; only a positively matched pnpm workspace root is inherited, and workspace-root edits add `-w` | same | same |
 | Node | Yarn classic v1 `yarn.lock` | refuse: run `yarn add …`, then `blanket` (Yarn classic has no lockfile-only edit mode; a workspace-faithful scratch edit is future work) | refuse: run `yarn remove …`, then `blanket` | refuse: run `yarn update`, then `blanket` |
-| Node | Yarn Berry (`.yarnrc.yml` or Yarn 2+) | refuse with the npm/pnpm conversion line because Berry cache checksums are not imported tarball hashes | same | same |
+| Node | Yarn Berry (`.yarnrc.yml` or Yarn 2+) | refuse: Berry cache checksums are not npm tarball integrity values; convert with `npm install --package-lock-only` or `pnpm install --lockfile-only`, then `blanket` | same | same |
 | Cargo | any | store cargo: `cargo add`, `cargo remove`, `cargo update [-p <name>]` with network, exactly as `generate-lockfile` runs today | same | same |
 | Go | any | store go: `go get <mod>[@ver]`, `go get <mod>@none`, `go get -u [<mod>]`; later sync owns tidy resolution | same | same |
 | Ruby | any | store bundler: `bundle add <gem>`, `bundle remove <gem>`, `bundle update [<gem>]` with `BUNDLE_IGNORE_CONFIG` enforced and `BUNDLE_FROZEN=false` for edits; realization remains frozen | same | same |
@@ -272,6 +272,10 @@ the user owns. Rules: write atomically (temp file + rename, the store's
 existing helper); never reformat a file blanket did not fully generate (the
 requirements.txt append preserves everything above it, uv and npm preserve
 formatting themselves); print every file touched; `--no-sync` for review.
+
+If one request would edit more than one project root (for example, a Python
+file in a pnpm member and the pnpm workspace root), blanket refuses before
+delegation and names both roots; run the two adds separately.
 
 ### 2.4 `blanket x <tool>[@version] [<args>...]`
 

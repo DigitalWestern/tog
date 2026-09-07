@@ -37,6 +37,14 @@ pub enum Verb {
 }
 
 impl Verb {
+    fn command(self) -> &'static str {
+        match self {
+            Verb::Add => "add",
+            Verb::Remove => "remove",
+            Verb::Update => "update",
+        }
+    }
+
     fn past(self) -> &'static str {
         match self {
             Verb::Add => "added",
@@ -480,7 +488,6 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outco
     if project != cwd {
         ui::note(&format!("project: {}", project.display()));
     }
-    let store = Store::open()?;
     let mut groups: Vec<(Eco, Vec<Spec>)> = Vec::new();
     if request.specs.is_empty() {
         // `update` with nothing named: every ecosystem present.
@@ -496,6 +503,8 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outco
             None => groups.push((eco, vec![spec])),
         }
     }
+    reject_mixed_sync_roots(request.verb, &project, &groups)?;
+    let store = Store::open()?;
     let mut lines = Vec::new();
     let mut outcome_project = project.clone();
     for (eco, specs) in groups {
@@ -565,6 +574,43 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outco
         project: outcome_project,
         lines,
     })
+}
+
+fn sync_root_for(eco: Eco, project: &Path) -> io::Result<PathBuf> {
+    match eco {
+        Eco::Node => Ok(node_lock_selection(project)?.1),
+        _ => Ok(project.to_path_buf()),
+    }
+}
+
+fn reject_mixed_sync_roots(
+    verb: Verb,
+    project: &Path,
+    groups: &[(Eco, Vec<Spec>)],
+) -> io::Result<()> {
+    let mut roots = Vec::new();
+    for (eco, _) in groups {
+        let root = sync_root_for(*eco, project)?;
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    if roots.len() > 1 {
+        return Err(other(format!(
+            "dependency edit spans multiple project roots: {}; run the two {} separately",
+            roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" and "),
+            match verb {
+                Verb::Add => "adds",
+                Verb::Remove => "removes",
+                Verb::Update => "updates",
+            }
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,15 +1222,16 @@ fn parse_package_manager_value(value: &str, package_json: &Path) -> io::Result<N
     })
 }
 
-fn pnpm_lock_major(lock_text: &str) -> Option<String> {
-    let version = lock_text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("lockfileVersion:")
-            .map(|version| version.trim().trim_matches(['\'', '"']))
-    })?;
-    let major = version.split('.').next()?.trim();
-    (!major.is_empty() && major.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| major.to_string())
+fn pnpm_lock_format(lock_text: &str) -> Option<String> {
+    lock_text
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("lockfileVersion:")
+                .map(|version| version.trim().trim_matches(['\'', '"']))
+        })
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
 }
 
 fn node_package_manager(root: &Path, lock_text: &str) -> io::Result<NodePackageManager> {
@@ -1198,11 +1245,11 @@ fn node_package_manager(root: &Path, lock_text: &str) -> io::Result<NodePackageM
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| other(format!("{}: {error}", package_json.display())))?;
     let field = value.get("packageManager").ok_or_else(|| {
-        let major = pnpm_lock_major(lock_text)
-            .map(|major| format!(" this lock was written by pnpm major {major};"))
+        let format = pnpm_lock_format(lock_text)
+            .map(|format| format!(" pnpm-lock.yaml is lockfile format {format};"))
             .unwrap_or_default();
         other(format!(
-            "{}: packageManager is required;{major} add \"packageManager\": \"pnpm@<major.minor.patch>\" using the exact version the team runs (pnpm --version)",
+            "{}: packageManager is required;{format} set packageManager to the exact pnpm version your team runs, e.g. from `pnpm --version`",
             package_json.display()
         ))
     })?;
@@ -1283,7 +1330,8 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<(bool, Vec
         ))
     })?;
     let relative = relative.to_string_lossy().replace('\\', "/");
-    let mut matched = false;
+    let mut positive_match = false;
+    let mut negative_match = false;
     for raw_pattern in &patterns {
         let trimmed = raw_pattern.trim();
         let exclude = trimmed.starts_with('!');
@@ -1303,15 +1351,20 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<(bool, Vec
             )));
         }
         if workspace_glob_matches(pattern, &relative) {
-            matched = !exclude;
+            if exclude {
+                negative_match = true;
+            } else {
+                positive_match = true;
+            }
         }
     }
-    Ok((matched, patterns))
+    Ok((positive_match && !negative_match, patterns))
 }
 
 /// Select the lockfile to edit. A lockfile in the project itself wins in the
 /// same order as sync. Only a pnpm workspace root may be inherited, and only
-/// when its declared package globs contain the project.
+/// when its positive package globs contain the project and no negative glob
+/// excludes it. Any other ancestor lock is a boundary.
 fn node_lock_selection(project: &Path) -> io::Result<(String, PathBuf)> {
     if let Some(lock_name) = node_lock_at(project) {
         return Ok((lock_name.to_string(), project.to_path_buf()));
@@ -1321,28 +1374,60 @@ fn node_lock_selection(project: &Path) -> io::Result<(String, PathBuf)> {
     }
     for ancestor in project.ancestors().skip(1) {
         if let Some(lock_name) = node_lock_at(ancestor) {
-            if lock_name == "pnpm-lock.yaml" {
-                let (matched, patterns) = pnpm_workspace_contains(ancestor, project)?;
-                if !matched {
-                    return Err(other(format!(
-                        "project {} is not included by pnpm workspace root {}; packages globs: {}",
-                        project.display(),
-                        ancestor.display(),
-                        if patterns.is_empty() {
-                            "<none>".to_string()
-                        } else {
-                            patterns.join(", ")
-                        }
-                    )));
-                }
+            if lock_name != "pnpm-lock.yaml" || !ancestor.join("pnpm-workspace.yaml").is_file() {
+                break;
             }
-            return Ok((lock_name.to_string(), ancestor.to_path_buf()));
+            let (matched, _) = pnpm_workspace_contains(ancestor, project)?;
+            if matched {
+                return Ok((lock_name.to_string(), ancestor.to_path_buf()));
+            }
+            break;
         }
         if ancestor.join(".blanket").is_dir() {
             break;
         }
     }
     Ok(("package-lock.json".to_string(), project.to_path_buf()))
+}
+
+fn is_yarn_berry(root: &Path) -> bool {
+    if root.join(".yarnrc.yml").is_file() {
+        return true;
+    }
+    let Ok(text) = fs::read_to_string(root.join("package.json")) else {
+        return false;
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(value) = package
+        .get("packageManager")
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+    let Some(version) = value.strip_prefix("yarn@") else {
+        return false;
+    };
+    version
+        .split(|character| matches!(character, '.' | '-' | '+'))
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .is_some_and(|major| major >= 2)
+}
+
+fn yarn_refusal(root: &Path, verb: Verb, texts: &[String], dev: bool) -> io::Error {
+    if is_yarn_berry(root) {
+        return other(
+            "this project uses Yarn Berry; Berry cache checksums are not npm tarball integrity values; convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only', then 'blanket'",
+        );
+    }
+    let tool_verb = verb.command();
+    other(format!(
+        "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'blanket' (it imports yarn.lock)",
+        if dev && verb == Verb::Add { " -D" } else { "" },
+        texts.iter().map(|text| format!(" {text}")).collect::<String>()
+    ))
 }
 
 fn node_delegate_args(
@@ -1448,16 +1533,7 @@ fn node(
     }
     let lock_text = fs::read_to_string(lock_root.join(&lock_name))?;
     if lock_name == "yarn.lock" {
-        let tool_verb = match verb {
-            Verb::Add => "add",
-            Verb::Remove => "remove",
-            Verb::Update => "update",
-        };
-        return Err(other(format!(
-            "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'blanket' (it imports yarn.lock)",
-            if dev && verb == Verb::Add { " -D" } else { "" },
-            texts.iter().map(|text| format!(" {text}")).collect::<String>()
-        )));
+        return Err(yarn_refusal(&lock_root, verb, texts, dev));
     }
     let manager = node_package_manager(&lock_root, &lock_text)?;
     let tool_root = xrun::realize_node_tool(
@@ -1833,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_pnpm_package_manager_names_lock_major_without_floating_suggestion() {
+    fn missing_pnpm_package_manager_names_lock_format_without_floating_suggestion() {
         let root = std::env::temp_dir().join(format!(
             "blanket-node-package-manager-{}",
             std::process::id()
@@ -1844,13 +1920,12 @@ mod tests {
         let missing = node_package_manager(&root, "lockfileVersion: '9.0'\n").unwrap_err();
         let missing = missing.to_string();
         assert!(
-            missing.contains("lock was written by pnpm major 9"),
+            missing.contains(
+                "pnpm-lock.yaml is lockfile format 9.0; set packageManager to the exact pnpm version your team runs, e.g. from `pnpm --version`"
+            ),
             "{missing}"
         );
-        assert!(missing.contains(
-            "add \"packageManager\": \"pnpm@<major.minor.patch>\" using the exact version the team runs (pnpm --version)"
-        ));
-        assert!(!missing.contains("pnpm@9\""), "{missing}");
+        assert!(!missing.contains("pnpm major 9"), "{missing}");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1885,7 +1960,7 @@ mod tests {
         fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
         fs::write(
             root.join("pnpm-workspace.yaml"),
-            "packages:\n  - packages/*\n  - '!packages/private'\n",
+            "packages:\n  - '!packages/private'\n  - packages/*\n",
         )
         .unwrap();
         let member = root.join("packages/lib");
@@ -1904,12 +1979,10 @@ mod tests {
         ));
 
         let independent = root.join("packages/private");
-        let error = node_lock_selection(&independent).unwrap_err();
-        assert!(
-            error.to_string().contains(&root.display().to_string()),
-            "{error}"
+        assert_eq!(
+            node_lock_selection(&independent).unwrap(),
+            ("package-lock.json".to_string(), independent.clone())
         );
-        assert!(error.to_string().contains("packages/*"), "{error}");
 
         fs::write(independent.join("package-lock.json"), "{}\n").unwrap();
         assert_eq!(
@@ -1929,6 +2002,122 @@ mod tests {
         assert_eq!(
             node_lock_selection(&boundary).unwrap(),
             ("package-lock.json".to_string(), boundary)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-node-lock-boundaries-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let nested = root.join("tools/nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("package.json"), "{}\n").unwrap();
+
+        fs::write(root.join("package-lock.json"), "{}\n").unwrap();
+        assert_eq!(
+            node_lock_selection(&nested).unwrap(),
+            ("package-lock.json".to_string(), nested.clone())
+        );
+        fs::remove_file(root.join("package-lock.json")).unwrap();
+        fs::write(root.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+        assert_eq!(
+            node_lock_selection(&nested).unwrap(),
+            ("package-lock.json".to_string(), nested.clone())
+        );
+        fs::remove_file(root.join("yarn.lock")).unwrap();
+        assert_eq!(
+            node_lock_selection(&nested).unwrap(),
+            ("package-lock.json".to_string(), nested)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unmatched_pnpm_workspace_is_a_boundary_to_an_outer_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-nested-pnpm-boundary-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let inner = root.join("inner");
+        let member = inner.join("member");
+        fs::create_dir_all(&member).unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - inner/**\n",
+        )
+        .unwrap();
+        fs::write(inner.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(
+            inner.join("pnpm-workspace.yaml"),
+            "packages:\n  - '!member'\n",
+        )
+        .unwrap();
+        fs::write(member.join("package.json"), "{}\n").unwrap();
+
+        assert_eq!(
+            node_lock_selection(&member).unwrap(),
+            ("package-lock.json".to_string(), member)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mixed_sync_roots_are_rejected_before_delegation() {
+        let root =
+            std::env::temp_dir().join(format!("blanket-mixed-sync-roots-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("packages/member")).unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        let member = root.join("packages/member");
+        let groups = vec![(Eco::Python, Vec::new()), (Eco::Node, Vec::new())];
+        let error = reject_mixed_sync_roots(Verb::Add, &member, &groups).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(&member.display().to_string()), "{message}");
+        assert!(message.contains(&root.display().to_string()), "{message}");
+        assert!(message.contains("run the two adds separately"), "{message}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn yarn_berry_uses_conversion_refusal_without_delegation() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-yarn-berry-detection-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            "{\"packageManager\":\"yarn@1.22.22\"}\n",
+        )
+        .unwrap();
+        assert!(!is_yarn_berry(&root));
+        fs::write(root.join(".yarnrc.yml"), "nodeLinker: node-modules\n").unwrap();
+        assert!(is_yarn_berry(&root));
+        fs::remove_file(root.join(".yarnrc.yml")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            "{\"packageManager\":\"yarn@2.4.3\"}\n",
+        )
+        .unwrap();
+        assert!(is_yarn_berry(&root));
+        let error = yarn_refusal(&root, Verb::Add, &["react".into()], false);
+        assert!(
+            error.to_string().contains(
+                "convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only'"
+            ),
+            "{error}"
         );
         let _ = fs::remove_dir_all(&root);
     }
