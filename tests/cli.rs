@@ -462,6 +462,70 @@ fn x_clean_is_offline_and_strict_about_trailing_arguments() {
 }
 
 #[test]
+fn x_clean_refuses_symlinked_or_relative_home_components() {
+    let outside = TempDir::new("x-clean-outside-blanket");
+    let symlinked_blanket_home = TempDir::new("x-clean-symlinked-blanket");
+    let blanket_victim = outside.0.join(".blanket/x/py-victim/.blanket/closures");
+    std::fs::create_dir_all(&blanket_victim).unwrap();
+    std::fs::remove_dir_all(symlinked_blanket_home.0.join(".blanket")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.0.join(".blanket"),
+        symlinked_blanket_home.0.join(".blanket"),
+    )
+    .unwrap();
+    let out = blanket(
+        &symlinked_blanket_home.0,
+        &symlinked_blanket_home.0,
+        &["x", "--clean"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("symlink") && stderr.contains("refusing"),
+        "{stderr}"
+    );
+    assert!(blanket_victim.is_dir(), "symlink target was removed");
+
+    let outside_x = TempDir::new("x-clean-outside-x");
+    let symlinked_x_home = TempDir::new("x-clean-symlinked-x");
+    let x_victim = outside_x.0.join("x/py-victim/.blanket/closures");
+    std::fs::create_dir_all(&x_victim).unwrap();
+    std::os::unix::fs::symlink(outside_x.0.join("x"), symlinked_x_home.0.join(".blanket/x"))
+        .unwrap();
+    let out = blanket(&symlinked_x_home.0, &symlinked_x_home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("symlink") && stderr.contains("refusing"),
+        "{stderr}"
+    );
+    assert!(x_victim.is_dir(), "symlink target was removed");
+
+    let relative_home = TempDir::new("x-clean-relative-home");
+    let relative_victim = relative_home
+        .0
+        .join("relative-home/.blanket/x/py-victim/.blanket/closures");
+    std::fs::create_dir_all(&relative_victim).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_blanket"))
+        .current_dir(&relative_home.0)
+        .env("BLANKET_STORE", relative_home.0.join("store"))
+        .env("HOME", "relative-home")
+        .env_remove("BLANKET_POLICY")
+        .env_remove("BLANKET_STRICT")
+        .env("NO_COLOR", "1")
+        .args(["x", "--clean"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("HOME must be an absolute directory"),
+        "{stderr}"
+    );
+    assert!(relative_victim.is_dir(), "relative HOME target was removed");
+}
+
+#[test]
 fn cached_x_rechecks_object_exceptions_under_project_policy() {
     let home = TempDir::new("x-policy-home");
     let project = TempDir::new("x-policy-project");

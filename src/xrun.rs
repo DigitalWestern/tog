@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -72,9 +73,16 @@ fn safe(text: &str) -> String {
 }
 
 fn home() -> io::Result<PathBuf> {
-    std::env::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| other("HOME is not set"))
+        .ok_or_else(|| other("x: HOME is not set; set HOME to an absolute directory"))?;
+    if !home.is_absolute() {
+        return Err(other(format!(
+            "x: HOME must be an absolute directory, got {}; refusing to use it",
+            home.display()
+        )));
+    }
+    Ok(home)
 }
 
 fn x_root_name(
@@ -102,6 +110,15 @@ fn x_root_name(
 }
 
 fn ensure_x_metadata_dir(root: &Path) -> io::Result<()> {
+    if root
+        .file_name()
+        .is_some_and(|name| name.as_bytes().first() == Some(&b'.'))
+    {
+        return Err(other(format!(
+            "x: environment root {} may not start with '.'",
+            root.display()
+        )));
+    }
     if let Ok(metadata) = fs::symlink_metadata(root) {
         if metadata.file_type().is_symlink() {
             return Err(other(format!(
@@ -575,6 +592,62 @@ fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
     Some(canonical)
 }
 
+fn existing_real_directory(path: &Path, label: &str) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(other(format!(
+            "x: {label} {} is a symlink; refusing to clean",
+            path.display()
+        ))),
+        Ok(metadata) if !metadata.is_dir() => Err(other(format!(
+            "x: {label} {} is not a directory; refusing to clean",
+            path.display()
+        ))),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(other(format!(
+            "x: could not inspect {label} {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Return the canonical cleanup anchor after checking every user-controlled
+/// directory above it without following a symlink. Missing `.blanket` or `x`
+/// means there is nothing to clean; an existing unsafe component is an error.
+fn validated_x_dir(x_dir: &Path) -> io::Result<Option<PathBuf>> {
+    if !x_dir.is_absolute() {
+        return Err(other(format!(
+            "x: cleanup directory {} is not absolute; refusing to clean",
+            x_dir.display()
+        )));
+    }
+    let blanket_dir = x_dir.parent().ok_or_else(|| {
+        other(format!(
+            "x: cleanup directory {} has no .blanket parent; refusing to clean",
+            x_dir.display()
+        ))
+    })?;
+    let home_dir = blanket_dir.parent().ok_or_else(|| {
+        other(format!(
+            "x: cleanup directory {} has no HOME parent; refusing to clean",
+            x_dir.display()
+        ))
+    })?;
+    if !existing_real_directory(home_dir, "HOME")? {
+        return Err(other(format!(
+            "x: HOME directory {} does not exist; refusing to clean",
+            home_dir.display()
+        )));
+    }
+    if !existing_real_directory(blanket_dir, "$HOME/.blanket")? {
+        return Ok(None);
+    }
+    if !existing_real_directory(x_dir, "$HOME/.blanket/x")? {
+        return Ok(None);
+    }
+    Ok(Some(x_dir.canonicalize()?))
+}
+
 fn has_safe_closures(root: &Path) -> bool {
     fs::symlink_metadata(root.join(".blanket/closures"))
         .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
@@ -582,18 +655,23 @@ fn has_safe_closures(root: &Path) -> bool {
 }
 
 fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
-    match fs::symlink_metadata(&x_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Ok(Vec::new()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    }
-    let x_dir = x_dir.canonicalize()?;
+    let Some(x_dir) = validated_x_dir(x_dir)? else {
+        return Ok(Vec::new());
+    };
     let mut candidates = Vec::new();
     for entry in fs::read_dir(&x_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !entry.file_type()?.is_dir() {
+        let name = entry.file_name();
+        if name.as_bytes().first() == Some(&b'.') {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
         let Some(canonical) = safe_x_root(&path, &x_dir) else {
@@ -666,7 +744,33 @@ fn legacy_packages(path: &Path, ecosystem: &str) -> Option<Vec<LegacyPackage>> {
 
 fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
     let Some(package) = filter.package.as_deref() else {
-        return CandidateMatch::Match;
+        let Some(ecosystem) = filter.ecosystem.as_deref() else {
+            return CandidateMatch::Match;
+        };
+        let name_ecosystem = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| {
+                if name.starts_with("py-") {
+                    Some("python")
+                } else if name.starts_with("npm-") {
+                    Some("node")
+                } else {
+                    None
+                }
+            });
+        let recovered_ecosystem = if legacy_packages(path, "python").is_some() {
+            Some("python")
+        } else if legacy_packages(path, "node").is_some() {
+            Some("node")
+        } else {
+            name_ecosystem
+        };
+        return match recovered_ecosystem {
+            Some(recovered) if recovered == ecosystem => CandidateMatch::Match,
+            Some(_) => CandidateMatch::NoMatch,
+            None => CandidateMatch::Unrecoverable,
+        };
     };
     let ecosystems: Vec<&str> = filter
         .ecosystem
@@ -840,6 +944,17 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             continue;
         }
         let registration = registration_for(&candidate.path)?;
+        // Revalidate the full candidate immediately before deletion. The
+        // canonical parent check prevents a replacement symlink from turning
+        // cleanup into an out-of-tree delete.
+        if safe_x_root(&candidate.path, &x_dir).is_none() {
+            println!(
+                "blanket: skipped x environment {} (it disappeared or changed; retry later)",
+                candidate.path.display()
+            );
+            skipped += 1;
+            continue;
+        }
         store::remove_tree(&candidate.path)?;
         match registration {
             Registration::Found { store, entry } => {
@@ -899,8 +1014,9 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     if tool.is_empty() || package.is_empty() {
         return Err(other("x: empty tool name"));
     }
+    let x_home = home()?;
     let store = Store::open()?;
-    let root = home()?
+    let root = x_home
         .join(".blanket/x")
         .join(x_root_name(&store, platform, ecosystem, package, version));
     let _x_lock = lock_x_root(&root, false, false, true)?
@@ -1099,7 +1215,7 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn versions_and_bins() {
@@ -1175,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_x_lock_revalidates_root_after_cleanup_race() {
+    fn cleanup_lock_waits_for_runner_recreation() {
         let base = std::env::temp_dir().join(format!(
             "blanket-x-lock-race-{}-{}",
             std::process::id(),
@@ -1185,35 +1301,66 @@ mod tests {
                 .as_nanos()
         ));
         let root = base.join("x").join("py-race-test");
-        fs::create_dir_all(&root).unwrap();
-        let exclusive = lock_x_root(&root, true, false, false)
-            .unwrap()
-            .expect("exclusive cleanup lock");
-        let (started_tx, started_rx) = mpsc::channel();
-        let (acquired_tx, acquired_rx) = mpsc::channel();
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
         let runner_root = root.clone();
         let runner = thread::spawn(move || {
-            started_tx.send(()).unwrap();
             let shared = lock_x_root(&runner_root, false, false, true)
                 .unwrap()
                 .expect("shared runner lock");
-            acquired_tx.send(runner_root.exists()).unwrap();
-            shared
+            fs::create_dir_all(&runner_root).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(shared);
         });
 
-        started_rx.recv().unwrap();
+        ready_rx.recv().unwrap();
         assert!(
-            acquired_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "shared runner lock was not blocked by cleanup"
+            lock_x_root(&root, true, true, false).unwrap().is_none(),
+            "cleanup lock acquired while runner held its shared lock"
         );
-        store::remove_tree(&root).unwrap();
-        drop(exclusive);
+        release_tx.send(()).unwrap();
+        runner.join().unwrap();
 
         assert!(
-            !acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "runner must revalidate the root after acquiring the stable lock"
+            lock_x_root(&root, true, true, false).unwrap().is_some(),
+            "cleanup lock did not become available after runner dropped its shared lock"
         );
-        drop(runner.join().unwrap());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn dot_prefixed_entries_are_not_x_candidates() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-x-lock-entry-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let x_dir = base.join("home/.blanket/x");
+        let root = x_dir.join("py-active");
+        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        let shared = lock_x_root(&root, false, false, true)
+            .unwrap()
+            .expect("active root shared lock");
+        let lock_path = x_dir.join(".locks/py-active.lock");
+        assert!(lock_path.is_file());
+        fs::create_dir_all(x_dir.join(".locks/.blanket")).unwrap();
+        fs::write(x_dir.join(".locks/.blanket/x.json"), "{}").unwrap();
+
+        let candidates = x_candidates(&x_dir).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, root.canonicalize().unwrap());
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.path != x_dir.join(".locks")),
+            "the permanent lock directory was enumerated as an environment"
+        );
+        drop(shared);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -1365,10 +1512,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let root = base.join("x").join("py-partial");
+        let root = base.join("home/.blanket/x/py-partial");
         ensure_x_metadata_dir(&root).unwrap();
         write_x_request(&root, "python", "ruff", None, "realizing").unwrap();
-        let candidates = x_candidates(&base.join("x")).unwrap();
+        let candidates = x_candidates(&base.join("home/.blanket/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
         fs::remove_dir_all(base).unwrap();

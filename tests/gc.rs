@@ -410,3 +410,43 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
     assert!(!pytest_root.exists());
 }
+
+#[test]
+#[ignore]
+fn x_clean_py_leaves_legacy_npm_root() {
+    let temp = TempDir::new();
+    let store = temp.0.join("store");
+    let home = temp.0.join("home");
+    let project = temp.0.join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+
+    let npm_root = home.join(".blanket/x/npm-legacy");
+    fs::create_dir_all(npm_root.join(".blanket/closures")).unwrap();
+    fs::write(
+        npm_root.join("package.json"),
+        r#"{"dependencies":{"prettier":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let py_root = home.join(".blanket/x/py-legacy");
+    fs::create_dir_all(py_root.join(".blanket/closures")).unwrap();
+    fs::write(py_root.join("requirements.in"), "ruff\n").unwrap();
+
+    let cleaned = blanket_home(&bin, &project, &store, &home, &["x", "--clean", "--py"]);
+    assert_eq!(
+        cleaned.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&cleaned.stderr)
+    );
+    assert!(!py_root.exists(), "legacy Python root was not removed");
+    assert!(
+        npm_root.exists(),
+        "legacy npm root was removed by --py cleanup"
+    );
+
+    let all_cleaned = blanket_home(&bin, &project, &store, &home, &["x", "--clean"]);
+    assert_eq!(all_cleaned.status.code(), Some(0));
+    assert!(!npm_root.exists(), "legacy npm root cleanup did not work");
+}

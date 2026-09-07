@@ -18,6 +18,14 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — `x` cleanup validates its filesystem boundary
+
+`x --clean` now requires an absolute `HOME`, validates the real
+`HOME/.blanket/x` directory chain without following symlinks, reserves all
+dot-prefixed entries including `.locks`, and rechecks each candidate's
+canonical parent immediately before deletion. The checks are shared by the
+Linux and macOS paths; no sandbox, extraction, or toolchain pin changed.
+
 ### 2026-09-06 — running `x` tools hold an inherited shared lock
 
 `blanket x` now takes a shared `flock` on each cached environment's

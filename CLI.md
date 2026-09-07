@@ -311,7 +311,9 @@ closure before realization begins. For older roots without `x.json`, cleanup
 matches the exact package recovered from the generated `requirements.in` or
 `package.json`; if it cannot recover the package it skips that root with a
 removal hint. A cleanup without a tool still removes every safe x root,
-including partial realizations.
+including partial realizations. It refuses a relative `HOME` or symlinked or
+non-directory `HOME/.blanket/x` component, and never treats `.locks` as an
+environment.
 
 ### 2.5 `blanket status`
 

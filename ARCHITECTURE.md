@@ -73,7 +73,10 @@ roots, cleanup recovers the exact package from the generated
 `requirements.in` or `package.json` dependencies and skips roots whose
 package cannot be recovered. Closure object paths identify the originating
 store, so cleanup removes the matching canonical registry entry there even
-when the active `BLANKET_STORE` differs.
+when the active `BLANKET_STORE` differs. Cleanup first requires an absolute,
+real `HOME/.blanket/x` hierarchy, reserves every dot-prefixed entry (including
+`.locks`), and revalidates each candidate's real canonical parent immediately
+before removal.
 
 ## Platforms
 

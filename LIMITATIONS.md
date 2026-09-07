@@ -36,9 +36,14 @@ say what breaks, for whom, and how it fails (loud/silent).
   `blanket gc`. A permanent per-root lock under
   `~/.blanket/x/.locks/` protects running tools, including roots being
   recreated after cleanup. Partial roots are marked `realizing` before work
-  starts and are cleanable. Legacy roots without `x.json` are matched by
-  exact package recovered from their generated manifest; unrecoverable roots
-  are skipped with a hint to run `blanket x --clean` without a tool.
+  starts and are cleanable. Cleanup requires an absolute, non-symlink
+  `HOME/.blanket/x` hierarchy and skips all dot-prefixed entries, so the
+  permanent lock directory cannot be mistaken for an environment. Legacy
+  roots without `x.json` are matched by exact package recovered from their
+  generated manifest; an ecosystem-only filter may use only the recovered
+  manifest or the generated `py-`/`npm-` prefix as ecosystem evidence, never
+  as package evidence. Unrecoverable roots are skipped with a hint to run
+  `blanket x --clean` without a tool.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle complete)
+### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle under review)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -250,7 +250,7 @@ Any of these may be taken after WP1 merges; each is its own PR.
   mutable overlay; dev/optional dependency groups installable by flag.
 - `blanket add/remove/update` for pnpm, Yarn, Poetry, and PDM projects
   (today they refuse with instructions; LIMITATIONS.md:24).
-- ✅ `x` lifecycle: `blanket x --clean`, unregister an environment, protect a
+- IMPLEMENTED — under review; Mac cold/warm gate outstanding: `blanket x --clean`, unregister an environment, protect a
   running tool from concurrent gc. (gc already knows the roots:
   src/gc.rs:111.) Covered by `cli::tests::x_owns_only_its_leading_flags`,
   `xrun::tests::shared_x_lock_blocks_nonblocking_cleanup_and_is_inheritable`,
@@ -336,3 +336,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
 | 2026-09-06 | WP4 x lifecycle implemented: `x --clean` removes and unregisters safe cached roots, inherited shared locks protect running tools, and GC remains closure-rooted. Unit, offline CLI, and ignored GC/x lifecycle tests added. |
 | 2026-09-06 | WP4 x lifecycle rework: permanent locks survive projection deletion, legacy cleanup matches exact generated packages, partial roots carry realizing markers, and registrations are removed from the closure's originating store. Race, legacy, scoped/`--from`, cross-store, and partial-root regressions added. |
+| 2026-09-06 | WP4 x lifecycle review round 2: cleanup validates the absolute home hierarchy, reserves `.locks`, filters legacy ecosystems correctly, and uses a channel-coordinated lock race regression; Mac cold/warm gate remains outstanding. |
