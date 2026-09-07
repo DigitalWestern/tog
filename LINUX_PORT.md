@@ -18,6 +18,15 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — running `x` tools hold an inherited shared lock
+
+`blanket x` now takes a shared `flock` on each cached environment's
+`.blanket/x.lock` and clears close-on-exec before replacing itself with the
+tool. `x --clean` uses a non-blocking exclusive lock, reports a running tool
+as in use, and leaves its registered root for a later retry. This uses the
+same advisory-lock contract on Linux and macOS; no sandbox or toolchain pin
+changed.
+
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 
 `pack_checkout` no longer infers ustar representability from the tar

@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,7 +16,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::platform::Platform;
-use crate::store::Store;
+use crate::store::{self, RootEntry, Store};
 use crate::{inspect, npm, policy, project, pypi, pyselect, python, ui};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,16 @@ pub struct Request {
     pub tool: String,
     pub args: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanRequest {
+    pub ecosystem: Option<String>,
+    pub from: Option<String>,
+    pub tool: Option<String>,
+}
+
+const X_LOCK_FILE: &str = ".blanket/x.lock";
+const X_REQUEST_FILE: &str = ".blanket/x.json";
 
 fn other(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
@@ -63,6 +74,144 @@ fn home() -> io::Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| other("HOME is not set"))
+}
+
+fn x_root_name(
+    store: &Store,
+    platform: Platform,
+    ecosystem: &str,
+    package: &str,
+    version: Option<&str>,
+) -> String {
+    let key = hex::encode(Sha256::digest(
+        format!(
+            "x/2\0{}\0{ecosystem}\0{package}\0{}\0{}",
+            store.root.display(),
+            version.unwrap_or(""),
+            platform.triple()
+        )
+        .as_bytes(),
+    ));
+    format!(
+        "{}-{}-{}",
+        if ecosystem == "python" { "py" } else { "npm" },
+        safe(package),
+        &key[..16]
+    )
+}
+
+fn ensure_x_metadata_dir(root: &Path) -> io::Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(root) {
+        if metadata.file_type().is_symlink() {
+            return Err(other(format!(
+                "x: environment root {} is a symlink; refusing to use it",
+                root.display()
+            )));
+        }
+    }
+    fs::create_dir_all(root)?;
+    let metadata_dir = root.join(".blanket");
+    if let Ok(metadata) = fs::symlink_metadata(&metadata_dir) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(other(format!(
+                "x: metadata directory {} is not a private directory",
+                metadata_dir.display()
+            )));
+        }
+    } else {
+        fs::create_dir_all(&metadata_dir)?;
+    }
+    Ok(())
+}
+
+/// Open the per-environment advisory lock. A shared lock belongs to the
+/// running tool and is intentionally made inheritable across exec. Cleanup
+/// requests use the same file with a non-blocking exclusive lock.
+fn lock_x_root(
+    root: &Path,
+    exclusive: bool,
+    nonblocking: bool,
+    inherit: bool,
+) -> io::Result<Option<fs::File>> {
+    ensure_x_metadata_dir(root)?;
+    let path = root.join(X_LOCK_FILE);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() {
+            return Err(other(format!(
+                "x: lock file {} is a symlink; refusing to use it",
+                path.display()
+            )));
+        }
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    let mut operation = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    if nonblocking {
+        operation |= libc::LOCK_NB;
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+        let error = io::Error::last_os_error();
+        if nonblocking
+            && matches!(
+                error.raw_os_error(),
+                Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
+            )
+        {
+            return Ok(None);
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!("lock {}: {error}", path.display()),
+        ));
+    }
+    if inherit {
+        let fd = file.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(Some(file))
+}
+
+fn write_x_request(
+    root: &Path,
+    ecosystem: &str,
+    package: &str,
+    version: Option<&str>,
+    tool: &str,
+) -> io::Result<()> {
+    let path = root.join(X_REQUEST_FILE);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() {
+            return Err(other(format!(
+                "x: request record {} is a symlink; refusing to overwrite it",
+                path.display()
+            )));
+        }
+    }
+    let tmp = root
+        .join(".blanket")
+        .join(format!(".x.json.tmp.{}", std::process::id()));
+    let record = serde_json::json!({
+        "schema": "x-request/1",
+        "ecosystem": ecosystem,
+        "package": package,
+        "version": version,
+        "tool": tool,
+    });
+    fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
+    fs::rename(tmp, path)
 }
 
 fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
@@ -293,6 +442,226 @@ fn check_cached_projection(store: &Store, root: &Path, ecosystem: &str) -> io::R
     Ok(())
 }
 
+#[derive(Debug)]
+struct XRecord {
+    ecosystem: String,
+    package: String,
+    version: Option<String>,
+    tool: String,
+}
+
+#[derive(Debug)]
+struct CleanFilter {
+    ecosystem: Option<String>,
+    package: Option<String>,
+    version: Option<String>,
+    tool: Option<String>,
+}
+
+struct XCandidate {
+    path: PathBuf,
+    registered: Option<RootEntry>,
+}
+
+fn read_x_request(root: &Path) -> Option<XRecord> {
+    let value: serde_json::Value =
+        serde_json::from_reader(fs::File::open(root.join(X_REQUEST_FILE)).ok()?).ok()?;
+    Some(XRecord {
+        ecosystem: value.get("ecosystem")?.as_str()?.to_string(),
+        package: value.get("package")?.as_str()?.to_string(),
+        version: value
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        tool: value.get("tool")?.as_str()?.to_string(),
+    })
+    .filter(|_| value.get("schema").and_then(serde_json::Value::as_str) == Some("x-request/1"))
+}
+
+fn clean_filter(request: CleanRequest) -> io::Result<CleanFilter> {
+    let Some(tool) = request.tool else {
+        if request.from.is_some() {
+            return Err(other("x: --clean --from requires a tool name"));
+        }
+        return Ok(CleanFilter {
+            ecosystem: request.ecosystem,
+            package: None,
+            version: None,
+            tool: None,
+        });
+    };
+    let (tool, tool_version) = split_version(&tool);
+    let (package, from_version) = request.from.as_deref().map_or((tool, None), split_version);
+    let version = match (from_version, tool_version) {
+        (Some(from), Some(tool)) if from != tool => {
+            return Err(other(
+                "x: --from package version conflicts with the tool version; specify only one or use the same version",
+            ));
+        }
+        (Some(from), _) => Some(from),
+        (_, tool) => tool,
+    };
+    Ok(CleanFilter {
+        ecosystem: request.ecosystem,
+        package: Some(package.to_string()),
+        version: version.map(str::to_string),
+        tool: Some(tool.to_string()),
+    })
+}
+
+fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let metadata_dir = root.join(".blanket");
+    let metadata = fs::symlink_metadata(&metadata_dir).ok()?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let canonical = root.canonicalize().ok()?;
+    if canonical.parent() != Some(x_dir) {
+        return None;
+    }
+    Some(canonical)
+}
+
+fn has_safe_closures(root: &Path) -> bool {
+    fs::symlink_metadata(root.join(".blanket/closures"))
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn x_candidates(store: &Store) -> io::Result<Vec<XCandidate>> {
+    let x_dir = home()?.join(".blanket/x");
+    match fs::symlink_metadata(&x_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    }
+    let x_dir = x_dir.canonicalize()?;
+    let roots = store.roots()?;
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&x_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(canonical) = safe_x_root(&path, &x_dir) else {
+            continue;
+        };
+        let registered = roots.iter().find(|root| root.path == canonical).cloned();
+        if registered.is_none() && !has_safe_closures(&canonical) {
+            continue;
+        }
+        candidates.push(XCandidate { path, registered });
+    }
+    Ok(candidates)
+}
+
+fn old_root_matches(path: &Path, store: &Store, filter: &CleanFilter) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let ecosystems: Vec<&str> = filter
+        .ecosystem
+        .as_deref()
+        .map_or_else(|| vec!["python", "node"], |ecosystem| vec![ecosystem]);
+    let Some(package) = filter.package.as_deref() else {
+        return ecosystems.iter().any(|ecosystem| {
+            name.starts_with(if *ecosystem == "python" {
+                "py-"
+            } else {
+                "npm-"
+            })
+        });
+    };
+    if let Some(version) = filter.version.as_deref() {
+        return ecosystems.iter().any(|ecosystem| {
+            Platform::ALL.iter().any(|platform| {
+                name == x_root_name(store, *platform, ecosystem, package, Some(version))
+            })
+        });
+    }
+    ecosystems.iter().any(|ecosystem| {
+        name.starts_with(&format!(
+            "{}-{}-",
+            if *ecosystem == "python" { "py" } else { "npm" },
+            safe(package)
+        ))
+    })
+}
+
+fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
+    filter
+        .ecosystem
+        .as_deref()
+        .map_or(true, |ecosystem| ecosystem == record.ecosystem)
+        && filter
+            .package
+            .as_deref()
+            .map_or(true, |package| package == record.package)
+        && filter
+            .version
+            .as_deref()
+            .map_or(true, |version| Some(version) == record.version.as_deref())
+        && filter
+            .tool
+            .as_deref()
+            .map_or(true, |tool| tool == record.tool)
+}
+
+fn candidate_matches(candidate: &XCandidate, store: &Store, filter: &CleanFilter) -> bool {
+    read_x_request(&candidate.path).map_or_else(
+        || old_root_matches(&candidate.path, store, filter),
+        |record| record_matches(&record, filter),
+    )
+}
+
+/// Remove cached x projections. The store objects remain available for the
+/// ordinary GC pass; deleting a projection is deliberately not object GC.
+pub fn clean(request: CleanRequest) -> io::Result<()> {
+    let filter = clean_filter(request)?;
+    let store = Store::open()?;
+    let candidates = x_candidates(&store)?;
+    let mut matched = 0usize;
+    let mut removed = 0usize;
+    let mut skipped = 0usize;
+    for candidate in candidates {
+        if !candidate_matches(&candidate, &store, &filter) {
+            continue;
+        }
+        matched += 1;
+        let Some(_lock) = lock_x_root(&candidate.path, true, true, false)? else {
+            println!(
+                "blanket: skipped x environment {} (in use by a running tool; retry later)",
+                candidate.path.display()
+            );
+            skipped += 1;
+            continue;
+        };
+        store::remove_tree(&candidate.path)?;
+        if let Some(entry) = candidate.registered {
+            store.remove_root_entry(&entry)?;
+        }
+        println!(
+            "blanket: removed x environment {}",
+            candidate.path.display()
+        );
+        removed += 1;
+    }
+    if matched == 0 {
+        println!("blanket: x clean: nothing to clean");
+    } else {
+        println!(
+            "blanket: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'blanket gc'"
+        );
+    }
+    Ok(())
+}
+
 pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     let ecosystem = choose_ecosystem(&request, cwd)?;
     let (tool, tool_version) = split_version(&request.tool);
@@ -323,21 +692,11 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
         return Err(other("x: empty tool name"));
     }
     let store = Store::open()?;
-    let key = hex::encode(Sha256::digest(
-        format!(
-            "x/2\0{}\0{ecosystem}\0{package}\0{}\0{}",
-            store.root.display(),
-            version.unwrap_or(""),
-            platform.triple()
-        )
-        .as_bytes(),
-    ));
-    let root = home()?.join(".blanket/x").join(format!(
-        "{}-{}-{}",
-        if ecosystem == "python" { "py" } else { "npm" },
-        safe(package),
-        &key[..16]
-    ));
+    let root = home()?
+        .join(".blanket/x")
+        .join(x_root_name(&store, platform, ecosystem, package, version));
+    let _x_lock = lock_x_root(&root, false, false, true)?
+        .expect("blocking shared x lock always returns a file");
     let (executable, path_prefix, env): (PathBuf, Vec<PathBuf>, Vec<(String, PathBuf)>) =
         match ecosystem {
             "python" => {
@@ -380,6 +739,7 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                 )
             }
         };
+    write_x_request(&root, ecosystem, package, version, bin)?;
     let mut path: Vec<String> = path_prefix
         .iter()
         .map(|dir| dir.to_string_lossy().into_owned())
@@ -509,6 +869,7 @@ fn realize_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn versions_and_bins() {
@@ -557,5 +918,28 @@ mod tests {
         assert!(error.to_string().contains("invalid package"), "{error}");
         assert!(validate_from_bin("../tool").is_err());
         assert!(validate_version("1.0\n--index-url evil").is_err());
+    }
+
+    #[test]
+    fn shared_x_lock_blocks_nonblocking_cleanup_and_is_inheritable() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-x-lock-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let shared = lock_x_root(&root, false, false, true)
+            .unwrap()
+            .expect("shared lock");
+        let flags = unsafe { libc::fcntl(shared.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::FD_CLOEXEC, 0);
+        assert!(lock_x_root(&root, true, true, false).unwrap().is_none());
+        drop(shared);
+        assert!(lock_x_root(&root, true, true, false).unwrap().is_some());
+        fs::remove_dir_all(root).unwrap();
     }
 }

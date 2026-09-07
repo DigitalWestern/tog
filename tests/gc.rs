@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 struct TempDir(PathBuf);
@@ -53,6 +54,19 @@ fn blanket(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(cwd)
         .env("BLANKET_STORE", store)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn blanket_home(bin: &Path, cwd: &Path, store: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new(bin)
+        .current_dir(cwd)
+        .env("BLANKET_STORE", store)
+        .env("HOME", home)
+        .env_remove("BLANKET_POLICY")
+        .env_remove("BLANKET_STRICT")
+        .env("NO_COLOR", "1")
         .args(args)
         .output()
         .unwrap()
@@ -232,4 +246,132 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
         "register existing project",
     );
     assert!(object.is_dir(), "registered legacy object was collected");
+}
+
+#[test]
+#[ignore]
+fn x_clean_removes_registered_environment_and_running_x_is_busy() {
+    let temp = TempDir::new();
+    let store = temp.0.join("store");
+    let home = temp.0.join("home");
+    let project = temp.0.join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+
+    ok(
+        blanket_home(
+            &bin,
+            &project,
+            &store,
+            &home,
+            &["x", "py:ruff", "--version"],
+        ),
+        "realize x ruff",
+    );
+    let x_dir = home.join(".blanket/x");
+    let ruff_root = fs::read_dir(&x_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.join(".blanket/x.json").is_file())
+        .expect("ruff x root");
+    let closure: serde_json::Value = serde_json::from_reader(
+        fs::File::open(ruff_root.join(".blanket/closures/python.json")).unwrap(),
+    )
+    .unwrap();
+    let env_object = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
+    assert!(env_object.is_dir(), "realized environment object");
+
+    let roots = ok(
+        blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
+        "x root registration",
+    );
+    assert!(roots
+        .lines()
+        .any(|line| line == ruff_root.display().to_string()));
+
+    let cleaned = ok(
+        blanket_home(&bin, &project, &store, &home, &["x", "--clean", "py:ruff"]),
+        "clean x ruff",
+    );
+    assert!(cleaned.contains("removed x environment"), "{cleaned}");
+    assert!(!ruff_root.exists());
+    let roots = ok(
+        blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
+        "removed x root registration",
+    );
+    assert!(!roots
+        .lines()
+        .any(|line| line == ruff_root.display().to_string()));
+
+    // ACTIVE_WINDOW is deliberately independent of the lock. Age only the
+    // now-unrooted x environment so the following GC proves cleanup leaves
+    // immutable objects for the ordinary collector.
+    fs::File::open(&env_object)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(11 * 60))
+        .unwrap();
+    ok(
+        blanket_home(&bin, &project, &store, &home, &["gc", "--keep-days", "0"]),
+        "gc after x clean",
+    );
+    assert!(
+        !env_object.exists(),
+        "gc retained the unrooted x environment"
+    );
+
+    fs::write(
+        project.join("test_sleep.py"),
+        "import time\n\ndef test_sleep():\n    time.sleep(5)\n",
+    )
+    .unwrap();
+    let running = Command::new(&bin)
+        .current_dir(&project)
+        .env("BLANKET_STORE", &store)
+        .env("HOME", &home)
+        .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
+        .spawn()
+        .unwrap();
+    let pytest_root = (0..120)
+        .find_map(|_| {
+            let root = fs::read_dir(&x_dir)
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("py-pytest-"))
+                        && path.join(".blanket/x.json").is_file()
+                });
+            if root.is_some() {
+                root
+            } else {
+                thread::sleep(Duration::from_millis(100));
+                None
+            }
+        })
+        .expect("pytest x root became registered");
+    let busy = blanket_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]);
+    assert_eq!(busy.status.code(), Some(0), "clean while busy failed");
+    let busy_text = String::from_utf8_lossy(&busy.stdout);
+    assert!(
+        busy_text.contains("in use by a running tool; retry later"),
+        "{busy_text}"
+    );
+    assert!(pytest_root.exists(), "busy x root was removed");
+    let child = running.wait_with_output().unwrap();
+    assert!(
+        child.status.success(),
+        "pytest x failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+
+    let cleaned = ok(
+        blanket_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]),
+        "clean pytest after exit",
+    );
+    assert!(cleaned.contains("removed x environment"), "{cleaned}");
+    assert!(!pytest_root.exists());
 }

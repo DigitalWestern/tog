@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — OPEN
+### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -250,9 +250,12 @@ Any of these may be taken after WP1 merges; each is its own PR.
   mutable overlay; dev/optional dependency groups installable by flag.
 - `blanket add/remove/update` for pnpm, Yarn, Poetry, and PDM projects
   (today they refuse with instructions; LIMITATIONS.md:24).
-- `x` lifecycle: `blanket x --clean`, unregister an environment, protect a
+- ✅ `x` lifecycle: `blanket x --clean`, unregister an environment, protect a
   running tool from concurrent gc. (gc already knows the roots:
-  src/gc.rs:111.)
+  src/gc.rs:111.) Covered by `cli::tests::x_owns_only_its_leading_flags`,
+  `xrun::tests::shared_x_lock_blocks_nonblocking_cleanup_and_is_inheritable`,
+  `x_clean_is_offline_and_strict_about_trailing_arguments`, and the ignored
+  `x_clean_removes_registered_environment_and_running_x_is_busy`.
 - Extend `x` to cargo, go, gems, hex, nuget tools **after** WP1 has proven a
   model for compiled tools (Cargo today stores vendored sources; `cargo
   install` output is unmanaged, LIMITATIONS.md:226).
@@ -331,3 +334,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
+| 2026-09-06 | WP4 x lifecycle implemented: `x --clean` removes and unregisters safe cached roots, inherited shared locks protect running tools, and GC remains closure-rooted. Unit, offline CLI, and ignored GC/x lifecycle tests added. |

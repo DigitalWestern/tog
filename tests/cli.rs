@@ -433,6 +433,35 @@ fn x_needs_a_registry_outside_a_project() {
 }
 
 #[test]
+fn x_clean_is_offline_and_strict_about_trailing_arguments() {
+    let home = TempDir::new("x-clean");
+    let out = blanket(&home.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("nothing to clean"));
+
+    let out = blanket(&home.0, &home.0, &["x", "--clean", "ruff", "extra"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "blanket: error: x --clean: unexpected argument 'extra'\nRun 'blanket help x' for usage.\n"
+    );
+
+    for shell in ["bash", "zsh", "fish"] {
+        let out = blanket(&home.0, &home.0, &["completions", shell]);
+        assert_eq!(out.status.code(), Some(0), "{shell}");
+        let completion = text(&out.stdout);
+        assert!(
+            completion.contains(if shell == "fish" {
+                "-l clean"
+            } else {
+                "--clean"
+            }),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
 fn cached_x_rechecks_object_exceptions_under_project_policy() {
     let home = TempDir::new("x-policy-home");
     let project = TempDir::new("x-policy-project");

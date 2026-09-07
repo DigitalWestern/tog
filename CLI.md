@@ -297,6 +297,17 @@ outside any project → usage error naming the prefixes. No cross-registry
 lookups to guess. Python and Node only in v0; cargo (`cargo install`-style)
 and go (`go run pkg@ver`) are the obvious next two and fit the same shape.
 
+`blanket x --clean` removes every registered environment under
+`~/.blanket/x/`, and unregisters each root. `blanket x --clean <tool>[@version]`
+selects that tool (all versions when the version is omitted); `--py`, `--npm`,
+and `--from <package>` keep their normal meanings. Cleanup accepts no
+arguments after the tool. It prints one line per removed environment and a
+summary that the immutable store objects remain until the next `blanket gc`.
+A running tool holds a shared lock inherited across exec, so cleanup reports
+it as in use and leaves it for a later retry. The request is recorded in
+`x.json` beside the closure; older roots fall back to their validated package
+prefix and key name.
+
 ### 2.5 `blanket status`
 
 Per ecosystem found here: `synced`, `lock changed since sync`, `manifest

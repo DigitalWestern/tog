@@ -31,7 +31,9 @@ say what breaks, for whom, and how it fails (loud/silent).
   registry; a private-registry name needs the explicit prefix.
 - **`blanket x` covers PyPI and npm** (cargo and go later). Each tool's
   environment lives under `~/.blanket/x/` as a registered project root;
-  `blanket gc --project` does not touch it, and there is no `x --clean` yet.
+  `blanket x --clean` removes the projection and unregisters it, while the
+  immutable store object remains until the next `blanket gc`. Cleanup skips
+  environments held by a running tool and must be retried after exit.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a
