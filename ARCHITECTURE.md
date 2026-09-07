@@ -551,4 +551,4 @@ M5: hardening pass — RECORD verification/rewrite, Mach-service allowlist in
     checks (rebuild + compare), garbage collection (`blanket gc` — forests
     and backups included), per-package store objects, binary cache +
     /opt/blanket/store decision, signed toolchain manifests.
-See ROADMAP.md for direction (enterprise frame, expansion tracks).
+See PLAN.md for direction and the ordered work packages.

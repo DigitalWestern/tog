@@ -1,8 +1,8 @@
 # Review queue
 
-Independent adversarial review coverage, original briefs, and completed rounds. NEXT.md tracks what to *build*; this file tracks what has not
+Independent adversarial review coverage, original briefs, and completed rounds. PLAN.md tracks what to *build*; this file tracks what has not
 been independently *checked*. They are different debts and they were getting
-confused inside one paragraph of NEXT.md.
+confused inside one paragraph of the old NEXT.md.
 
 ## Ground rules
 
@@ -152,7 +152,7 @@ once.
 ## Logistics
 
 - **Codex** hit its usage limit at 03:18 on 2026-09-06; it resets
-  **2026-09-12**. Astra rounds are queued behind that. Per NEXT.md delegation,
+  **2026-09-12**. Astra rounds are queued behind that. Per PLAN.md working rules,
   Claude subagents are the stand-in while Codex is rate-limited.
 - **Gates:** `cargo test` for unit; `cargo test -- --ignored` for e2e, which
   needs network and real toolchains. On Linux put `TMPDIR` on a real disk.

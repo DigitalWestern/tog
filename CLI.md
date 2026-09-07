@@ -202,7 +202,8 @@ unknown first word:
 `blanket run <script>` stays the unambiguous spelling and is what docs use
 in examples. A `blanket.toml` `[tasks]` table for cross-language scripts is
 the natural extension but is **not** in this plan; it is the task-runner
-question ROADMAP.md deferred until a real polyglot need appears.
+question PLAN.md defers until a real polyglot need appears (WP1's
+`blanket fmt` contract is the shape a named tool command takes).
 
 ### 2.3 `blanket add`, `blanket remove`, `blanket update`
 

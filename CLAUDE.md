@@ -1,9 +1,11 @@
 # blanket
 
 Rust workspace: universal package-manager kernel. Read ARCHITECTURE.md first;
-design history in blanket-notes.md. What is built is in NEXT.md; what has not
-been independently reviewed is in REVIEW.md — check it before trusting a
-recent feature.
+design history in blanket-notes.md. PLAN.md is the single working document:
+decisions, agent working rules, and the ordered work packages — take the next
+open one. NEXT.md is a frozen index of shipped item numbers. What has not been
+independently reviewed is in REVIEW.md — check it before trusting a recent
+feature. Run `cargo fmt --check` before committing.
 
 - Build: `cargo build` · unit tests: `cargo test` (offline)
 - Heavy integration tests (network + real PyPI): `cargo test -- --ignored`
