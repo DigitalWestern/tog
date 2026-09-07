@@ -101,7 +101,10 @@ say what breaks, for whom, and how it fails (loud/silent).
 ## Python
 
 Interpreter selection is limited to the five pinned CPython builds for the
-two supported host platforms; explicit `.python-version` requests win over
+two supported host platforms. A two-part `.python-version` request selects
+the newest pinned patch for that minor; a three-part request must match a
+pinned build exactly and otherwise fails closed with the available pins and
+the command to accept the pinned patch. Explicit requests still win over
 metadata conflicts with a warning, while unsupported implementations and
 unsatisfiable constraints fail closed.
 

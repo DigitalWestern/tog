@@ -142,3 +142,44 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         "warm sync rewrote lock stamp"
     );
 }
+
+#[test]
+#[ignore]
+fn unpinned_patch_request_fails_closed_without_network_or_store_objects() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("python_select: skipped on non-Linux host");
+        return;
+    }
+    if Platform::host().unwrap() != Platform::X86_64UnknownLinuxGnu {
+        eprintln!("skip python_select: host is not x86_64-unknown-linux-gnu");
+        return;
+    }
+
+    let temp = TempDir::new();
+    let project = temp.0.join("proj-unpinned-patch");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".python-version"), "3.12.3\n").unwrap();
+    std::fs::write(project.join("requirements.txt"), "").unwrap();
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+
+    let output = blanket(&binary, &project, &store, &["sync"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("3.12.3"), "{stderr}");
+    assert!(stderr.contains(".python-version"), "{stderr}");
+    assert!(stderr.contains("3.12.14"), "{stderr}");
+    assert!(
+        stderr.contains("pin 3.12 to accept the pinned patch"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("request one of:"), "{stderr}");
+    let object_count = std::fs::read_dir(store.join("objects"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(object_count, 0, "store objects were created: {store:?}");
+}

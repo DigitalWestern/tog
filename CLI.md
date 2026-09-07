@@ -54,7 +54,8 @@ OPTIONS:
   -h, --help             print help ('blanket help <command>' for one command)
   -V, --version          print the version
 
-PROJECT INPUTS ...        (the existing block, unchanged)
+PROJECT INPUTS ...        (the existing block; `.python-version` accepts a
+                           minor request or an exact pinned patch)
 ENVIRONMENT ...           (BLANKET_STORE, BLANKET_STRICT, BLANKET_POLICY)
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run' and 'x' pass the
@@ -64,6 +65,12 @@ program's exit status through.
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they
 live in the docs.
+
+For Python, `.python-version` uses uv-style request shapes: `X.Y` selects the
+newest pinned patch for that minor, while `X.Y.Z` selects only that exact
+pinned build. An unavailable exact patch fails with the available pinned
+versions and the instruction to request `X.Y` when the pinned patch is
+acceptable.
 
 ---
 

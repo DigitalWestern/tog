@@ -154,7 +154,7 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — OPEN
+### WP2 — Toolchain lock and exact version selection — IN PROGRESS (Python exact-selection bugs fixed; lock and Go remain)
 
 Design before code; write the design into ARCHITECTURE.md as part of the PR.
 
@@ -179,10 +179,14 @@ catalog will expose it.
   .NET accepts one fixed SDK (src/npm.rs:137, src/ruby.rs:57,
   src/dotnet.rs:132, LIMITATIONS.md). Ranges (`requires-python >=3.10`) pick
   the newest compatible supported stable/LTS once and lock it.
-- **Exact selection bugs to fix first:** `pyselect` substitutes a patch
-  version even for an exact request (src/pyselect.rs:170); `python::lookup`
-  returns the first matching row (src/python.rs:87); Go realization takes no
-  selected version (src/golang.rs:145).
+- **Exact selection bugs to fix first:** ✅ `pyselect` requires a pinned
+  three-part request and keeps two-part selection minor-scoped
+  (`unpinned_patch_request_fails_closed`,
+  `exact_pinned_request_selects_without_warning_in_supported_spellings`);
+  ✅ `python::lookup` matches exact versions and chooses the newest numeric
+  patch from a minor
+  (`lookup_uses_the_newest_numeric_patch_in_a_wrongly_ordered_table`);
+  Go realization takes no selected version (src/golang.rs:145) and remains.
 - **Carry the selected runtime through every operation.** Node `run` and
   cached `x` environments take the global pin (src/main.rs:1409,
   src/xrun.rs:325); `x` keys omit runtime identity; `status` must compare
@@ -331,3 +335,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
+| 2026-09-06 | WP2 Python exact-selection bugs fixed: exact `.python-version` patches fail closed, and `python::lookup` uses exact-or-newest-minor matching; regression coverage added. |

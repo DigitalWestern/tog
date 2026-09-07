@@ -168,25 +168,39 @@ pub fn select_python_with_inputs(
     };
     let mut warnings = Vec::new();
     let (pin, explicit_request) = if let Some(explicit) = &inputs.explicit {
-        let matching = pins.iter().copied().find(|pin| {
-            let version = pinned_version(pin.version).expect("pinned CPython version");
-            version.major() == explicit.version.major()
-                && version.minor() == explicit.version.minor()
-        });
-        let Some(pin) = matching else {
-            return Err(no_satisfying_pin(
-                platform,
-                &format!(".python-version \"{}\"", explicit.raw),
-                &explicit.source,
-                &pins,
-            ));
+        let matching = if explicit.version.release_len() == 3 {
+            pins.iter().copied().find(|pin| {
+                pinned_version(pin.version)
+                    .expect("pinned CPython version")
+                    .cmp(&explicit.version)
+                    .is_eq()
+            })
+        } else {
+            pins.iter()
+                .copied()
+                .filter(|pin| {
+                    let version = pinned_version(pin.version).expect("pinned CPython version");
+                    version.major() == explicit.version.major()
+                        && version.minor() == explicit.version.minor()
+                })
+                .max_by(|left, right| {
+                    pinned_version(left.version)
+                        .expect("pinned CPython version")
+                        .cmp(&pinned_version(right.version).expect("pinned CPython version"))
+                })
         };
-        if explicit.version.release_len() == 3 && pin.version != explicit.raw {
-            warnings.push(format!(
-                "blanket: .python-version requests CPython {}; using pinned patch {}",
-                explicit.raw, pin.version
-            ));
-        }
+        let Some(pin) = matching else {
+            if explicit.version.release_len() == 3 {
+                return Err(no_exact_satisfying_pin(platform, explicit, &pins));
+            } else {
+                return Err(no_satisfying_pin(
+                    platform,
+                    &format!(".python-version \"{}\"", explicit.raw),
+                    &explicit.source,
+                    &pins,
+                ));
+            }
+        };
         let violated: Vec<_> = parsed
             .iter()
             .filter(|(_, specifier)| {
@@ -294,6 +308,37 @@ fn no_satisfying_pin(
         format!(
             "no pinned CPython satisfies {constraint} from {source} on {} (pinned: {versions}; LINUX_PORT.md stage 2)",
             platform.triple()
+        ),
+    )
+}
+
+fn no_exact_satisfying_pin(
+    platform: Platform,
+    explicit: &ExplicitPython,
+    pins: &[&PinnedPython],
+) -> io::Error {
+    let versions = pins
+        .iter()
+        .map(|pin| pin.version)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let minor = format!("{}.{}", explicit.version.major(), explicit.version.minor());
+    let next_step = if pins.iter().any(|pin| {
+        pinned_version(pin.version).is_some_and(|pinned| {
+            pinned.major() == explicit.version.major() && pinned.minor() == explicit.version.minor()
+        })
+    }) {
+        format!("pin {minor} to accept the pinned patch, or request one of: {versions}")
+    } else {
+        format!("request one of: {versions}")
+    };
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "{}: exact CPython request `{}` is not pinned for {} (pinned versions available: {versions}); next step: {next_step}",
+            explicit.source,
+            explicit.raw,
+            platform.triple(),
         ),
     )
 }
@@ -734,6 +779,7 @@ mod tests {
         }
         for text in [
             "3.11-dev",
+            "3.11.4-dev",
             "3.11t",
             "3.11-free-threaded",
             "pypy3.11",
@@ -772,18 +818,60 @@ mod tests {
     }
 
     #[test]
-    fn unpinned_patch_request_uses_the_pinned_patch_and_warns() {
+    fn unpinned_patch_request_fails_closed() {
+        for request in ["3.11.4", "python3.11.4", "cpython@3.11.4"] {
+            let inputs = PythonInputs {
+                explicit: Some(parse_python_version_file(request, ".python-version").unwrap()),
+                constraints: Vec::new(),
+            };
+            let error =
+                select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(request), "{message}");
+            assert!(message.contains(".python-version"), "{message}");
+            for pinned in ["3.12.14", "3.13.15", "3.10.21", "3.11.16", "3.14.7"] {
+                assert!(message.contains(pinned), "{message}");
+            }
+            assert!(
+                message.contains("pin 3.11 to accept the pinned patch"),
+                "{message}"
+            );
+            assert!(message.contains("request one of:"), "{message}");
+        }
+    }
+
+    #[test]
+    fn exact_pinned_request_selects_without_warning_in_supported_spellings() {
+        for request in [
+            "3.11.16",
+            "python3.11.16",
+            "Python3.11.16",
+            "cpython-3.11.16",
+            "cpython@3.11.16",
+            "CPython-3.11.16",
+            "CPython@3.11.16",
+        ] {
+            let inputs = PythonInputs {
+                explicit: Some(parse_python_version_file(request, ".python-version").unwrap()),
+                constraints: Vec::new(),
+            };
+            let selection =
+                select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
+            assert_eq!(selection.pin.version, "3.11.16", "{request}");
+            assert!(selection.warnings.is_empty(), "{request}");
+        }
+    }
+
+    #[test]
+    fn minor_request_selects_the_pinned_patch_without_warning() {
         let inputs = PythonInputs {
-            explicit: Some(parse_python_version_file("3.11.4", ".python-version").unwrap()),
+            explicit: Some(parse_python_version_file("3.11", ".python-version").unwrap()),
             constraints: Vec::new(),
         };
         let selection =
             select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
         assert_eq!(selection.pin.version, "3.11.16");
-        assert!(selection
-            .warnings
-            .iter()
-            .any(|warning| { warning.contains("3.11.4") && warning.contains("3.11.16") }));
+        assert!(selection.warnings.is_empty());
     }
 
     #[test]

@@ -85,11 +85,64 @@ pub const PYTHONS: &[PinnedPython] = &[
 ];
 
 pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython> {
-    // Accept "3.12" as a prefix match on "3.12.".
-    PYTHONS.iter().find(|p| {
-        p.platform == platform
-            && (p.version == version || p.version.starts_with(&format!("{version}.")))
-    })
+    lookup_in_pins(PYTHONS, platform, version)
+}
+
+/// Match only a complete pinned version or a major.minor request. The slice
+/// is supplied by the caller so matching remains independent of the table's
+/// row order and can be tested with synthetic pin tables.
+fn lookup_in_pins<'a>(
+    pins: &'a [PinnedPython],
+    platform: Platform,
+    version: &str,
+) -> Option<&'a PinnedPython> {
+    let pieces: Vec<_> = version.split('.').collect();
+    if !(2..=3).contains(&pieces.len())
+        || pieces
+            .iter()
+            .any(|piece| piece.is_empty() || !piece.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let requested = crate::pep440::Version::parse(version).ok()?;
+    if requested.raw() != version
+        || requested.has_epoch()
+        || requested.is_prerelease()
+        || requested.has_local()
+    {
+        return None;
+    }
+
+    match requested.release_len() {
+        3 => pins.iter().find(|pin| {
+            pin.platform == platform
+                && parse_pinned_version(pin.version)
+                    .is_some_and(|pinned| pinned.cmp(&requested).is_eq())
+        }),
+        2 => pins
+            .iter()
+            .filter(|pin| {
+                pin.platform == platform
+                    && parse_pinned_version(pin.version).is_some_and(|pinned| {
+                        pinned.major() == requested.major() && pinned.minor() == requested.minor()
+                    })
+            })
+            .max_by(|left, right| {
+                parse_pinned_version(left.version)
+                    .expect("pinned CPython version")
+                    .cmp(&parse_pinned_version(right.version).expect("pinned CPython version"))
+            }),
+        _ => None,
+    }
+}
+
+fn parse_pinned_version(version: &str) -> Option<crate::pep440::Version> {
+    let parsed = crate::pep440::Version::parse(version).ok()?;
+    (parsed.release_len() == 3
+        && !parsed.has_epoch()
+        && !parsed.is_prerelease()
+        && !parsed.has_local())
+    .then_some(parsed)
 }
 
 pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<String> {
@@ -295,5 +348,50 @@ mod tests {
             identity.object_id(),
             "d43528ee22f3027d76f93b39716982e6cabcbe9f-uv-0.12.7"
         );
+    }
+
+    #[test]
+    fn lookup_rejects_bare_major_and_accepts_minor_and_exact_versions() {
+        for &platform in Platform::ALL {
+            assert!(lookup(platform, "3").is_none());
+            assert!(lookup(platform, "3.1").is_none());
+            assert!(lookup(platform, "not-a-version").is_none());
+            assert!(lookup(platform, "3.12.post1").is_none());
+            assert!(lookup(platform, "3.12-dev").is_none());
+            assert_eq!(lookup(platform, "3.12").unwrap().version, "3.12.14");
+            assert_eq!(lookup(platform, "3.12.14").unwrap().version, "3.12.14");
+        }
+    }
+
+    #[test]
+    fn lookup_uses_the_newest_numeric_patch_in_a_wrongly_ordered_table() {
+        let pins = [
+            PinnedPython {
+                platform: Platform::X86_64UnknownLinuxGnu,
+                version: "3.12.9",
+                url: "https://example.invalid/3.12.9.tar.gz",
+                sha256: "9",
+            },
+            PinnedPython {
+                platform: Platform::X86_64UnknownLinuxGnu,
+                version: "3.12.14",
+                url: "https://example.invalid/3.12.14.tar.gz",
+                sha256: "14",
+            },
+        ];
+        assert_eq!(
+            lookup_in_pins(&pins, Platform::X86_64UnknownLinuxGnu, "3.12")
+                .unwrap()
+                .version,
+            "3.12.14"
+        );
+        assert_eq!(
+            lookup_in_pins(&pins, Platform::X86_64UnknownLinuxGnu, "3.12.9")
+                .unwrap()
+                .version,
+            "3.12.9"
+        );
+        assert!(lookup_in_pins(&pins, Platform::Aarch64AppleDarwin, "3.12").is_none());
+        assert!(lookup_in_pins(&pins, Platform::X86_64UnknownLinuxGnu, "3.12.3").is_none());
     }
 }
