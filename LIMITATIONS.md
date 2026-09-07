@@ -44,6 +44,10 @@ say what breaks, for whom, and how it fails (loud/silent).
   manifest or the generated `py-`/`npm-` prefix as ecosystem evidence, never
   as package evidence. Unrecoverable roots are skipped with a hint to run
   `blanket x --clean` without a tool.
+- **`x` cleanup is conservative under a concurrent rename**: removal is
+  descriptor-relative and never follows a symlink, but if a candidate name is
+  replaced while it is being removed, the replacement is left for a later
+  cleanup retry and the original registry entry is retained.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

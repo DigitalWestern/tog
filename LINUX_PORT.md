@@ -885,3 +885,11 @@ object, but it is the one non-sandboxed step).
    `build.rs`); nokogiri builds from its vendored sources and only needs
    host `libz.so.1` (allowlisted in the ruby gate); full prerequisite list
    is in README.
+
+### Changelog — 2026-09-06
+
+The Linux `x --clean` path now opens and holds the validated `~/.blanket/x`
+directory with `O_NOFOLLOW`, then enumerates, locks, and removes roots through
+directory descriptors. Recursive cleanup uses `fstatat`/`openat`/`unlinkat`,
+so symlinks are unlinked rather than traversed and a pathname swap cannot
+redirect removal to a symlink target.

@@ -63,9 +63,20 @@ to `state: "ready"` only after projection succeeds, so a failed realization
 leaves a discoverable partial root. A per-root lock at
 `~/.blanket/x/.locks/<root-name>.lock` is outside the removable projection:
 `x` takes a blocking shared lock before checking or recreating its root and
-inherits the descriptor across exec, while cleanup takes a nonblocking
-exclusive lock before removing the tree. Thus a runner waiting during cleanup
-revalidates the root while still holding the stable lock.
+keeps that descriptor close-on-exec through resolution and realization,
+clearing the flag only immediately before exec. Cleanup takes a nonblocking
+exclusive lock before removing the tree. A `ready` marker is accepted only
+when the requested executable and cached projection are both still valid;
+otherwise the marker returns to `realizing` and the cached environment is
+reprojected.
+
+Cleanup opens the validated `x` directory one component at a time with
+`O_NOFOLLOW`, keeps that descriptor while enumerating, and opens each real
+candidate directory relative to it. Locks and removal are likewise
+descriptor-relative: recursive removal uses `fstatat`, `openat` with
+`O_NOFOLLOW`, and `unlinkat`; symlinks are unlinked and never traversed. A
+candidate inode is checked again before its name is removed, so renaming the
+root and replacing its pathname cannot redirect deletion to a symlink target.
 
 The request marker records the ecosystem, package, version, and lifecycle
 state; the executable name is not part of cleanup identity. For pre-marker
@@ -75,8 +86,9 @@ package cannot be recovered. Closure object paths identify the originating
 store, so cleanup removes the matching canonical registry entry there even
 when the active `BLANKET_STORE` differs. Cleanup first requires an absolute,
 real `HOME/.blanket/x` hierarchy, reserves every dot-prefixed entry (including
-`.locks`), and revalidates each candidate's real canonical parent immediately
-before removal.
+`.locks`), and opens each candidate only after checking its real canonical
+parent and inode. Removal then uses the open candidate descriptor rather than
+resolving the candidate pathname again.
 
 ## Platforms
 

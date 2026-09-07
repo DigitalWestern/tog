@@ -303,6 +303,21 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     let env_object = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
     assert!(env_object.is_dir(), "realized environment object");
 
+    // A ready marker is not enough to accept a cache hit: deleting the
+    // projection must make the next run reproject the cached environment.
+    fs::remove_file(ruff_root.join(".venv")).unwrap();
+    ok(
+        blanket_home(
+            &bin,
+            &project,
+            &store,
+            &home,
+            &["x", "py:ruff", "--version"],
+        ),
+        "repair missing x projection",
+    );
+    assert!(ruff_root.join(".venv").is_symlink());
+
     let roots = ok(
         blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
         "x root registration",
@@ -364,9 +379,10 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         })
         .expect("prewarmed pytest x root");
     let ready = project.join("pytest-started");
+    let release = project.join("pytest-release");
     fs::write(
         project.join("test_sleep.py"),
-        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"BLANKET_TEST_READY\"]).write_text(\"ready\")\n    time.sleep(5)\n",
+        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"BLANKET_TEST_READY\"]).write_text(\"ready\")\n    release = Path(os.environ[\"BLANKET_TEST_RELEASE\"])\n    while not release.is_file():\n        time.sleep(0.1)\n",
     )
     .unwrap();
     let running = ChildGuard(Some(
@@ -375,6 +391,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
             .env("BLANKET_STORE", &store)
             .env("HOME", &home)
             .env("BLANKET_TEST_READY", &ready)
+            .env("BLANKET_TEST_RELEASE", &release)
             .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
             .spawn()
             .unwrap(),
@@ -395,6 +412,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         "{busy_text}"
     );
     assert!(pytest_root.exists(), "busy x root was removed");
+    fs::write(&release, b"release").unwrap();
     let child = running.wait_output();
     assert!(
         child.status.success(),

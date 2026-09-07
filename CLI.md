@@ -304,7 +304,8 @@ and `--from <package>` keep their normal meanings. Cleanup accepts no
 arguments after the tool. It prints one line per removed environment and a
 summary that the immutable store objects remain until the next `blanket gc`.
 A running tool holds a shared lock in the permanent
-`~/.blanket/x/.locks/<root-name>.lock`, inherited across exec, so cleanup
+`~/.blanket/x/.locks/<root-name>.lock`, made inheritable immediately before
+exec, so cleanup
 reports it as in use and leaves it for a later retry. The request and
 ownership state (`realizing` or `ready`) are recorded in `x.json` beside the
 closure before realization begins. For older roots without `x.json`, cleanup
