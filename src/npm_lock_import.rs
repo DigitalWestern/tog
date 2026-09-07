@@ -317,6 +317,39 @@ fn yaml_list(value: Option<&YamlValue>) -> Vec<String> {
     }
 }
 
+/// Read the package globs from a pnpm workspace file. The dependency-free
+/// YAML parser used for lock imports also handles this small machine-written
+/// configuration shape, so workspace membership uses the same syntax rules
+/// as the imported lockfile instead of a line-oriented approximation.
+pub fn pnpm_workspace_packages(workspace_yaml: &str) -> io::Result<Vec<String>> {
+    let parsed = parse_yaml(workspace_yaml)?;
+    let root = yaml_map(&parsed, "pnpm-workspace.yaml")?;
+    let packages = root
+        .get("packages")
+        .ok_or_else(|| err("pnpm-workspace.yaml has no packages list"))?;
+    let patterns = match packages {
+        YamlValue::Seq(values) => values
+            .iter()
+            .map(|value| {
+                yaml_str(Some(value))
+                    .filter(|pattern| !pattern.trim().is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| err("pnpm-workspace.yaml packages entries must be strings"))
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+        YamlValue::Scalar(value) if !value.is_empty() => vec![value.clone()],
+        _ => {
+            return Err(err(
+                "pnpm-workspace.yaml packages must be a list of strings",
+            ))
+        }
+    };
+    if patterns.is_empty() {
+        return Err(err("pnpm-workspace.yaml packages has no workspace globs"));
+    }
+    Ok(patterns)
+}
+
 fn trim_peer_suffix(value: &str) -> &str {
     let parenthesis = value.find('(');
     // pnpm v9 also encodes peer context as `_peer@version`. An underscore

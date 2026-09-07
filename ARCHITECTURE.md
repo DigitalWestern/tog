@@ -421,11 +421,14 @@ packages.config files fail closed.
 - Missing `Cargo.lock` → the store cargo runs `generate-lockfile`.
 
 Delegated resolvers come from the store (uv and npm are pinned toolchain
-components like CPython/Node; pnpm and Yarn classic are realized as exact
-Node package versions from the root package.json `packageManager` field and
-cached in the registered `~/.blanket/x/` environment), while existing npm
-lockfiles are parsed locally — a bare machine needs nothing installed besides
-blanket itself.
+components like CPython/Node; pnpm is realized as the exact Node package
+version from the root package.json `packageManager` field and cached in the
+registered `~/.blanket/x/` environment), while existing npm lockfiles are
+parsed locally — a bare machine needs nothing installed besides blanket
+itself. pnpm edits isolate HOME and XDG configuration/data/cache directories
+so user-global pnpm settings cannot change the registry or store behavior.
+Yarn classic remains a refusal because it has no lockfile-only edit mode and
+workspace-faithful scratch editing is future work.
 Proven with a scrubbed-PATH (`/usr/bin:/bin`) sync + run on both ecosystems,
 2026-08-31.
 
@@ -438,13 +441,13 @@ replaces), no more, no less. Resolving a hostile dependency tree can run
 code at plan time (PEP 517 metadata builds); blanket's guarantees start at
 realization.
 
-The same trust boundary applies to pnpm and Yarn classic dependency edits.
-pnpm receives `--lockfile-only`, so it edits the selected manifest and lock
-without creating a project `node_modules`. Yarn classic has no equivalent
-flag; blanket runs its edit in a scratch project and atomically copies only
-the resulting package.json and yarn.lock back. Yarn Berry remains outside
-the importer contract because its cache checksums do not authenticate npm
-tarballs.
+The same trust boundary applies to pnpm dependency edits. pnpm receives
+`--lockfile-only`, so it edits the selected manifest and lock without creating
+a project `node_modules`; inherited pnpm locks are accepted only when the
+root's `pnpm-workspace.yaml` package globs match the member. Yarn classic has
+no lockfile-only edit mode and remains a refusal; a workspace-faithful scratch
+edit is future work. Yarn Berry remains outside the importer contract because
+its cache checksums do not authenticate npm tarballs.
 
 Declared artifacts, honestly: the mechanism is **cache seeding** — it
 works when the declaration matches where a package's downloader looks

@@ -1,12 +1,13 @@
 //! Real dependency-edit delegation round trips.
 //!
-//! These tests deliberately exercise the pinned ecosystem tools with
-//! `--no-sync`: the manifest/lock edit is the subject under test, while a
-//! later sync remains outside this suite. They are ignored because each test
-//! may download a toolchain and resolve a package from its registry.
+//! These tests deliberately exercise the pinned ecosystem tools. They are
+//! ignored because each test may download a toolchain and resolve a package
+//! from its registry.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use sha2::{Digest as _, Sha224};
 
 struct TempDir(PathBuf);
 
@@ -287,7 +288,7 @@ fn pnpm_add_update_remove_roundtrip() {
             &bin,
             project,
             &store,
-            &["add", "--dev", "--no-sync", "is-number@7.0.0"],
+            &["add", "--dev", "is-number@7.0.0"],
             &temp.0,
         ),
         "pnpm add",
@@ -298,16 +299,46 @@ fn pnpm_add_update_remove_roundtrip() {
     assert_eq!(package["devDependencies"]["is-number"], "7.0.0");
     let first_env_count = node_env_object_count(&store);
     assert!(first_env_count >= 1);
+    assert_status_synced(&bin, project, &store, &temp);
 
-    assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["update", "--no-sync", "is-number"],
-            &temp.0,
-        ),
-        "pnpm update",
+    let x_root = temp.0.join("home/.blanket/x");
+    let x_root = std::fs::read_dir(&x_root)
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path();
+            path.join("package-lock.json").is_file().then_some(path)
+        })
+        .expect("pnpm x project");
+    let x_lock = x_root.join("package-lock.json");
+    let x_lock_mtime = std::fs::metadata(&x_lock).unwrap().modified().unwrap();
+    let closure: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(x_root.join(".blanket/closures/node.json")).unwrap(),
+    )
+    .unwrap();
+    let pnpm = closure["body"]["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["path"] == "node_modules/pnpm")
+        .unwrap();
+    let digest = blanket::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
+    let tarball =
+        std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
+    let corepack_sha224 = hex::encode(Sha224::digest(tarball));
+    set_package_manager(project, &format!("pnpm@9.12.3+sha224.{corepack_sha224}"));
+
+    let update = run(
+        &bin,
+        project,
+        &store,
+        &["update", "--no-sync", "is-number"],
+        &temp.0,
+    );
+    assert_ok(update, "pnpm update");
+    assert_eq!(
+        std::fs::metadata(&x_lock).unwrap().modified().unwrap(),
+        x_lock_mtime,
+        "warm pnpm invocation re-resolved the tool"
     );
     assert_eq!(node_env_object_count(&store), first_env_count);
     assert!(temp.0.join("home/.blanket/x").is_dir());
@@ -405,60 +436,44 @@ fn pnpm_workspace_member_and_root_roundtrip() {
 
 #[test]
 #[ignore]
-fn yarn_classic_add_update_remove_roundtrip() {
-    let temp = TempDir::new("yarn1");
-    copy_fixture(&temp, "proj-yarn1");
+fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
+    let temp = TempDir::new("pnpm-nested-npm");
+    copy_fixture(&temp, "proj-pnpm-ws");
     let project = &temp.0;
     let store = project.join("store");
-    set_package_manager(project, "yarn@1.22.22");
+    set_package_manager(project, "pnpm@9.12.3");
+    let ancestor_lock = std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap();
+    let nested = project.join("tools/nested-npm");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("package.json"),
+        "{\"name\":\"nested-npm\",\"version\":\"1.0.0\",\"dependencies\":{}}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        nested.join("package-lock.json"),
+        "{\"name\":\"nested-npm\",\"version\":\"1.0.0\",\"lockfileVersion\":3,\"requires\":true,\"packages\":{\"\":{\"name\":\"nested-npm\",\"version\":\"1.0.0\"}}}\n",
+    )
+    .unwrap();
     let bin = binary();
 
     assert_ok(
         run(
             &bin,
-            project,
+            &nested,
             &store,
-            &["add", "--dev", "--no-sync", "is-number@7.0.0"],
+            &["add", "--no-sync", "is-number@7.0.0"],
             &temp.0,
         ),
-        "yarn add",
+        "nested npm add",
     );
-    assert!(!project.join("node_modules").exists());
-    let package: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
-            .unwrap();
-    assert_eq!(package["devDependencies"]["is-number"], "7.0.0");
-    let first_env_count = node_env_object_count(&store);
-
-    assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["update", "--no-sync", "is-number"],
-            &temp.0,
-        ),
-        "yarn upgrade",
-    );
-    assert_eq!(node_env_object_count(&store), first_env_count);
-    assert!(temp.0.join("home/.blanket/x").is_dir());
-
-    assert_ok(
-        run(
-            &bin,
-            project,
-            &store,
-            &["remove", "--dev", "--no-sync", "is-number"],
-            &temp.0,
-        ),
-        "yarn remove",
-    );
-    assert!(!project.join("node_modules").exists());
-    assert!(!std::fs::read_to_string(project.join("package.json"))
+    assert!(std::fs::read_to_string(nested.join("package-lock.json"))
         .unwrap()
         .contains("is-number"));
-    assert_ok(run(&bin, project, &store, &["sync"], &temp.0), "yarn sync");
-    assert_status_synced(&bin, project, &store, &temp);
+    assert_eq!(
+        std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
+        ancestor_lock
+    );
 }
 
 #[test]

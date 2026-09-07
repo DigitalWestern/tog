@@ -390,11 +390,12 @@ fn dependency_verbs_offline_paths() {
     let out = blanket(&pnpm.0, &home.0, &["add", "-D", "react", "left-pad"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains("add \"packageManager\": \"pnpm@<version>\""),
+        text(&out.stderr).contains(
+            "lock was written by pnpm major 9; add \"packageManager\": \"pnpm@<major.minor.patch>\" using the exact version the team runs (pnpm --version)"
+        ),
         "{}",
         text(&out.stderr)
     );
-    assert!(text(&out.stderr).contains("suggestion: \"packageManager\": \"pnpm@9\""));
     let poetry = TempDir::new("deps-poetry");
     std::fs::write(poetry.0.join("pyproject.toml"), "[tool.poetry]\nname='p'\n").unwrap();
     let out = blanket(&poetry.0, &home.0, &["update"]);

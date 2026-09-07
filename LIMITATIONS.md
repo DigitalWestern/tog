@@ -22,20 +22,25 @@ say what breaks, for whom, and how it fails (loud/silent).
   hash only, not the manifest. Closures from before the field exists show
   as "synced (unchecked)" until the next sync.
 - **`blanket add` / `remove` / `update` delegate to store tools with
-  network, unsandboxed** (uv, the store npm, pinned pnpm/Yarn classic, cargo,
-  go, bundler, mix) — the same trust boundary as missing-lockfile
-  generation. Rows that refuse with instructions instead of editing: Poetry
-  and PDM projects, setup.py/setup.cfg, `requirements/` directories, Elixir
-  add and remove, Yarn Berry, and all of .NET. The registry existence check for an ambiguous
-  bare name in a polyglot directory is one HTTPS GET per candidate
-  registry; a private-registry name needs the explicit prefix.
-- **pnpm and Yarn classic dependency edits require a root `package.json`
-  `packageManager` field** with an exact tool version. A missing field refuses
-  with the JSON line to add and, when the lock format identifies one, a marked
-  version suggestion. `+sha224.<hash>` suffixes are accepted but currently
-  ignored after syntax validation; blanket traces that it did not verify the
-  Corepack hash. Delegates are resolved through the store's cached `x`
-  environments under `~/.blanket/x/`, and remain unsandboxed with network.
+  network, unsandboxed** (uv, the store npm, pinned pnpm, cargo, go,
+  bundler, mix) — the same trust boundary as missing-lockfile generation.
+  Rows that refuse with instructions instead of editing: Poetry and PDM
+  projects, setup.py/setup.cfg, `requirements/` directories, Elixir add and
+  remove, Yarn classic and Berry, and all of .NET. The registry existence
+  check for an ambiguous bare name in a polyglot directory is one HTTPS GET
+  per candidate registry; a private-registry name needs the explicit prefix.
+- **pnpm dependency edits require a root `package.json` `packageManager`
+  field** with an exact `MAJOR.MINOR.PATCH` version (an optional prerelease
+  is retained verbatim). A missing field names the pnpm lockfile's major and
+  tells the user to use the exact version from `pnpm --version`; no floating
+  version is suggested. `+sha224.<hash>` suffixes are verified against the
+  realized pnpm package tarball in the verified artifact cache. Delegates are
+  resolved through the store's cached `x` environments under
+  `~/.blanket/x/`, with HOME and XDG directories isolated for pnpm; they
+  remain unsandboxed with network.
+- **Yarn classic dependency edits remain a refusal.** Yarn has no
+  lockfile-only edit mode, and a workspace-faithful scratch edit is future
+  work; run the Yarn command named by blanket, then `blanket`.
 - **`blanket x` covers PyPI and npm** (cargo and go later). Each tool's
   environment lives under `~/.blanket/x/` as a registered project root;
   `blanket gc --project` does not touch it, and there is no `x --clean` yet.

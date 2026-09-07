@@ -166,6 +166,47 @@ pub(crate) fn cache_verified_held(store: &Store, sha256: &str) -> io::Result<Cac
     }
 }
 
+pub(crate) fn cache_verified_digest_held(store: &Store, digest: &Digest) -> io::Result<CacheLease> {
+    let gc_lock = acquire_gc_lock(store)?;
+    let path = store.cache_path(digest.algo(), digest.hex());
+    match hash_file(&path, digest.algo) {
+        Ok(h) if h == digest.hex() => {
+            store::touch_path(&path)?;
+            Ok(CacheLease {
+                path,
+                _gc_lock: gc_lock,
+            })
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(&path);
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cache entry {}:{} was corrupted (removed)",
+                    digest.algo(),
+                    digest.hex()
+                ),
+            ))
+        }
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "cache entry {}:{} is unreadable: {error}",
+                digest.algo(),
+                digest.hex()
+            ),
+        )),
+    }
+}
+
+/// Read an integrity-addressed cache entry while retaining the verification
+/// lease through the read, so GC cannot remove it between verification and
+/// use.
+pub(crate) fn read_cache_verified_digest(store: &Store, digest: &Digest) -> io::Result<Vec<u8>> {
+    let lease = cache_verified_digest_held(store, digest)?;
+    fs::read(&lease.path)
+}
+
 fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     let mut f = fs::File::open(path)?;
     let mut buf = [0u8; 65536];

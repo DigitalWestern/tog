@@ -12,11 +12,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha224, Sha256};
 
 use crate::platform::Platform;
 use crate::store::Store;
-use crate::{inspect, npm, policy, project, pypi, pyselect, python, ui};
+use crate::{fetch, inspect, npm, policy, project, pypi, pyselect, python, ui};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -144,6 +144,48 @@ fn validate_package(ecosystem: &str, package: &str) -> io::Result<()> {
 
 fn validate_version(version: &str) -> io::Result<()> {
     validate_text("version", version)
+}
+
+/// Whether `version` is the exact release syntax accepted for a delegated
+/// package-manager tool: MAJOR.MINOR.PATCH with an optional prerelease.
+/// Build metadata is deliberately excluded because Corepack's hash suffix is
+/// handled separately by the package-manager field parser.
+pub(crate) fn is_exact_version(version: &str) -> bool {
+    fn decimal_component(value: &str) -> bool {
+        !value.is_empty()
+            && (value.len() == 1 || !value.starts_with('0'))
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+    }
+
+    let (release, prerelease) = version
+        .split_once('-')
+        .map_or((version, None), |(a, b)| (a, Some(b)));
+    let components: Vec<&str> = release.split('.').collect();
+    if components.len() != 3 || !components.iter().all(|part| decimal_component(part)) {
+        return false;
+    }
+    let Some(prerelease) = prerelease else {
+        return true;
+    };
+    !prerelease.is_empty()
+        && prerelease.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (!identifier.bytes().all(|byte| byte.is_ascii_digit())
+                    || (identifier.len() == 1 && identifier != "0")
+                    || !identifier.starts_with('0'))
+        })
+}
+
+fn validate_exact_version(version: &str) -> io::Result<()> {
+    if !is_exact_version(version) {
+        return Err(other(format!(
+            "x: node tool version must be an exact MAJOR.MINOR.PATCH release (a prerelease suffix is allowed), found {version:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_from_bin(bin: &str) -> io::Result<()> {
@@ -426,11 +468,16 @@ pub(crate) fn realize_node_tool(
     platform: Platform,
     package: &str,
     version: &str,
+    corepack_sha224: Option<&str>,
 ) -> io::Result<PathBuf> {
+    validate_exact_version(version)?;
     let root = node_cache_root(store, platform, package, Some(version))?;
     let executable = root.join("node_modules/.bin").join(default_bin(package));
     if executable.is_file() {
         check_cached_projection(store, &root, "node")?;
+        if let Some(expected) = corepack_sha224 {
+            verify_corepack_sha224(store, &root, package, version, expected)?;
+        }
         return Ok(root);
     }
     realize_node(store, platform, &root, package, Some(version))?;
@@ -439,7 +486,63 @@ pub(crate) fn realize_node_tool(
             "'{package}@{version}' installed but provides no '{package}' executable"
         )));
     }
+    if let Some(expected) = corepack_sha224 {
+        verify_corepack_sha224(store, &root, package, version, expected)?;
+    }
     Ok(root)
+}
+
+fn verify_corepack_sha224(
+    store: &Store,
+    root: &Path,
+    package: &str,
+    version: &str,
+    expected: &str,
+) -> io::Result<()> {
+    if expected.len() != 56 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(other(format!(
+            "x: packageManager has a malformed sha224 hash for {package}@{version}"
+        )));
+    }
+    let closure = project::read_closure(root, "node")?;
+    let packages = closure["packages"].as_array().ok_or_else(|| {
+        other(format!(
+            "x: cannot verify packageManager sha224 for {package}@{version}: realized node closure has no package list; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+        ))
+    })?;
+    let pnpm = packages.iter().find(|entry| {
+        entry["path"].as_str() == Some("node_modules/pnpm")
+            && entry["version"].as_str() == Some(version)
+    });
+    let Some(pnpm) = pnpm else {
+        return Err(other(format!(
+            "x: cannot verify packageManager sha224 for {package}@{version}: realized node closure has no reachable pnpm artifact; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+        )));
+    };
+    let integrity = pnpm["integrity"].as_str().ok_or_else(|| {
+        other(format!(
+            "x: cannot verify packageManager sha224 for {package}@{version}: pnpm artifact has no integrity and no reachable cache path; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+        ))
+    })?;
+    let digest = fetch::Digest::from_sri(integrity).map_err(|error| {
+        other(format!(
+            "x: cannot verify packageManager sha224 for {package}@{version}: pnpm artifact integrity is invalid ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+        ))
+    })?;
+    let cache_path = store.cache_path(digest.algo(), digest.hex());
+    let bytes = fetch::read_cache_verified_digest(store, &digest).map_err(|error| {
+        other(format!(
+            "x: cannot verify packageManager sha224 for {package}@{version}: verified pnpm artifact cache {} is not reachable ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
+            cache_path.display()
+        ))
+    })?;
+    let actual = hex::encode(Sha224::digest(bytes));
+    if actual != expected.to_ascii_lowercase() {
+        return Err(other(format!(
+            "x: Corepack sha224 mismatch for {package}@{version}: packageManager declares {expected}, cached pnpm tarball has {actual}; nothing runs"
+        )));
+    }
+    Ok(())
 }
 
 fn realize_python(
@@ -602,5 +705,17 @@ mod tests {
         assert!(error.to_string().contains("invalid package"), "{error}");
         assert!(validate_from_bin("../tool").is_err());
         assert!(validate_version("1.0\n--index-url evil").is_err());
+    }
+
+    #[test]
+    fn exact_node_tool_versions_are_full_releases() {
+        assert!(is_exact_version("9.1.2"));
+        assert!(is_exact_version("9.1.2-rc.1"));
+        for version in ["9", "9.x", "^9.1.0", "latest", "9.01.2", "9.1.2+build"] {
+            assert!(
+                !is_exact_version(version),
+                "accepted floating version {version}"
+            );
+        }
     }
 }

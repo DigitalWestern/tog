@@ -233,9 +233,10 @@ them instead.",
         usage: "blanket add <package>... [--dev] [--no-sync]",
         description: "\
 Adds each package to the project's manifest with the ecosystem's own pinned
-tool (uv, the store npm, cargo, go, bundler), re-locks, and syncs. Where no
-pinned tool can make the edit (Poetry, PDM, pnpm, yarn, setup.py, Elixir,
-.NET) blanket refuses and prints the exact line and file instead.
+tool (uv, the store npm, pinned pnpm, cargo, go, bundler), re-locks, and
+syncs. Where no pinned tool can make the edit (Poetry, PDM, Yarn classic,
+setup.py, Elixir, .NET) blanket refuses and prints the exact line and file
+instead.
 
 Which ecosystem: an explicit prefix (py:requests, npm:react, cargo:serde,
 go:github.com/x/y, gem:rails, hex:jason, nuget:Foo.Bar) or the name's shape
@@ -275,8 +276,9 @@ choice. For a plain requirements file blanket deletes the line itself.",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
-bundle update, mix deps.update. Poetry, PDM, pnpm, yarn and .NET projects
-are told which command to run with their own tool.",
+bundle update, mix deps.update, and pnpm update --lockfile-only. Poetry, PDM,
+Yarn classic, and .NET projects are told which command to run with their own
+tool.",
         options: &[
             ("--no-sync", "stop after the lock edit; review, then run 'blanket'"),
             HELP_OPTION,
