@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sha2::{Digest as _, Sha224};
+use sha2::{Digest as _, Sha224, Sha512};
 
 struct TempDir(PathBuf);
 
@@ -324,7 +324,8 @@ fn pnpm_add_update_remove_roundtrip() {
     let digest = blanket::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
     let tarball =
         std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
-    let corepack_sha224 = hex::encode(Sha224::digest(tarball));
+    let corepack_sha224 = hex::encode(Sha224::digest(&tarball));
+    let corepack_sha512 = hex::encode(Sha512::digest(&tarball));
     set_package_manager(project, &format!("pnpm@9.12.3+sha224.{corepack_sha224}"));
 
     let update = run(
@@ -376,8 +377,77 @@ fn pnpm_add_update_remove_roundtrip() {
         std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
         lock_before_wrong
     );
-    set_package_manager(project, &format!("pnpm@9.12.3+sha224.{corepack_sha224}"));
 
+    // Current Corepack writes `+sha512.`; a wrong one must fail the same way
+    // (no extra network — the tool root and the tarball are already cached).
+    let wrong_sha512 = {
+        let mut value = corepack_sha512.clone().into_bytes();
+        value[0] = if value[0] == b'0' { b'1' } else { b'0' };
+        String::from_utf8(value).unwrap()
+    };
+    set_package_manager(project, &format!("pnpm@9.12.3+sha512.{wrong_sha512}"));
+    // `set_package_manager` rewrote package.json, so the snapshot to compare
+    // against is taken after it: the delegate must leave the file untouched.
+    let package_before_sha512 = std::fs::read_to_string(project.join("package.json")).unwrap();
+    let wrong = run(
+        &bin,
+        project,
+        &store,
+        &["update", "--no-sync", "is-number"],
+        &temp.0,
+    );
+    assert_eq!(
+        wrong.status.code(),
+        Some(1),
+        "wrong sha512 digest unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&wrong.stderr).contains("sha512 mismatch"),
+        "wrong sha512 error:\n{}",
+        String::from_utf8_lossy(&wrong.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("package.json")).unwrap(),
+        package_before_sha512
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
+        lock_before_wrong
+    );
+
+    // An algorithm blanket cannot verify names itself, never the version.
+    set_package_manager(
+        project,
+        &format!("pnpm@9.12.3+sha1.{}", &corepack_sha224[..40]),
+    );
+    let package_before_unknown = std::fs::read_to_string(project.join("package.json")).unwrap();
+    let unknown = run(
+        &bin,
+        project,
+        &store,
+        &["update", "--no-sync", "is-number"],
+        &temp.0,
+    );
+    assert_eq!(
+        unknown.status.code(),
+        Some(1),
+        "unknown hash algorithm unexpectedly passed"
+    );
+    let unknown = String::from_utf8_lossy(&unknown.stderr).into_owned();
+    assert!(unknown.contains("\"sha1\""), "{unknown}");
+    assert!(unknown.contains("sha224, sha256, sha512"), "{unknown}");
+    assert!(!unknown.contains("exact release"), "{unknown}");
+    assert_eq!(
+        std::fs::read_to_string(project.join("package.json")).unwrap(),
+        package_before_unknown
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
+        lock_before_wrong
+    );
+
+    // The correct sha512 is accepted and the delegate runs for real.
+    set_package_manager(project, &format!("pnpm@9.12.3+sha512.{corepack_sha512}"));
     assert_ok(
         run(
             &bin,

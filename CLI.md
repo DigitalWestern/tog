@@ -255,7 +255,7 @@ exit 1, no writes.
 | Python | `poetry.lock` / `pdm.lock` present, or `[tool.poetry]` | refuse (poetry/pdm are not pinned; uv would create a second lock) | refuse | refuse |
 | Python | `setup.py` / `setup.cfg` only | refuse with the `install_requires` line | refuse | n/a |
 | Node | `package-lock.json` or no lock | store npm: `npm install --package-lock-only --ignore-scripts [--save-dev] <spec>`, `npm uninstall --package-lock-only`, `npm update --package-lock-only [<name>]` | same | same |
-| Node | `pnpm-lock.yaml` | store pnpm at the exact version in root `package.json` `packageManager` (for example `pnpm@9.12.3`), then `pnpm add --lockfile-only`, `pnpm remove --lockfile-only`, or `pnpm update --lockfile-only`; only a positively matched pnpm workspace root is inherited, and workspace-root edits add `-w` | same | same |
+| Node | `pnpm-lock.yaml` | store pnpm at the exact version in root `package.json` `packageManager` (for example `pnpm@9.12.3`, optionally with a Corepack `+sha224.`/`+sha256.`/`+sha512.` hash, which is verified; any other algorithm is refused by name), then `pnpm add --lockfile-only --ignore-scripts`, `pnpm remove --lockfile-only`, or `pnpm update --lockfile-only --ignore-scripts`; lifecycle scripts are off for all three (pnpm's `remove` parser rejects the flag, so `npm_config_ignore_scripts` in the delegate's environment carries it); only a positively matched pnpm workspace root is inherited, and workspace-root edits add `-w` | same | same |
 | Node | Yarn classic v1 `yarn.lock` | refuse: run `yarn add …`, then `blanket` (Yarn classic has no lockfile-only edit mode; a workspace-faithful scratch edit is future work) | refuse: run `yarn remove …`, then `blanket` | refuse: run `yarn update`, then `blanket` |
 | Node | Yarn Berry (`.yarnrc.yml` or Yarn 2+) | refuse: Berry cache checksums are not npm tarball integrity values; convert with `npm install --package-lock-only` or `pnpm install --lockfile-only`, then `blanket` | same | same |
 | Cargo | any | store cargo: `cargo add`, `cargo remove`, `cargo update [-p <name>]` with network, exactly as `generate-lockfile` runs today | same | same |
@@ -276,6 +276,13 @@ formatting themselves); print every file touched; `--no-sync` for review.
 If one request would edit more than one project root (for example, a Python
 file in a pnpm member and the pnpm workspace root), blanket refuses before
 delegation and names both roots; run the two adds separately.
+
+A pnpm workspace member is found by matching `pnpm-workspace.yaml`'s
+`packages:` globs against the project's path relative to the root. Blanket
+matches literal segments, `*`, `**`, and a leading `!` negation. A pattern
+using a brace list, a character class, `?`, or an extglob is refused by
+name — never treated as a non-match, which would let `add` write a stray
+`package-lock.json` inside the workspace.
 
 ### 2.4 `blanket x <tool>[@version] [<args>...]`
 

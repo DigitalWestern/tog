@@ -1157,7 +1157,7 @@ fn python_uv(
 enum NodePackageManager {
     Pnpm {
         version: String,
-        corepack_sha224: Option<String>,
+        corepack_hash: Option<xrun::CorepackHash>,
     },
 }
 
@@ -1171,11 +1171,9 @@ impl NodePackageManager {
         version
     }
 
-    fn corepack_sha224(&self) -> Option<&str> {
-        let Self::Pnpm {
-            corepack_sha224, ..
-        } = self;
-        corepack_sha224.as_deref()
+    fn corepack_hash(&self) -> Option<&xrun::CorepackHash> {
+        let Self::Pnpm { corepack_hash, .. } = self;
+        corepack_hash.as_ref()
     }
 
     fn executable(&self) -> &'static str {
@@ -1183,29 +1181,55 @@ impl NodePackageManager {
     }
 }
 
+/// Split a `packageManager` version off its Corepack `+<algo>.<hex>` hash
+/// suffix. The suffix is diagnosed on its own terms: an unknown algorithm
+/// names the algorithm and the supported set rather than blaming a version
+/// that is already exact.
 fn package_manager_version(
     value: &str,
     package_json: &Path,
-) -> io::Result<(String, Option<String>)> {
-    let (version, hash) = match value.split_once("+sha224.") {
-        Some((version, hash)) => (version, Some(hash)),
+) -> io::Result<(String, Option<xrun::CorepackHash>)> {
+    let (version, suffix) = match value.split_once('+') {
+        Some((version, suffix)) => (version, Some(suffix)),
         None => (value, None),
     };
-    if let Some(hash) = hash {
-        if hash.len() != 56 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(other(format!(
-                "{}: packageManager has a malformed sha224 hash",
-                package_json.display()
-            )));
+    let hash = match suffix {
+        None => None,
+        Some(suffix) => {
+            let (algo, hex) = suffix.split_once('.').ok_or_else(|| {
+                other(format!(
+                    "{}: packageManager hash suffix must be +<algo>.<hex>, found \"+{suffix}\"; supported algorithms are {}",
+                    package_json.display(),
+                    xrun::CorepackAlgo::SUPPORTED
+                ))
+            })?;
+            let parsed = xrun::CorepackAlgo::parse(algo).ok_or_else(|| {
+                other(format!(
+                    "{}: packageManager hash algorithm {algo:?} is not supported; blanket verifies {}; drop the suffix or re-pin with one of those",
+                    package_json.display(),
+                    xrun::CorepackAlgo::SUPPORTED
+                ))
+            })?;
+            if hex.len() != parsed.hex_len() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(other(format!(
+                    "{}: packageManager has a malformed {} hash",
+                    package_json.display(),
+                    parsed.name()
+                )));
+            }
+            Some(xrun::CorepackHash {
+                algo: parsed,
+                hex: hex.to_ascii_lowercase(),
+            })
         }
-    }
+    };
     if !xrun::is_exact_version(version) {
         return Err(other(format!(
             "{}: packageManager version must be an exact release such as pnpm@9.12.3 (a prerelease suffix is allowed)",
             package_json.display()
         )));
     }
-    Ok((version.to_string(), hash.map(str::to_ascii_lowercase)))
+    Ok((version.to_string(), hash))
 }
 
 fn parse_package_manager_value(value: &str, package_json: &Path) -> io::Result<NodePackageManager> {
@@ -1215,10 +1239,10 @@ fn parse_package_manager_value(value: &str, package_json: &Path) -> io::Result<N
             package_json.display()
         ))
     })?;
-    let (version, corepack_sha224) = package_manager_version(version, package_json)?;
+    let (version, corepack_hash) = package_manager_version(version, package_json)?;
     Ok(NodePackageManager::Pnpm {
         version,
-        corepack_sha224,
+        corepack_hash,
     })
 }
 
@@ -1310,7 +1334,13 @@ fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
     matches(&pattern, &path)
 }
 
-fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<(bool, Vec<String>)> {
+/// Glob syntax `workspace_glob_matches` does NOT implement. A pattern using
+/// any of it would be matched literally, silently excluding a real member and
+/// letting `add` write a stray `package-lock.json` inside a pnpm workspace,
+/// so such a pattern is a refusal, not a non-match.
+const UNSUPPORTED_WORKSPACE_GLOB: [&str; 9] = ["!(", "+(", "@(", "*(", "{", "}", "?", "[", "]"];
+
+fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
     let workspace_file = root.join("pnpm-workspace.yaml");
     let patterns = if workspace_file.is_file() {
         let text = fs::read_to_string(&workspace_file)
@@ -1334,6 +1364,15 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<(bool, Vec
     let mut negative_match = false;
     for raw_pattern in &patterns {
         let trimmed = raw_pattern.trim();
+        if let Some(found) = UNSUPPORTED_WORKSPACE_GLOB
+            .iter()
+            .find(|token| trimmed.contains(**token))
+        {
+            return Err(other(format!(
+                "{}: unsupported pnpm workspace glob {raw_pattern:?} (contains {found:?}); blanket matches literal segments, '*', '**', and a leading '!' negation — brace lists, character classes, '?' and extglobs are not supported; rewrite the pattern, or run pnpm directly and then 'blanket'",
+                workspace_file.display()
+            )));
+        }
         let exclude = trimmed.starts_with('!');
         let pattern = trimmed
             .strip_prefix('!')
@@ -1358,7 +1397,7 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<(bool, Vec
             }
         }
     }
-    Ok((positive_match && !negative_match, patterns))
+    Ok(positive_match && !negative_match)
 }
 
 /// Select the lockfile to edit. A lockfile in the project itself wins in the
@@ -1377,8 +1416,7 @@ fn node_lock_selection(project: &Path) -> io::Result<(String, PathBuf)> {
             if lock_name != "pnpm-lock.yaml" || !ancestor.join("pnpm-workspace.yaml").is_file() {
                 break;
             }
-            let (matched, _) = pnpm_workspace_contains(ancestor, project)?;
-            if matched {
+            if pnpm_workspace_contains(ancestor, project)? {
                 return Ok((lock_name.to_string(), ancestor.to_path_buf()));
             }
             break;
@@ -1436,13 +1474,19 @@ fn node_delegate_args(
     dev: bool,
     workspace_root: bool,
 ) -> Vec<String> {
-    let command = match verb {
-        Verb::Add => "add",
-        Verb::Remove => "remove",
-        Verb::Update => "update",
-    };
-    let mut args = vec![command.to_string()];
-    args.extend(["--lockfile-only", "--reporter", "append-only"].map(str::to_string));
+    let mut args = vec![verb.command().to_string()];
+    args.push("--lockfile-only".into());
+    // Match the npm branch's defence in depth: `--lockfile-only` should mean
+    // nothing installs and no lifecycle script runs, but pnpm still runs
+    // `prepare` for git-URL dependencies while resolving. pnpm's `remove`
+    // parser rejects `--ignore-scripts` outright ("Unknown option:
+    // 'ignore-scripts'"), so the flag goes only on the verbs whose parser
+    // accepts it; `npm_config_ignore_scripts` in the delegate's environment
+    // (see `node`) is what covers all three.
+    if verb != Verb::Remove {
+        args.push("--ignore-scripts".into());
+    }
+    args.extend(["--reporter", "append-only"].map(str::to_string));
     if workspace_root {
         args.push("-w".into());
     }
@@ -1456,10 +1500,20 @@ fn node_delegate_args(
     args
 }
 
-/// Keep pnpm's isolated data directory stable for one project. pnpm embeds
-/// its store location in node_modules, so a fresh stage for every edit would
-/// make the next edit reject the existing installation as belonging to a
-/// different store. This is scratch state, not a published blanket object.
+/// pnpm's isolated HOME/XDG root for one project, stable across edits.
+///
+/// It has to be stable: even on the `--lockfile-only` path pnpm writes a
+/// `node_modules/.modules.yaml` recording the store directory it linked from,
+/// and the next edit refuses with `ERR_PNPM_UNEXPECTED_STORE` if that path
+/// has moved. The workspace round trip in tests/deps_e2e.rs is the proof —
+/// with a fresh directory per run, the second edit at a root that already has
+/// a `node_modules` fails. Deleting the directory between runs is safe, since
+/// it is re-created at the same path.
+///
+/// The `stage-` prefix is what makes it reclaimable: `gc::sweep_stages`
+/// removes `<store>/tmp/stage-*` older than its window, so this scratch is
+/// swept like any other. `touch_stage` keeps that window measured from the
+/// last edit, which also keeps gc from removing a directory mid-run.
 fn pnpm_home(store: &Store, project: &Path) -> io::Result<PathBuf> {
     let project = project.canonicalize()?;
     let key = hex::encode(Sha256::digest(
@@ -1468,9 +1522,19 @@ fn pnpm_home(store: &Store, project: &Path) -> io::Result<PathBuf> {
     let home = store
         .root
         .join("tmp")
-        .join(format!("pnpm-home-{}", &key[..32]));
+        .join(format!("stage-pnpm-home-{}", &key[..32]));
     fs::create_dir_all(&home)?;
+    touch_stage(&home);
     Ok(home)
+}
+
+/// Bump a directory's mtime so gc's age window runs from this edit. std has
+/// no `set_mtime`; adding or removing an entry updates the directory's mtime
+/// on both Linux and macOS, and one of the two always happens here.
+fn touch_stage(dir: &Path) {
+    let marker = dir.join(format!(".blanket-live-{}", std::process::id()));
+    let _ = fs::write(&marker, b"");
+    let _ = fs::remove_file(&marker);
 }
 
 struct NodeEdit {
@@ -1541,7 +1605,7 @@ fn node(
         platform,
         manager.name(),
         manager.version(),
-        manager.corepack_sha224(),
+        manager.corepack_hash(),
     )?;
     let node_obj = npm::ensure_node_for(store, platform)?;
     let executable = tool_root
@@ -1564,6 +1628,10 @@ fn node(
             && lock_root.join("pnpm-workspace.yaml").is_file(),
     );
     let package_path = project.join("package.json");
+    // An isolated HOME/XDG root, so pnpm never reads or writes the user's
+    // pnpm config, store or registry metadata cache. It is per project and
+    // stable (see `pnpm_home`) and named `stage-…`, so `blanket gc` reclaims
+    // it instead of letting pnpm's metadata cache grow unbounded.
     let pnpm_home_dir = pnpm_home(store, project)?;
     let pnpm_config = pnpm_home_dir.join("xdg-config");
     let pnpm_data = pnpm_home_dir.join("xdg-data");
@@ -1586,11 +1654,18 @@ fn node(
             .env("XDG_DATA_HOME", &pnpm_data)
             .env("XDG_CACHE_HOME", &pnpm_cache)
             .env("XDG_STATE_HOME", &pnpm_state);
+        // `npm_config_ignore_scripts` is set after the `npm_config_` strip, so
+        // it is blanket's value, not the user's. It is the only way to say
+        // "run no lifecycle script" to `pnpm remove`, whose parser rejects
+        // the `--ignore-scripts` flag; `add` and `update` carry the flag too.
         sandbox::force_env(
             &mut command,
             &["npm_config_", "NPM_CONFIG_", "PNPM_", "YARN_", "COREPACK_"],
             &["NODE_OPTIONS"],
-            &[("CI".into(), "1".into())],
+            &[
+                ("CI".into(), "1".into()),
+                ("npm_config_ignore_scripts".into(), "true".into()),
+            ],
         );
         run_inherited(command, &format!("store {}", manager.name()))?;
         Ok(())
@@ -1886,7 +1961,7 @@ mod tests {
             parse_package_manager_value("pnpm@9.12.3", package_json).unwrap(),
             NodePackageManager::Pnpm {
                 version: "9.12.3".into(),
-                corepack_sha224: None,
+                corepack_hash: None,
             }
         );
         assert_eq!(
@@ -1897,7 +1972,10 @@ mod tests {
             .unwrap(),
             NodePackageManager::Pnpm {
                 version: "9.1.2-rc.1".into(),
-                corepack_sha224: Some("a".repeat(56)),
+                corepack_hash: Some(xrun::CorepackHash {
+                    algo: xrun::CorepackAlgo::Sha224,
+                    hex: "a".repeat(56),
+                }),
             }
         );
         let garbage =
@@ -1906,6 +1984,58 @@ mod tests {
         let malformed_hash =
             parse_package_manager_value("pnpm@9.1.2+sha224.not-a-hash", package_json).unwrap_err();
         assert!(malformed_hash.to_string().contains("malformed sha224"));
+    }
+
+    /// Corepack has written three hash algorithms over its life; every one it
+    /// writes is a pin, so none of them may be misdiagnosed as an inexact
+    /// version. An algorithm blanket cannot verify is refused by name.
+    #[test]
+    fn corepack_hash_suffixes_accept_every_supported_algorithm() {
+        let package_json = Path::new("package.json");
+        for (algo, width) in [
+            (xrun::CorepackAlgo::Sha224, 56),
+            (xrun::CorepackAlgo::Sha256, 64),
+            (xrun::CorepackAlgo::Sha512, 128),
+        ] {
+            let value = format!("pnpm@9.15.4+{}.{}", algo.name(), "B".repeat(width));
+            assert_eq!(
+                parse_package_manager_value(&value, package_json).unwrap(),
+                NodePackageManager::Pnpm {
+                    version: "9.15.4".into(),
+                    corepack_hash: Some(xrun::CorepackHash {
+                        algo,
+                        hex: "b".repeat(width),
+                    }),
+                },
+                "rejected {value}"
+            );
+            // The right hex for the wrong algorithm is a malformed hash, not a
+            // silently accepted one.
+            let short = format!("pnpm@9.15.4+{}.{}", algo.name(), "b".repeat(width - 2));
+            let error = parse_package_manager_value(&short, package_json).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("malformed {} hash", algo.name())),
+                "{error}"
+            );
+        }
+
+        let unknown = parse_package_manager_value(
+            &format!("pnpm@9.15.4+sha1.{}", "c".repeat(40)),
+            package_json,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown.contains("\"sha1\""), "{unknown}");
+        assert!(unknown.contains("sha224, sha256, sha512"), "{unknown}");
+        assert!(!unknown.contains("exact release"), "{unknown}");
+
+        let shapeless = parse_package_manager_value("pnpm@9.15.4+deadbeef", package_json)
+            .unwrap_err()
+            .to_string();
+        assert!(shapeless.contains("+<algo>.<hex>"), "{shapeless}");
+        assert!(!shapeless.contains("exact release"), "{shapeless}");
     }
 
     #[test]
@@ -1937,6 +2067,7 @@ mod tests {
             vec![
                 "add",
                 "--lockfile-only",
+                "--ignore-scripts",
                 "--reporter",
                 "append-only",
                 "-w",
@@ -1945,7 +2076,59 @@ mod tests {
                 "@scope/pkg@1.2.3"
             ]
         );
+        // Every verb comes from `Verb::command`, and every verb whose pnpm
+        // parser accepts `--ignore-scripts` carries it. `remove` is the one
+        // exception: pnpm rejects the flag there ("Unknown option:
+        // 'ignore-scripts'"), so `npm_config_ignore_scripts` in the delegate
+        // environment is what stops its lifecycle scripts.
+        for verb in [Verb::Add, Verb::Remove, Verb::Update] {
+            let args = node_delegate_args(verb, &[], false, false);
+            assert_eq!(args[0], verb.command());
+            assert_eq!(
+                args.contains(&"--ignore-scripts".to_string()),
+                verb != Verb::Remove,
+                "{verb:?} delegate argv: {args:?}"
+            );
+        }
         assert!(validate_delegate_specs(&["--prefix=/tmp".into()]).is_err());
+    }
+
+    /// pnpm's HOME/XDG root must be stable per project — pnpm records the
+    /// store it linked from in `node_modules/.modules.yaml` and refuses a
+    /// moved one with ERR_PNPM_UNEXPECTED_STORE — and it must be reclaimable:
+    /// `gc::sweep_stages` only removes `<store>/tmp/stage-*`.
+    #[test]
+    fn pnpm_home_is_stable_per_project_and_named_for_the_gc_stage_sweep() {
+        let root = std::env::temp_dir().join(format!("blanket-pnpm-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("store/tmp")).unwrap();
+        let one = root.join("one");
+        let two = root.join("two");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        let store = Store {
+            root: root.join("store").canonicalize().unwrap(),
+        };
+        let home = pnpm_home(&store, &one).unwrap();
+        assert_eq!(
+            home,
+            pnpm_home(&store, &one).unwrap(),
+            "pnpm's store path moved between two edits of the same project"
+        );
+        assert_ne!(home, pnpm_home(&store, &two).unwrap());
+        assert_eq!(home.parent().unwrap(), store.root.join("tmp"));
+        let name = home.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("stage-"),
+            "gc's stale-stage sweep will never reclaim {name}"
+        );
+        // The mtime touch leaves nothing behind for pnpm or gc to trip over.
+        assert_eq!(
+            fs::read_dir(&home).unwrap().count(),
+            0,
+            "{name} kept a liveness marker"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2002,6 +2185,56 @@ mod tests {
         assert_eq!(
             node_lock_selection(&boundary).unwrap(),
             ("package-lock.json".to_string(), boundary)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A glob shape blanket cannot match must refuse, never fall through to
+    /// "not a member": falling through makes `add` write a stray
+    /// package-lock.json inside a pnpm workspace member.
+    #[test]
+    fn unsupported_pnpm_workspace_glob_shapes_refuse_instead_of_not_matching() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-workspace-glob-grammar-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let member = root.join("apps/web");
+        fs::create_dir_all(&member).unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        for pattern in [
+            "'{apps,libs}/*'",
+            "'app?/*'",
+            "'app[sx]/*'",
+            "'!(legacy)/*'",
+            "'+(apps|libs)/*'",
+            "'@(apps)/*'",
+            "'*(apps)/*'",
+        ] {
+            fs::write(
+                root.join("pnpm-workspace.yaml"),
+                format!("packages:\n  - {pattern}\n"),
+            )
+            .unwrap();
+            let error = node_lock_selection(&member)
+                .expect_err(&format!("{pattern} did not refuse"))
+                .to_string();
+            assert!(error.contains("unsupported pnpm workspace glob"), "{error}");
+            assert!(
+                error.contains("'*', '**', and a leading '!' negation"),
+                "{error}"
+            );
+        }
+        // The supported grammar still matches, and a plain '!' negation is not
+        // mistaken for an extglob.
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/*\n  - '!apps/legacy'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            node_lock_selection(&member).unwrap(),
+            ("pnpm-lock.yaml".to_string(), root.clone())
         );
         let _ = fs::remove_dir_all(&root);
     }

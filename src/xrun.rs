@@ -12,7 +12,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha224, Sha256};
+use sha2::{Digest, Sha224, Sha256, Sha512};
 
 use crate::platform::Platform;
 use crate::store::Store;
@@ -460,6 +460,62 @@ fn node_cache_root(
         .join(format!("npm-{}-{}", safe(package), &key[..16])))
 }
 
+/// The digest algorithms a Corepack `packageManager` hash suffix may name.
+/// Corepack has written `+sha224.`, `+sha256.` and (currently) `+sha512.`;
+/// the suffix is always lower-case hex, never base64 SRI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CorepackAlgo {
+    Sha224,
+    Sha256,
+    Sha512,
+}
+
+impl CorepackAlgo {
+    /// Named verbatim by every refusal that rejects an algorithm.
+    pub(crate) const SUPPORTED: &'static str = "sha224, sha256, sha512";
+
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "sha224" => Some(Self::Sha224),
+            "sha256" => Some(Self::Sha256),
+            "sha512" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sha224 => "sha224",
+            Self::Sha256 => "sha256",
+            Self::Sha512 => "sha512",
+        }
+    }
+
+    /// Width of the hex digest the suffix must carry.
+    pub(crate) fn hex_len(self) -> usize {
+        match self {
+            Self::Sha224 => 56,
+            Self::Sha256 => 64,
+            Self::Sha512 => 128,
+        }
+    }
+
+    fn hex_digest(self, bytes: &[u8]) -> String {
+        match self {
+            Self::Sha224 => hex::encode(Sha224::digest(bytes)),
+            Self::Sha256 => hex::encode(Sha256::digest(bytes)),
+            Self::Sha512 => hex::encode(Sha512::digest(bytes)),
+        }
+    }
+}
+
+/// A parsed Corepack hash suffix: the algorithm plus its lower-case hex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CorepackHash {
+    pub(crate) algo: CorepackAlgo,
+    pub(crate) hex: String,
+}
+
 /// Realize a Node package whose executable is needed by another delegate.
 /// This is the same registered `~/.blanket/x/` environment used by
 /// `blanket x`, so a delegate's second invocation is a normal cache hit.
@@ -468,15 +524,15 @@ pub(crate) fn realize_node_tool(
     platform: Platform,
     package: &str,
     version: &str,
-    corepack_sha224: Option<&str>,
+    corepack_hash: Option<&CorepackHash>,
 ) -> io::Result<PathBuf> {
     validate_exact_version(version)?;
     let root = node_cache_root(store, platform, package, Some(version))?;
     let executable = root.join("node_modules/.bin").join(default_bin(package));
     if executable.is_file() {
         check_cached_projection(store, &root, "node")?;
-        if let Some(expected) = corepack_sha224 {
-            verify_corepack_sha224(store, &root, package, version, expected)?;
+        if let Some(expected) = corepack_hash {
+            verify_corepack_hash(store, &root, package, version, expected)?;
         }
         return Ok(root);
     }
@@ -486,28 +542,32 @@ pub(crate) fn realize_node_tool(
             "'{package}@{version}' installed but provides no '{package}' executable"
         )));
     }
-    if let Some(expected) = corepack_sha224 {
-        verify_corepack_sha224(store, &root, package, version, expected)?;
+    if let Some(expected) = corepack_hash {
+        verify_corepack_hash(store, &root, package, version, expected)?;
     }
     Ok(root)
 }
 
-fn verify_corepack_sha224(
+fn verify_corepack_hash(
     store: &Store,
     root: &Path,
     package: &str,
     version: &str,
-    expected: &str,
+    expected: &CorepackHash,
 ) -> io::Result<()> {
-    if expected.len() != 56 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    let algo = expected.algo;
+    let name = algo.name();
+    if expected.hex.len() != algo.hex_len()
+        || !expected.hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err(other(format!(
-            "x: packageManager has a malformed sha224 hash for {package}@{version}"
+            "x: packageManager has a malformed {name} hash for {package}@{version}"
         )));
     }
     let closure = project::read_closure(root, "node")?;
     let packages = closure["packages"].as_array().ok_or_else(|| {
         other(format!(
-            "x: cannot verify packageManager sha224 for {package}@{version}: realized node closure has no package list; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+            "x: cannot verify packageManager {name} for {package}@{version}: realized node closure has no package list; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
         ))
     })?;
     let pnpm = packages.iter().find(|entry| {
@@ -516,30 +576,31 @@ fn verify_corepack_sha224(
     });
     let Some(pnpm) = pnpm else {
         return Err(other(format!(
-            "x: cannot verify packageManager sha224 for {package}@{version}: realized node closure has no reachable pnpm artifact; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+            "x: cannot verify packageManager {name} for {package}@{version}: realized node closure has no reachable pnpm artifact; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
         )));
     };
     let integrity = pnpm["integrity"].as_str().ok_or_else(|| {
         other(format!(
-            "x: cannot verify packageManager sha224 for {package}@{version}: pnpm artifact has no integrity and no reachable cache path; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+            "x: cannot verify packageManager {name} for {package}@{version}: pnpm artifact has no integrity and no reachable cache path; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
         ))
     })?;
     let digest = fetch::Digest::from_sri(integrity).map_err(|error| {
         other(format!(
-            "x: cannot verify packageManager sha224 for {package}@{version}: pnpm artifact integrity is invalid ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
+            "x: cannot verify packageManager {name} for {package}@{version}: pnpm artifact integrity is invalid ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
         ))
     })?;
     let cache_path = store.cache_path(digest.algo(), digest.hex());
     let bytes = fetch::read_cache_verified_digest(store, &digest).map_err(|error| {
         other(format!(
-            "x: cannot verify packageManager sha224 for {package}@{version}: verified pnpm artifact cache {} is not reachable ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
+            "x: cannot verify packageManager {name} for {package}@{version}: verified pnpm artifact cache {} is not reachable ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
             cache_path.display()
         ))
     })?;
-    let actual = hex::encode(Sha224::digest(bytes));
-    if actual != expected.to_ascii_lowercase() {
+    let actual = algo.hex_digest(&bytes);
+    if actual != expected.hex.to_ascii_lowercase() {
         return Err(other(format!(
-            "x: Corepack sha224 mismatch for {package}@{version}: packageManager declares {expected}, cached pnpm tarball has {actual}; nothing runs"
+            "x: Corepack {name} mismatch for {package}@{version}: packageManager declares {}, cached pnpm tarball has {actual}; nothing runs",
+            expected.hex
         )));
     }
     Ok(())

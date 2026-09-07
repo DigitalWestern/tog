@@ -36,11 +36,21 @@ say what breaks, for whom, and how it fails (loud/silent).
   version is suggested. Ancestor locks are never inherited unless a
   `pnpm-lock.yaml` and `pnpm-workspace.yaml` positively include the member;
   other locks and excluded members are boundaries. Mixed-root edits are
-  refused before delegation and name both roots. `+sha224.<hash>` suffixes
-  are verified against the realized pnpm package tarball in the verified
-  artifact cache. Delegates are resolved through the store's cached `x`
-  environments under `~/.blanket/x/`, with HOME and XDG directories isolated
-  for pnpm; they remain unsandboxed with network.
+  refused before delegation and name both roots. A Corepack
+  `+<algo>.<hex>` suffix is verified against the realized pnpm package
+  tarball in the verified artifact cache; `sha224`, `sha256` and `sha512`
+  are supported and any other algorithm is refused by name. **Only a subset
+  of the pnpm workspace glob grammar is matched:** literal segments, `*`,
+  `**`, and a leading `!` negation. A `packages:` pattern using a brace
+  list, a character class, `?`, or an extglob is refused by name rather
+  than silently treated as a non-match. Delegates are resolved through the
+  store's cached `x` environments under `~/.blanket/x/`; pnpm runs with an
+  isolated HOME and XDG root at `<store>/tmp/stage-pnpm-home-<key>`, kept
+  stable per project because pnpm records the store it linked from in
+  `node_modules/.modules.yaml` and refuses a moved one. Its `stage-` name is
+  what `blanket gc` sweeps, so the pnpm metadata cache is reclaimed with
+  every other stale stage and is re-created on the next edit; lifecycle
+  scripts are off for every verb. Delegates remain unsandboxed with network.
 - **Yarn classic dependency edits remain a refusal.** Yarn has no
   lockfile-only edit mode, and a workspace-faithful scratch edit is future
   work; run the Yarn command named by blanket, then `blanket`.

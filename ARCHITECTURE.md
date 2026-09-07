@@ -426,7 +426,11 @@ version from the root package.json `packageManager` field and cached in the
 registered `~/.blanket/x/` environment), while existing npm lockfiles are
 parsed locally — a bare machine needs nothing installed besides blanket
 itself. pnpm edits isolate HOME and XDG configuration/data/cache directories
-so user-global pnpm settings cannot change the registry or store behavior.
+so user-global pnpm settings cannot change the registry or store behavior;
+that root is `<store>/tmp/stage-pnpm-home-<key>`, stable per project because
+pnpm records its store path in `node_modules/.modules.yaml`, and named so
+`blanket gc`'s stale-stage sweep reclaims it. Lifecycle scripts are off for
+every verb.
 Yarn classic remains a refusal because it has no lockfile-only edit mode and
 workspace-faithful scratch editing is future work.
 Proven with a scrubbed-PATH (`/usr/bin:/bin`) sync + run on both ecosystems,

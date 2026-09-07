@@ -117,7 +117,7 @@ single most likely Mac-only break.
 
 **Mac before merge (this is the whole package):** on main, `cargo build`,
 `cargo test`, `cargo test -- --ignored` with a disposable `BLANKET_STORE`,
-`bash tests/acceptance.sh`, the six `deps_e2e` round trips, and the `x`
+`bash tests/acceptance.sh`, the nine `deps_e2e` round trips, and the `x`
 cold/warm smoke (`blanket x ruff --version`, `blanket x prettier --version`).
 Record results in REVIEW-2026-09-06.md, add the REVIEW.md log row, and
 append a round-4 entry to LINUX_PORT.md. Any Mac-only fix goes on a
@@ -273,11 +273,14 @@ Any of these may be taken after WP1 merges; each is its own PR.
 **Mac before merge (per item):** editable installs and dev groups exercise
 clonefile projection, so run the Python `--ignored` tests on the Mac; the
 `add/remove/update` delegates run unsandboxed and are platform-neutral, so
-the six `deps_e2e` round trips (including `pnpm_add_update_remove_roundtrip`
-and `pnpm_workspace_member_and_root_roundtrip`) on the Mac suffice; `x` lifecycle and any
-compiled-tool model for cargo/go tools need a Mac cold/warm run because the
-binaries are per-platform artifacts; the real-project-per-ecosystem proofs
-are measured on both machines and recorded as two columns.
+the nine `deps_e2e` round trips on the Mac suffice — including all three
+pnpm cases: `pnpm_add_update_remove_roundtrip`,
+`pnpm_workspace_member_and_root_roundtrip`, and
+`nested_independent_npm_project_does_not_use_ancestor_pnpm_lock`; `x`
+lifecycle and any compiled-tool model for cargo/go tools need a Mac
+cold/warm run because the binaries are per-platform artifacts; the
+real-project-per-ecosystem proofs are measured on both machines and
+recorded as two columns.
 
 ### WP5 — The company layer, all inside policy — OPEN, last
 
@@ -338,3 +341,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP4 initial pnpm and Yarn classic dependency edits landed at the prior revision; the rework below removed Yarn scratch edits and returned Yarn classic to refusal. Poetry/PDM remain open. |
 | 2026-09-06 | WP4 rework narrowed dependency edits to pnpm: exact release validation, Corepack SHA-224 verification, workspace-glob lock selection, and isolated pnpm config; Yarn classic scratch delegation was removed and remains a refusal. |
 | 2026-09-06 | WP4 rework round 2 made ancestor lock boundaries pnpm-only, made exclusions order-independent, rejected mixed-root edits before delegation, accepted prerelease numeric zero, clarified pnpm lock-format guidance, strengthened wrong-digest coverage, and distinguished Yarn Berry refusal guidance. |
+| 2026-09-07 | WP4 rework round 3 accepted every Corepack hash algorithm (`sha224`/`sha256`/`sha512`, unknown algorithms refused by name instead of blaming the version), made unsupported pnpm workspace glob shapes a refusal rather than a silent non-match, renamed the pnpm delegate's HOME/XDG root to `stage-pnpm-home-<key>` so gc's stale-stage sweep reclaims it (it stays stable per project because pnpm records its store path in `node_modules/.modules.yaml`), and turned lifecycle scripts off for every pnpm verb (`--ignore-scripts` on `add`/`update`, `npm_config_ignore_scripts` for `remove`, whose pnpm parser rejects the flag). |
