@@ -37,6 +37,16 @@ Nix's interface.
 - **Toolchain versions must track upstream without code edits.** Today every
   CPython/Node/Rust/Go/Ruby/OTP/.NET version is a hand-typed pin table in
   `src/*.rs`. This is the largest gap between the code and the owner's intent.
+- **Two platforms, both gated.** macOS arm64 and Linux x86_64 are the
+  product. The code is written once with per-platform pin rows, and the Linux
+  unit suite carries frozen darwin identity goldens, so a Linux run proves the
+  *plan* is identical on the Mac. It does not prove the Mac can *execute* it:
+  the sandbox engine (Seatbelt vs bubblewrap), tar (BSD vs GNU), file cloning
+  (clonefile vs reflink), the host C toolchain (Xcode vs gcc), and native
+  library provisioning (Linux only today) all differ at runtime. Windows is
+  out of scope until further notice; it is a different product surface (no
+  sandbox engine to lean on, different symlink and path semantics), not a
+  port, and nothing in this plan should bend toward it.
 - **"One door" stays qualified.** Blanket is a complete manifest of what came
   through *it*; without CI admission, registry proxies, or device management
   it is door fifty-one. Keep that sentence wherever the pitch appears.
@@ -52,6 +62,16 @@ Nix's interface.
   tests with a disposable `BLANKET_STORE`, disk-backed `TMPDIR`, and on Linux
   `BLANKET_SANDBOX_TESTS=required`. Use `--target-dir`, never
   `CARGO_TARGET_DIR`.
+- **Mac before merge.** Agents run on the Linux box; the Mac is the owner's
+  laptop. Every work package lists a **Mac before merge** line naming exactly
+  what must run there. The way it has been done: the owner (or a terminal
+  agent on the Mac, which runs under Codex's sandbox with `LANG=C.UTF-8` and
+  `ps` blocked) checks out the branch, runs the listed commands, and pastes
+  the results or pushes a `mac-verify-*` branch with any fix, as PRs #2-#4
+  did. A PR does not merge on Linux evidence alone unless the owner says so,
+  and then REVIEW.md gets a row saying "Linux evidence only" that WP0-style
+  work must later clear. Default Mac gate for any PR: `cargo build`,
+  `cargo test`, and the `--ignored` tests the PR touches.
 - **Independent adversarial review before merge.** Astra (Codex,
   `codex exec -m gpt-6-astra -c model_reasoning_effort=xhigh -s read-only
   --dangerously-bypass-approvals-and-sandbox -o <out> "<brief>" < /dev/null`)
@@ -80,13 +100,28 @@ WP4 items may interleave anywhere after WP1. WP5 last.
 
 ### WP0 — macOS arm64 validation of the current main — OPEN
 
-The CLI (PR #20), Git sources, artifacts, and the 2026-09-06 review fixes
-have Linux evidence only. Run on the Mac: `cargo test`, `cargo test --
---ignored`, `bash tests/acceptance.sh`, the six `deps_e2e` round trips, and
-the `x` cold/warm smoke (ruff, prettier). BSD tar execution specifically
-needs a real check. Record results in REVIEW-2026-09-06.md and tick the
-REVIEW.md log row. Also re-measure the two `npm_git_dep` hit-rate rows
-(hoppscotch, tabby) that predate Git sources, dated column in HITRATE.md.
+What the Mac has already proven: at commit dbf7ac4 (2026-09-05, PRs #2-#4,
+LINUX_PORT.md rounds 1-3) `cargo build`, `cargo test`, and
+`tests/acceptance.sh` passed 35/35 on macOS arm64, after three Mac-found
+fixes (Go locale, an unused_mut warning, the .NET CoreCLR shm directory).
+
+What it has not: the 76 commits since, which include Git sources (#14-#16),
+artifacts and electron provisioning (#13, #17), pnpm/yarn importers, manifest
+coverage, build isolation, native libraries, gc, the CLI (#20), the
+2026-09-06 review fixes (#19 and follow-ups), the in-process ustar check
+that replaced trusting tar's exit code (f856e98), the pnpm empty-lock fix,
+and the rustfmt pass. BSD tar behaviour under the new ustar validation is the
+single most likely Mac-only break.
+
+**Mac before merge (this is the whole package):** on main, `cargo build`,
+`cargo test`, `cargo test -- --ignored` with a disposable `BLANKET_STORE`,
+`bash tests/acceptance.sh`, the six `deps_e2e` round trips, and the `x`
+cold/warm smoke (`blanket x ruff --version`, `blanket x prettier --version`).
+Record results in REVIEW-2026-09-06.md, add the REVIEW.md log row, and
+append a round-4 entry to LINUX_PORT.md. Any Mac-only fix goes on a
+`mac-verify-round4` branch like the earlier rounds. Also re-measure the two
+`npm_git_dep` hit-rate rows (hoppscotch, tabby) that predate Git sources, as
+a dated column in HITRATE.md.
 
 ### WP1 — `blanket fmt` on the existing pinned Rust toolchain — OPEN
 
@@ -110,6 +145,12 @@ the toolchain), and the rest follow the same contract in WP4.
 Acceptance: a fresh clone of a Rust repo with no store runs `blanket fmt
 --check` and exits with rustfmt's status; second run is a cache hit; the
 component appears in `blanket ls` and survives `blanket gc`.
+
+**Mac before merge:** the rustfmt component needs its own darwin pin row
+with a verified sha256, and the new `fmt` execution mode goes through
+Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
+plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
+must be unchanged.
 
 ### WP2 — Toolchain lock and exact version selection — OPEN
 
@@ -154,6 +195,12 @@ environments from the same committed lock; a project with no pin gets a lock
 written on first sync and a refusal under `--frozen`; every exact-selection
 bug above has a regression test.
 
+**Mac before merge:** the lock carries a hash per platform, so a lock written
+on Linux must sync on the Mac without rewriting itself, and vice versa.
+Sync the same project on both machines and diff the lock file (it must be
+identical) and `blanket status` (both "synced"). Run `cargo test` and the
+selection `--ignored` tests on the Mac.
+
 ### WP3 — Release catalog with one authenticated provider — OPEN
 
 - **Catalog, not just a release list.** For each ecosystem: usable
@@ -187,6 +234,12 @@ code change; a failed refresh falls back to last-good and says so; offline
 replay of a locked project succeeds with the network denied; a tampered
 catalog is rejected.
 
+**Mac before merge:** every catalog provider must produce darwin-arm64 rows,
+and the Mac must realize a toolchain from the catalog rather than the
+compiled-in table (verify with `-v` that the catalog was the source). Offline
+replay is run on the Mac with the network off. The `--offline` and "shipped
+catalog only" modes are tested on both.
+
 ### WP4 — Daily-driver gaps and the `x` lifecycle — OPEN
 
 Any of these may be taken after WP1 merges; each is its own PR.
@@ -212,6 +265,14 @@ Any of these may be taken after WP1 merges; each is its own PR.
   sentry-cli) only when a real project needs them; SPDX SBOM and dependency
   graph.
 
+**Mac before merge (per item):** editable installs and dev groups exercise
+clonefile projection, so run the Python `--ignored` tests on the Mac; the
+`add/remove/update` delegates run unsandboxed and are platform-neutral, so
+the six `deps_e2e` round trips on the Mac suffice; `x` lifecycle and any
+compiled-tool model for cargo/go tools need a Mac cold/warm run because the
+binaries are per-platform artifacts; the real-project-per-ecosystem proofs
+are measured on both machines and recorded as two columns.
+
 ### WP5 — The company layer, all inside policy — OPEN, last
 
 - Policy engine: today `deny` names exception categories and strict rejects
@@ -234,6 +295,12 @@ Any of these may be taken after WP1 merges; each is its own PR.
   and licenses (they carry neither today: src/types.rs:46, src/npm.rs:217).
   Define the metadata source and missing-data behaviour first.
 - Shared store / binary cache across machines: only on real demand.
+
+**Mac before merge:** policy loading, registry configuration, and
+authentication are pure logic and need only `cargo test` on the Mac, except
+that any enforcement inside a build goes through Seatbelt and must be shown
+to deny on the Mac too (the network-denied sandbox acceptance check already
+exists for both engines; extend it rather than adding a new one).
 
 ## 4. Backlog (unranked, from the retired ROADMAP.md standing list)
 
@@ -261,3 +328,4 @@ Any of these may be taken after WP1 merges; each is its own PR.
 | Date | Change |
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
+| 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
