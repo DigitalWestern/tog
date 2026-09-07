@@ -26,12 +26,13 @@ say what breaks, for whom, and how it fails (loud/silent).
   `.ruby-version`, `.tool-versions`, or a cross-platform runtime row; Node,
   Ruby, and Elixir therefore remain single-pin selections, and `status` does
   not report a stale/missing toolchain lock. The release-bundle catalog
-  authority, bundle ids, HTTPS-only retrieval, the unconditional
-  descriptor-relative pre-publication compare, the reusable
+  authority, bundle ids, algorithm-qualified artifact digests, HTTPS-only
+  retrieval, the one hardened publication rule shared by both lock writers,
+  the unconditional descriptor-relative pre-publication compare, the reusable
   pre-materialization extractor, the source matrix, per-platform BEAM rows,
-  the `--frozen` write boundary, and bundle-complete `x/3` keys in
-  ARCHITECTURE.md are not implementation guarantees yet. In particular, the
-  generic fetch helper still accepts `file://` for mirrors and tests
+  the `--frozen` write boundary, and store-root-scoped bundle-complete `x/3`
+  keys in ARCHITECTURE.md are not implementation guarantees yet. In particular,
+  the generic fetch helper still accepts `file://` for mirrors and tests
   (`src/fetch.rs:319-380`); the dormant lock cannot authorize that path.
   Implementation remains open.
 - **Legacy closures cannot always seed a complete toolchain lock (WP2 design
@@ -122,10 +123,12 @@ say what breaks, for whom, and how it fails (loud/silent).
 Interpreter selection is limited to the five pinned CPython builds for the
 two supported host platforms; explicit `.python-version` requests win over
 metadata conflicts with a warning, while unsupported implementations and
-unsatisfiable constraints fail closed. The narrower WP2 request grammar —
-exact `X.Y.Z`, minor `X.Y`, or a restricted PEP 440 specifier set, each
-resolved against the catalog once and then locked, with implementation
-prefixes, variants, paths, and executables refused — is design-only until lock
+unsatisfiable constraints fail closed. An explicit CPython prefix
+(`python3.12`, `cpython-3.12`, `cpython@3.12`) is accepted as the same request
+and stays accepted under WP2. The narrower WP2 request grammar — exact
+`X.Y.Z`, minor `X.Y`, or a restricted PEP 440 specifier set, each resolved
+against the catalog once and then locked, with non-CPython implementations,
+variants, paths, and executables refused — is design-only until lock
 activation.
 
 Manifest discovery covers Poetry/PDM/uv/hatch metadata, Poetry/uv lockfile

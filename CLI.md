@@ -237,7 +237,7 @@ project read-only, and scratch-only writes; it never evaluates project code
 unsandboxed. Thus setup.py/mix.exs compatibility comes from safe parsing or
 that probe. The setup `BuildSpec` uses
 `argv = ["/bin/sh", "-c", "exec <build-env>/bin/python setup.py egg_info
---egg-base <scratch>/egg-info > <scratch>/egg-info.log 2>&1]`, with the
+--egg-base <scratch>/egg-info ><scratch>/egg-info.log 2>&1"]`, with the
 project root as cwd and the build environment, CPython, and scratch as roots
 (`src/manifest.rs:162-178`); it does not run `/bin/sh setup.py`. The write
 boundary's regression is

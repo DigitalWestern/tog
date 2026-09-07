@@ -154,16 +154,21 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 4; IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 5; IMPLEMENTATION OPEN
 
-Status: the design is reworked in ARCHITECTURE.md after the fourth adversarial
-review; implementation is open and follows its ordered PRs. The design now
+Status: the design is reworked in ARCHITECTURE.md after the fifth adversarial
+review; implementation is open and follows its ordered PRs, of which item 0 is
+already open as PRs #21 (`wp2/python-exact-selection`) and #22
+(`wp2/go-selected-version`). The design now gives both lock writers one
+hardened publication rule, keeps the store root in the `x/3` key, makes
+artifact digests algorithm-qualified so the existing sha512 rows are carried
+over, keeps explicit CPython prefixes as a supported `.python-version`
+spelling, defines the input digest as the source file's own content hash,
 requires an unconditional descriptor-relative lock snapshot compare, separates
-bundle ids from component versions, carries bundle ids into `x/3`, defines the
-Python request grammar and frozen-write boundary, and assigns extractor and
-legacy-seeding tests. Lock activation is dormant until source selection and
-runtime propagation land, so intermediate PRs neither write nor require a
-toolchain lock.
+bundle ids from component versions, defines the frozen-write boundary, and
+assigns extractor and legacy-seeding tests. Lock activation is dormant until
+source selection and runtime propagation land, so intermediate PRs neither
+write nor require a toolchain lock.
 
 The design is documented before implementation; changes to the contract update
 ARCHITECTURE.md in the same PR as the affected implementation.
@@ -189,10 +194,11 @@ catalog will expose it.
   .NET accepts one fixed SDK (src/npm.rs:137, src/ruby.rs:57,
   src/dotnet.rs:132, LIMITATIONS.md). Ranges (`requires-python >=3.10`) pick
   the newest compatible supported stable/LTS once and lock it.
-- **Exact selection bugs to fix first:** `pyselect` substitutes a patch
-  version even for an exact request (src/pyselect.rs:170); `python::lookup`
-  returns the first matching row (src/python.rs:87); Go realization takes no
-  selected version (src/golang.rs:145).
+- **Exact selection bugs to fix first (open as PRs #21 and #22):**
+  `pyselect` substitutes a patch version even for an exact request
+  (src/pyselect.rs:170); `python::lookup` returns the first matching row
+  (src/python.rs:87); Go realization takes no selected version
+  (src/golang.rs:145).
 - **Carry the selected runtime through every operation.** Node `run` and
   cached `x` environments take the global pin (src/main.rs:1409,
   src/xrun.rs:325); `x` keys omit runtime identity; `status` must compare
@@ -348,3 +354,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP2 design reworked round 2: catalog-authorized HTTPS artifacts, per-platform BEAM rows, descriptor-relative input snapshots, explicit source-discovery matrix, sandbox-only frozen probes, and dormant lock activation are now explicit. |
 | 2026-09-06 | WP2 design reworked round 3: release-bundle catalog authority, pre-materialization extractor requirements, lock-file race protection, exact Go `toolchain` semantics, corrected setup.py argv, and activation-ordered acceptance tests are now explicit. |
 | 2026-09-07 | WP2 design reworked round 4: unconditional descriptor-relative lock comparison, bundle id/component-version separation with recipe-revision tie-breaking, bundle-complete `x/3` keys, supported Python request grammar, the frozen-write boundary, and assigned extractor/legacy-seeding tests are now explicit. |
+| 2026-09-07 | WP2 design reworked round 5: one hardened publication rule for both lock writers, store root kept in the `x/3` key, algorithm-qualified artifact digests carrying the existing sha512 rows, explicit CPython `.python-version` prefixes kept supported, input digests redefined as source-file content hashes, and channel dropped from the ordering key; exact-selection work recorded as open PRs #21/#22. |
