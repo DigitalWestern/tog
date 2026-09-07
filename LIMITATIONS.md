@@ -21,6 +21,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   reported as synced. Cargo, Go, Ruby, Elixir and .NET compare the lock
   hash only, not the manifest. Closures from before the field exists show
   as "synced (unchecked)" until the next sync.
+- **There is no committed toolchain lock yet (WP2 design only).** `sync`
+  selects from compiled pins and does not compare `.node-version`,
+  `.ruby-version`, `.tool-versions`, or a cross-platform runtime row; Node,
+  Ruby, and Elixir therefore remain single-pin selections, and `status` does
+  not report a stale/missing toolchain lock. The design is in
+  ARCHITECTURE.md; implementation remains open.
 - **`blanket add` / `remove` / `update` delegate to store tools with
   network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
   same trust boundary as missing-lockfile generation. Rows that refuse with

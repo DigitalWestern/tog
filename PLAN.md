@@ -154,7 +154,10 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN WRITTEN; IMPLEMENTATION OPEN
+
+Status: design is in ARCHITECTURE.md; implementation is open and follows the
+ordered PRs listed in that section.
 
 Design before code; write the design into ARCHITECTURE.md as part of the PR.
 
@@ -331,3 +334,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
+| 2026-09-06 | WP2 design written; implementation open, ordered PRs listed in ARCHITECTURE.md. |

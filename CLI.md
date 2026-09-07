@@ -25,9 +25,11 @@ USAGE:
 
 EVERYDAY:
   sync       realize and project the environment(s) from the project's inputs
+             (planned: --frozen requires a committed toolchain lock)
   add        add a dependency, re-lock, sync
   remove     remove a dependency, re-lock, sync
   update     update dependencies within the manifest's constraints, sync
+             (planned: --toolchain [<ecosystem>] updates toolchain lock only)
   run        run a command or script inside the environment(s)
   x          run a tool without adding it to the project (like npx / uvx)
   build      sandboxed, network-denied build (cargo | go | elixir | dotnet)
@@ -211,6 +213,7 @@ question PLAN.md defers until a real polyglot need appears (WP1's
 blanket add <spec>...    [--dev] [--no-sync]
 blanket remove <name>... [--dev] [--no-sync]
 blanket update [<name>...] [--no-sync]
+blanket update --toolchain [<ecosystem>]       (planned: WP2 design)
 ```
 
 Flow, identical for the three: pick the ecosystem → delegate the manifest
@@ -219,6 +222,13 @@ and lock edit to the store tool → run the ordinary sync → print what changed
 `--no-sync` stops after the lock edit, for people who want to review the
 diff first. `remove --dev` selects development dependencies for uv and Cargo,
 matching `add --dev`. All dependency arguments are validated before delegation.
+
+**Planned (WP2 design, not implemented in level two):** `blanket sync
+--frozen` reads and validates `blanket-toolchain.toml` without creating or
+updating it. `blanket update --toolchain [<ecosystem>]` is the only command
+that upgrades those exact runtime selections; it may be run for one ecosystem
+or all present ecosystems and then invokes ordinary sync. It is separate from
+dependency update and does not edit the ecosystem's dependency lockfile.
 
 **Choosing the ecosystem (decided 2026-09-06: infer from evidence, then
 ask; no required syntax).** Blanket never picks an ecosystem on a coin flip,
