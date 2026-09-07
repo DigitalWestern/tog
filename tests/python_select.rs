@@ -1,4 +1,4 @@
-//! Ignored Linux e2e for interpreter selection and warm lock/plan caches.
+//! Ignored e2e for interpreter selection and warm lock/plan caches.
 
 use blanket::platform::Platform;
 use std::path::{Path, PathBuf};
@@ -145,16 +145,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
 
 #[test]
 #[ignore]
-fn unpinned_patch_request_fails_closed_without_network_or_store_objects() {
-    if !cfg!(target_os = "linux") {
-        eprintln!("python_select: skipped on non-Linux host");
-        return;
-    }
-    if Platform::host().unwrap() != Platform::X86_64UnknownLinuxGnu {
-        eprintln!("skip python_select: host is not x86_64-unknown-linux-gnu");
-        return;
-    }
-
+fn unpinned_patch_request_fails_closed_before_opening_store() {
     let temp = TempDir::new();
     let project = temp.0.join("proj-unpinned-patch");
     std::fs::create_dir_all(&project).unwrap();
@@ -178,8 +169,5 @@ fn unpinned_patch_request_fails_closed_without_network_or_store_objects() {
         "{stderr}"
     );
     assert!(stderr.contains("request one of:"), "{stderr}");
-    let object_count = std::fs::read_dir(store.join("objects"))
-        .map(|entries| entries.count())
-        .unwrap_or(0);
-    assert_eq!(object_count, 0, "store objects were created: {store:?}");
+    assert!(!store.exists(), "store was opened: {store:?}");
 }

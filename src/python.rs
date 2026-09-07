@@ -88,6 +88,24 @@ pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython
     lookup_in_pins(PYTHONS, platform, version)
 }
 
+/// Return the number of release components when `version` is written in the
+/// canonical form accepted for CPython selection. Components are decimal and
+/// cannot have leading zeroes; no suffixes, prefixes, or surrounding text are
+/// accepted.
+pub(crate) fn canonical_release_len(version: &str) -> Option<usize> {
+    let pieces: Vec<_> = version.split('.').collect();
+    if !(2..=3).contains(&pieces.len())
+        || pieces.iter().any(|piece| {
+            piece.is_empty()
+                || (piece.len() > 1 && piece.starts_with('0'))
+                || !piece.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    Some(pieces.len())
+}
+
 /// Match only a complete pinned version or a major.minor request. The slice
 /// is supplied by the caller so matching remains independent of the table's
 /// row order and can be tested with synthetic pin tables.
@@ -96,29 +114,16 @@ fn lookup_in_pins<'a>(
     platform: Platform,
     version: &str,
 ) -> Option<&'a PinnedPython> {
-    let pieces: Vec<_> = version.split('.').collect();
-    if !(2..=3).contains(&pieces.len())
-        || pieces
-            .iter()
-            .any(|piece| piece.is_empty() || !piece.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return None;
-    }
+    let release_len = canonical_release_len(version)?;
     let requested = crate::pep440::Version::parse(version).ok()?;
-    if requested.raw() != version
-        || requested.has_epoch()
-        || requested.is_prerelease()
-        || requested.has_local()
-    {
+    if requested.has_epoch() || requested.is_prerelease() || requested.has_local() {
         return None;
     }
 
-    match requested.release_len() {
-        3 => pins.iter().find(|pin| {
-            pin.platform == platform
-                && parse_pinned_version(pin.version)
-                    .is_some_and(|pinned| pinned.cmp(&requested).is_eq())
-        }),
+    match release_len {
+        3 => pins
+            .iter()
+            .find(|pin| pin.platform == platform && pin.version == version),
         2 => pins
             .iter()
             .filter(|pin| {
@@ -358,6 +363,17 @@ mod tests {
             assert!(lookup(platform, "not-a-version").is_none());
             assert!(lookup(platform, "3.12.post1").is_none());
             assert!(lookup(platform, "3.12-dev").is_none());
+            for invalid in [
+                "03.12",
+                "3.12.014",
+                "3.12.0",
+                "3.12.14.0",
+                "v3.12",
+                "3.12.14 ",
+                "3.12.",
+            ] {
+                assert!(lookup(platform, invalid).is_none(), "{invalid}");
+            }
             assert_eq!(lookup(platform, "3.12").unwrap().version, "3.12.14");
             assert_eq!(lookup(platform, "3.12.14").unwrap().version, "3.12.14");
         }

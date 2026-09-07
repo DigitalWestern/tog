@@ -101,12 +101,13 @@ say what breaks, for whom, and how it fails (loud/silent).
 ## Python
 
 Interpreter selection is limited to the five pinned CPython builds for the
-two supported host platforms. A two-part `.python-version` request selects
-the newest pinned patch for that minor; a three-part request must match a
-pinned build exactly and otherwise fails closed with the available pins and
-the command to accept the pinned patch. Explicit requests still win over
-metadata conflicts with a warning, while unsupported implementations and
-unsatisfiable constraints fail closed.
+two supported host platforms. A canonical two-part `.python-version` request
+selects the newest pinned patch for that minor; a canonical three-part request
+must match a pinned build exactly and otherwise fails closed with the
+available pins and the command to accept the pinned patch. Noncanonical
+release spellings, unsupported implementations, and unsatisfiable constraints
+fail closed. Explicit requests still win over metadata conflicts with a
+warning.
 
 Manifest discovery covers Poetry/PDM/uv/hatch metadata, Poetry/uv lockfile
 hashes, setup.cfg, sandboxed setup.py egg_info, and requirements directories.

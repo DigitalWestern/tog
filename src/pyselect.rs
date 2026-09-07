@@ -6,7 +6,7 @@
 //! the host Python or a package index.
 
 use crate::platform::Platform;
-use crate::python::{PinnedPython, PYTHONS};
+use crate::python::{canonical_release_len, PinnedPython, PYTHONS};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -168,27 +168,7 @@ pub fn select_python_with_inputs(
     };
     let mut warnings = Vec::new();
     let (pin, explicit_request) = if let Some(explicit) = &inputs.explicit {
-        let matching = if explicit.version.release_len() == 3 {
-            pins.iter().copied().find(|pin| {
-                pinned_version(pin.version)
-                    .expect("pinned CPython version")
-                    .cmp(&explicit.version)
-                    .is_eq()
-            })
-        } else {
-            pins.iter()
-                .copied()
-                .filter(|pin| {
-                    let version = pinned_version(pin.version).expect("pinned CPython version");
-                    version.major() == explicit.version.major()
-                        && version.minor() == explicit.version.minor()
-                })
-                .max_by(|left, right| {
-                    pinned_version(left.version)
-                        .expect("pinned CPython version")
-                        .cmp(&pinned_version(right.version).expect("pinned CPython version"))
-                })
-        };
+        let matching = select_explicit_pin(&pins, &explicit.version);
         let Some(pin) = matching else {
             if explicit.version.release_len() == 3 {
                 return Err(no_exact_satisfying_pin(platform, explicit, &pins));
@@ -270,6 +250,37 @@ pub fn select_python_with_inputs(
         warnings,
         explicit_request,
     })
+}
+
+/// Choose an explicit request from an already platform-filtered pin slice.
+/// Three-part requests match one pinned build; two-part requests choose the
+/// numerically newest patch for that minor. The caller validates the request's
+/// textual spelling before constructing its `Version`.
+fn select_explicit_pin<'a>(
+    pins: &[&'a PinnedPython],
+    requested: &crate::pep440::Version,
+) -> Option<&'a PinnedPython> {
+    match requested.release_len() {
+        3 => pins.iter().copied().find(|pin| {
+            pinned_version(pin.version)
+                .expect("pinned CPython version")
+                .cmp(requested)
+                .is_eq()
+        }),
+        2 => pins
+            .iter()
+            .copied()
+            .filter(|pin| {
+                let version = pinned_version(pin.version).expect("pinned CPython version");
+                version.major() == requested.major() && version.minor() == requested.minor()
+            })
+            .max_by(|left, right| {
+                pinned_version(left.version)
+                    .expect("pinned CPython version")
+                    .cmp(&pinned_version(right.version).expect("pinned CPython version"))
+            }),
+        _ => None,
+    }
 }
 
 /// Reconstruct the selection recorded in a plan when a later metadata phase
@@ -384,12 +395,7 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
         .or_else(|| line.strip_prefix("CPython-"))
         .or_else(|| line.strip_prefix("CPython@"))
         .unwrap_or(line);
-    let pieces: Vec<_> = numeric.split('.').collect();
-    if !(2..=3).contains(&pieces.len())
-        || pieces
-            .iter()
-            .any(|piece| piece.is_empty() || !piece.bytes().all(|byte| byte.is_ascii_digit()))
-    {
+    if canonical_release_len(numeric).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{source}: invalid .python-version request `{line}`"),
@@ -799,6 +805,14 @@ mod tests {
     }
 
     #[test]
+    fn python_version_requires_canonical_release_components() {
+        for text in ["03.11", "3.11.016"] {
+            let error = parse_python_version_file(text, ".python-version").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{text}");
+        }
+    }
+
+    #[test]
     fn explicit_version_precedes_declared_constraints_and_warns() {
         let inputs = PythonInputs {
             explicit: Some(parse_python_version_file("3.10", ".python-version").unwrap()),
@@ -863,15 +877,35 @@ mod tests {
     }
 
     #[test]
-    fn minor_request_selects_the_pinned_patch_without_warning() {
-        let inputs = PythonInputs {
-            explicit: Some(parse_python_version_file("3.11", ".python-version").unwrap()),
-            constraints: Vec::new(),
+    fn explicit_request_pin_choice_is_newest_for_minor_and_exact_for_patch() {
+        let newer = PinnedPython {
+            platform: Platform::X86_64UnknownLinuxGnu,
+            version: "3.11.16",
+            url: "https://example.invalid/3.11.16.tar.gz",
+            sha256: "16",
         };
-        let selection =
-            select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
-        assert_eq!(selection.pin.version, "3.11.16");
-        assert!(selection.warnings.is_empty());
+        let older = PinnedPython {
+            platform: Platform::X86_64UnknownLinuxGnu,
+            version: "3.11.9",
+            url: "https://example.invalid/3.11.9.tar.gz",
+            sha256: "9",
+        };
+        let pins = [&newer, &older];
+
+        let minor = crate::pep440::Version::parse("3.11").unwrap();
+        assert_eq!(
+            select_explicit_pin(&pins, &minor).unwrap().version,
+            "3.11.16"
+        );
+
+        let exact = crate::pep440::Version::parse("3.11.9").unwrap();
+        assert_eq!(
+            select_explicit_pin(&pins, &exact).unwrap().version,
+            "3.11.9"
+        );
+
+        let unavailable = crate::pep440::Version::parse("3.11.4").unwrap();
+        assert!(select_explicit_pin(&pins, &unavailable).is_none());
     }
 
     #[test]

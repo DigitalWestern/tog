@@ -66,9 +66,10 @@ The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they
 live in the docs.
 
-For Python, `.python-version` uses uv-style request shapes: `X.Y` selects the
-newest pinned patch for that minor, while `X.Y.Z` selects only that exact
-pinned build. An unavailable exact patch fails with the available pinned
+For Python, `.python-version` uses canonical uv-style request shapes:
+`X.Y` selects the newest pinned patch for that minor, while `X.Y.Z` selects
+only that exact pinned build. Release components must be decimal with no
+leading zeroes; an unavailable exact patch fails with the available pinned
 versions and the instruction to request `X.Y` when the pinned patch is
 acceptable.
 
