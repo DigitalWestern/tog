@@ -154,11 +154,12 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED; IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 2; IMPLEMENTATION OPEN
 
-Status: the design is reworked in ARCHITECTURE.md after adversarial review;
-implementation is open and follows its ordered PRs (exact-selection fixes,
-shipped-table adapter, lock core, runtime propagation, then update).
+Status: the design is reworked in ARCHITECTURE.md after the second adversarial
+review; implementation is open and follows its ordered PRs. Lock activation is
+dormant until source selection and runtime propagation land, so intermediate
+PRs neither write nor require a toolchain lock.
 
 The design is documented before implementation; changes to the contract update
 ARCHITECTURE.md in the same PR as the affected implementation.
@@ -340,3 +341,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
 | 2026-09-06 | WP2 design written; implementation open, ordered PRs listed in ARCHITECTURE.md. |
 | 2026-09-06 | WP2 design reworked after adversarial review: recipe identities, embedded components, frozen input safety, global cross-platform selection, conservative legacy seeding, and the implementation order are now explicit. |
+| 2026-09-06 | WP2 design reworked round 2: catalog-authorized HTTPS artifacts, per-platform BEAM rows, descriptor-relative input snapshots, explicit source-discovery matrix, sandbox-only frozen probes, and dormant lock activation are now explicit. |

@@ -464,9 +464,10 @@ The schema is versioned and intentionally boring:
 - each `toolchain.<ecosystem>` has `runtime`, a complete `components` list,
   one `component.<name>` table per listed component, `inputs` rows, and
   `platforms.<triple>.artifacts.<component>` rows;
-- every component table has exact `provider`, `build`, `version`, and stable
-  `recipe` fields. `recipe` identifies extraction, layout, and relocation
-  behaviour, not just the provider release;
+- every component table has an exact `version` and, when applicable,
+  `embedded_in`; `provider`, `build`, and stable `recipe` are fields of each
+  independently fetched per-platform artifact row. `recipe` identifies
+  extraction, layout, and relocation behaviour, not just the provider release;
 - an embedded component is wholly contained in another component's artifact.
   It still has its own metadata table and `embedded_in = "<parent>"`, but no
   artifact row of its own: the parent's sha256 verifies all embedded bytes.
@@ -475,8 +476,9 @@ The schema is versioned and intentionally boring:
   as components without pretending they are separate downloads;
 - input rows have `path`, `field`, `value`, and a sha256 over
   `path + NUL + field + NUL + canonical value`; and
-- artifact rows have `url` and a verified sha256. Provider-native hashes may
-  be evidence, but Blanket's sha256 is mandatory.
+- artifact rows have `provider`, `build`, `recipe`, `url`, and a verified
+  sha256. Provider-native hashes may be evidence, but Blanket's sha256 is
+  mandatory.
 
 Both supported triples are always present for each independently fetched
 component, even when syncing on one host; a platform-neutral component repeats
@@ -488,9 +490,9 @@ doing so would stale every lock after a Blanket upgrade. `schema_version`,
 recipe support, source inputs, and artifact rows determine compatibility.
 Dependency locks remain the ecosystem files already listed in PLAN.md.
 
-Illustrative Node and Go entries using the currently shipped pins (hashes are
-the existing table values, not new identities; other ecosystems use the same
-complete shape):
+Illustrative Node and BEAM entries using the currently shipped pins (hashes are
+the existing table values, not new identities; abbreviated BEAM rows show the
+platform-specific shape, while real locks contain every required row):
 
 ```toml
 schema_version = 1
@@ -528,35 +530,46 @@ sha256 = "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8"
 url = "https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.gz"
 sha256 = "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec"
 
-[toolchain.go]
-runtime = "go"
-components = ["go", "stdlib"]
-[toolchain.go.component.go]
-provider = "go.dev"
-build = "1.27.0"
-version = "1.27.0"
-recipe = "go-toolchain/1"
-[toolchain.go.component.stdlib]
-provider = "go.dev"
-build = "1.27.0"
-version = "1.27.0"
-recipe = "go-toolchain/1"
-embedded_in = "go"
-[[toolchain.go.inputs]]
-path = "go.mod"
-field = "go"
-value = "1.27"
-sha256 = "552f4882f06289dd620695411f72f17e3f32315e7e0d59a1c73c29add0fc10e9"
-[toolchain.go.platforms."aarch64-apple-darwin".artifacts.go]
-url = "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz"
-sha256 = "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"
-[toolchain.go.platforms."x86_64-unknown-linux-gnu".artifacts.go]
-url = "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz"
-sha256 = "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
+[toolchain.beam]
+runtime = "beam"
+components = ["otp", "elixir", "hex", "rebar3"]
+[toolchain.beam.component.otp]
+version = "29.0.5"
+[toolchain.beam.component.elixir]
+version = "1.20.4"
+[toolchain.beam.component.hex]
+version = "2.5.1"
+[toolchain.beam.component.rebar3]
+version = "3.25.1"
+[toolchain.beam.platforms."aarch64-apple-darwin".artifacts.otp]
+provider = "erlef/otp_builds"
+build = "OTP-29.0.5"
+recipe = "otp/preinstalled/1"
+url = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz"
+sha256 = "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d"
+[toolchain.beam.platforms."x86_64-unknown-linux-gnu".artifacts.otp]
+provider = "DigitalWestern/blanket-toolchains"
+build = "otp-29.0.5-x86_64-unknown-linux-gnu-fedora44"
+recipe = "otp-install-cross-minimal/1"
+url = "https://github.com/DigitalWestern/blanket-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
+sha256 = "18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4"
+# elixir, hex, and rebar3 also have one row per supported platform;
+# platform-neutral bytes repeat their digest in the two rows.
 ```
 
 Real locks include every consulted field; missing rows, bad digests, unknown
-schema, or unsupported builds invalidate the lock without host fallback.
+schema, or unsupported builds invalidate the lock without host fallback. A
+lock row is never self-authorizing: resolve it through the shipped catalog
+(compiled tables today, WP3 catalog later) by the exact tuple
+`(ecosystem, component, provider, build, recipe, platform)`; an absent tuple
+is an error and never downloads. The catalog URL and sha256 must equal the
+lock's, retrieval is HTTPS-only, and `file://`, foreign-host, or hash-mismatch
+rows fail before fetch. Every catalog extraction uses the existing contained
+path/link checks
+(`src/build_requires.rs:565-619`, `src/gitsrc.rs:943-980`,
+`src/gitsrc.rs:1120-1132`),
+not a lock-selected raw archive path; adversarial tests cover those three rows
+and archives with escaping or otherwise hostile links.
 
 The recipe is also an identity boundary. Current implementations already use
 recipe markers such as `rust-toolchain/1` in the Rust identity
@@ -573,29 +586,25 @@ Darwin goldens.
 
 ### Pre-planning security gate
 
-The lock is not permission to read arbitrary project paths. Before planning or
-validating a lock, each `inputs.path` is required to be a project-relative,
-lexically normalized path with no `..` component; its resolved target must stay
-under the canonical project root and be a regular file. A symlink is accepted
-only when its final target is contained there and regular. The allowed input
-set comes from manifest discovery, not from an arbitrary path named by the
-lock. Lock paths are validated data, never read targets that can widen that
-set.
+The lock is not permission to read arbitrary project paths: each
+`inputs.path` is project-relative, normalized, and free of `..`; the allowed
+set comes from manifest discovery. To close TOCTOU, open the project root once
+and every input descriptor-relative beneath that held descriptor with
+`O_NOFOLLOW` at every component; a symlinked input or ancestor is an error.
 
-Blanket snapshots every selected input's bytes, path, and metadata before
-selection and rechecks containment, metadata, and bytes immediately before
-publishing the lock. A change aborts publication and reports the file; it does
-not silently refresh the lock.
+Snapshot bytes and metadata from those descriptors and retain them through
+planning. After dependency planning, on EVERY sync (including an existing-lock
+sync), reopen through the held root descriptor with `O_NOFOLLOW` and recheck
+identity metadata and bytes before publishing the closure or projection. A
+change aborts and leaves the existing lock, closure, and projection untouched.
 
-`--frozen` performs no resolver, manifest, dependency-lock, or lock write. A
-compatibility value from `setup.py` or `mix.exs` must come from a
-non-evaluating parser, or the existing network-denied, project-read-only,
-env-scrubbed probe with scratch-only writes; frozen publishes no cache. The
-setup.py path already runs `egg_info` this way (`src/manifest.rs:146-178`).
-The current normal Elixir consistency gate evaluates `mix.exs`
-(`src/elixir.rs:1097-1110`); frozen validation must not call that unsandboxed
-delegated planner. If safe compatibility data cannot be obtained, frozen
-refuses before realization.
+`--frozen` performs no resolver, manifest, dependency-lock, or lock write.
+Frozen permits SANDBOXED evaluation only: network denied, project read-only,
+scratch-only writes, and no cache writes; it never evaluates project code
+unsandboxed. `setup.py`/`mix.exs` compatibility therefore comes from safe
+parsing or that probe; the setup path runs `/bin/sh setup.py egg_info`
+(`src/manifest.rs:162-178`). Frozen must not call normal Elixir's unsandboxed
+gate (`src/elixir.rs:1097-1110`) and refuses if safe data is unavailable.
 
 ### Lifecycle and concurrency
 
@@ -628,34 +637,29 @@ missing, stale, or unresolvable input.
 
 ### Selection sources and precedence
 
-Source declarations are read in the order their ecosystem tool gives them
-meaning; the lock then supplies the exact artifact. A matching source request
-is stable. A changed source wins as the new request, but sync stops with both
-values and `blanket update --toolchain`; the lock never hides a user edit.
+Source discovery is explicit rather than an abstract "read the ecosystem" step:
 
-- **Python/Rust/Go:** read `.python-version` and Python metadata, rustup's
-  nearest toolchain file, and Go's `go`/`toolchain` directives respectively
-  (`src/pyselect.rs:307-362`, `src/cargo.rs:246-323`,
-  `src/golang.rs:243-277`). Exact requests are exact; ranges choose the
-  newest compatible stable/LTS once. The three existing exact-selection fixes
-  are separate PRs (`src/pyselect.rs:170-188`, `src/python.rs:87-93`,
-  `src/golang.rs:140-157`).
-- **Node/Ruby:** read `.node-version`/`engines.node` and `.ruby-version`; the
-  current implementations instead use platform pin rows
-  (`src/npm.rs:122-146`, `src/ruby.rs:47-67`).
-- **Elixir/.NET:** read `.tool-versions` plus `mix.exs` compatibility, and
-  exact `global.json` with `rollForward = "disable"`; current values are
-  compiled in and exact unsupported requests fail closed
-  (`src/elixir.rs:26-31`, `src/elixir.rs:1075-1155`, `src/dotnet.rs:27-68`).
+| ecosystem | starting directory | walk boundary | source precedence | compatibility intersection and conflict |
+|---|---|---|---|---|
+| Python | cwd | parents through the uv project/workspace root; [uv documents this walk](https://docs.astral.sh/uv/reference/cli/) | exact `.python-version`, then `requires-python` / Poetry metadata | intersect the exact request with metadata; no candidate is a hard conflict; current code parses the value at `src/pyselect.rs:309-362` but reads one supplied directory at `src/pyselect.rs:368-404` |
+| Node | cwd | nearest package/workspace root | exact `.node-version`, then `engines.node` | intersect exact/range; empty intersection or conflicting same-level declarations is a hard error; current code only has platform rows (`src/npm.rs:114-146`) |
+| Cargo | cwd | Cargo workspace root | nearest `rust-toolchain`, then `rust-toolchain.toml`, then shipped default | channel, targets, and supported components must intersect the catalog; an unsupported or conflicting request is a hard error; current nearest-file walk is `src/cargo.rs:246-264` |
+| Go | module/project root | no workspace expansion; an ancestor `go.work` is refused | `go` minimum intersected with `toolchain` suggestion | choose one catalog release satisfying both; no candidate is a hard error; platform filtering is `go_pins` (`src/golang.rs:72-83`) and directive parsing is `src/golang.rs:245-269` |
+| Ruby | cwd | parents through the project root | exact `.ruby-version`, then a Ruby entry in `.tool-versions` | intersect exact declarations; disagreement is a hard error; current code has only platform rows (`src/ruby.rs:47-67`) |
+| Elixir | cwd | parents through the Mix workspace root | exact `.tool-versions` OTP/Elixir, then `mix.exs` compatibility | intersect OTP/Elixir requirements and OTP-qualified Hex/rebar rows; empty intersection is a hard error; current plan checks `mix.exs`/`mix.lock` at `src/elixir.rs:1075-1110` and pins OTP at `src/elixir.rs:26-31` |
+| .NET | project directory | inspect ancestors only to reject inherited SDK inputs | exact project `global.json` with `rollForward = "disable"` | no roll-forward or second source; a mismatch is a hard error; current ancestor rejection and exact gate are `src/dotnet.rs:542-593` |
 
-For every ecosystem, an exact request with no matching lock/catalog row is a
-hard error. A range is selected once at lock creation or explicit update; it
-never reselects on sync. Conflicting source files name both files and the
-update command. Dependency lockfiles remain delegated to native tools.
+The lock then supplies the exact artifact. A matching source request is stable;
+a changed source stops sync with both values and `blanket update --toolchain`.
+For every ecosystem, an exact request with no matching catalog row is a hard
+error. A range is selected once at lock creation or explicit update and never
+reselected on sync. Dependency lockfiles remain delegated to native tools. The
+three existing exact-selection fixes are separate PRs
+(`src/pyselect.rs:170-188`, `src/python.rs:87-93`, `src/golang.rs:140-157`).
 
 Current selectors filter their candidate rows by the passed platform: Python
 does so while collecting pins (`src/pyselect.rs:129-136`), Go does so in
-`go_pins` (`src/golang.rs:245-269`), and npm's planner immediately selects the
+`go_pins` (`src/golang.rs:72-83`), and npm's planner immediately selects the
 platform's Node row (`src/npm.rs:767-770`). The lock selector is different. Let
 `C_p` be the complete releases for platform `p`; it selects only from the
 intersection of `C_p` for every `p` in `Platform::ALL` (`src/platform.rs:83-86`).
@@ -760,30 +764,19 @@ and an unrelated refresh cannot alter an Identity or an existing lock.
 
 ### Acceptance and ordered implementation
 
-PLAN.md WP2 acceptance is: different catalog snapshots replay the same lock
-identically; a no-pin project writes it on writable sync and refuses under
-`--frozen`; the three exact-selection regressions are tested in their separate
-fixes; the asymmetric-catalog selector produces identical lock bytes for both
-platform values; and Linux-to-macOS sync does not rewrite the lock.
+Acceptance is: different catalog snapshots replay the same lock in two stores;
+a no-pin project writes it on writable sync and refuses under `--frozen`; exact
+selection, asymmetric-catalog, byte-identical BEAM, Linux-to-Mac, and catalog
+`file://`/foreign-host/hash/link rejection fixtures all pass.
 
-0. **Exact selection fixes, already separate PRs:** fix the Python exact
-   patch-substitution and first-row lookup, and pass the selected Go version
-   through realization. These PRs carry the default-version-unchanged and
-   Darwin-golden gates because they can first change selection or an object id.
-1. **Shipped-table adapter:** expose complete, recipe-bearing rows for every
-   `Platform::ALL`; the lock core consumes this adapter. Keep the default rows
-   and Darwin goldens unchanged.
-2. **Lock core:** add strict TOML read/validate/canonical-write code,
-   compare-and-keep, the pre-planning security gate, `--frozen`, status hashes,
-   and the per-project writer lock. Its PR carries canonical-byte tests and
-   the frozen exit-status/no-write gate.
-3. **Runtime propagation:** add Node/Ruby/Elixir/.NET selection and closure
-   refs; change run/status and `x/3` to use closure ids. Preserve all earlier
-   gates and test refresh and old-`x/2` non-reuse.
-4. **Update against shipped tables:** implement `blanket update --toolchain`
-   and its explicit upgrade tests, unchanged dependency locks, foreign-platform
-   refusal, and Linux/Mac diff gate. Historical catalog lookup and retention
-   wait for WP3; no default-version change.
+The lock ACTIVATION stays dormant until selection sources and runtime propagation
+land: its feature remains off, and the lock is neither written nor required.
+
+0. **Exact selection fixes** — `src/pyselect.rs`, `src/python.rs`, `src/golang.rs` and unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
+1. **Shipped-table adapter and source selection** — ecosystem pin modules, `src/platform.rs`, selector tests: complete rows, matrix precedence/intersections, and verified sha256 for .NET SDK and Hex/rebar (currently sha512: `src/dotnet.rs:27-44`, `src/elixir.rs:127-138`). Test completeness, two-store replay, asymmetric catalogs, byte-identical BEAM locks.
+2. **Lock core, dormant** — new lock parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes, concurrent conflicting writers, ordinary/strict stale inputs, unsafe paths, legacy seeding/refusal, exact 0/1/2 exit codes; activation stays off.
+3. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
+4. **Activation and update** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: `blanket update --toolchain`, catalog replay, unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff; historical retention waits for WP3.
 
 Honesty note: TOML keeps canonicalization reviewable; provider-native hashes
 remain evidence only, and trust improvements never rewrite an existing lock.

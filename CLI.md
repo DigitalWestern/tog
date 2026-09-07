@@ -226,9 +226,11 @@ matching `add --dev`. All dependency arguments are validated before delegation.
 **Planned (WP2 design, not implemented in level two):** `blanket sync
 --frozen` reads and validates `blanket-toolchain.toml` without creating or
 updating it, including its contained regular-file inputs and complete artifact
-rows for both supported platforms. It performs no resolver or manifest probe that can
-evaluate project code; setup.py/mix.ex compatibility must come from safe
-parsing or the existing sandboxed probe. `blanket update --toolchain
+rows for both supported platforms. Frozen permits SANDBOXED evaluation only:
+network denied, project read-only, scratch-only writes, and no cache writes; it
+never evaluates project code unsandboxed. Thus setup.py/mix.ex compatibility
+comes from safe parsing or that probe (`src/manifest.rs:162-178` shows the
+`/bin/sh setup.py egg_info` path). `blanket update --toolchain
 [<ecosystem>]` is the only command that upgrades those exact runtime
 selections; it may be run for one ecosystem or all present ecosystems and then
 invokes ordinary sync. It is separate from dependency update and does not edit
