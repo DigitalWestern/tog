@@ -30,6 +30,11 @@ pub enum Command {
         fresh: bool,
         strict: bool,
     },
+    Fmt {
+        check: bool,
+        ecosystem: Option<String>,
+        args: Vec<String>,
+    },
     Plan,
     /// Everything after `build` (ecosystem name and tool arguments); the
     /// ecosystem is inferred by the dispatcher from the project layout.
@@ -222,6 +227,26 @@ them instead.",
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
             ("--strict", "refuse every policy exception (same as BLANKET_STRICT=1)"),
+            HELP_OPTION,
+        ],
+        words: &[],
+    },
+    Spec {
+        name: "fmt",
+        group: Group::Everyday,
+        summary: "format the Rust project with the pinned rustfmt",
+        usage: "blanket fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
+        description: "\
+Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
+discovered with the store Cargo tool and Cargo metadata is read with
+--no-deps, so a project that has never been synced needs no Cargo.lock,
+dependency resolution, or vendor object. --check returns rustfmt's status.
+In a polyglot directory use --eco rust; other ecosystems are not implemented
+yet. A package.json script named fmt takes precedence and is run as
+'blanket run fmt'.",
+        options: &[
+            ("--check", "check formatting without editing files"),
+            ("--eco <ecosystem>", "select the ecosystem (Rust: rust)"),
             HELP_OPTION,
         ],
         words: &[],
@@ -657,6 +682,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let name = canonical_name(word);
     let command = match name {
         "sync" => parse_sync(rest)?,
+        "fmt" => parse_fmt(rest)?,
         "plan" => parse_plan(rest)?,
         "build" => parse_passthrough(rest, "build")?,
         "run" => parse_passthrough(rest, "run")?,
@@ -723,6 +749,67 @@ fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
     }
     Ok(Some(Command::Sync { fresh, strict }))
+}
+
+fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut check = false;
+    let mut ecosystem = None;
+    let mut passthrough = false;
+    let mut tool_args = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if index == 0 && matches!(arg.as_str(), "-h" | "--help") {
+            return Ok(None);
+        }
+        if passthrough {
+            tool_args.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--" => passthrough = true,
+            "--check" => check = true,
+            "--eco" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| UsageError::new("fmt: --eco needs an ecosystem", Some("fmt")))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(UsageError::new(
+                        "fmt: --eco needs an ecosystem",
+                        Some("fmt"),
+                    ));
+                }
+                ecosystem = Some(value.clone());
+                index += 1;
+            }
+            value if value.starts_with("--eco=") => {
+                let value = &value["--eco=".len()..];
+                if value.is_empty() {
+                    return Err(UsageError::new(
+                        "fmt: --eco needs an ecosystem",
+                        Some("fmt"),
+                    ));
+                }
+                ecosystem = Some(value.to_string());
+            }
+            value
+                if value.starts_with("--")
+                    && suggest(value, ["--check", "--eco"].into_iter()).is_some() =>
+            {
+                return Err(reject("fmt", value));
+            }
+            value => {
+                passthrough = true;
+                tool_args.push(value.to_string());
+            }
+        }
+        index += 1;
+    }
+    Ok(Some(Command::Fmt {
+        check,
+        ecosystem,
+        args: tool_args,
+    }))
 }
 
 fn parse_plan(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1705,6 +1792,39 @@ mod tests {
             parse(&argv(&["sync", "now"])).unwrap_err().render(),
             "blanket: error: sync: unexpected argument 'now'\nRun 'blanket help sync' for usage.\n"
         );
+    }
+
+    #[test]
+    fn fmt_grammar_separates_blanket_flags_from_tool_args() {
+        assert_eq!(
+            command(&["fmt"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: None,
+                args: vec![],
+            }
+        );
+        assert_eq!(
+            command(&["fmt", "--check", "--eco", "rust", "--edition", "2024"]),
+            Command::Fmt {
+                check: true,
+                ecosystem: Some("rust".into()),
+                args: argv(&["--edition", "2024"]),
+            }
+        );
+        assert_eq!(
+            command(&["fmt", "--", "--help"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: None,
+                args: argv(&["--help"]),
+            }
+        );
+        assert_eq!(
+            message(&["fmt", "--chekc"]),
+            "fmt: unknown option '--chekc'; did you mean '--check'?"
+        );
+        assert_eq!(message(&["fmt", "--eco"]), "fmt: --eco needs an ecosystem");
     }
 
     #[test]

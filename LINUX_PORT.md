@@ -18,6 +18,24 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — Rust `blanket fmt` sandbox and rustfmt pin
+
+The Rust formatting path now runs the pinned `cargo-fmt` in the shared
+bubblewrap `BuildSpec` engine with no network, read-only Rust/rustfmt store
+objects, a writable workspace, and scratch HOME/TMPDIR. Workspace discovery
+uses Cargo metadata with `--no-deps`, so an unsynced lock-less project does not
+create `Cargo.lock` or a vendor object. The writable-root socket preflight
+also applies to fmt.
+
+The Linux rustfmt archive was verified on 2026-09-06 against its published
+sidecar: `https://static.rust-lang.org/dist/rustfmt-1.96.1-x86_64-unknown-linux-gnu.tar.xz`
+sha256 `dcee5627f709f387cdca416a1d2ae9e6c2581cd117cdb4fd097c56c196384662`.
+The paired Darwin row was verified the same day at
+`https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz`
+with sha256 `ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165`.
+Both local downloads matched their published `.sha256` files. The macOS
+Seatbelt path still requires the Mac gate before merge.
+
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 
 `pack_checkout` no longer infers ustar representability from the tar

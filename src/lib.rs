@@ -24,6 +24,7 @@ pub mod pypi;
 pub mod pyselect;
 pub mod python;
 pub mod ruby;
+pub mod rustfmt;
 pub mod sandbox;
 pub mod sbom;
 pub mod store;

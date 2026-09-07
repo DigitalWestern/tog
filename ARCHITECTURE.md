@@ -267,6 +267,30 @@ fail loudly. Because rooting delegates to cargo, even `blanket plan`
 realizes the toolchain first (~105MB once, then cached) — correctness
 over a light first plan.
 
+### `blanket fmt`
+
+`blanket fmt` is the Rust tailor's lockless formatting path. It resolves the
+project's Rust version, realizes the existing `rust` object, and realizes a
+separate immutable `rustfmt` object containing `bin/rustfmt` and
+`bin/cargo-fmt` from the pinned component archive. The object has identity
+schema `rustfmt/1`, the platform triple, the component sha256, and the paired
+Rust object id as inputs; its `lib` entry links to the Rust object's `lib`, so
+the dynamically linked formatter uses the matching compiler libraries. A
+publication probe runs `rustfmt --version` before the object is committed.
+
+The store Cargo command runs `locate-project --workspace --offline`, then
+`cargo-fmt` runs `cargo metadata --no-deps` inside a dedicated sandbox mode:
+network denied, Rust and rustfmt objects read-only, the workspace root
+writable, and HOME/TMPDIR scratch directories. No dependency resolution,
+Cargo.lock, or vendor object is involved. The mode uses Seatbelt on macOS and
+bubblewrap on Linux and returns the formatter's exit status unchanged.
+
+The workspace receives `.blanket/closures/rustfmt.json`, recording both object
+references, the resolved version, and workspace root. GC follows the object
+reference in the rustfmt metadata and the closure keeps both objects live.
+`ls` lists the rustfmt component; `status` deliberately ignores this
+toolchain-only closure because it has no dependency-sync state to compare.
+
 ## The Go tailor (delegation computes, the kernel verifies)
 
 go.sum is an authentication ledger, not a lock graph (Sol review 4), so
@@ -495,6 +519,7 @@ Command surface (`cli.rs` is pure; everything it decides is unit-testable):
     src/inspect.rs  status / ls / doctor: read-only views over closures + store
     src/deps.rs     add / remove / update, delegated to each ecosystem's tool
     src/xrun.rs     blanket x: run a registry tool without adding it to a project
+    src/rustfmt.rs  pinned rustfmt realization and fmt sandbox specification
 
 Kernel — identity, the store, and how anything becomes an object:
 

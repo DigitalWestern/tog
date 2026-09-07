@@ -7,6 +7,19 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Kernel-wide
 
+- **`blanket fmt` is Rust-only for now**: a polyglot directory must use
+  `blanket fmt --eco rust`; other ecosystems fail clearly as not implemented.
+  The command formats Cargo workspaces with the pinned 1.96.1 component and
+  intentionally does not resolve dependencies or create `Cargo.lock`.
+- **`blanket status` ignores the rustfmt closure**: `.blanket/closures/rustfmt.json`
+  is a toolchain/GC record, not a dependency-sync projection, so `status`
+  does not show a separate row for it. `blanket ls` and `blanket gc` do handle
+  the closure.
+- **A Unix socket in a fmt write tree refuses the run**: Linux bubblewrap's
+  pre-mount `reject_host_sockets` scan walks the workspace and scratch roots.
+  This is intentional protection against exposing a host socket; the scan can
+  add latency on large projects.
+
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
   exited 1. `blanket build -h` and `blanket run -h` now print blanket's

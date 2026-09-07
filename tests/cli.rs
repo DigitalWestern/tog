@@ -137,6 +137,53 @@ fn usage_errors_exit_2_with_a_next_step() {
 }
 
 #[test]
+fn fmt_is_named_and_typos_are_usage_errors() {
+    let home = TempDir::new("fmt-cli");
+    let out = blanket(&home.0, &home.0, &["fmtt"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("unknown command 'fmtt'; did you mean 'fmt'?"));
+
+    let out = blanket(&home.0, &home.0, &["fmt", "--chekc"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("fmt: unknown option '--chekc'"));
+    assert!(text(&out.stderr).contains("did you mean '--check'?"));
+}
+
+#[test]
+fn fmt_reports_ecosystem_and_project_errors_offline() {
+    let home = TempDir::new("fmt-errors");
+    let empty = TempDir::new("fmt-empty");
+    let out = blanket(&empty.0, &home.0, &["fmt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no Rust project"));
+
+    let out = blanket(&empty.0, &home.0, &["fmt", "--eco", "python"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("fmt for python is not implemented yet"));
+}
+
+#[test]
+fn fmt_script_precedence_does_not_try_rustfmt_without_a_projection() {
+    let home = TempDir::new("fmt-script-home");
+    let project = TempDir::new("fmt-script-project");
+    std::fs::write(
+        project.0.join("package.json"),
+        r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt; exit 7'"}}"#,
+    )
+    .unwrap();
+    let out = blanket(&project.0, &home.0, &["fmt"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("command 'fmt'"), "{stderr}");
+    assert!(
+        !stderr.contains("script-fmt"),
+        "script unexpectedly ran: {stderr}"
+    );
+    assert!(!home.0.join("store/objects").is_dir());
+    assert!(!project.0.join(".blanket/closures/rustfmt.json").exists());
+}
+
+#[test]
 fn failures_exit_1_and_survive_quiet() {
     let home = TempDir::new("fail");
     let project = TempDir::new("empty");

@@ -306,7 +306,12 @@ fn resolve_toolchain_spec(
     if let Some(components) = spec.components {
         let unavailable: Vec<String> = components
             .iter()
-            .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
+            .filter(|component| {
+                !matches!(
+                    component.as_str(),
+                    "rustc" | "cargo" | "rust-std" | "rustfmt"
+                )
+            })
             .cloned()
             .collect();
         if !unavailable.is_empty() {

@@ -67,6 +67,24 @@ pub fn run_build_spec(spec: &BuildSpec) -> io::Result<()> {
 }
 
 pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Result<()> {
+    let status = run_build_spec_status_on(platform, spec)?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("sandboxed command failed ({status}): {:?}", spec.argv),
+    ))
+}
+
+/// Run a build specification and return the child status. Sandbox setup
+/// failures remain errors, while a command's ordinary non-zero status is
+/// returned to callers that must preserve tool exit semantics (for example
+/// `rustfmt --check`).
+pub(crate) fn run_build_spec_status_on(
+    platform: Platform,
+    spec: &BuildSpec,
+) -> io::Result<std::process::ExitStatus> {
     let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
     let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
     write.push(&spec.scratch);
@@ -74,7 +92,7 @@ pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Res
         read: spec.read.iter().map(PathBuf::as_path).collect(),
         write,
     };
-    sandbox.run_in_on(
+    sandbox.run_in_status_on(
         platform,
         &argv,
         &spec.path,
@@ -161,20 +179,39 @@ impl Sandbox<'_> {
         cwd: &Path,
         envs: &[(String, String)],
     ) -> io::Result<()> {
+        let status = self.run_in_status_on(platform, cmd, env_path, tmp, cwd, envs)?;
+        if status.success() {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("sandboxed command failed ({status}): {cmd:?}"),
+        ))
+    }
+
+    fn run_in_status_on(
+        &self,
+        platform: Platform,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+    ) -> io::Result<std::process::ExitStatus> {
         match platform {
-            Platform::Aarch64AppleDarwin => self.run_seatbelt(cmd, env_path, tmp, cwd, envs),
-            Platform::X86_64UnknownLinuxGnu => self.run_bwrap(cmd, env_path, tmp, cwd, envs),
+            Platform::Aarch64AppleDarwin => self.run_seatbelt_status(cmd, env_path, tmp, cwd, envs),
+            Platform::X86_64UnknownLinuxGnu => self.run_bwrap_status(cmd, env_path, tmp, cwd, envs),
         }
     }
 
-    fn run_seatbelt(
+    fn run_seatbelt_status(
         &self,
         cmd: &[&str],
         env_path: &str,
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
-    ) -> io::Result<()> {
+    ) -> io::Result<std::process::ExitStatus> {
         let profile = self.profile();
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command
@@ -193,24 +230,17 @@ impl Sandbox<'_> {
         }
         // Installers must fail, never hang on a prompt (Sol review 5).
         command.stdin(std::process::Stdio::null());
-        let status = command.status()?;
-        if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sandboxed command failed ({status}): {cmd:?}"),
-            ));
-        }
-        Ok(())
+        command.status()
     }
 
-    fn run_bwrap(
+    fn run_bwrap_status(
         &self,
         cmd: &[&str],
         env_path: &str,
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
-    ) -> io::Result<()> {
+    ) -> io::Result<std::process::ExitStatus> {
         let output = self.run_bwrap_with_stdout(
             cmd,
             env_path,
@@ -219,10 +249,10 @@ impl Sandbox<'_> {
             envs,
             std::process::Stdio::inherit(),
         )?;
-        if !output.status.success() {
+        if !output.status.success() && output.stderr.starts_with(b"bwrap:") {
             return Err(classify_bwrap_failure(&output.status, &output.stderr, cmd));
         }
-        Ok(())
+        Ok(output.status)
     }
 
     fn run_bwrap_with_stdout(

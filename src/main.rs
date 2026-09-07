@@ -1,7 +1,7 @@
 use blanket::{
     cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest, npm, npm_lock_import,
-    platform::Platform, policy, project, pypi, pyselect, python, ruby, sbom, store, types, ui,
-    xrun,
+    platform::Platform, policy, project, pypi, pyselect, python, ruby, rustfmt, sbom, store, types,
+    ui, xrun,
 };
 
 use std::io;
@@ -199,6 +199,11 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
     let platform = Platform::host()?;
     match command {
         Sync { fresh, strict } => run_sync(platform, fresh, strict),
+        Fmt {
+            check,
+            ecosystem,
+            args,
+        } => run_fmt(platform, check, ecosystem.as_deref(), &args),
         Plan => run_plan(platform),
         Build { args } => run_build(platform, &args),
         Run { command } => run_run(platform, &command),
@@ -377,7 +382,8 @@ struct CargoInputs {
 /// (`locate-project --workspace`): an ancestor-walk for Cargo.lock picks an
 /// unrelated outer lock when independent packages nest (Sol review, repro'd).
 fn locate_cargo_root(rust_obj: &Path, cwd: &Path) -> io::Result<PathBuf> {
-    let out = std::process::Command::new(rust_obj.join("bin/cargo"))
+    let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
+    command
         .args([
             "locate-project",
             "--workspace",
@@ -387,7 +393,9 @@ fn locate_cargo_root(rust_obj: &Path, cwd: &Path) -> io::Result<PathBuf> {
         ])
         .current_dir(cwd)
         .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTUP_TOOLCHAIN");
+    ui::trace_command(&command);
+    let out = command
         .output()
         .map_err(|e| io::Error::new(e.kind(), format!("run store cargo locate-project: {e}")))?;
     if !out.status.success() {
@@ -1297,6 +1305,116 @@ fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
     }
 }
 
+/// `blanket fmt`: realize only the Rust toolchain and its paired rustfmt
+/// component, then format the Cargo workspace without resolving dependencies.
+fn run_fmt(
+    platform: Platform,
+    check: bool,
+    ecosystem: Option<&str>,
+    args: &[String],
+) -> io::Result<()> {
+    let cwd = project_dir();
+    policy::init(&cwd, false)?;
+
+    // A package.json script named fmt wins over the named command, matching
+    // `blanket run fmt`. Preserve the command's user arguments for the script.
+    let script_root = projected_root(&cwd);
+    let package_json = script_root.join("package.json");
+    let is_script = package_json.is_file()
+        && std::fs::read_to_string(&package_json)
+            .ok()
+            .and_then(|json| npm::script_commands_from_package(&json, "fmt", &[]).ok())
+            .flatten()
+            .is_some();
+    if is_script {
+        ui::trace("'fmt' is a package.json script: running it");
+        let mut command = vec!["fmt".to_string()];
+        if check {
+            command.push("--check".into());
+        }
+        if let Some(ecosystem) = ecosystem {
+            command.extend(["--eco".into(), ecosystem.into()]);
+        }
+        command.extend(args.iter().cloned());
+        return run_run(platform, &command);
+    }
+
+    if let Some(ecosystem) = ecosystem {
+        if ecosystem != "rust" {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "fmt for {ecosystem} is not implemented yet; Rust is the only supported ecosystem"
+                ),
+            ));
+        }
+    }
+    let detected = inspect::detected(&cwd)?;
+    if ecosystem.is_none() && detected.len() > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "multiple ecosystems found ({}); specify `blanket fmt --eco rust`",
+                detected.join(", ")
+            ),
+        ));
+    }
+    if !cwd
+        .ancestors()
+        .any(|dir| dir.join("Cargo.toml").is_file() || dir.join("Cargo.lock").is_file())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no Rust project here; run `blanket fmt` from a Cargo project",
+        ));
+    }
+
+    let store = store::Store::open()?;
+    let rust_version = cargo::resolve_toolchain(platform, &cwd)?.to_string();
+    let rust_object = cargo::ensure_rust_for(&store, platform, &rust_version)?;
+    let rustfmt_object = rustfmt::ensure_rustfmt(&store, platform, &rust_version, &rust_object)?;
+    let workspace_root = locate_cargo_root(&rust_object, &cwd)?.canonicalize()?;
+    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
+        let id = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "object path has no UTF-8 id")
+            })?;
+        Ok(serde_json::json!({
+            "path": path.display().to_string(),
+            "id": id,
+        }))
+    };
+    project::write_closure(
+        &workspace_root,
+        "rustfmt",
+        serde_json::json!({
+            "rust_object": object_ref(&rust_object)?,
+            "rustfmt_object": object_ref(&rustfmt_object)?,
+            "rust_version": rust_version,
+            "workspace_root": workspace_root.display().to_string(),
+        }),
+    )?;
+    let invocation_dir = cwd.canonicalize()?;
+    let status = rustfmt::run_sandboxed(
+        platform,
+        &invocation_dir,
+        &workspace_root,
+        &rust_object,
+        &rustfmt_object,
+        check,
+        args,
+    )?;
+    use std::os::unix::process::ExitStatusExt;
+    exit(
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(1),
+    );
+}
+
 /// Nearest ancestor that is a blanket projection: every tailor writes
 /// `.blanket/closures/<eco>.json`, so that directory is the proof. A plain
 /// `node_modules` or `.venv` in a subdirectory (a docs site, a vendored
@@ -1503,7 +1621,10 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
     if prefix.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "no environment projected here; run `blanket sync` first",
+            format!(
+                "no environment projected here for command '{}'; run `blanket sync` first",
+                cmd[0]
+            ),
         ));
     }
     let path = std::env::var("PATH").unwrap_or_default();
