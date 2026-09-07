@@ -18,9 +18,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   closures written since 2026-09-06 record the root manifest and lock files
   (`inputs`); `-r` includes, `requirements/` directory members, and
   workspace-member package.json files are not recorded, so an edit there is
-  reported as synced. Cargo, Go, Ruby, Elixir and .NET compare the lock
-  hash only, not the manifest. Closures from before the field exists show
-  as "synced (unchecked)" until the next sync.
+  reported as synced. Cargo, Ruby, Elixir and .NET compare the lock hash
+  only, not the manifest. Go compares the selected `go.mod` toolchain
+  version as well as the `go.sum` hash, but `go.mod` `require`/`replace`
+  edits are still detected only indirectly through `go.sum`/`go mod tidy`.
+  Closures from before a required field exists show as "synced (unchecked)"
+  until the next sync.
 - **`blanket add` / `remove` / `update` delegate to store tools with
   network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
   same trust boundary as missing-lockfile generation. Rows that refuse with

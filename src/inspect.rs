@@ -599,15 +599,27 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
     let lock_state = lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?;
     match lock_state {
         State::Changed(files) => changed.extend(files),
-        State::Unchecked(reason) if changed.is_empty() => return Ok(State::Unchecked(reason)),
+        State::Unchecked(reason) if changed.is_empty() => {
+            if recorded_version.is_empty() {
+                return Ok(State::Unchecked(format!(
+                    "{reason}; recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                )));
+            }
+            return Ok(State::Unchecked(reason));
+        }
         State::Synced | State::Unchecked(_) => {}
         _ => unreachable!("go.sum lock_state has no projection or platform state"),
     }
-    Ok(if changed.is_empty() {
-        State::Synced
-    } else {
-        State::Changed(changed)
-    })
+    if !changed.is_empty() {
+        return Ok(State::Changed(changed));
+    }
+    if recorded_version.is_empty() {
+        return Ok(State::Unchecked(
+            "recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                .into(),
+        ));
+    }
+    Ok(State::Synced)
 }
 
 fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
@@ -1257,6 +1269,30 @@ mod tests {
         assert!(
             text.contains("cargo   missing     .blanket/cargo-home"),
             "{text}"
+        );
+
+        // A pre-field Go closure cannot verify the selected toolchain, even
+        // when its recorded go.sum hash is still current.
+        write_closure(
+            dir,
+            "go",
+            host,
+            json!({"go_sum_sha256": sha256_file(&dir.join("go.sum")).unwrap(), "plan": {"modules": []}}),
+        );
+        let rows = status(platform, dir).unwrap();
+        assert_eq!(
+            rows[2].state,
+            State::Unchecked(
+                "recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                    .into()
+            )
+        );
+
+        write_closure(
+            dir,
+            "go",
+            host,
+            json!({"go_sum_sha256": sha256_file(&dir.join("go.sum")).unwrap(), "plan": {"go_version": "1.27.0", "modules": []}}),
         );
 
         // The selected Go version is an input too, even when the projection

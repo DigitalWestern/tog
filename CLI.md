@@ -305,6 +305,9 @@ lock hash, the current lock, and the manifest tree hash the planner already
 computes. Exit 0 only when everything is `synced`, so CI can use it as a
 "did you commit the lock" gate. For Go, status also compares the exact
 version selected from `go.mod` with the closure's recorded toolchain version.
+Older Go closures without that recorded version are shown as
+`synced-unchecked` until the next sync; missing projections and changed lock
+hashes remain reported first.
 `--json` is available for tooling.
 
 ### 2.6 `blanket ls [<ecosystem>] [--json]`

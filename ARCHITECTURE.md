@@ -299,6 +299,9 @@ fails before store or network access when no exact row exists. The same
 selected version is recorded in `GoPlan` and used by `realize_modcache` for
 both its extractor identity and synthetic `go.mod`; `blanket run` resolves
 the recorded Go object through the closure id rather than selecting again.
+`status` reports a closure that predates the recorded Go version as
+synced-but-unchecked, while missing projections and changed lock hashes keep
+their higher-priority outcomes.
 
 ## The Ruby tailor (delegate the semantics, own the bytes)
 

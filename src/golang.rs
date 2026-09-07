@@ -1052,6 +1052,52 @@ pub fn build_sandboxed(
 mod tests {
     use super::*;
 
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blanket-go-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            snapshot: &mut BTreeMap<PathBuf, std::time::SystemTime>,
+        ) {
+            let metadata = fs::metadata(path).unwrap();
+            snapshot.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                metadata.modified().unwrap(),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), snapshot);
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
     #[test]
     fn one_unique_pin_per_supported_platform() {
         assert_eq!(GO_PIN_ROWS.len(), Platform::ALL.len());
@@ -1086,27 +1132,29 @@ mod tests {
         let _lock = crate::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "blanket-go-unpinned-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).unwrap();
-        let store = Store {
-            root: temp.join("store"),
-        };
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store { root: store_root };
+        let before = tree_snapshot(&store.root);
 
         let error = ensure_go_for(&store, Platform::host().unwrap(), "1.26.0")
             .unwrap_err()
             .to_string();
         assert!(error.contains("resolved Go 1.26.0"), "{error}");
         assert!(error.contains("only 1.27.0 is realizable"), "{error}");
-        assert!(!store.root.exists(), "unpinned lookup touched the store");
-
-        let _ = std::fs::remove_dir_all(temp);
+        assert_eq!(
+            tree_snapshot(&store.root),
+            before,
+            "unpinned lookup created or modified store files"
+        );
+        assert!(!store.root.join("tmp/.publish.lock").exists());
+        assert!(fs::read_dir(store.root.join("tmp"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with("stage-")));
     }
 
     #[test]
