@@ -1285,13 +1285,15 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<(bool, Vec
     let relative = relative.to_string_lossy().replace('\\', "/");
     let mut matched = false;
     for raw_pattern in &patterns {
-        let exclude = raw_pattern.trim_start().starts_with('!');
-        let pattern = raw_pattern
-            .trim()
+        let trimmed = raw_pattern.trim();
+        let exclude = trimmed.starts_with('!');
+        let pattern = trimmed
             .strip_prefix('!')
-            .unwrap_or(raw_pattern.trim())
+            .unwrap_or(trimmed)
+            .trim()
             .trim_start_matches("./");
-        if pattern.starts_with('/')
+        if pattern.is_empty()
+            || pattern.starts_with('/')
             || pattern.contains('\\')
             || pattern.split('/').any(|part| part == "..")
         {
