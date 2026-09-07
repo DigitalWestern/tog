@@ -72,11 +72,13 @@ Nix's interface.
   and then REVIEW.md gets a row saying "Linux evidence only" that WP0-style
   work must later clear. Default Mac gate for any PR: `cargo build`,
   `cargo test`, and the `--ignored` tests the PR touches.
-- **Independent adversarial review before merge.** Astra (Codex,
-  `codex exec -m gpt-6-astra -c model_reasoning_effort=xhigh -s read-only
+- **Independent adversarial review before merge.** Sol (Codex,
+  `codex exec -m gpt-5.6-sol -c model_reasoning_effort=xhigh -s read-only
   --dangerously-bypass-approvals-and-sandbox -o <out> "<brief>" < /dev/null`)
-  reviews the diff with a written brief; fix every blocker/should; Astra
-  rechecks. Self-review only downgrades a REVIEW.md entry, never clears it. If
+  reviews the diff with a written brief; fix every blocker/should; Sol
+  rechecks. Implementation is Luna (`-m gpt-5.6-luna`). Astra (`gpt-6-astra`)
+  is reserved for owner-requested plan reviews: it costs too much usage for
+  per-PR rounds. Self-review only downgrades a REVIEW.md entry, never clears it. If
   Codex is rate-limited, a fresh Claude subagent that did not write the code is
   the stand-in, and REVIEW.md records that it was not independent.
 - **Invariants that end a PR if broken:** store objects are input-addressed
