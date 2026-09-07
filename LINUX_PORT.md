@@ -18,6 +18,14 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-07 — WP2 lock extractor gets its own module and PR
+
+The design now names the reusable pre-materialization extractor
+(`src/archive.rs`) and gives it a PR of its own before lock activation; its
+containment tests keep the platform asymmetry recorded on 2026-09-06 — Linux's
+outside-sentinel gate runs under GNU tar, macOS bsdtar waits for the Mac gate.
+Documentation only: no Linux pin or shipped extraction behavior changed.
+
 ### 2026-09-06 — WP2 lock extractor design boundary
 
 The WP2 design now requires catalog-lock extraction to validate archive entries

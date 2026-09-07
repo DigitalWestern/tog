@@ -154,12 +154,16 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 3; IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 4; IMPLEMENTATION OPEN
 
-Status: the design is reworked in ARCHITECTURE.md after the third adversarial
-review; implementation is open and follows its ordered PRs. Lock activation is
-dormant until source selection and runtime propagation land, so intermediate
-PRs neither write nor require a toolchain lock.
+Status: the design is reworked in ARCHITECTURE.md after the fourth adversarial
+review; implementation is open and follows its ordered PRs. The design now
+requires an unconditional descriptor-relative lock snapshot compare, separates
+bundle ids from component versions, carries bundle ids into `x/3`, defines the
+Python request grammar and frozen-write boundary, and assigns extractor and
+legacy-seeding tests. Lock activation is dormant until source selection and
+runtime propagation land, so intermediate PRs neither write nor require a
+toolchain lock.
 
 The design is documented before implementation; changes to the contract update
 ARCHITECTURE.md in the same PR as the affected implementation.
@@ -343,3 +347,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP2 design reworked after adversarial review: recipe identities, embedded components, frozen input safety, global cross-platform selection, conservative legacy seeding, and the implementation order are now explicit. |
 | 2026-09-06 | WP2 design reworked round 2: catalog-authorized HTTPS artifacts, per-platform BEAM rows, descriptor-relative input snapshots, explicit source-discovery matrix, sandbox-only frozen probes, and dormant lock activation are now explicit. |
 | 2026-09-06 | WP2 design reworked round 3: release-bundle catalog authority, pre-materialization extractor requirements, lock-file race protection, exact Go `toolchain` semantics, corrected setup.py argv, and activation-ordered acceptance tests are now explicit. |
+| 2026-09-07 | WP2 design reworked round 4: unconditional descriptor-relative lock comparison, bundle id/component-version separation with recipe-revision tie-breaking, bundle-complete `x/3` keys, supported Python request grammar, the frozen-write boundary, and assigned extractor/legacy-seeding tests are now explicit. |

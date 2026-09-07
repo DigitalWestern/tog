@@ -25,7 +25,10 @@ USAGE:
 
 EVERYDAY:
   sync       realize and project the environment(s) from the project's inputs
-             (planned: --frozen requires a complete lock and performs no writes)
+             (planned) --frozen never modifies project inputs,
+             blanket-toolchain.toml, or the catalog cache; it may realize
+             store objects and write the projection after validation
+             succeeds; validation failure exits before any write.
   add        add a dependency, re-lock, sync
   remove     remove a dependency, re-lock, sync
   update     update dependencies within the manifest's constraints, sync
@@ -226,19 +229,25 @@ matching `add --dev`. All dependency arguments are validated before delegation.
 **Planned (WP2 design, not implemented in level two):** `blanket sync
 --frozen` reads and validates `blanket-toolchain.toml` without creating or
 updating it, including its contained regular-file inputs and complete artifact
-rows for both supported platforms. Frozen permits SANDBOXED evaluation only:
-network denied, project read-only, scratch-only writes, and no cache writes; it
-never evaluates project code unsandboxed. Thus setup.py/mix.ex compatibility
-comes from safe parsing or that probe. The setup `BuildSpec` uses
+rows for both supported platforms. --frozen never modifies project inputs,
+blanket-toolchain.toml, or the catalog cache; it may realize store objects and
+write the projection after validation succeeds; validation failure exits before
+any write. Frozen validation uses SANDBOXED evaluation only: network denied,
+project read-only, and scratch-only writes; it never evaluates project code
+unsandboxed. Thus setup.py/mix.exs compatibility comes from safe parsing or
+that probe. The setup `BuildSpec` uses
 `argv = ["/bin/sh", "-c", "exec <build-env>/bin/python setup.py egg_info
 --egg-base <scratch>/egg-info > <scratch>/egg-info.log 2>&1]`, with the
 project root as cwd and the build environment, CPython, and scratch as roots
-(`src/manifest.rs:162-178`); it does not run `/bin/sh setup.py`.
-`blanket update --toolchain
-[<ecosystem>]` is the only command that upgrades those exact runtime
-selections; it may be run for one ecosystem or all present ecosystems and then
-invokes ordinary sync. It is separate from dependency update and does not edit
-the ecosystem's dependency lockfile.
+(`src/manifest.rs:162-178`); it does not run `/bin/sh setup.py`. The write
+boundary's regression is
+`tests/toolchain_lock.rs::frozen_validation_failure_precedes_all_writes`: the
+failing case leaves inputs, the lock, the catalog cache, the store, and the
+projection unchanged, while its valid case permits realization and projection.
+`blanket update --toolchain [<ecosystem>]` is the only command that upgrades
+those exact runtime selections; it may be run for one ecosystem or all present
+ecosystems and then invokes ordinary sync. It is separate from dependency
+update and does not edit the ecosystem's dependency lockfile.
 
 **Choosing the ecosystem (decided 2026-09-06: infer from evidence, then
 ask; no required syntax).** Blanket never picks an ecosystem on a coin flip,
