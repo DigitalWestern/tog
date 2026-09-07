@@ -303,7 +303,9 @@ Per ecosystem found here: `synced`, `lock changed since sync`, `manifest
 changed since lock`, or `not synced`, computed from the closure's recorded
 lock hash, the current lock, and the manifest tree hash the planner already
 computes. Exit 0 only when everything is `synced`, so CI can use it as a
-"did you commit the lock" gate. `--json` for tooling.
+"did you commit the lock" gate. For Go, status also compares the exact
+version selected from `go.mod` with the closure's recorded toolchain version.
+`--json` is available for tooling.
 
 ### 2.6 `blanket ls [<ecosystem>] [--json]`
 

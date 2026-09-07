@@ -154,7 +154,7 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — OPEN
+### WP2 — Toolchain lock and exact version selection — IN PROGRESS
 
 Design before code; write the design into ARCHITECTURE.md as part of the PR.
 
@@ -182,7 +182,8 @@ catalog will expose it.
 - **Exact selection bugs to fix first:** `pyselect` substitutes a patch
   version even for an exact request (src/pyselect.rs:170); `python::lookup`
   returns the first matching row (src/python.rs:87); Go realization takes no
-  selected version (src/golang.rs:145).
+  selected version (src/golang.rs:145) — ✅ fixed by
+  `golang::tests::ensure_go_for_rejects_unpinned_version_before_store_access`.
 - **Carry the selected runtime through every operation.** Node `run` and
   cached `x` environments take the global pin (src/main.rs:1409,
   src/xrun.rs:325); `x` keys omit runtime identity; `status` must compare
@@ -331,3 +332,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
+| 2026-09-06 | WP2 Go exact-selection fix: `ensure_go_for_rejects_unpinned_version_before_store_access`; selected version now drives Go toolchain and module-cache realization. |

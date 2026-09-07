@@ -1229,7 +1229,8 @@ fn go_delegate(
             "--dev has no meaning in Go (one dependency set per module)",
         ));
     }
-    let go_obj = golang::ensure_go_for(store, platform)?;
+    let go_version = golang::resolve_project_toolchain(platform, project)?;
+    let go_obj = golang::ensure_go_for(store, platform, go_version)?;
     let scratch = store.stage()?;
     let args: Vec<String> = match verb {
         Verb::Add => std::iter::once("get".to_string())

@@ -903,8 +903,15 @@ struct GoInputs {
 }
 
 fn load_go_inputs(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<GoInputs> {
-    let go_obj = golang::ensure_go_for(store, platform)?;
+    let go_version = golang::resolve_project_toolchain(platform, dir)?;
+    let go_obj = golang::ensure_go_for(store, platform, go_version)?;
     let plan = golang::plan_go(store, platform, dir, &go_obj)?;
+    if plan.go_version != go_version {
+        return Err(io::Error::other(format!(
+            "go.mod selected Go {go_version}, but planning selected {}; re-run blanket sync after keeping go.mod unchanged",
+            plan.go_version
+        )));
+    }
     let gosum = std::fs::read_to_string(dir.join("go.sum")).unwrap_or_default();
     use sha2::{Digest, Sha256};
     Ok(GoInputs {

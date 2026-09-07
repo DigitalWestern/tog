@@ -18,6 +18,13 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — Go realization uses the selected platform pin
+
+Go toolchain and module-cache realization now look up the exact version
+selected from `go.mod` in the Linux platform pin row. An unpinned selection
+fails before store or network access; the Linux artifact, sha256, and object
+identity are unchanged.
+
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 
 `pack_checkout` no longer infers ustar representability from the tar
