@@ -58,8 +58,8 @@ OPTIONS:
 PROJECT INPUTS ...        (the existing block, unchanged)
 ENVIRONMENT ...           (BLANKET_STORE, BLANKET_STRICT, BLANKET_POLICY)
 
-Exit status: 0 success, 1 failure, 2 usage error; 'run' and 'x' pass the
-program's exit status through.
+Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
+the program's exit status through.
 ```
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT

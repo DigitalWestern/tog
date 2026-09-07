@@ -36,6 +36,15 @@ with sha256 `ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165`.
 Both local downloads matched their published `.sha256` files. The macOS
 Seatbelt path still requires the Mac gate before merge.
 
+### 2026-09-06 — Rust fmt rework portability and sandbox diagnostics
+
+The committed rustfmt object's `lib` link is now relative to its sibling Rust
+object, so it is independent of the store root; the staging publication probe
+sets `LD_LIBRARY_PATH` explicitly until that sibling layout exists. Seatbelt
+now relays stderr like bubblewrap and classifies `sandbox-exec:` setup failures
+as sandbox errors rather than formatter exit statuses. Closure publication
+also rejects symlinked `.blanket` directories before writing provenance.
+
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 
 `pack_checkout` no longer infers ustar representability from the tar

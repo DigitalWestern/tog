@@ -123,6 +123,10 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
             .unwrap();
     let rust_id = closure["body"]["rust_object"]["id"].as_str().unwrap();
     let rustfmt_id = closure["body"]["rustfmt_object"]["id"].as_str().unwrap();
+    let rustfmt_lib_link =
+        fs::read_link(store.join("objects").join(rustfmt_id).join("lib")).unwrap();
+    assert!(!rustfmt_lib_link.is_absolute());
+    assert_eq!(rustfmt_lib_link, PathBuf::from(format!("../{rust_id}/lib")));
     let rustfmt_meta =
         fs::read_to_string(store.join("meta").join(format!("{rustfmt_id}.json"))).unwrap();
     assert!(

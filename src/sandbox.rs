@@ -230,7 +230,21 @@ impl Sandbox<'_> {
         }
         // Installers must fail, never hang on a prompt (Sol review 5).
         command.stdin(std::process::Stdio::null());
-        command.status()
+        command.stdout(std::process::Stdio::inherit());
+        command.stderr(std::process::Stdio::piped());
+        let child = command.spawn()?;
+        let output = wait_with_stderr_relay(child)?;
+        if let Some(SandboxFailureKind::Setup) =
+            classify_sandbox_failure(&output.status, &output.stderr)
+        {
+            return Err(sandbox_failure_error(
+                SandboxFailureKind::Setup,
+                &output.status,
+                &output.stderr,
+                cmd,
+            ));
+        }
+        Ok(output.status)
     }
 
     fn run_bwrap_status(
@@ -249,8 +263,15 @@ impl Sandbox<'_> {
             envs,
             std::process::Stdio::inherit(),
         )?;
-        if !output.status.success() && output.stderr.starts_with(b"bwrap:") {
-            return Err(classify_bwrap_failure(&output.status, &output.stderr, cmd));
+        if let Some(SandboxFailureKind::Setup) =
+            classify_sandbox_failure(&output.status, &output.stderr)
+        {
+            return Err(sandbox_failure_error(
+                SandboxFailureKind::Setup,
+                &output.status,
+                &output.stderr,
+                cmd,
+            ));
         }
         Ok(output.status)
     }
@@ -272,23 +293,13 @@ impl Sandbox<'_> {
         // classified, but the build's diagnostics must still reach the user:
         // a relay thread streams every byte to our stderr and keeps the
         // leading bytes for classification.
-        let mut child = command
+        let child = command
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(stdout)
             .stderr(std::process::Stdio::piped())
             .spawn()?;
-        let stderr = child.stderr.take().expect("stderr is piped");
-        let relay = std::thread::spawn(move || relay_stderr(stderr));
-        let output = child.wait_with_output()?;
-        let stderr = relay.join().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "sandbox stderr relay thread panicked")
-        })?;
-        Ok(std::process::Output {
-            status: output.status,
-            stdout: output.stdout,
-            stderr,
-        })
+        wait_with_stderr_relay(child)
     }
 
     fn reject_host_sockets(&self, cwd: &Path, scratch: &Path) -> io::Result<()> {
@@ -439,7 +450,7 @@ impl Sandbox<'_> {
     }
 }
 
-/// Longest stderr prefix retained for `classify_bwrap_failure`; bwrap's own
+/// Longest stderr prefix retained for sandbox setup classification; bwrap's own
 /// setup errors are a single short line.
 const STDERR_PREFIX_LIMIT: usize = 4096;
 
@@ -464,23 +475,61 @@ fn relay_stderr(mut stderr: std::process::ChildStderr) -> Vec<u8> {
     prefix
 }
 
+fn wait_with_stderr_relay(mut child: std::process::Child) -> io::Result<std::process::Output> {
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let relay = std::thread::spawn(move || relay_stderr(stderr));
+    let output = child.wait_with_output()?;
+    let stderr = relay.join().map_err(|_| {
+        io::Error::new(io::ErrorKind::Other, "sandbox stderr relay thread panicked")
+    })?;
+    Ok(std::process::Output {
+        status: output.status,
+        stdout: output.stdout,
+        stderr,
+    })
+}
+
 const BWRAP_UNAVAILABLE: &str = "bubblewrap unavailable: install it (Fedora: dnf install bubblewrap; Debian: apt install bubblewrap) and ensure unprivileged user namespaces are enabled (/proc/sys/user/max_user_namespaces > 0)";
 
-fn classify_bwrap_failure(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxFailureKind {
+    Setup,
+    Command,
+}
+
+/// Classify a non-zero sandbox result without looking at the host platform.
+/// Engine setup diagnostics have distinct prefixes; all other stderr belongs
+/// to the command and must remain an ordinary exit status.
+fn classify_sandbox_failure(
+    status: &std::process::ExitStatus,
+    stderr: &[u8],
+) -> Option<SandboxFailureKind> {
+    if status.success() {
+        return None;
+    }
+    if stderr.starts_with(b"bwrap:") || stderr.starts_with(b"sandbox-exec:") {
+        Some(SandboxFailureKind::Setup)
+    } else {
+        Some(SandboxFailureKind::Command)
+    }
+}
+
+fn sandbox_failure_error(
+    kind: SandboxFailureKind,
     status: &std::process::ExitStatus,
     stderr: &[u8],
     cmd: &[&str],
 ) -> io::Error {
-    if stderr.starts_with(b"bwrap:") {
-        return io::Error::new(
+    match kind {
+        SandboxFailureKind::Setup => io::Error::new(
             io::ErrorKind::Unsupported,
             String::from_utf8_lossy(stderr).trim_end().to_string(),
-        );
+        ),
+        SandboxFailureKind::Command => io::Error::new(
+            io::ErrorKind::Other,
+            format!("sandboxed command failed ({status}): {cmd:?}"),
+        ),
     }
-    io::Error::new(
-        io::ErrorKind::Other,
-        format!("sandboxed command failed ({status}): {cmd:?}"),
-    )
 }
 
 #[cfg(target_os = "linux")]
@@ -837,7 +886,14 @@ mod tests {
             std::process::Stdio::piped(),
         )?;
         if !output.status.success() {
-            return Err(classify_bwrap_failure(&output.status, &output.stderr, cmd));
+            let failure = classify_sandbox_failure(&output.status, &output.stderr)
+                .expect("non-zero status has a sandbox failure classification");
+            return Err(sandbox_failure_error(
+                failure,
+                &output.status,
+                &output.stderr,
+                cmd,
+            ));
         }
         Ok(output.stdout)
     }
@@ -1512,7 +1568,12 @@ mod tests {
         // The relay thread retained the build's own stderr (and forwarded it
         // to ours); a build printing to stderr is still a command failure.
         assert_eq!(output.stderr, b"build diagnostic\n");
-        let error = classify_bwrap_failure(&output.status, &output.stderr, &cmd);
+        let error = sandbox_failure_error(
+            SandboxFailureKind::Command,
+            &output.status,
+            &output.stderr,
+            &cmd,
+        );
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             error.to_string(),
@@ -1541,10 +1602,41 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .output()
             .unwrap();
-        let error = classify_bwrap_failure(&output.status, &output.stderr, &["/usr/bin/true"]);
+        let error = sandbox_failure_error(
+            SandboxFailureKind::Setup,
+            &output.status,
+            &output.stderr,
+            &["/usr/bin/true"],
+        );
         fs::remove_dir_all(root).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().starts_with("bwrap:"));
+    }
+
+    #[test]
+    fn both_sandbox_engines_classify_setup_failures_by_prefix() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(1);
+        assert_eq!(
+            classify_sandbox_failure(&status, b"bwrap: cannot mount /missing\n"),
+            Some(SandboxFailureKind::Setup)
+        );
+        assert_eq!(
+            classify_sandbox_failure(&status, b"sandbox-exec: invalid profile\n"),
+            Some(SandboxFailureKind::Setup)
+        );
+        assert_eq!(
+            classify_sandbox_failure(&status, b"formatter: could not parse input\n"),
+            Some(SandboxFailureKind::Command)
+        );
+        assert_eq!(
+            classify_sandbox_failure(
+                &std::process::ExitStatus::from_raw(0),
+                b"sandbox-exec: no\n"
+            ),
+            None
+        );
     }
 
     #[test]

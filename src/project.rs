@@ -13,8 +13,11 @@ use crate::{pyselect, python, wheel};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CLOSURE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Common closure envelope (Sol review 4): every tailor's provenance lands
 /// at .blanket/closures/<ecosystem>.json with a shared outer shape; the
@@ -25,11 +28,31 @@ pub fn write_closure(
     mut body: serde_json::Value,
 ) -> io::Result<()> {
     let project_dir = project_dir.canonicalize()?;
-    let dir = project_dir.join(".blanket/closures");
-    fs::create_dir_all(&dir)?;
+    let blanket_dir = project_dir.join(".blanket");
+    let closures_dir = blanket_dir.join("closures");
+    fs::create_dir_all(&closures_dir)?;
+    for (path, label) in [
+        (&blanket_dir, ".blanket"),
+        (&closures_dir, ".blanket/closures"),
+    ] {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(io::Error::other(format!(
+                "{} is not a real directory; refusing to write closures",
+                path.display()
+            )));
+        }
+        let canonical = path.canonicalize()?;
+        if !canonical.starts_with(&project_dir) {
+            return Err(io::Error::other(format!(
+                "{label} at {} escapes the project; refusing to write closures",
+                canonical.display()
+            )));
+        }
+    }
     // A symlinked closures dir would carry provenance writes outside the
     // project (same class as the cargo-home/bin escape).
-    let dir = dir.canonicalize()?;
+    let dir = closures_dir.canonicalize()?;
     if !dir.starts_with(&project_dir) {
         return Err(io::Error::other(format!(
             "{} escapes the project; refusing to write closures there",
@@ -63,9 +86,41 @@ pub fn write_closure(
         "body": body,
     });
     let dest = dir.join(format!("{ecosystem}.json"));
-    let tmp = dir.join(format!(".{ecosystem}.json.tmp.{}", std::process::id()));
-    fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
-    fs::rename(&tmp, &dest)?;
+    let bytes = serde_json::to_vec_pretty(&envelope)?;
+    let (tmp, mut file) = loop {
+        let counter = CLOSURE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let candidate = dir.join(format!(
+            ".{ecosystem}.json.tmp.{}.{}.{}",
+            std::process::id(),
+            nanos,
+            counter
+        ));
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW);
+        match options.open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let result = (|| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, &dest)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
     store.register_root(&project_dir)?;
     crate::policy::clear();
     Ok(())
@@ -781,6 +836,31 @@ mod closure_platform_tests {
         write_closure(&dir, None); // pre-port envelope
         assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_closure_rejects_symlinked_closures_dir_without_touching_target() {
+        let project = std::env::temp_dir().join(format!(
+            "blanket-closure-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let blanket = project.join(".blanket");
+        let real_closures = blanket.join("real-closures");
+        fs::create_dir_all(&real_closures).unwrap();
+        let destination = real_closures.join("python.json");
+        fs::write(&destination, b"untouched\n").unwrap();
+        symlink(&real_closures, blanket.join("closures")).unwrap();
+
+        let error =
+            super::write_closure(&project, "python", serde_json::json!({"ok": true})).unwrap_err();
+        assert!(error.to_string().contains("real directory"), "{error}");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "untouched\n");
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]

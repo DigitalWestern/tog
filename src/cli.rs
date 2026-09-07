@@ -578,8 +578,8 @@ pub fn usage() -> String {
     text.push('\n');
     text.push_str(ENVIRONMENT);
     text.push_str(
-        "\nExit status: 0 success, 1 failure, 2 usage error; 'run' passes the\n\
-         program's status through.\n",
+        "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'\n\
+         pass the program's status through.\n",
     );
     text
 }

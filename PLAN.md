@@ -125,7 +125,7 @@ append a round-4 entry to LINUX_PORT.md. Any Mac-only fix goes on a
 `npm_git_dep` hit-rate rows (hoppscotch, tabby) that predate Git sources, as
 a dated column in HITRATE.md.
 
-### WP1 — `blanket fmt` on the existing pinned Rust toolchain — IMPLEMENTED, awaiting review and Mac gate
+### WP1 — `blanket fmt` on the existing pinned Rust toolchain — IMPLEMENTED, rework round 1 fixed; awaiting review recheck and Mac gate
 
 Contract (Astra): works in a project that has never been synced (discover the
 Cargo workspace, do not resolve dependencies); fetches the rustfmt/cargo-fmt
@@ -332,3 +332,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
 | 2026-09-06 | WP1 implemented: pinned rustfmt object, lockless Cargo workspace discovery, writable fmt sandbox, closure/GC retention, CLI grammar, and Linux e2e coverage. Awaiting review and the Mac gate. |
+| 2026-09-06 | WP1 review rework: closure writes reject symlinked directories and use exclusive fsynced temps; rustfmt links are relative with a staging probe loader path; rustfmt sync requests remain recorded exceptions; Seatbelt and bubblewrap classify setup failures symmetrically; fmt exit pass-through is documented. Awaiting review recheck and the Mac gate. |

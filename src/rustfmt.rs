@@ -126,13 +126,22 @@ pub fn ensure_rustfmt(
     }
 
     let scratch = unique_dir(&store.root.join("tmp"), "rustfmt-probe")?;
+    // The staged object is under store/tmp, so its committed relative lib
+    // link cannot resolve until publication beside the Rust object. Point
+    // only this pre-publication probe at the paired library directory.
+    let loader_path = rust_object.join("lib").display().to_string();
+    let loader_variable = if platform.is_macos() {
+        "DYLD_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
     let probe = BuildSpec {
         argv: vec![
             staged.join("bin/rustfmt").display().to_string(),
             "--version".into(),
         ],
         cwd: scratch.clone(),
-        env: vec![],
+        env: vec![(loader_variable.into(), loader_path)],
         read: vec![staged.clone(), rust_object.clone()],
         write: vec![],
         scratch: scratch.clone(),
@@ -267,8 +276,16 @@ fn stage_rustfmt(
             ));
         }
     }
-    std::os::unix::fs::symlink(rust_object.join("lib"), staged.join("lib"))?;
+    std::os::unix::fs::symlink(rust_object_lib_link(rust_object)?, staged.join("lib"))?;
     Ok(())
+}
+
+fn rust_object_lib_link(rust_object: &Path) -> io::Result<PathBuf> {
+    let rust_object_id = rust_object
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Rust object has no UTF-8 id"))?;
+    Ok(PathBuf::from(format!("../{rust_object_id}/lib")))
 }
 
 fn archive_entries(archive: &Path) -> io::Result<Vec<String>> {
@@ -380,5 +397,32 @@ mod tests {
             id,
             "ce2ba748066606d57d165a0ef794abeb5af18dc9-rustfmt-1.96.1"
         );
+    }
+
+    #[test]
+    fn rustfmt_object_lib_link_is_relative_to_paired_rust_object() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-rustfmt-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let staged = root.join("staged");
+        fs::create_dir_all(&staged).unwrap();
+        let rust_id = "b8418440835c4ec1f591381a17ae60ab12d1c727-rust-1.96.1";
+        let rust_object = Path::new("/store/objects").join(rust_id);
+        std::os::unix::fs::symlink(
+            rust_object_lib_link(&rust_object).unwrap(),
+            staged.join("lib"),
+        )
+        .unwrap();
+
+        let link = fs::read_link(staged.join("lib")).unwrap();
+        assert!(!link.is_absolute());
+        assert_eq!(link, PathBuf::from(format!("../{rust_id}/lib")));
+
+        let _ = crate::store::remove_tree(&root);
     }
 }

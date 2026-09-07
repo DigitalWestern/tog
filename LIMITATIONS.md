@@ -22,11 +22,17 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
-  exited 1. `blanket build -h` and `blanket run -h` now print blanket's
-  help; a tool argument that is literally `-h` needs `--` in front
-  (`blanket build -- -h`). `--verbose` shows subprocess command lines only
-  for the subprocesses `main.rs` starts (uv, npm, cargo lock generation);
-  the tailors' own subprocesses are not yet traced. See CLI.md.
+  exited 1. `run`, `x` and `fmt` pass the program's status through.
+  `blanket build -h` and `blanket run -h` now print blanket's help; a tool
+  argument that is literally `-h` needs `--` in front (`blanket build -- -h`).
+  `--verbose` shows subprocess command lines only for the subprocesses
+  `main.rs` starts (uv, npm, cargo lock generation); the tailors' own
+  subprocesses are not yet traced. See CLI.md.
+- **Rust toolchain component requests are deliberately narrower than
+  `blanket fmt`**: a `rust-toolchain.toml` `components = ["rustfmt"]` request
+  still records `toolchain-component-unavailable` during `blanket sync`,
+  because sync's Rust object contains only rustc, rust-std, and cargo.
+  `blanket fmt` realizes the matching rustfmt component on demand.
 - **`blanket status` compares recorded inputs only.** Python and Node
   closures written since 2026-09-06 record the root manifest and lock files
   (`inputs`); `-r` includes, `requirements/` directory members, and

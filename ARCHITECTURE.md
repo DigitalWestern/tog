@@ -276,7 +276,11 @@ separate immutable `rustfmt` object containing `bin/rustfmt` and
 schema `rustfmt/1`, the platform triple, the component sha256, and the paired
 Rust object id as inputs; its `lib` entry links to the Rust object's `lib`, so
 the dynamically linked formatter uses the matching compiler libraries. A
-publication probe runs `rustfmt --version` before the object is committed.
+publication probe runs `rustfmt --version` before the object is committed. The
+committed link is relative (`../<rust-object-id>/lib`), so the object bytes do
+not embed a store root and remain valid if the store is moved. Because the
+staging directory is under `store/tmp` rather than beside the Rust object, the
+publication probe sets the paired library directory explicitly for that probe.
 
 The store Cargo command runs `locate-project --workspace --offline`, then
 `cargo-fmt` runs `cargo metadata --no-deps` inside a dedicated sandbox mode:
