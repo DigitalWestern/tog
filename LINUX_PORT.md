@@ -18,6 +18,17 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-07 — fmt checks the rustfmt pin before it opens the store
+
+`run_fmt` now calls `rustfmt::preflight_platform` at the top of the Rust
+path, like the other tailors do from `preflight_sync`: a host with no pinned
+rustfmt component is refused with the usual `no ... pinned for <triple>
+(LINUX_PORT.md stage 4)` message before `Store::open` and before
+`ensure_rust_for` downloads ~105 MB. It is deliberately below the `--eco`
+dispatch, so a delegated `package.json` `fmt` script still needs no rustfmt
+pin. No behaviour change on the two pinned hosts; this is the guard that
+keeps a third triple (aarch64 Linux, musl) failing early and by name.
+
 ### 2026-09-06 — Rust fmt publication and contained closure writes
 
 The rustfmt publication probe now runs with an absolute staged `lib` link to

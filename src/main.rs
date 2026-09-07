@@ -1353,6 +1353,11 @@ fn run_fmt(
             }
         }
     }
+    // Top of the Rust path, and deliberately not above the `--eco` dispatch:
+    // a delegated package.json `fmt` script needs no rustfmt pin. A platform
+    // with no pinned component is refused here, before `Store::open` and
+    // before `ensure_rust_for` downloads ~105 MB of toolchain.
+    rustfmt::preflight_platform(platform)?;
     let detected = inspect::detected(&cwd)?;
     if ecosystem.is_none() && detected.len() > 1 {
         return Err(io::Error::new(

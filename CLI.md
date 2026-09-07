@@ -215,7 +215,15 @@ It can format a project before its first sync, does not create `Cargo.lock` or
 a vendor object, and passes the tool's exit status through. `--check` is
 blanket's flag; after it and `--eco` (or after `--`), arguments go to
 `cargo-fmt` unchanged. Rust is the only implementation; a polyglot directory
-needs `--eco rust`.
+needs `--eco rust`. Both `--eco <ecosystem>` and `--eco=<ecosystem>` are
+accepted and validated the same way: an empty value, or one that starts with
+`-` (`--eco --check`, `--eco=--check`), is a usage error (exit 2), never an
+ecosystem name.
+
+The run writes `.blanket/closures/rustfmt.json`, a toolchain-only closure:
+`blanket ls` shows it as a `rustfmt` row, `blanket sbom` inventories the two
+store objects it pins (`rust` and `rustfmt`), `blanket gc` keeps them live,
+and `blanket status` ignores it (it has no dependency-sync state to compare).
 
 If the nearest projected root's `package.json` has a script named `fmt`, that
 script takes precedence and runs exactly as `blanket run fmt` would; `--check`
@@ -329,7 +337,9 @@ computes. Exit 0 only when everything is `synced`, so CI can use it as a
 Name, version, and (with `--verbose`) artifact and store object id for every
 package in each synced closure. Straight from `.blanket/closures/*.json`;
 no store access. This is the "what is on this machine" query the enterprise
-pitch promises, made typeable.
+pitch promises, made typeable. The optional filter word is one of the seven
+ecosystems plus `rustfmt`, the toolchain-only closure `blanket fmt` writes:
+every row `ls` can print is a word `ls` accepts.
 
 ### 2.8 `blanket doctor`
 

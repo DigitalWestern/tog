@@ -333,6 +333,26 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
                 &version_of(plan, "sdk_version")?,
             )?);
         }
+        // `blanket fmt` writes a toolchain-only closure: no packages, but two
+        // store objects it pins and keeps live. Like every other arm it emits
+        // the toolchain it records (rustfmt, versioned by the resolved Rust
+        // version, the same pairing `blanket ls` shows) plus the paired Rust
+        // object. Closures are visited in sorted name order, so a `cargo`
+        // closure naming the very same Rust object has already emitted it;
+        // listing it twice would inflate the inventory.
+        "rustfmt" => {
+            let rust_version = version_of(plan, "rust_version")?;
+            let rust = toolchain_component(body, "rust_object", "rust", &rust_version)?;
+            if !out.contains(&rust) {
+                out.push(rust);
+            }
+            out.push(toolchain_component(
+                body,
+                "rustfmt_object",
+                "rustfmt",
+                &rust_version,
+            )?);
+        }
         other => {
             return Err(err(format!("unknown closure ecosystem '{other}'")));
         }
@@ -462,6 +482,17 @@ mod tests {
                 }],
             }),
         );
+        // The toolchain-only closure `blanket fmt` writes: no packages, and
+        // an SBOM must survive it rather than fail the whole document.
+        write(
+            "rustfmt",
+            json!({
+                "rust_object": {"path": "/store/objects/rust789", "id": "rust789"},
+                "rustfmt_object": {"path": "/store/objects/fmt012", "id": "fmt012"},
+                "rust_version": "1.96.1",
+                "workspace_root": "/w",
+            }),
+        );
         let doc = generate(&dir).unwrap();
         assert_eq!(doc["bomFormat"], "CycloneDX");
         assert_eq!(doc["specVersion"], "1.5");
@@ -470,8 +501,8 @@ mod tests {
             .unwrap()
             .starts_with("urn:uuid:"));
         let comps = doc["components"].as_array().unwrap();
-        // 1 pypi env + 2 npm + 2 dependency environments
-        assert_eq!(comps.len(), 5);
+        // 1 pypi + 2 npm + 2 dependency environments + rust and rustfmt
+        assert_eq!(comps.len(), 7);
         let purls: Vec<&str> = comps.iter().filter_map(|c| c["purl"].as_str()).collect();
         assert!(purls.contains(&"pkg:pypi/flask-login@0.6.3"));
         assert!(purls.contains(&"pkg:npm/%40types/node@22.0.0"));
@@ -483,14 +514,14 @@ mod tests {
             .filter(|p| p["name"] == "blanket:store-id")
             .filter_map(|p| p["value"].as_str())
             .collect();
-        // Closures are processed in ecosystem name order: node, then python.
-        assert_eq!(ids, ["def456", "abc123"]);
+        // Closures are processed in name order: node, python, then rustfmt.
+        assert_eq!(ids, ["def456", "abc123", "rust789", "fmt012"]);
         let env_names: Vec<&str> = comps
             .iter()
             .filter(|c| c["type"] == "application")
             .filter_map(|c| c["name"].as_str())
             .collect();
-        assert_eq!(env_names, ["node-env", "python-env"]);
+        assert_eq!(env_names, ["node-env", "python-env", "rust", "rustfmt"]);
         let properties = doc["metadata"]["properties"].as_array().unwrap();
         assert!(properties.iter().any(|p| {
             p["name"] == "blanket:exception:requirement-skipped"
@@ -501,6 +532,69 @@ mod tests {
                 && p["value"] == "node_modules/a: postinstall: network-denied"
         }));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A synced Rust project that has also been formatted has both closures;
+    /// they name the same Rust object, which belongs in the inventory once.
+    #[test]
+    fn rustfmt_closure_lists_the_shared_rust_object_once() {
+        let mut out = Vec::new();
+        eco_components(
+            "cargo",
+            &json!({
+                "rust_object": {"path": "/store/objects/rust789", "id": "rust789"},
+                "plan": {
+                    "rust_version": "1.96.1",
+                    "crates": [{"name": "itoa", "version": "1.0.11",
+                                "sha256": "bb".repeat(32)}],
+                },
+            }),
+            &mut out,
+        )
+        .unwrap();
+        eco_components(
+            "rustfmt",
+            &json!({
+                "rust_object": {"path": "/store/objects/rust789", "id": "rust789"},
+                "rustfmt_object": {"path": "/store/objects/fmt012", "id": "fmt012"},
+                "rust_version": "1.96.1",
+                "workspace_root": "/w",
+            }),
+            &mut out,
+        )
+        .unwrap();
+        let toolchains: Vec<(&str, &str)> = out
+            .iter()
+            .filter(|c| c["type"] == "application")
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap(),
+                    c["properties"][0]["value"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            toolchains,
+            [("rust", "rust789"), ("rustfmt", "fmt012")],
+            "{out:?}"
+        );
+    }
+
+    /// A malformed fmt closure is an error, never a silently thinner SBOM.
+    #[test]
+    fn rustfmt_closure_requires_both_objects_and_the_version() {
+        for body in [
+            json!({"rustfmt_object": {"id": "fmt012"}, "rust_version": "1.96.1"}),
+            json!({"rust_object": {"id": "rust789"}, "rust_version": "1.96.1"}),
+            json!({"rust_object": {"id": "rust789"},
+                   "rustfmt_object": {"id": "fmt012"}}),
+        ] {
+            let mut out = Vec::new();
+            assert!(
+                eco_components("rustfmt", &body, &mut out).is_err(),
+                "accepted {body}"
+            );
+        }
     }
 
     #[test]

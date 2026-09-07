@@ -164,6 +164,50 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     let listed = blanket(&binary, &project, &store, &["ls"]);
     assert!(listed.status.success());
     assert!(String::from_utf8_lossy(&listed.stdout).contains("rustfmt 1.96.1"));
+    // `ls` prints a rustfmt row, so `ls rustfmt` must be a legal filter.
+    let listed_one = blanket(&binary, &project, &store, &["ls", "rustfmt"]);
+    assert!(
+        listed_one.status.success(),
+        "ls rustfmt failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&listed_one.stdout),
+        String::from_utf8_lossy(&listed_one.stderr)
+    );
+
+    // Every closure consumer must survive the toolchain-only fmt closure:
+    // `sbom` reads every .blanket/closures/*.json and fails the whole
+    // document on the first ecosystem it does not know.
+    let sbom = blanket(&binary, &project, &store, &["sbom"]);
+    assert!(
+        sbom.status.success(),
+        "sbom failed after fmt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&sbom.stdout),
+        String::from_utf8_lossy(&sbom.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&sbom.stdout).unwrap();
+    let toolchains: Vec<(String, String)> = doc["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|component| component["type"] == "application")
+        .map(|component| {
+            (
+                component["name"].as_str().unwrap().to_string(),
+                component["properties"][0]["value"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        toolchains,
+        [
+            ("rust".to_string(), rust_id.to_string()),
+            ("rustfmt".to_string(), rustfmt_id.to_string()),
+        ],
+        "sbom did not inventory the fmt toolchain objects: {}",
+        String::from_utf8_lossy(&sbom.stdout)
+    );
 
     let help = blanket(&binary, &project, &store, &["fmt", "--", "--help"]);
     assert!(

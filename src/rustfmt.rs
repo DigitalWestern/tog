@@ -402,6 +402,18 @@ mod tests {
         );
     }
 
+    /// `run_fmt` calls this before opening the store, so an unpinned or
+    /// foreign platform is refused ahead of the toolchain download.
+    #[test]
+    fn preflight_accepts_the_host_and_refuses_a_foreign_platform() {
+        let host = Platform::host().unwrap();
+        assert!(preflight_platform(host).is_ok());
+        for platform in Platform::ALL.iter().copied().filter(|p| *p != host) {
+            let error = preflight_platform(platform).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+        }
+    }
+
     #[test]
     fn darwin_identity_unchanged_style_golden() {
         let id = object_id_for(

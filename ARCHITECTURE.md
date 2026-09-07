@@ -304,9 +304,14 @@ anchored to open project, `.blanket`, and `closures` directory handles:
 `mkdirat`/`openat` create the chain without following symlinked parents, and
 `openat`/`renameat` publish the fsynced temporary file in that same
 directory. GC follows the object reference in the rustfmt metadata and the
-closure keeps both objects live. `ls` lists the rustfmt component; `status`
-deliberately ignores this toolchain-only closure because it has no
-dependency-sync state to compare.
+closure keeps both objects live. `ls` lists the rustfmt component and accepts
+`rustfmt` as its filter word; `sbom` emits the closure's two toolchain
+components (`rust` and `rustfmt`, versioned by the resolved Rust version),
+skipping the Rust object when a `cargo` closure has already named the same
+one; `status` deliberately ignores this toolchain-only closure because it has
+no dependency-sync state to compare. Every closure consumer knows the
+ecosystem: `sbom` fails the whole document on a closure it does not
+recognize, so a new closure name is a change to all of them.
 
 ## The Go tailor (delegation computes, the kernel verifies)
 

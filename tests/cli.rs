@@ -147,6 +147,70 @@ fn fmt_is_named_and_typos_are_usage_errors() {
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("fmt: unknown option '--chekc'"));
     assert!(text(&out.stderr).contains("did you mean '--check'?"));
+
+    // A value that is really a mistyped flag is a usage error in BOTH
+    // spellings; `--eco=--check` must not be taken for an ecosystem name.
+    for args in [
+        &["fmt", "--eco", "--check"][..],
+        &["fmt", "--eco=--check"],
+        &["fmt", "--eco="],
+    ] {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            text(&out.stderr).contains("fmt: --eco needs an ecosystem"),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
+/// `blanket ls` prints a `rustfmt` row for the closure `blanket fmt` writes,
+/// so `blanket ls rustfmt` must be a legal filter rather than a usage error.
+#[test]
+fn ls_accepts_every_ecosystem_name_it_can_print() {
+    let home = TempDir::new("ls-words-home");
+    let project = TempDir::new("ls-words-project");
+    std::fs::create_dir_all(project.0.join(".blanket/closures")).unwrap();
+    std::fs::write(
+        project.0.join(".blanket/closures/rustfmt.json"),
+        r#"{"schema":"closure/1","ecosystem":"rustfmt","projected_at":0,
+            "body":{"rust_version":"1.96.1",
+                    "rust_object":{"path":"/store/objects/r","id":"r"},
+                    "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
+    )
+    .unwrap();
+
+    let out = blanket(&project.0, &home.0, &["ls", "rustfmt"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stdout).contains("rustfmt 1.96.1"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // The help text names the same set the parser accepts.
+    let help = blanket(&project.0, &home.0, &["ls", "-h"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(
+        text(&help.stdout).contains("rustfmt"),
+        "{}",
+        text(&help.stdout)
+    );
+
+    let out = blanket(&project.0, &home.0, &["ls", "npm"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("unknown ecosystem 'npm'"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]

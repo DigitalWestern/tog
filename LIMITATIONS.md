@@ -13,8 +13,9 @@ say what breaks, for whom, and how it fails (loud/silent).
   intentionally does not resolve dependencies or create `Cargo.lock`.
 - **`blanket status` ignores the rustfmt closure**: `.blanket/closures/rustfmt.json`
   is a toolchain/GC record, not a dependency-sync projection, so `status`
-  does not show a separate row for it. `blanket ls` and `blanket gc` do handle
-  the closure.
+  does not show a separate row for it. `blanket ls` (including the `ls
+  rustfmt` filter), `blanket sbom` (two toolchain components, no packages)
+  and `blanket gc` do handle the closure.
 - **A Unix socket in a fmt write tree refuses the run**: Linux bubblewrap's
   pre-mount `reject_host_sockets` scan walks the workspace and scratch roots.
   This is intentional protection against exposing a host socket; the scan can

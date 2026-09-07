@@ -203,7 +203,14 @@ pub struct Spec {
 const HELP_OPTION: (&str, &str) = ("-h, --help", "print this help");
 const JSON_OPTION: (&str, &str) = ("--json", "machine-readable output on stdout");
 
-pub const ECOSYSTEM_WORDS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
+/// What `blanket ls` accepts as a filter word. `ls` lists closures, not
+/// ecosystems: besides the seven ecosystems it prints a row for the
+/// toolchain-only `rustfmt` closure `blanket fmt` writes, and every name
+/// `ls` can print must be a name it accepts. This is the `ls` vocabulary
+/// only; it never selects an ecosystem for sync, add, or build.
+pub const LS_WORDS: &[&str] = &[
+    "python", "node", "cargo", "go", "ruby", "elixir", "dotnet", "rustfmt",
+];
 pub const BUILD_WORDS: &[&str] = &["cargo", "go", "elixir", "dotnet"];
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
 pub const SYNC_ALIASES: &[&str] = &["install", "i"];
@@ -387,9 +394,10 @@ lock' gate.",
 Name and version of every package in each synced closure, with the
 toolchain each runs on; -v adds the artifact and store object. Read from
 .blanket/closures/*.json, no store access. Ecosystems: python, node,
-cargo, go, ruby, elixir, dotnet.",
+cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
+'blanket fmt' writes.",
         options: &[JSON_OPTION, HELP_OPTION],
-        words: ECOSYSTEM_WORDS,
+        words: LS_WORDS,
     },
     Spec {
         name: "plan",
@@ -784,8 +792,10 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
                 index += 1;
             }
             value if value.starts_with("--eco=") => {
+                // Same rule as the separate-word form: a mistyped flag
+                // (`--eco=--check`) is a usage error, not an ecosystem name.
                 let value = &value["--eco=".len()..];
-                if value.is_empty() {
+                if value.is_empty() || value.starts_with('-') {
                     return Err(UsageError::new(
                         "fmt: --eco needs an ecosystem",
                         Some("fmt"),
@@ -849,15 +859,15 @@ fn parse_ls(args: &[String]) -> Result<Option<Command>, UsageError> {
                         Some("ls"),
                     ));
                 }
-                if !ECOSYSTEM_WORDS.contains(&other) {
+                if !LS_WORDS.contains(&other) {
                     return Err(UsageError::new(
                         with_suggestion(
                             format!(
                                 "ls: unknown ecosystem '{other}' (one of: {})",
-                                ECOSYSTEM_WORDS.join(", ")
+                                LS_WORDS.join(", ")
                             ),
                             other,
-                            ECOSYSTEM_WORDS.iter().copied(),
+                            LS_WORDS.iter().copied(),
                         ),
                         Some("ls"),
                     ));
@@ -1825,7 +1835,23 @@ mod tests {
             message(&["fmt", "--chekc"]),
             "fmt: unknown option '--chekc'; did you mean '--check'?"
         );
+        assert_eq!(
+            command(&["fmt", "--eco=rust"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: Some("rust".into()),
+                args: vec![],
+            }
+        );
         assert_eq!(message(&["fmt", "--eco"]), "fmt: --eco needs an ecosystem");
+        // Both spellings reject a value that is really a mistyped flag.
+        for args in [
+            &["fmt", "--eco", "--check"][..],
+            &["fmt", "--eco=--check"],
+            &["fmt", "--eco="],
+        ] {
+            assert_eq!(message(args), "fmt: --eco needs an ecosystem", "{args:?}");
+        }
     }
 
     #[test]
@@ -1864,13 +1890,21 @@ mod tests {
                 json: true
             }
         );
+        // The row `blanket fmt` makes `ls` print is a word `ls` accepts.
+        assert_eq!(
+            command(&["ls", "rustfmt"]),
+            Command::Ls {
+                ecosystem: Some("rustfmt".into()),
+                json: false
+            }
+        );
         assert_eq!(
             message(&["ls", "npm"]),
-            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet)"
+            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet, rustfmt)"
         );
         assert_eq!(
             message(&["ls", "pyhton"]),
-            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet); did you mean 'python'?"
+            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet, rustfmt); did you mean 'python'?"
         );
         assert_eq!(
             message(&["ls", "node", "python"]),
