@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle round 3 fixes; Mac gate outstanding)
+### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle round 4 fixes; Mac gate outstanding)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -250,14 +250,19 @@ Any of these may be taken after WP1 merges; each is its own PR.
   mutable overlay; dev/optional dependency groups installable by flag.
 - `blanket add/remove/update` for pnpm, Yarn, Poetry, and PDM projects
   (today they refuse with instructions; LIMITATIONS.md:24).
-- IMPLEMENTED — round 3 rework complete; Mac cold/warm gate outstanding:
+- IMPLEMENTED — round 4 rework complete; Mac cold/warm gate outstanding:
   `blanket x --clean`, unregister an environment, protect a running tool from
   concurrent gc, repair a missing projection, and contain cleanup through
   open directory descriptors. (gc already knows the roots: src/gc.rs:111.)
   Covered by `cli::tests::x_owns_only_its_leading_flags`,
   `xrun::tests::shared_x_lock_blocks_nonblocking_cleanup_until_exec`,
   `xrun::tests::fd_relative_removal_does_not_follow_replaced_x_directory`,
-  `x_clean_is_offline_and_strict_about_trailing_arguments`, and the ignored
+  `xrun::tests::runner_and_cleanup_agree_about_a_symlinked_home`,
+  `xrun::tests::cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file`,
+  `xrun::tests::ready_cache_hit_records_each_exception_once`,
+  `x_clean_is_offline_and_strict_about_trailing_arguments`,
+  `cached_x_narrates_each_object_exception_once`,
+  `x_clean_py_leaves_legacy_npm_root`, and the ignored
   `x_clean_removes_registered_environment_and_running_x_is_busy`.
 - Extend `x` to cargo, go, gems, hex, nuget tools **after** WP1 has proven a
   model for compiled tools (Cargo today stores vendored sources; `cargo
@@ -341,3 +346,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP4 x lifecycle rework: permanent locks survive projection deletion, legacy cleanup matches exact generated packages, partial roots carry realizing markers, and registrations are removed from the closure's originating store. Race, legacy, scoped/`--from`, cross-store, and partial-root regressions added. |
 | 2026-09-06 | WP4 x lifecycle review round 2: cleanup validates the absolute home hierarchy, reserves `.locks`, filters legacy ecosystems correctly, and uses a channel-coordinated lock race regression; Mac cold/warm gate remains outstanding. |
 | 2026-09-06 | WP4 x lifecycle review round 3: cleanup uses validated directory descriptors and fd-relative removal, shared locks stay CLOEXEC until exec, ready roots repair missing projections, and the GC busy test uses a release handshake; Mac cold/warm gate remains outstanding. |
+| 2026-09-07 | WP4 x lifecycle review round 4: `x --clean` resolves the home chain the way `blanket x` does (symlinked `$HOME`/`~/.blanket` accepted, symlinked `~/.blanket/x` refused by both), a cache hit narrates each persisted exception once, cleanup unlinks its own per-root lock, the summary names `blanket gc --project` for node roots and no longer says "nothing to clean" after skipping every candidate, and the legacy-ecosystem regression moved into the offline CLI suite; Mac cold/warm gate remains outstanding. |

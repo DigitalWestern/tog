@@ -65,10 +65,16 @@ leaves a discoverable partial root. A per-root lock at
 `x` takes a blocking shared lock before checking or recreating its root and
 keeps that descriptor close-on-exec through resolution and realization,
 clearing the flag only immediately before exec. Cleanup takes a nonblocking
-exclusive lock before removing the tree. A `ready` marker is accepted only
-when the requested executable and cached projection are both still valid;
-otherwise the marker returns to `realizing` and the cached environment is
-reprojected.
+exclusive lock before removing the tree, and unlinks that lock file while
+still holding it once the root is gone, so `.locks` cannot grow one stale
+file per environment ever created. A lock acquisition therefore re-checks the
+lock pathname against the inode it locked and retries, so a runner that was
+waiting behind a cleanup never proceeds holding a lock on an unlinked inode.
+A `ready` marker is accepted only when the requested executable and cached
+projection are both still valid; that check validates the cached projection
+once, including its policy exceptions, so a cache hit narrates each persisted
+exception exactly once. Otherwise the marker returns to `realizing` and the
+cached environment is reprojected.
 
 Cleanup opens the validated `x` directory one component at a time with
 `O_NOFOLLOW`, keeps that descriptor while enumerating, and opens each real
@@ -84,11 +90,18 @@ roots, cleanup recovers the exact package from the generated
 `requirements.in` or `package.json` dependencies and skips roots whose
 package cannot be recovered. Closure object paths identify the originating
 store, so cleanup removes the matching canonical registry entry there even
-when the active `BLANKET_STORE` differs. Cleanup first requires an absolute,
-real `HOME/.blanket/x` hierarchy, reserves every dot-prefixed entry (including
+when the active `BLANKET_STORE` differs. Cleanup first requires an absolute
+`HOME` and resolves the home chain (`$HOME` and `~/.blanket`, either of which
+may be a symlink) exactly once, the same way the runner resolves it, then
+refuses a symlinked or non-directory `x` component; containment below that
+anchor is carried by the no-follow component walk and the descriptor identity
+checks, not by refusing a symlinked ancestor, so the two commands accept and
+refuse the same layouts. Cleanup reserves every dot-prefixed entry (including
 `.locks`), and opens each candidate only after checking its real canonical
 parent and inode. Removal then uses the open candidate descriptor rather than
-resolving the candidate pathname again.
+resolving the candidate pathname again. Removing a node root also orphans its
+`~/.blanket/forests` projection, which only `gc --project` sweeps; the
+cleanup summary names that command.
 
 ## Platforms
 

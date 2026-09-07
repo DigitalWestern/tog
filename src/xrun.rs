@@ -306,6 +306,17 @@ fn ensure_x_locks_dir_at(x_dir_fd: RawFd) -> io::Result<fs::File> {
     Ok(locks)
 }
 
+fn x_root_lock_name(root_name: &OsString) -> io::Result<CString> {
+    CString::new(format!("{}.lock", root_name.to_string_lossy()))
+        .map_err(|_| other("x: environment root has an invalid lock name"))
+}
+
+/// A successful cleanup unlinks the lock file it holds, so `.locks` stays
+/// bounded. That means a waiter can be handed a lock on an inode the lock
+/// pathname no longer names, which would protect nothing. Every acquisition
+/// therefore re-checks the pathname against the locked inode and retries.
+const LOCK_ATTEMPTS: usize = 8;
+
 /// Open the stable per-environment advisory lock relative to an already-open
 /// x directory. Cleanup uses this path so renaming the pathname cannot make
 /// its lock refer to a different environment.
@@ -315,50 +326,76 @@ fn lock_x_root_at(
     exclusive: bool,
     nonblocking: bool,
 ) -> io::Result<Option<fs::File>> {
-    let locks = ensure_x_locks_dir_at(x_dir_fd)?;
-    let lock_name = format!("{}.lock", root_name.to_string_lossy());
-    let lock_name = CString::new(lock_name)
-        .map_err(|_| other("x: environment root has an invalid lock name"))?;
-    // SAFETY: the name is NUL-terminated and locks is owned by this function.
-    let fd = unsafe {
-        libc::openat(
-            locks.as_raw_fd(),
-            lock_name.as_ptr(),
-            libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd is newly opened and ownership moves to the File.
-    let file = unsafe { fs::File::from_raw_fd(fd) };
-    // SAFETY: the descriptor is owned by file.
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut operation = if exclusive {
-        libc::LOCK_EX
-    } else {
-        libc::LOCK_SH
-    };
-    if nonblocking {
-        operation |= libc::LOCK_NB;
-    }
-    // SAFETY: flock operates on the owned lock descriptor.
-    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-        let error = io::Error::last_os_error();
-        if nonblocking
-            && matches!(
-                error.raw_os_error(),
-                Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
+    let lock_name = x_root_lock_name(root_name)?;
+    for _ in 0..LOCK_ATTEMPTS {
+        let locks = ensure_x_locks_dir_at(x_dir_fd)?;
+        // SAFETY: the name is NUL-terminated and locks is owned by this loop.
+        let fd = unsafe {
+            libc::openat(
+                locks.as_raw_fd(),
+                lock_name.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
             )
-        {
-            return Ok(None);
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
         }
-        return Err(error);
+        // SAFETY: fd is newly opened and ownership moves to the File.
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        // SAFETY: the descriptor is owned by file.
+        if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        if nonblocking {
+            operation |= libc::LOCK_NB;
+        }
+        // SAFETY: flock operates on the owned lock descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+            let error = io::Error::last_os_error();
+            if nonblocking
+                && matches!(
+                    error.raw_os_error(),
+                    Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
+                )
+            {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        match stat_at(locks.as_raw_fd(), lock_name.to_bytes()) {
+            Ok(stat) if stat_identity(&stat) == fd_identity(&file)? => return Ok(Some(file)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        drop(file);
     }
-    Ok(Some(file))
+    Err(other(format!(
+        "x: lock file for environment {} kept being replaced while it was acquired; retry later",
+        root_name.to_string_lossy()
+    )))
+}
+
+/// Drop the per-environment lock file after its environment is gone. Called
+/// while the exclusive lock is still held; a later runner recreates the file,
+/// and the identity re-check in the lock helpers keeps that safe.
+fn remove_x_root_lock_at(x_dir_fd: RawFd, root_name: &OsString) -> io::Result<()> {
+    let locks = ensure_x_locks_dir_at(x_dir_fd)?;
+    let lock_name = x_root_lock_name(root_name)?;
+    // SAFETY: locks is an open directory and the name is NUL-terminated.
+    if unsafe { libc::unlinkat(locks.as_raw_fd(), lock_name.as_ptr(), 0) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// Open the stable per-environment advisory lock. A shared lock remains
@@ -379,48 +416,65 @@ fn lock_x_root(root: &Path, exclusive: bool, nonblocking: bool) -> io::Result<Op
         ))
     })?;
     let path = locks.join(format!("{}.lock", root_name.to_string_lossy()));
-    if let Ok(metadata) = fs::symlink_metadata(&path) {
-        if metadata.file_type().is_symlink() {
-            return Err(other(format!(
-                "x: lock file {} is a symlink; refusing to use it",
-                path.display()
-            )));
+    for _ in 0..LOCK_ATTEMPTS {
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                return Err(other(format!(
+                    "x: lock file {} is a symlink; refusing to use it",
+                    path.display()
+                )));
+            }
         }
-    }
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)?;
-    let mut permissions = file.metadata()?.permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(&path, permissions)?;
-    let mut operation = if exclusive {
-        libc::LOCK_EX
-    } else {
-        libc::LOCK_SH
-    };
-    if nonblocking {
-        operation |= libc::LOCK_NB;
-    }
-    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-        let error = io::Error::last_os_error();
-        if nonblocking
-            && matches!(
-                error.raw_os_error(),
-                Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
-            )
-        {
-            return Ok(None);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&path, permissions)?;
+        let mut operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        if nonblocking {
+            operation |= libc::LOCK_NB;
         }
-        return Err(io::Error::new(
-            error.kind(),
-            format!("lock {}: {error}", path.display()),
-        ));
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+            let error = io::Error::last_os_error();
+            if nonblocking
+                && matches!(
+                    error.raw_os_error(),
+                    Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK
+                )
+            {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                error.kind(),
+                format!("lock {}: {error}", path.display()),
+            ));
+        }
+        fd_set_cloexec(file.as_raw_fd(), true)?;
+        // A cleanup that removed this environment unlinked its lock file
+        // while holding the lock. Waking up on an unlinked inode would
+        // protect nothing, so acquire again against the current file.
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if (metadata.dev(), metadata.ino()) == fd_identity(&file)? => {
+                return Ok(Some(file));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        drop(file);
     }
-    fd_set_cloexec(file.as_raw_fd(), true)?;
-    Ok(Some(file))
+    Err(other(format!(
+        "x: lock file {} kept being replaced while it was acquired; retry later",
+        path.display()
+    )))
 }
 
 fn make_lock_inheritable(lock: &fs::File) -> io::Result<()> {
@@ -791,6 +845,42 @@ fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
     Some(canonical)
 }
 
+/// Resolve a user-controlled ancestor of the cleanup anchor. `$HOME` and
+/// `~/.blanket` are routinely symlinks (the usual "move the cache off the
+/// root disk" setup) and `blanket x` follows them when it creates and
+/// registers a root, so cleanup follows them too — otherwise it could never
+/// remove what the runner just made. Containment is carried by the no-follow
+/// component walk below the resolved anchor and by the descriptor identity
+/// checks, not by refusing a symlinked ancestor.
+fn canonical_real_directory(path: &Path, label: &str) -> io::Result<Option<PathBuf>> {
+    let canonical = match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(other(format!(
+                "x: could not resolve {label} {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let metadata = fs::symlink_metadata(&canonical).map_err(|error| {
+        other(format!(
+            "x: could not inspect {label} {}: {error}",
+            canonical.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(other(format!(
+            "x: {label} {} is not a directory; refusing to clean",
+            path.display()
+        )));
+    }
+    Ok(Some(canonical))
+}
+
+/// The final `x` component is checked without following it, matching the
+/// runner's own `ensure_x_locks_dir` check, so both commands accept and
+/// refuse exactly the same layouts.
 fn existing_real_directory(path: &Path, label: &str) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(other(format!(
@@ -810,9 +900,12 @@ fn existing_real_directory(path: &Path, label: &str) -> io::Result<bool> {
     }
 }
 
-/// Return the canonical cleanup anchor after checking every user-controlled
-/// directory above it without following a symlink. Missing `.blanket` or `x`
-/// means there is nothing to clean; an existing unsafe component is an error.
+/// Return the canonical cleanup anchor. The home chain (`$HOME` and
+/// `~/.blanket`) is resolved the way the runner resolves it and the result
+/// must be a real directory; the final `x` component is never followed.
+/// Missing `.blanket` or `x` means there is nothing to clean; an existing
+/// unsafe component is an error.
+#[derive(Debug)]
 struct ValidatedXDir {
     path: PathBuf,
     directory: fs::File,
@@ -837,33 +930,43 @@ fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
             x_dir.display()
         ))
     })?;
-    if !existing_real_directory(home_dir, "HOME")? {
+    let blanket_name = blanket_dir.file_name().ok_or_else(|| {
+        other(format!(
+            "x: cleanup directory {} has no .blanket parent; refusing to clean",
+            x_dir.display()
+        ))
+    })?;
+    let x_name = x_dir.file_name().ok_or_else(|| {
+        other(format!(
+            "x: cleanup directory {} has no name; refusing to clean",
+            x_dir.display()
+        ))
+    })?;
+    let Some(home_canonical) = canonical_real_directory(home_dir, "HOME")? else {
         return Err(other(format!(
             "x: HOME directory {} does not exist; refusing to clean",
             home_dir.display()
         )));
-    }
-    if !existing_real_directory(blanket_dir, "$HOME/.blanket")? {
+    };
+    let Some(blanket_canonical) =
+        canonical_real_directory(&home_canonical.join(blanket_name), "$HOME/.blanket")?
+    else {
+        return Ok(None);
+    };
+    // Below the resolved home chain nothing is followed: the `x` component
+    // must be a real directory and `open_directory_path` walks the canonical
+    // path one no-follow component at a time.
+    let canonical = blanket_canonical.join(x_name);
+    if !existing_real_directory(&canonical, "$HOME/.blanket/x")? {
         return Ok(None);
     }
-    if !existing_real_directory(x_dir, "$HOME/.blanket/x")? {
-        return Ok(None);
-    }
-    let expected = fs::symlink_metadata(x_dir)?;
-    let canonical = x_dir.canonicalize()?;
-    let current = fs::symlink_metadata(x_dir)?;
-    if expected.dev() != current.dev() || expected.ino() != current.ino() {
-        return Err(other(format!(
-            "x: cleanup directory {} changed while it was being validated; retry later",
-            x_dir.display()
-        )));
-    }
+    let expected = fs::symlink_metadata(&canonical)?;
     let directory = open_directory_path(&canonical)?;
     let actual = fd_identity(&directory)?;
-    if actual != (current.dev(), current.ino()) {
+    if actual != (expected.dev(), expected.ino()) {
         return Err(other(format!(
             "x: cleanup directory {} changed while it was being opened; retry later",
-            x_dir.display()
+            canonical.display()
         )));
     }
     Ok(Some(ValidatedXDir {
@@ -1060,6 +1163,33 @@ fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
             .map_or(true, |version| Some(version) == record.version.as_deref())
 }
 
+/// Best-effort ecosystem of a candidate, used only to word the summary. The
+/// recorded request wins, then a recovered legacy manifest, then the
+/// generated name prefix.
+fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
+    if let Some(record) = read_x_request(path) {
+        return match record.ecosystem.as_str() {
+            "python" => Some("python"),
+            "node" => Some("node"),
+            _ => None,
+        };
+    }
+    if legacy_packages(path, "node").is_some() {
+        return Some("node");
+    }
+    if legacy_packages(path, "python").is_some() {
+        return Some("python");
+    }
+    let name = path.file_name().and_then(|name| name.to_str())?;
+    if name.starts_with("npm-") {
+        Some("node")
+    } else if name.starts_with("py-") {
+        Some("python")
+    } else {
+        None
+    }
+}
+
 fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateMatch {
     read_x_request(&candidate.path).map_or_else(
         || old_root_matches(&candidate.path, filter),
@@ -1073,6 +1203,10 @@ fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateM
     )
 }
 
+/// Decide whether a cached root can be executed as it stands. A `true` answer
+/// means the cached projection has already been fully validated here,
+/// including its policy exceptions: callers must not validate it a second
+/// time or every persisted exception is narrated and queued twice.
 fn x_request_is_ready(
     store: &Store,
     root: &Path,
@@ -1168,6 +1302,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
     let mut matched = 0usize;
     let mut removed = 0usize;
     let mut skipped = 0usize;
+    let mut removed_node = false;
     for candidate in candidates {
         match candidate_matches(&candidate, &filter) {
             CandidateMatch::Match => {}
@@ -1177,11 +1312,16 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
                     "blanket: skipped x environment {} (legacy root package could not be recovered; use 'blanket x --clean' with no tool to remove all x environments)",
                     candidate.path.display()
                 );
+                // A root that was considered and skipped still counts, so a
+                // run that skipped everything does not then claim there was
+                // nothing to clean.
+                matched += 1;
                 skipped += 1;
                 continue;
             }
         }
         matched += 1;
+        let ecosystem = candidate_ecosystem(&candidate.path);
         let Some(_lock) = lock_x_root_at(candidate.x_dir.as_raw_fd(), &candidate.name, true, true)?
         else {
             println!(
@@ -1230,6 +1370,13 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         {
             return Err(io::Error::last_os_error());
         }
+        // The environment is gone, so its lock file has nothing left to
+        // protect. Drop it while the exclusive lock is still held to keep
+        // `.locks` bounded; a later runner recreates it.
+        remove_x_root_lock_at(candidate.x_dir.as_raw_fd(), &candidate.name)?;
+        if ecosystem == Some("node") {
+            removed_node = true;
+        }
         match registration {
             Registration::Found { store, entry } => {
                 store.remove_root_entry(&entry)?;
@@ -1252,8 +1399,16 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
     if matched == 0 {
         println!("blanket: x clean: nothing to clean");
     } else {
+        // A removed node environment also orphans its
+        // ~/.blanket/forests/<project-key>/<projection-id> node_modules
+        // forest, which plain `blanket gc` never visits.
+        let forests = if removed_node {
+            ", and 'blanket gc --project' also reclaims the node_modules forest each removed node environment used"
+        } else {
+            ""
+        };
         println!(
-            "blanket: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'blanket gc'"
+            "blanket: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'blanket gc'{forests}"
         );
     }
     Ok(())
@@ -1308,7 +1463,10 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                     realize_python(&store, platform, &root, package, version)?;
                     write_x_request(&root, ecosystem, package, version, "ready")?;
                 } else {
-                    check_cached_projection(&store, &root, "python")?;
+                    // `x_request_is_ready` already validated this projection
+                    // against the store and the active policy. Validating it
+                    // again would narrate and queue every persisted exception
+                    // twice.
                     if !x_request_file_exists(&root) {
                         write_x_request(&root, ecosystem, package, version, "ready")?;
                     }
@@ -1333,7 +1491,7 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                     realize_node(&store, platform, &root, package, version)?;
                     write_x_request(&root, ecosystem, package, version, "ready")?;
                 } else {
-                    check_cached_projection(&store, &root, "node")?;
+                    // Already validated by `x_request_is_ready`; see above.
                     if !x_request_file_exists(&root) {
                         write_x_request(&root, ecosystem, package, version, "ready")?;
                     }
@@ -1824,6 +1982,312 @@ mod tests {
         let candidates = x_candidates(&base.join("home/.blanket/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    fn temp_base(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "blanket-x-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// Prepare an environment root the way the runner does, so cleanup will
+    /// enumerate it: metadata directory plus a lifecycle marker.
+    fn seed_root(root: &Path) {
+        ensure_x_metadata_dir(root).unwrap();
+        write_x_request(root, "python", "ruff", None, "realizing").unwrap();
+    }
+
+    /// `$HOME` on another volume is a routine setup, and `blanket x` follows
+    /// the symlink when it creates and registers a root. Cleanup has to reach
+    /// exactly the same environment or it could never remove what the runner
+    /// just made.
+    #[test]
+    fn runner_and_cleanup_agree_about_a_symlinked_home() {
+        let base = temp_base("symlinked-home");
+        let real_home = base.join("volume/home");
+        fs::create_dir_all(&real_home).unwrap();
+        let home = base.join("home");
+        std::os::unix::fs::symlink(&real_home, &home).unwrap();
+
+        let x_dir = home.join(".blanket/x");
+        let root = x_dir.join("py-linked-home");
+        // Runner path: creates .blanket/x, .locks and the root itself.
+        let shared = acquire_x_root(&root).unwrap();
+        seed_root(&root);
+        assert!(real_home
+            .join(".blanket/x/.locks/py-linked-home.lock")
+            .is_file());
+        drop(shared);
+
+        // Cleanup path: the same environment, named by its real location.
+        let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
+        assert_eq!(
+            validated.path,
+            real_home.canonicalize().unwrap().join(".blanket/x")
+        );
+        let candidates = x_candidates(&x_dir).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, root.canonicalize().unwrap());
+        drop(validated);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The same contract for a symlinked `~/.blanket` — "move the cache off
+    /// the root disk".
+    #[test]
+    fn runner_and_cleanup_agree_about_a_symlinked_blanket_directory() {
+        let base = temp_base("symlinked-blanket");
+        let real_blanket = base.join("volume/blanket");
+        fs::create_dir_all(&real_blanket).unwrap();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&real_blanket, home.join(".blanket")).unwrap();
+
+        let x_dir = home.join(".blanket/x");
+        let root = x_dir.join("py-linked-blanket");
+        let shared = acquire_x_root(&root).unwrap();
+        seed_root(&root);
+        assert!(real_blanket
+            .join("x/.locks/py-linked-blanket.lock")
+            .is_file());
+        drop(shared);
+
+        let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
+        assert_eq!(
+            validated.path,
+            real_blanket.canonicalize().unwrap().join("x")
+        );
+        let candidates = x_candidates(&x_dir).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, root.canonicalize().unwrap());
+        drop(validated);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The final `x` component is where both commands stop following: the
+    /// runner refuses it as a private directory and cleanup refuses to clean
+    /// it, so neither can be pointed at a directory outside the home chain.
+    #[test]
+    fn runner_and_cleanup_both_refuse_a_symlinked_x_directory() {
+        let base = temp_base("symlinked-x");
+        let home = base.join("home");
+        fs::create_dir_all(home.join(".blanket")).unwrap();
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let x_dir = home.join(".blanket/x");
+        std::os::unix::fs::symlink(&elsewhere, &x_dir).unwrap();
+
+        let runner = ensure_x_locks_dir(&x_dir).unwrap_err();
+        assert!(
+            runner.to_string().contains("is not a private directory"),
+            "{runner}"
+        );
+        let cleanup = validated_x_dir(&x_dir).unwrap_err();
+        assert!(
+            cleanup
+                .to_string()
+                .contains("is a symlink; refusing to clean"),
+            "{cleanup}"
+        );
+        assert!(elsewhere.is_dir(), "the symlink target was touched");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A relative `HOME` is still refused, by both commands, before anything
+    /// is opened.
+    #[test]
+    fn cleanup_refuses_a_relative_home() {
+        let error = validated_x_dir(Path::new("relative-home/.blanket/x")).unwrap_err();
+        assert!(error.to_string().contains("is not absolute"), "{error}");
+    }
+
+    /// A successful cleanup unlinks the lock file it holds so `.locks` cannot
+    /// grow one stale file per environment ever created. A runner that was
+    /// already waiting on that inode must not be handed a lock that protects
+    /// nothing: it revalidates and locks the file the pathname names now.
+    #[test]
+    fn cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file() {
+        let base = temp_base("lock-unlink");
+        let x_dir = base.join("home/.blanket/x");
+        let root = x_dir.join("py-unlink");
+        fs::create_dir_all(&root).unwrap();
+        let x_fd = open_directory_path(&x_dir.canonicalize().unwrap()).unwrap();
+        let name = OsString::from("py-unlink");
+        let cleanup = lock_x_root_at(x_fd.as_raw_fd(), &name, true, true)
+            .unwrap()
+            .expect("cleanup lock");
+        let lock_path = x_dir.join(".locks/py-unlink.lock");
+        assert!(lock_path.is_file());
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let waiter_root = root.clone();
+        let waiter = thread::spawn(move || {
+            let lock = lock_x_root(&waiter_root, true, false)
+                .unwrap()
+                .expect("blocking lock");
+            let identity = fd_identity(&lock).unwrap();
+            ready_tx.send(identity).unwrap();
+            lock
+        });
+        assert!(
+            ready_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the waiter took the lock while cleanup still held it"
+        );
+
+        remove_x_root_lock_at(x_fd.as_raw_fd(), &name).unwrap();
+        assert!(
+            !lock_path.exists(),
+            "cleanup left its lock file behind: {}",
+            lock_path.display()
+        );
+        drop(cleanup);
+
+        let identity = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiter never acquired a lock after cleanup released it");
+        let current = fs::symlink_metadata(&lock_path).expect("the waiter recreated the lock file");
+        assert_eq!(
+            identity,
+            (current.dev(), current.ino()),
+            "the waiter holds a lock on an inode the lock pathname no longer names"
+        );
+        drop(waiter.join().unwrap());
+        // Unlinking twice is not an error: the file may already be gone.
+        remove_x_root_lock_at(x_fd.as_raw_fd(), &name).unwrap();
+        drop(x_fd);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The pending-exception queue is shared, so a test that asserts on its
+    /// length starts from an empty queue under a lock of its own.
+    fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        policy::clear();
+        guard
+    }
+
+    /// A cache hit validates the projection exactly once. `x_request_is_ready`
+    /// ends with `check_cached_projection`, so a caller that validated again
+    /// would narrate and queue every persisted exception twice.
+    #[test]
+    fn ready_cache_hit_records_each_exception_once() {
+        let _guard = exception_guard();
+        let base = temp_base("ready-exceptions");
+        fs::create_dir_all(base.join("store/objects/test-env/bin")).unwrap();
+        fs::create_dir_all(base.join("store/meta")).unwrap();
+        // `Store::has` takes the publish lock under `tmp/`.
+        fs::create_dir_all(base.join("store/tmp")).unwrap();
+        // Closures record the store's own canonical object path.
+        let store = Store {
+            root: base.join("store").canonicalize().unwrap(),
+        };
+        let object = store.root.join("objects/test-env");
+        let executable = object.join("bin/ruff");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        // A complete object is a read-only directory with metadata.
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
+        let exception = serde_json::json!({
+            "kind": policy::FILE_COLLISION,
+            "subject": "ruff",
+            "detail": "cached test exception"
+        });
+        fs::write(
+            store.root.join("meta/test-env.json"),
+            serde_json::json!({"id": "test-env", "exceptions": [exception.clone()]}).to_string(),
+        )
+        .unwrap();
+
+        let root = base.join("home/.blanket/x/py-ready");
+        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        std::os::unix::fs::symlink(&object, root.join(".venv")).unwrap();
+        fs::write(
+            root.join(".blanket/closures/python.json"),
+            serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "python",
+                "platform": Platform::host().unwrap().triple(),
+                "body": {
+                    "env_object": object.display().to_string(),
+                    "exceptions": [exception]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(policy::pending().is_empty());
+        assert!(x_request_is_ready(&store, &root, "python", &root.join(".venv/bin/ruff")).unwrap());
+        assert_eq!(
+            policy::pending().len(),
+            1,
+            "a cache hit narrated the same exception more than once: {:?}",
+            policy::pending()
+        );
+        policy::clear();
+        // The object is published read-only; make it removable again.
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A run that considered a root and skipped it as unrecoverable has not
+    /// found "nothing to clean": unrecoverable candidates count as matched.
+    #[test]
+    fn unrecoverable_candidates_count_as_matched() {
+        let base = temp_base("unrecoverable");
+        let root = base.join("home/.blanket/x/mystery");
+        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        let filter = clean_filter(CleanRequest {
+            ecosystem: None,
+            from: None,
+            tool: Some("ruff".into()),
+        })
+        .unwrap();
+        let candidates = x_candidates(&base.join("home/.blanket/x")).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidate_matches(&candidates[0], &filter),
+            CandidateMatch::Unrecoverable
+        );
+        assert_eq!(candidate_ecosystem(&candidates[0].path), None);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The summary names `blanket gc --project` only for node environments,
+    /// whose removal also orphans a `~/.blanket/forests` projection.
+    #[test]
+    fn candidate_ecosystem_reads_record_then_manifest_then_name() {
+        let base = temp_base("ecosystem");
+        let recorded = base.join("py-recorded");
+        ensure_x_metadata_dir(&recorded).unwrap();
+        write_x_request(&recorded, "node", "prettier", None, "ready").unwrap();
+        assert_eq!(candidate_ecosystem(&recorded), Some("node"));
+
+        let legacy = base.join("npm-legacy");
+        fs::create_dir_all(legacy.join(".blanket")).unwrap();
+        fs::write(
+            legacy.join("package.json"),
+            r#"{"dependencies":{"prettier":"1.0.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(candidate_ecosystem(&legacy), Some("node"));
+
+        let named = base.join("py-named");
+        fs::create_dir_all(named.join(".blanket")).unwrap();
+        assert_eq!(candidate_ecosystem(&named), Some("python"));
+
+        let unknown = base.join("mystery");
+        fs::create_dir_all(unknown.join(".blanket")).unwrap();
+        assert_eq!(candidate_ecosystem(&unknown), None);
         fs::remove_dir_all(base).unwrap();
     }
 }

@@ -18,6 +18,18 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-07 — `x` cleanup follows the same home chain the runner does
+
+`x --clean` now canonicalizes `$HOME` and `~/.blanket` once (either may be a
+symlink — the usual "move the cache to another volume" setup) and refuses only
+a symlinked or non-directory `~/.blanket/x`, which is exactly what `blanket x`
+itself refuses; containment below the anchor is carried by the no-follow
+component walk and the fd identity checks. A successful removal also unlinks
+the per-root `.locks/<root>.lock` while still holding it, and every lock
+acquisition re-checks the pathname against the inode it locked, so a waiter
+behind a cleanup relocks the recreated file. Both are the same code on Linux
+and macOS; no sandbox, extraction, or toolchain pin changed.
+
 ### 2026-09-06 — `x` cleanup validates its filesystem boundary
 
 `x --clean` now requires an absolute `HOME`, validates the real
