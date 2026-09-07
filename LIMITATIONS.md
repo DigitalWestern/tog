@@ -109,7 +109,9 @@ say what breaks, for whom, and how it fails (loud/silent).
   code at PLAN time. Fails silent (it's the design).
 - **Project-side plan caches for go/python lack contained atomic writes**
   (ruby's was removed entirely); a symlinked .blanket could redirect a
-  cache write outside the project.
+  cache write outside the project. Closure-envelope publication is not part
+  of this remaining gap: it is anchored to open directory handles and rejects
+  symlinked .blanket or .blanket/closures directories.
 - **Reproducibility is asserted, not measured**: no rebuild-twice-and-
   compare checks (the last unimplemented item from Sol's original list).
 - **xcrun cache-write warnings** inside every sandboxed native build

@@ -50,8 +50,12 @@ fn copy_tree(src: &Path, dest: &Path) {
 }
 
 fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+    blanket_at(bin, project, store, args)
+}
+
+fn blanket_at(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
-        .current_dir(project)
+        .current_dir(cwd)
         .env("BLANKET_STORE", store)
         .args(args)
         .output()
@@ -169,6 +173,18 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         String::from_utf8_lossy(&help.stderr)
     );
 
+    // This is cargo-fmt's own argument parser rejecting a malformed blanket
+    // pass-through flag. Its status is 2, so status 1 would not prove
+    // unchanged propagation from the formatter.
+    let bad_tool_flag = blanket(&binary, &project, &store, &["fmt", "--", "--version=bad"]);
+    assert_eq!(
+        bad_tool_flag.status.code(),
+        Some(2),
+        "formatter status was not passed through unchanged\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&bad_tool_flag.stdout),
+        String::from_utf8_lossy(&bad_tool_flag.stderr)
+    );
+
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         age(&entry.unwrap().path());
     }
@@ -181,4 +197,64 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     );
     assert!(store.join("objects").join(rust_id).is_dir());
     assert!(store.join("objects").join(rustfmt_id).is_dir());
+}
+
+#[test]
+#[ignore]
+fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
+    let temp = TempDir::new();
+    let project = temp.0.join("fmt-script");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("package.json"),
+        r#"{"name":"fmt-script","version":"1.0.0","scripts":{"fmt":"sh -c 'echo script-fmt \"$@\"; exit 7' sh"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("package-lock.json"),
+        r#"{"name":"fmt-script","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fmt-script","version":"1.0.0"}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fmt-script\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("Cargo.lock"), "version = 4\n").unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let synced = blanket(&binary, &project, &store, &["sync"]);
+    assert!(
+        synced.status.success(),
+        "sync failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&synced.stdout),
+        String::from_utf8_lossy(&synced.stderr)
+    );
+    assert!(project.join(".blanket/closures/node.json").is_file());
+
+    let run = blanket_at(
+        &binary,
+        &project.join("src"),
+        &store,
+        &["fmt", "--check", "extra"],
+    );
+    assert_eq!(
+        run.status.code(),
+        Some(7),
+        "package script status was not preserved\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("script-fmt --check extra"),
+        "script did not receive fmt arguments\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        !project.join(".blanket/closures/rustfmt.json").exists(),
+        "script precedence unexpectedly realized rustfmt"
+    );
 }

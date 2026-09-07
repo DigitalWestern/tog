@@ -127,21 +127,16 @@ pub fn ensure_rustfmt(
 
     let scratch = unique_dir(&store.root.join("tmp"), "rustfmt-probe")?;
     // The staged object is under store/tmp, so its committed relative lib
-    // link cannot resolve until publication beside the Rust object. Point
-    // only this pre-publication probe at the paired library directory.
-    let loader_path = rust_object.join("lib").display().to_string();
-    let loader_variable = if platform.is_macos() {
-        "DYLD_LIBRARY_PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    };
+    // link cannot resolve until publication beside the Rust object. The stage
+    // carries an absolute link for this probe, so protected macOS binaries do
+    // not need a DYLD_* or LD_* environment override.
     let probe = BuildSpec {
         argv: vec![
             staged.join("bin/rustfmt").display().to_string(),
             "--version".into(),
         ],
         cwd: scratch.clone(),
-        env: vec![(loader_variable.into(), loader_path)],
+        env: vec![],
         read: vec![staged.clone(), rust_object.clone()],
         write: vec![],
         scratch: scratch.clone(),
@@ -155,6 +150,21 @@ pub fn ensure_rustfmt(
             format!("rustfmt probe failed before publication: {error}"),
         )
     })?;
+
+    // The probe used the absolute link above. Publish only the relocatable
+    // sibling-relative form, and verify the exact link text before commit.
+    let lib = staged.join("lib");
+    fs::remove_file(&lib)?;
+    let committed_link = rust_object_lib_link(&rust_object)?;
+    std::os::unix::fs::symlink(&committed_link, &lib)?;
+    let actual_link = fs::read_link(&lib)?;
+    if actual_link.is_absolute() || actual_link != committed_link {
+        let _ = crate::store::remove_tree(&staged);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "rustfmt publication link is not the expected relative Rust lib link",
+        ));
+    }
 
     store
         .commit(&identity, &staged, &[])
@@ -276,7 +286,7 @@ fn stage_rustfmt(
             ));
         }
     }
-    std::os::unix::fs::symlink(rust_object_lib_link(rust_object)?, staged.join("lib"))?;
+    std::os::unix::fs::symlink(rust_object.join("lib"), staged.join("lib"))?;
     Ok(())
 }
 

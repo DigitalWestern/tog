@@ -277,10 +277,12 @@ schema `rustfmt/1`, the platform triple, the component sha256, and the paired
 Rust object id as inputs; its `lib` entry links to the Rust object's `lib`, so
 the dynamically linked formatter uses the matching compiler libraries. A
 publication probe runs `rustfmt --version` before the object is committed. The
-committed link is relative (`../<rust-object-id>/lib`), so the object bytes do
-not embed a store root and remain valid if the store is moved. Because the
-staging directory is under `store/tmp` rather than beside the Rust object, the
-publication probe sets the paired library directory explicitly for that probe.
+probe runs with `lib` staged as an absolute link to the paired Rust object's
+`lib`, and sets no `DYLD_*` or `LD_*` loader variable. Immediately before
+commit, blanket replaces that link with the relative
+`../<rust-object-id>/lib` form and re-asserts the link text with `read_link`.
+The committed link therefore does not embed a store root and remains valid if
+the store is moved.
 
 The store Cargo command runs `locate-project --workspace --offline`, then
 `cargo-fmt` runs `cargo metadata --no-deps` inside a dedicated sandbox mode:
@@ -290,10 +292,14 @@ Cargo.lock, or vendor object is involved. The mode uses Seatbelt on macOS and
 bubblewrap on Linux and returns the formatter's exit status unchanged.
 
 The workspace receives `.blanket/closures/rustfmt.json`, recording both object
-references, the resolved version, and workspace root. GC follows the object
-reference in the rustfmt metadata and the closure keeps both objects live.
-`ls` lists the rustfmt component; `status` deliberately ignores this
-toolchain-only closure because it has no dependency-sync state to compare.
+references, the resolved version, and workspace root. Closure publication is
+anchored to open project, `.blanket`, and `closures` directory handles:
+`mkdirat`/`openat` create the chain without following symlinked parents, and
+`openat`/`renameat` publish the fsynced temporary file in that same
+directory. GC follows the object reference in the rustfmt metadata and the
+closure keeps both objects live. `ls` lists the rustfmt component; `status`
+deliberately ignores this toolchain-only closure because it has no
+dependency-sync state to compare.
 
 ## The Go tailor (delegation computes, the kernel verifies)
 

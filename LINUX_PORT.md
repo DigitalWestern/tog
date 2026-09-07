@@ -18,6 +18,21 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — Rust fmt publication and contained closure writes
+
+The rustfmt publication probe now runs with an absolute staged `lib` link to
+the paired Rust object's `lib`, with no `DYLD_*` or `LD_*` environment
+variable. Immediately before `store.commit`, blanket replaces it with the
+relative `../<rust-object-id>/lib` link and verifies that committed link text
+with `read_link`. This is required for the macOS Seatbelt probe because
+protected `sandbox-exec` binaries do not retain loader-variable overrides.
+
+Closure files are created and published through project, `.blanket`, and
+`closures` directory handles using `mkdirat`, `openat`, `renameat`, and
+`unlinkat`; symlinked directory parents are refused before anything is
+created in their targets. The same descriptor-anchored path is used by the
+Linux and macOS implementations.
+
 ### 2026-09-06 — Rust `blanket fmt` sandbox and rustfmt pin
 
 The Rust formatting path now runs the pinned `cargo-fmt` in the shared
@@ -38,11 +53,11 @@ Seatbelt path still requires the Mac gate before merge.
 
 ### 2026-09-06 — Rust fmt rework portability and sandbox diagnostics
 
-The committed rustfmt object's `lib` link is now relative to its sibling Rust
-object, so it is independent of the store root; the staging publication probe
-sets `LD_LIBRARY_PATH` explicitly until that sibling layout exists. Seatbelt
-now relays stderr like bubblewrap and classifies `sandbox-exec:` setup failures
-as sandbox errors rather than formatter exit statuses. Closure publication
+Round 1 made the committed rustfmt object's `lib` link relative to its sibling Rust
+object, so it is independent of the store root. The current publication probe
+uses an absolute staged `lib` link and no loader-variable override, while
+Seatbelt relays stderr like bubblewrap and classifies `sandbox-exec:` setup
+failures as sandbox errors rather than formatter exit statuses. Closure publication
 also rejects symlinked `.blanket` directories before writing provenance.
 
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar

@@ -372,7 +372,7 @@ pub struct CargoCrate {
     pub version: String,
     pub sha256: String,
     pub url: String,
-    /// A git dependency pinned to a commit (NEXT.md item 4): the crate's files
+    /// A git dependency pinned to a commit: the crate's files
     /// come from the realized commit instead of a registry `.crate` archive,
     /// and `source` is the lock's exact source string, which the generated
     /// cargo config must replace verbatim.
