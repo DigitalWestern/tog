@@ -284,6 +284,13 @@ commit, blanket replaces that link with the relative
 The committed link therefore does not embed a store root and remains valid if
 the store is moved.
 
+An explicit `--eco` is decided before the package.json `fmt` script check, so
+`blanket fmt --eco rust` always formats Rust even in a root whose script would
+otherwise win, and `--eco` is never appended to a delegated script command
+line. The probe and run scratch directories are `store/tmp/stage-rustfmt-*`,
+inside the prefix `blanket gc` sweeps, so a run killed before its own cleanup
+is still reclaimable.
+
 The store Cargo command runs `locate-project --workspace --offline`, then
 `cargo-fmt` runs `cargo metadata --no-deps` inside a dedicated sandbox mode:
 network denied, Rust and rustfmt objects read-only, the workspace root

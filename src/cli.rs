@@ -241,9 +241,10 @@ Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
 discovered with the store Cargo tool and Cargo metadata is read with
 --no-deps, so a project that has never been synced needs no Cargo.lock,
 dependency resolution, or vendor object. --check returns rustfmt's status.
-In a polyglot directory use --eco rust; other ecosystems are not implemented
-yet. A package.json script named fmt takes precedence and is run as
-'blanket run fmt'.",
+A package.json script named fmt takes precedence and is run as
+'blanket run fmt'. In a polyglot directory use --eco rust: an explicit --eco
+selects the ecosystem, so it formats Rust instead of running that script.
+Other ecosystems are not implemented yet.",
         options: &[
             ("--check", "check formatting without editing files"),
             ("--eco <ecosystem>", "select the ecosystem (Rust: rust)"),

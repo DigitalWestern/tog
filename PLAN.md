@@ -125,7 +125,7 @@ append a round-4 entry to LINUX_PORT.md. Any Mac-only fix goes on a
 `npm_git_dep` hit-rate rows (hoppscotch, tabby) that predate Git sources, as
 a dated column in HITRATE.md.
 
-### WP1 — `blanket fmt` on the existing pinned Rust toolchain — IMPLEMENTED, rework rounds 1–2 fixed; awaiting review recheck and Mac gate
+### WP1 — `blanket fmt` on the existing pinned Rust toolchain — IMPLEMENTED, rework rounds 1–3 fixed; awaiting review recheck and Mac gate
 
 Contract (Astra): works in a project that has never been synced (discover the
 Cargo workspace, do not resolve dependencies); fetches the rustfmt/cargo-fmt
@@ -334,3 +334,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP1 implemented: pinned rustfmt object, lockless Cargo workspace discovery, writable fmt sandbox, closure/GC retention, CLI grammar, and Linux e2e coverage. Awaiting review and the Mac gate. |
 | 2026-09-06 | WP1 review rework: closure writes reject symlinked directories and use exclusive fsynced temps; rustfmt links are relative with a staging probe loader path; rustfmt sync requests remain recorded exceptions; Seatbelt and bubblewrap classify setup failures symmetrically; fmt exit pass-through is documented. Awaiting review recheck and the Mac gate. |
 | 2026-09-06 | WP1 rework round 2: rustfmt probes use an absolute staged library link and commit a verified relative link; closure publication is anchored by directory handles; pass-through and package-script precedence have positive e2e coverage. Awaiting review recheck and the Mac gate. |
+| 2026-09-07 | WP1 rework round 3: an explicit `--eco` selects the ecosystem before the package.json `fmt` script check and is never forwarded to a delegated script; rustfmt scratch directories are `stage-rustfmt-*` so `blanket gc` reclaims them after an interrupted run, and a failing publication probe removes its stage; the pass-through e2e asserts cargo-fmt's own diagnostic alongside status 2. Awaiting review recheck and the Mac gate. |

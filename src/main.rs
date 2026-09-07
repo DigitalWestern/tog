@@ -1316,37 +1316,41 @@ fn run_fmt(
     let cwd = project_dir();
     policy::init(&cwd, false)?;
 
-    // A package.json script named fmt wins over the named command, matching
-    // `blanket run fmt`. Preserve the command's user arguments for the script.
-    let script_root = projected_root(&cwd);
-    let package_json = script_root.join("package.json");
-    let is_script = package_json.is_file()
-        && std::fs::read_to_string(&package_json)
-            .ok()
-            .and_then(|json| npm::script_commands_from_package(&json, "fmt", &[]).ok())
-            .flatten()
-            .is_some();
-    if is_script {
-        ui::trace("'fmt' is a package.json script: running it");
-        let mut command = vec!["fmt".to_string()];
-        if check {
-            command.push("--check".into());
-        }
-        if let Some(ecosystem) = ecosystem {
-            command.extend(["--eco".into(), ecosystem.into()]);
-        }
-        command.extend(args.iter().cloned());
-        return run_run(platform, &command);
-    }
-
-    if let Some(ecosystem) = ecosystem {
-        if ecosystem != "rust" {
+    // `--eco` is blanket's own ecosystem selector, not something a script can
+    // read: when it is given explicitly it dispatches to that ecosystem and
+    // the package.json script is skipped, so `--eco rust` is a real escape
+    // hatch in a polyglot root whose package.json also has a `fmt` script.
+    // Without it, a script named fmt wins over the named command, matching
+    // `blanket run fmt`. Preserve the command's user arguments for the script;
+    // `--eco` is never appended to a delegated command line.
+    match ecosystem {
+        Some("rust") => {}
+        Some(ecosystem) => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
                     "fmt for {ecosystem} is not implemented yet; Rust is the only supported ecosystem"
                 ),
             ));
+        }
+        None => {
+            let script_root = projected_root(&cwd);
+            let package_json = script_root.join("package.json");
+            let is_script = package_json.is_file()
+                && std::fs::read_to_string(&package_json)
+                    .ok()
+                    .and_then(|json| npm::script_commands_from_package(&json, "fmt", &[]).ok())
+                    .flatten()
+                    .is_some();
+            if is_script {
+                ui::trace("'fmt' is a package.json script: running it");
+                let mut command = vec!["fmt".to_string()];
+                if check {
+                    command.push("--check".into());
+                }
+                command.extend(args.iter().cloned());
+                return run_run(platform, &command);
+            }
         }
     }
     let detected = inspect::detected(&cwd)?;

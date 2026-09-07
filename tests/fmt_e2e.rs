@@ -177,12 +177,23 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     // pass-through flag. Its status is 2, so status 1 would not prove
     // unchanged propagation from the formatter.
     let bad_tool_flag = blanket(&binary, &project, &store, &["fmt", "--", "--version=bad"]);
+    let bad_tool_stderr = String::from_utf8_lossy(&bad_tool_flag.stderr).into_owned();
     assert_eq!(
         bad_tool_flag.status.code(),
         Some(2),
-        "formatter status was not passed through unchanged\nstdout:\n{}\nstderr:\n{}",
+        "formatter status was not passed through unchanged\nstdout:\n{}\nstderr:\n{bad_tool_stderr}",
         String::from_utf8_lossy(&bad_tool_flag.stdout),
-        String::from_utf8_lossy(&bad_tool_flag.stderr)
+    );
+    // Status 2 is also blanket's own usage exit, so the code alone cannot
+    // tell pass-through from a blanket-side argument rejection: require
+    // cargo-fmt's own diagnostic and the absence of blanket's usage line.
+    assert!(
+        bad_tool_stderr.contains("bad") && bad_tool_stderr.to_lowercase().contains("cargo fmt"),
+        "status 2 did not come from cargo-fmt's own argument parser:\n{bad_tool_stderr}"
+    );
+    assert!(
+        !bad_tool_stderr.contains("blanket: error:"),
+        "status 2 was blanket's usage error, not the formatter's:\n{bad_tool_stderr}"
     );
 
     for entry in fs::read_dir(store.join("objects")).unwrap() {

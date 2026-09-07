@@ -218,8 +218,11 @@ blanket's flag; after it and `--eco` (or after `--`), arguments go to
 needs `--eco rust`.
 
 If the nearest projected root's `package.json` has a script named `fmt`, that
-script takes precedence and runs exactly as `blanket run fmt` would. Use
-`blanket run fmt` to address the script explicitly.
+script takes precedence and runs exactly as `blanket run fmt` would; `--check`
+and any pass-through arguments go to the script, `--eco` never does. Use
+`blanket run fmt` to address the script explicitly, and `blanket fmt --eco
+rust` to bypass it: an explicit `--eco` selects the ecosystem, so it always
+formats that ecosystem and never delegates to a script.
 
 ### 2.4 `blanket add`, `blanket remove`, `blanket update`
 

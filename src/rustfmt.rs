@@ -125,7 +125,7 @@ pub fn ensure_rustfmt(
         return Err(error);
     }
 
-    let scratch = unique_dir(&store.root.join("tmp"), "rustfmt-probe")?;
+    let scratch = unique_dir(&store.root.join("tmp"), "stage-rustfmt-probe")?;
     // The staged object is under store/tmp, so its committed relative lib
     // link cannot resolve until publication beside the Rust object. The stage
     // carries an absolute link for this probe, so protected macOS binaries do
@@ -144,12 +144,13 @@ pub fn ensure_rustfmt(
     };
     let probe_result = crate::sandbox::run_build_spec_on(platform, &probe);
     let _ = crate::store::remove_tree(&scratch);
-    probe_result.map_err(|error| {
-        io::Error::new(
+    if let Err(error) = probe_result {
+        let _ = crate::store::remove_tree(&staged);
+        return Err(io::Error::new(
             error.kind(),
             format!("rustfmt probe failed before publication: {error}"),
-        )
-    })?;
+        ));
+    }
 
     // The probe used the absolute link above. Publish only the relocatable
     // sibling-relative form, and verify the exact link text before commit.
@@ -187,7 +188,7 @@ pub fn run_sandboxed(
             .and_then(Path::parent)
             .map(|path| path.join("tmp"))
             .ok_or_else(|| io::Error::other("cannot locate store tmp for rustfmt"))?,
-        "rustfmt-run",
+        "stage-rustfmt-run",
     )?;
     let cargo = rust_object.join("bin/cargo");
     let cargo_fmt = rustfmt_object.join("bin/cargo-fmt");
@@ -346,11 +347,16 @@ fn allowed_entries(root: &str) -> Vec<String> {
     .collect()
 }
 
+/// A scratch directory under `store/tmp`. The name is a `stage-` prefix on
+/// purpose: `gc::sweep_stages` only reclaims `store/tmp/stage-*`, so a run
+/// killed by a signal before its `remove_tree` still gets collected. Sweeping
+/// only touches stages older than a day, so a live run's scratch (created
+/// moments ago, and written to throughout) is never swept out from under it.
 fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(parent)?;
     for attempt in 0..100 {
         let path = parent.join(format!(
-            ".{prefix}.{}.{}.{}",
+            "{prefix}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -364,9 +370,10 @@ fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
-    Err(io::Error::other(
-        "could not create rustfmt probe scratch directory",
-    ))
+    Err(io::Error::other(format!(
+        "could not create a {prefix} scratch directory under {}",
+        parent.display()
+    )))
 }
 
 #[cfg(test)]
@@ -407,6 +414,27 @@ mod tests {
             id,
             "ce2ba748066606d57d165a0ef794abeb5af18dc9-rustfmt-1.96.1"
         );
+    }
+
+    #[test]
+    fn scratch_directories_are_named_so_gc_can_sweep_them() {
+        let parent = std::env::temp_dir().join(format!(
+            "blanket-rustfmt-scratch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for prefix in ["stage-rustfmt-run", "stage-rustfmt-probe"] {
+            let dir = unique_dir(&parent, prefix).unwrap();
+            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            // `gc::sweep_stages` reclaims exactly `store/tmp/stage-*`, so a
+            // run interrupted before its cleanup is still collectable.
+            assert!(name.starts_with("stage-"), "{name}");
+            assert!(name.starts_with(prefix), "{name}");
+        }
+        let _ = crate::store::remove_tree(&parent);
     }
 
     #[test]
