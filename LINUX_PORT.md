@@ -18,6 +18,14 @@ bubblewrap 0.12 installed, unprivileged user namespaces enabled).
 
 ## Changelog
 
+### 2026-09-06 — WP2 lock extractor design boundary
+
+The WP2 design now requires catalog-lock extraction to validate archive entries
+before materialization, scrub tar/unzip option environment variables, and run an
+outside-sentinel test under both GNU tar and macOS bsdtar. This is a design-only
+entry: no extractor behavior changed here, and Darwin remains asymmetric by
+inspection until the Mac gate.
+
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 
 `pack_checkout` no longer infers ustar representability from the tar

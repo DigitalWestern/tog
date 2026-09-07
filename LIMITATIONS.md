@@ -25,8 +25,9 @@ say what breaks, for whom, and how it fails (loud/silent).
   selects from compiled pins and does not compare `.node-version`,
   `.ruby-version`, `.tool-versions`, or a cross-platform runtime row; Node,
   Ruby, and Elixir therefore remain single-pin selections, and `status` does
-  not report a stale/missing toolchain lock. The catalog-authority,
-  HTTPS-only retrieval, descriptor-relative snapshots, source matrix, and
+  not report a stale/missing toolchain lock. The release-bundle catalog
+  authority, HTTPS-only retrieval, reusable pre-materialization extractor,
+  descriptor-relative snapshots, lock-file race protection, source matrix, and
   per-platform BEAM rows in ARCHITECTURE.md are not implementation guarantees
   yet. In particular, the generic fetch helper still accepts `file://` for
   mirrors and tests (`src/fetch.rs:319-380`); the dormant lock cannot authorize
@@ -253,6 +254,11 @@ sandbox, and uv fallback still delegates resolution.
 
 ## Go
 
+- **Current Go selection treats a non-default `toolchain` directive as a
+  lower-bound suggestion and chooses the lowest pin satisfying it and `go`**;
+  a newer catalog row can therefore replace an exact upstream directive until
+  the WP2 selection implementation makes non-default `toolchain goX.Y.Z` exact.
+  The design change is not implemented yet.
 - **go.work workspaces fail closed** (including ancestor detection).
   Loud.
 - **Local-path replace directives fail closed.** Loud.

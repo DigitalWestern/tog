@@ -229,8 +229,12 @@ updating it, including its contained regular-file inputs and complete artifact
 rows for both supported platforms. Frozen permits SANDBOXED evaluation only:
 network denied, project read-only, scratch-only writes, and no cache writes; it
 never evaluates project code unsandboxed. Thus setup.py/mix.ex compatibility
-comes from safe parsing or that probe (`src/manifest.rs:162-178` shows the
-`/bin/sh setup.py egg_info` path). `blanket update --toolchain
+comes from safe parsing or that probe. The setup `BuildSpec` uses
+`argv = ["/bin/sh", "-c", "exec <build-env>/bin/python setup.py egg_info
+--egg-base <scratch>/egg-info > <scratch>/egg-info.log 2>&1]`, with the
+project root as cwd and the build environment, CPython, and scratch as roots
+(`src/manifest.rs:162-178`); it does not run `/bin/sh setup.py`.
+`blanket update --toolchain
 [<ecosystem>]` is the only command that upgrades those exact runtime
 selections; it may be run for one ecosystem or all present ecosystems and then
 invokes ordinary sync. It is separate from dependency update and does not edit
