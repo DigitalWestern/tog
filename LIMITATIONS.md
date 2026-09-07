@@ -243,7 +243,9 @@ sandbox, and uv fallback still delegates resolution.
 - **One exact Go pin is realizable per supported platform.** A `go.mod`
   selection without a matching `(platform, version)` row fails before store
   or network access and tells the user to use a pinned version or add a
-  verified row; a release catalog and additional Go pins remain future work.
+  verified row; the regression coverage also guards the rejection against a
+  cached-default fallback. Archive extraction and a release catalog with
+  additional Go pins remain future work.
 - **go.work workspaces fail closed** (including ancestor detection).
   Loud.
 - **Local-path replace directives fail closed.** Loud.

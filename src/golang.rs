@@ -1071,7 +1071,7 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let _ = crate::store::remove_tree(&self.0);
         }
     }
 
@@ -1138,9 +1138,32 @@ mod tests {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
         let store = Store { root: store_root };
+        let platform = Platform::host().unwrap();
+        let default_identity = go_identity(go_pin(platform, GO_VERSION).unwrap());
+        let default_id = default_identity.object_id();
+        let default_object = store.object_path(&default_id);
+        fs::create_dir_all(&default_object).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&default_object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&default_object, permissions).unwrap();
+        }
+        fs::write(
+            store.root.join("meta").join(format!("{default_id}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": default_id,
+                "identity": default_identity,
+                "created": 0,
+                "exceptions": [],
+                "refs": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let before = tree_snapshot(&store.root);
 
-        let error = ensure_go_for(&store, Platform::host().unwrap(), "1.26.0")
+        let error = ensure_go_for(&store, platform, "1.26.0")
             .unwrap_err()
             .to_string();
         assert!(error.contains("resolved Go 1.26.0"), "{error}");
