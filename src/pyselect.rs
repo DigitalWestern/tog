@@ -890,14 +890,15 @@ mod tests {
             url: "https://example.invalid/3.11.9.tar.gz",
             sha256: "9",
         };
-        let pins = [&newer, &older];
-
         let minor = crate::pep440::Version::parse("3.11").unwrap();
-        assert_eq!(
-            select_explicit_pin(&pins, &minor).unwrap().version,
-            "3.11.16"
-        );
+        for pins in [[&older, &newer], [&newer, &older]] {
+            assert_eq!(
+                select_explicit_pin(&pins, &minor).unwrap().version,
+                "3.11.16"
+            );
+        }
 
+        let pins = [&older, &newer];
         let exact = crate::pep440::Version::parse("3.11.9").unwrap();
         assert_eq!(
             select_explicit_pin(&pins, &exact).unwrap().version,

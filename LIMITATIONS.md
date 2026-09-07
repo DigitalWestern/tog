@@ -109,6 +109,11 @@ release spellings, unsupported implementations, and unsatisfiable constraints
 fail closed. Explicit requests still win over metadata conflicts with a
 warning.
 
+- **Pin-table row order is not a selection contract**: minor requests choose
+  the newest numeric patch regardless of row ordering; both orders are covered
+  by unit tests. The table remains static until the release-catalog work
+  replaces it.
+
 Manifest discovery covers Poetry/PDM/uv/hatch metadata, Poetry/uv lockfile
 hashes, setup.cfg, sandboxed setup.py egg_info, and requirements directories.
 It reports `no_manifest` when no Python input exists, treats an empty found

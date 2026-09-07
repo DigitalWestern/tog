@@ -337,5 +337,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-06 | WP2 Python exact-selection bugs fixed: exact `.python-version` patches fail closed, and `python::lookup` uses exact-or-newest-minor matching; regression coverage added. |
-| 2026-09-06 | WP2 review fix: CPython selection now rejects noncanonical release spellings; explicit pin choice is covered by a deliberately misordered synthetic table; the cross-platform ignored test proves the store is never opened. |
+| 2026-09-06 | WP2 Python exact-selection bugs fixed (branch wp2/python-exact-selection): an exact `.python-version` patch must be pinned or sync fails closed; `python::lookup` is exact-or-newest-minor over canonical spellings; regression tests use misordered synthetic pin tables in both orders; the ignored e2e proves the store is never opened. Sol: 3 rounds. |
