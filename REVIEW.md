@@ -170,3 +170,4 @@ Completed rounds. Add a row when an entry above reaches ✅.
 | ≤2026-09-06 | items 7, 10, 12, gc, and earlier work | GPT-6 Astra | 1–5 each | ~70 fixed, several security-relevant | 🟡 final round unverified |
 | 2026-09-06 | items 4 and 5 | supervising agent only | — | — | ⬛ not independent |
 | 2026-09-06 | CLI levels 1–2 (PR #20), Git, artifacts, #19, final fixes of #8/#10/#11/#12 | GPT-6 Astra | review + iterative fix rechecks | 15 categories; see report | ✅ reviewed and fixes rechecked; macOS validation outstanding |
+| 2026-09-06 | WP2 Python exact selection (branch `wp2/python-exact-selection`): exact `.python-version` patch fails closed unless pinned; `python::lookup` exact-or-newest-minor | GPT-5.6 Sol (Codex), independent | 3 | r1: 3 should (non-canonical spellings accepted, minor test not order-proving, vacuous Darwin e2e); r2: 1 should (test order); r3: none | ✅ MERGE on Linux evidence; Mac gate (`cargo test`, `python_select --ignored`) outstanding |
