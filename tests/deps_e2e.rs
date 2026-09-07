@@ -39,6 +39,7 @@ fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -
         .env("BLANKET_STORE", store)
         .env("TMPDIR", tmp.join("tmp"))
         .env("HOME", tmp.join("home"))
+        .env("BLANKET_SANDBOX_TESTS", "required")
         .env_remove("BLANKET_POLICY")
         .env_remove("BLANKET_STRICT")
         .args(args)
@@ -57,6 +58,61 @@ fn assert_ok(output: Output, label: &str) {
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_blanket"))
+}
+
+fn copy_fixture(temp: &TempDir, fixture: &str) {
+    fn copy_dir(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source = entry.path();
+            let destination = destination.join(entry.file_name());
+            if source.is_dir() {
+                copy_dir(&source, &destination);
+            } else {
+                std::fs::copy(source, destination).unwrap();
+            }
+        }
+    }
+
+    copy_dir(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture),
+        &temp.0,
+    );
+}
+
+fn set_package_manager(project: &Path, value: &str) {
+    let path = project.join("package.json");
+    let mut package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    package["packageManager"] = serde_json::Value::String(value.to_string());
+    std::fs::write(path, serde_json::to_vec_pretty(&package).unwrap()).unwrap();
+}
+
+fn assert_status_synced(binary: &Path, project: &Path, store: &Path, temp: &TempDir) {
+    let status = run(binary, project, store, &["status"], &temp.0);
+    assert_ok(status, "status");
+    let status = run(binary, project, store, &["status"], &temp.0);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("synced"),
+        "status was not synced:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn node_env_object_count(store: &Path) -> usize {
+    std::fs::read_dir(store.join("meta"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(entry.path()).ok()?)
+                .ok()
+        })
+        .filter(|metadata| metadata["identity"]["kind"] == "node-env")
+        .count()
 }
 
 #[test]
@@ -214,6 +270,195 @@ fn npm_add_update_remove_roundtrip() {
     );
     let package = std::fs::read_to_string(project.join("package.json")).unwrap();
     assert!(!package.contains("is-number"), "{package}");
+}
+
+#[test]
+#[ignore]
+fn pnpm_add_update_remove_roundtrip() {
+    let temp = TempDir::new("pnpm");
+    copy_fixture(&temp, "proj-pnpm");
+    let project = &temp.0;
+    let store = project.join("store");
+    set_package_manager(project, "pnpm@9.12.3");
+    let bin = binary();
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--dev", "--no-sync", "is-number@7.0.0"],
+            &temp.0,
+        ),
+        "pnpm add",
+    );
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(package["devDependencies"]["is-number"], "7.0.0");
+    let first_env_count = node_env_object_count(&store);
+    assert!(first_env_count >= 1);
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "is-number"],
+            &temp.0,
+        ),
+        "pnpm update",
+    );
+    assert_eq!(node_env_object_count(&store), first_env_count);
+    assert!(temp.0.join("home/.blanket/x").is_dir());
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--dev", "--no-sync", "is-number"],
+            &temp.0,
+        ),
+        "pnpm remove",
+    );
+    let package = std::fs::read_to_string(project.join("package.json")).unwrap();
+    assert!(!package.contains("is-number"), "{package}");
+    assert_ok(run(&bin, project, &store, &["sync"], &temp.0), "pnpm sync");
+    assert_status_synced(&bin, project, &store, &temp);
+}
+
+#[test]
+#[ignore]
+fn pnpm_workspace_member_and_root_roundtrip() {
+    let temp = TempDir::new("pnpm-workspace");
+    copy_fixture(&temp, "proj-pnpm-ws");
+    let project = &temp.0;
+    let member = project.join("packages/lib");
+    let store = project.join("store");
+    set_package_manager(project, "pnpm@9.12.3");
+    let bin = binary();
+
+    assert_ok(
+        run(
+            &bin,
+            &member,
+            &store,
+            &["add", "--dev", "--no-sync", "is-even@1.0.0"],
+            &temp.0,
+        ),
+        "pnpm workspace member add",
+    );
+    let member_package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(member.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(member_package["devDependencies"]["is-even"], "1.0.0");
+    let root_package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
+            .unwrap();
+    assert!(root_package.get("devDependencies").is_none());
+
+    assert_ok(
+        run(
+            &bin,
+            &member,
+            &store,
+            &["remove", "--dev", "--no-sync", "is-even"],
+            &temp.0,
+        ),
+        "pnpm workspace member remove",
+    );
+    assert!(!std::fs::read_to_string(member.join("package.json"))
+        .unwrap()
+        .contains("is-even"));
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--dev", "--no-sync", "is-even@1.0.0"],
+            &temp.0,
+        ),
+        "pnpm workspace root add",
+    );
+    let root_package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(root_package["devDependencies"]["is-even"], "1.0.0");
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--dev", "--no-sync", "is-even"],
+            &temp.0,
+        ),
+        "pnpm workspace root remove",
+    );
+    assert_ok(
+        run(&bin, project, &store, &["sync"], &temp.0),
+        "pnpm workspace sync",
+    );
+    assert_status_synced(&bin, project, &store, &temp);
+}
+
+#[test]
+#[ignore]
+fn yarn_classic_add_update_remove_roundtrip() {
+    let temp = TempDir::new("yarn1");
+    copy_fixture(&temp, "proj-yarn1");
+    let project = &temp.0;
+    let store = project.join("store");
+    set_package_manager(project, "yarn@1.22.22");
+    let bin = binary();
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--dev", "--no-sync", "is-number@7.0.0"],
+            &temp.0,
+        ),
+        "yarn add",
+    );
+    assert!(!project.join("node_modules").exists());
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(package["devDependencies"]["is-number"], "7.0.0");
+    let first_env_count = node_env_object_count(&store);
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["update", "--no-sync", "is-number"],
+            &temp.0,
+        ),
+        "yarn upgrade",
+    );
+    assert_eq!(node_env_object_count(&store), first_env_count);
+    assert!(temp.0.join("home/.blanket/x").is_dir());
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["remove", "--dev", "--no-sync", "is-number"],
+            &temp.0,
+        ),
+        "yarn remove",
+    );
+    assert!(!project.join("node_modules").exists());
+    assert!(!std::fs::read_to_string(project.join("package.json"))
+        .unwrap()
+        .contains("is-number"));
+    assert_ok(run(&bin, project, &store, &["sync"], &temp.0), "yarn sync");
+    assert_status_synced(&bin, project, &store, &temp);
 }
 
 #[test]

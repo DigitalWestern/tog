@@ -369,7 +369,8 @@ fn dependency_verbs_offline_paths() {
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("--dev has no meaning"));
 
-    // Refuse-with-instructions rows never touch the network or the store.
+    // Refuse-with-instructions rows and missing tool declarations never touch
+    // the network or the store.
     let setup = TempDir::new("deps-setup");
     std::fs::write(
         setup.0.join("setup.py"),
@@ -389,10 +390,11 @@ fn dependency_verbs_offline_paths() {
     let out = blanket(&pnpm.0, &home.0, &["add", "-D", "react", "left-pad"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains("run 'pnpm add -D react left-pad'"),
+        text(&out.stderr).contains("add \"packageManager\": \"pnpm@<version>\""),
         "{}",
         text(&out.stderr)
     );
+    assert!(text(&out.stderr).contains("suggestion: \"packageManager\": \"pnpm@9\""));
     let poetry = TempDir::new("deps-poetry");
     std::fs::write(poetry.0.join("pyproject.toml"), "[tool.poetry]\nname='p'\n").unwrap();
     let out = blanket(&poetry.0, &home.0, &["update"]);

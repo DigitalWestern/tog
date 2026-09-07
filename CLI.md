@@ -255,7 +255,9 @@ exit 1, no writes.
 | Python | `poetry.lock` / `pdm.lock` present, or `[tool.poetry]` | refuse (poetry/pdm are not pinned; uv would create a second lock) | refuse | refuse |
 | Python | `setup.py` / `setup.cfg` only | refuse with the `install_requires` line | refuse | n/a |
 | Node | `package-lock.json` or no lock | store npm: `npm install --package-lock-only --ignore-scripts [--save-dev] <spec>`, `npm uninstall --package-lock-only`, `npm update --package-lock-only [<name>]` | same | same |
-| Node | `pnpm-lock.yaml` / `yarn.lock` | refuse with `pnpm add <spec>` / `yarn add <spec>` (pnpm and yarn are not pinned; running npm would create a second lock). Pinning pnpm via the store node's corepack is the follow-up that turns this row green | same | same |
+| Node | `pnpm-lock.yaml` | store pnpm at the exact version in root `package.json` `packageManager` (for example `pnpm@9.12.3`), then `pnpm add --lockfile-only`, `pnpm remove --lockfile-only`, or `pnpm update --lockfile-only`; workspace-root edits add `-w` | same | same |
+| Node | Yarn classic v1 `yarn.lock` | store Yarn at the exact root `package.json` `packageManager` version, run `yarn add --ignore-scripts --update-checksums` in a scratch project, then atomically copy its manifest and lock back | same | `yarn upgrade --ignore-scripts --update-checksums` in the scratch project |
+| Node | Yarn Berry (`.yarnrc.yml` or Yarn 2+) | refuse with the npm/pnpm conversion line because Berry cache checksums are not imported tarball hashes | same | same |
 | Cargo | any | store cargo: `cargo add`, `cargo remove`, `cargo update [-p <name>]` with network, exactly as `generate-lockfile` runs today | same | same |
 | Go | any | store go: `go get <mod>[@ver]`, `go get <mod>@none`, `go get -u [<mod>]`; later sync owns tidy resolution | same | same |
 | Ruby | any | store bundler: `bundle add <gem>`, `bundle remove <gem>`, `bundle update [<gem>]` with `BUNDLE_IGNORE_CONFIG` enforced and `BUNDLE_FROZEN=false` for edits; realization remains frozen | same | same |
@@ -354,7 +356,7 @@ results are in REVIEW-2026-09-06.md. The macOS arm64 run remains outstanding.
 | B | bare `blanket`, `install` alias, `blanket <script>`, `status`, `ls`, `doctor`, `completions` | M | A |
 | C | `add` / `remove` / `update` for the green rows; refuse-with-instructions for the rest | L | A |
 | D | `x` for Python and Node | M | A |
-| later | `why` (needs closure edges), `x` for cargo/go, corepack-pinned pnpm/yarn so their `add` rows go green, level three | | |
+| later | `why` (needs closure edges), `x` for cargo/go, level three | | |
 
 B before C on purpose: B is all reading and dispatch, no writes to user
 files, and it delivers most of the "easy" feel. C is where the design

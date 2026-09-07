@@ -22,13 +22,20 @@ say what breaks, for whom, and how it fails (loud/silent).
   hash only, not the manifest. Closures from before the field exists show
   as "synced (unchecked)" until the next sync.
 - **`blanket add` / `remove` / `update` delegate to store tools with
-  network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
-  same trust boundary as missing-lockfile generation. Rows that refuse with
-  instructions instead of editing: Poetry and PDM projects, pnpm and yarn
-  lockfiles, setup.py/setup.cfg, `requirements/` directories, Elixir add and
-  remove, and all of .NET. The registry existence check for an ambiguous
+  network, unsandboxed** (uv, the store npm, pinned pnpm/Yarn classic, cargo,
+  go, bundler, mix) — the same trust boundary as missing-lockfile
+  generation. Rows that refuse with instructions instead of editing: Poetry
+  and PDM projects, setup.py/setup.cfg, `requirements/` directories, Elixir
+  add and remove, Yarn Berry, and all of .NET. The registry existence check for an ambiguous
   bare name in a polyglot directory is one HTTPS GET per candidate
   registry; a private-registry name needs the explicit prefix.
+- **pnpm and Yarn classic dependency edits require a root `package.json`
+  `packageManager` field** with an exact tool version. A missing field refuses
+  with the JSON line to add and, when the lock format identifies one, a marked
+  version suggestion. `+sha224.<hash>` suffixes are accepted but currently
+  ignored after syntax validation; blanket traces that it did not verify the
+  Corepack hash. Delegates are resolved through the store's cached `x`
+  environments under `~/.blanket/x/`, and remain unsandboxed with network.
 - **`blanket x` covers PyPI and npm** (cargo and go later). Each tool's
   environment lives under `~/.blanket/x/` as a registered project root;
   `blanket gc --project` does not touch it, and there is no `x --clean` yet.
@@ -209,7 +216,7 @@ sandbox, and uv fallback still delegates resolution.
 - **Process-tree quiescence after scripts not enforced** (a daemon
   started by postinstall can outlive realization).
 - **Yarn Berry is not imported**: its cache-zip checksums are not tarball
-  integrity values, so item 7 rejects it loudly and names the npm/pnpm
+  integrity values, so the importer rejects it loudly and names the npm/pnpm
   conversion path. pnpm/yarn classic imports discover `bin` and legacy
   `directories.bin` entries from each extracted package.json before launcher
   generation. Lockfile-less projects still fall back to npm resolution.

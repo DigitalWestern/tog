@@ -323,21 +323,22 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
         return Err(other("x: empty tool name"));
     }
     let store = Store::open()?;
-    let key = hex::encode(Sha256::digest(
-        format!(
-            "x/2\0{}\0{ecosystem}\0{package}\0{}\0{}",
-            store.root.display(),
-            version.unwrap_or(""),
-            platform.triple()
-        )
-        .as_bytes(),
-    ));
-    let root = home()?.join(".blanket/x").join(format!(
-        "{}-{}-{}",
-        if ecosystem == "python" { "py" } else { "npm" },
-        safe(package),
-        &key[..16]
-    ));
+    let root = if ecosystem == "node" {
+        node_cache_root(&store, platform, package, version)?
+    } else {
+        let key = hex::encode(Sha256::digest(
+            format!(
+                "x/2\0{}\0{ecosystem}\0{package}\0{}\0{}",
+                store.root.display(),
+                version.unwrap_or(""),
+                platform.triple()
+            )
+            .as_bytes(),
+        ));
+        home()?
+            .join(".blanket/x")
+            .join(format!("py-{}-{}", safe(package), &key[..16]))
+    };
     let (executable, path_prefix, env): (PathBuf, Vec<PathBuf>, Vec<(String, PathBuf)>) =
         match ecosystem {
             "python" => {
@@ -395,6 +396,50 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     }
     ui::trace_command(&command);
     Err(command.exec())
+}
+
+fn node_cache_root(
+    store: &Store,
+    platform: Platform,
+    package: &str,
+    version: Option<&str>,
+) -> io::Result<PathBuf> {
+    let key = hex::encode(Sha256::digest(
+        format!(
+            "x/2\0{}\0node\0{package}\0{}\0{}",
+            store.root.display(),
+            version.unwrap_or(""),
+            platform.triple()
+        )
+        .as_bytes(),
+    ));
+    Ok(home()?
+        .join(".blanket/x")
+        .join(format!("npm-{}-{}", safe(package), &key[..16])))
+}
+
+/// Realize a Node package whose executable is needed by another delegate.
+/// This is the same registered `~/.blanket/x/` environment used by
+/// `blanket x`, so a delegate's second invocation is a normal cache hit.
+pub(crate) fn realize_node_tool(
+    store: &Store,
+    platform: Platform,
+    package: &str,
+    version: &str,
+) -> io::Result<PathBuf> {
+    let root = node_cache_root(store, platform, package, Some(version))?;
+    let executable = root.join("node_modules/.bin").join(default_bin(package));
+    if executable.is_file() {
+        check_cached_projection(store, &root, "node")?;
+        return Ok(root);
+    }
+    realize_node(store, platform, &root, package, Some(version))?;
+    if !executable.is_file() {
+        return Err(other(format!(
+            "'{package}@{version}' installed but provides no '{package}' executable"
+        )));
+    }
+    Ok(root)
 }
 
 fn realize_python(
