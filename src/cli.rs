@@ -469,8 +469,9 @@ PROJECT INPUTS (any combination; each found ecosystem is synced):
                           Python deps; ranged inputs are locked via the store
                           uv into requirements.lock.txt (hash-pinned), while
                           Poetry/uv lockfiles are imported when compatible
-  .python-version         optional; otherwise selected from project
-                          constraints (default: CPython 3.12.14)
+  .python-version         optional; X.Y selects the newest pinned patch and
+                          X.Y.Z must be an exact pinned build; otherwise
+                          selected from project constraints (default: CPython 3.12.14)
   package-lock.json       npm lockfile v2/v3
   pnpm-lock.yaml          pnpm lockfile v9 (v6 importer shape also accepted)
   yarn.lock               Yarn classic v1 lockfile

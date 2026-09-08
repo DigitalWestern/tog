@@ -154,7 +154,7 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (10 rounds; round-10 findings fixed, those fixes themselves unreviewed); secure extractor (`src/archive.rs`) landed; REST OF IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (10 rounds; round-10 findings fixed, those fixes themselves unreviewed); Python exact selection and the secure extractor (`src/archive.rs`) landed; REST OF IMPLEMENTATION OPEN
 
 Status: the design is reworked in ARCHITECTURE.md after ten adversarial
 review rounds; implementation is open and follows its ordered PRs, of which item 0 is
@@ -271,11 +271,16 @@ catalog will expose it.
   .NET accepts one fixed SDK (src/npm.rs:137, src/ruby.rs:57,
   src/dotnet.rs:132, LIMITATIONS.md). Ranges (`requires-python >=3.10`) pick
   the newest compatible supported stable/LTS once and lock it.
-- **Exact selection bugs to fix first (open as PRs #21 and #22):**
-  `pyselect` substitutes a patch version even for an exact request
-  (src/pyselect.rs:170); `python::lookup` returns the first matching row
-  (src/python.rs:87); Go realization takes no selected version
-  (src/golang.rs:145).
+- **Exact selection bugs to fix first:** ✅ `pyselect` requires canonical
+  release spelling and a pinned
+  three-part request and keeps two-part selection minor-scoped
+  (`unpinned_patch_request_fails_closed`,
+  `exact_pinned_request_selects_without_warning_in_supported_spellings`,
+  `explicit_request_pin_choice_is_newest_for_minor_and_exact_for_patch`);
+  ✅ `python::lookup` matches exact versions and chooses the newest numeric
+  patch from a minor
+  (`lookup_uses_the_newest_numeric_patch_in_a_wrongly_ordered_table`);
+  Go realization takes no selected version (src/golang.rs:145) and remains.
 - **Carry the selected runtime through every operation.** Node `run` and
   cached `x` environments take the global pin (src/main.rs:1409,
   src/xrun.rs:325); `x` keys omit runtime identity; `status` must compare
@@ -428,3 +433,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
 | 2026-09-07 | WP2 design (branch wp2/toolchain-lock-design, docs-only): the toolchain lock is designed in ARCHITECTURE.md — release-bundle catalog authority with catalog-authorized HTTPS artifacts and algorithm-qualified digests, recipe identities and bundle ids separate from component versions, the source-discovery matrix and supported request grammars, global cross-platform selection, one hardened descriptor-relative publication rule for both lock writers with unique temp names, an unconditional lock snapshot compare, value-based input staleness (a digest mismatch alone is never stale) in sync, `--frozen` and `status` alike, the `--frozen` write boundary with sandbox-only probes, the polyglot missing-section rule, conservative legacy seeding, store-root-scoped bundle-complete `x/3` keys, the pre-materialization extractor and `src/fsroot.rs` with named refusal tests, and dormant activation behind ordered PRs (item 0 open as #21/#22). Round 8 applies the owner's product decisions: the shipped catalog leaves the reproducibility path (a lock is honored from its own version/URL/digest/recipe rows, with an append-only provider host allowlist and append-only recipe ids, so upgrading blanket cannot invalidate a committed lock), publication uses a `/dev/urandom` temp name with `fsync`-rename-`fsync` durability (pid-plus-sequence dropped; the false `src/store.rs:69` citation removed), staleness compares the whole consulted path list including absent rows under root-anchored discovery, `bundle_id` and canonical lock bytes are defined, CLI.md's invented `(planned:)` markers are gone, and the sandboxed-evaluation guarantee is structural rather than an Elixir-only blocklist that missed the Ruby evaluator at `src/ruby.rs:582-596`. Review: Codex Sol rounds 1–4 (REWORK), Claude Opus 5 subagent rounds 5–6 (MERGE-AFTER-FIXES), round 7 a supervising-agent recheck of the round-6 fixes (not independent), round 8 owner decisions applied by the supervising agent and then reviewed in round 9, whose fixes round 10 reviewed in turn; round 10's fixes are the currently unreviewed layer. Implementation open. |
 | 2026-09-07 | WP2 secure archive extractor (branch wp2/archive-extractor, ordered PR 2 of the design): `src/archive.rs` lists every tarball member and refuses absolute names, `..`, hard links, special files, and symlinks not lexically contained after `--strip-components` before tar writes anything; delegated tar runs with `TAR_OPTIONS` unset; per-platform listing parser (GNU tar / bsdtar), unparseable lines refuse. First consumer: the Go toolchain tarball (`extract_go_toolchain`), byte-identical extraction flags. Unit tests build hostile ustar members by hand and prove an outside sentinel and the destination stay untouched. No independent review yet (supervising agent only). |
+| 2026-09-06 | WP2 Python exact-selection bugs fixed (branch wp2/python-exact-selection): an exact `.python-version` patch must be pinned or sync fails closed; `python::lookup` is exact-or-newest-minor over canonical spellings; regression tests use misordered synthetic pin tables in both orders; the ignored e2e proves the store is never opened. Sol: 3 rounds. |

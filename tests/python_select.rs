@@ -1,4 +1,4 @@
-//! Ignored Linux e2e for interpreter selection and warm lock/plan caches.
+//! Ignored e2e for interpreter selection and warm lock/plan caches.
 
 use blanket::platform::Platform;
 use std::path::{Path, PathBuf};
@@ -141,4 +141,33 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         stamp_mtime,
         "warm sync rewrote lock stamp"
     );
+}
+
+#[test]
+#[ignore]
+fn unpinned_patch_request_fails_closed_before_opening_store() {
+    let temp = TempDir::new();
+    let project = temp.0.join("proj-unpinned-patch");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".python-version"), "3.12.3\n").unwrap();
+    std::fs::write(project.join("requirements.txt"), "").unwrap();
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+
+    let output = blanket(&binary, &project, &store, &["sync"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("3.12.3"), "{stderr}");
+    assert!(stderr.contains(".python-version"), "{stderr}");
+    assert!(stderr.contains("3.12.14"), "{stderr}");
+    assert!(
+        stderr.contains("pin 3.12 to accept the pinned patch"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("request one of:"), "{stderr}");
+    assert!(!store.exists(), "store was opened: {store:?}");
 }

@@ -164,15 +164,23 @@ say what breaks, for whom, and how it fails (loud/silent).
 ## Python
 
 Interpreter selection is limited to the five pinned CPython builds for the
-two supported host platforms; explicit `.python-version` requests win over
-metadata conflicts with a warning, while unsupported implementations and
-unsatisfiable constraints fail closed. An explicit CPython prefix
-(`python3.12`, `cpython-3.12`, `cpython@3.12`) is accepted as the same request
-and stays accepted under WP2. The narrower WP2 request grammar — exact
-`X.Y.Z`, minor `X.Y`, or a restricted PEP 440 specifier set, each resolved
-against the catalog once and then locked, with non-CPython implementations,
-variants, paths, and executables refused — is design-only until lock
-activation.
+two supported host platforms. A canonical two-part `.python-version` request
+selects the newest pinned patch for that minor; a canonical three-part request
+must match a pinned build exactly and otherwise fails closed with the
+available pins and the command to accept the pinned patch. Noncanonical
+release spellings, unsupported implementations, and unsatisfiable constraints
+fail closed. Explicit requests still win over metadata conflicts with a
+warning. An explicit CPython prefix (`python3.12`, `cpython-3.12`,
+`cpython@3.12`) is accepted as the same request and stays accepted under WP2.
+The narrower WP2 request grammar — exact `X.Y.Z`, minor `X.Y`, or a restricted
+PEP 440 specifier set, each resolved against the catalog once and then locked,
+with non-CPython implementations, variants, paths, and executables refused —
+is design-only until lock activation.
+
+- **Pin-table row order is not a selection contract**: minor requests choose
+  the newest numeric patch regardless of row ordering; both orders are covered
+  by unit tests. The table remains static until the release-catalog work
+  replaces it.
 
 Manifest discovery covers Poetry/PDM/uv/hatch metadata, Poetry/uv lockfile
 hashes, setup.cfg, sandboxed setup.py egg_info, and requirements directories.
