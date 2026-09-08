@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle round 4 fixes; Mac gate outstanding)
+### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle reviewed, MERGE on Linux evidence, PR open; Mac gate outstanding)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -250,7 +250,8 @@ Any of these may be taken after WP1 merges; each is its own PR.
   mutable overlay; dev/optional dependency groups installable by flag.
 - `blanket add/remove/update` for pnpm, Yarn, Poetry, and PDM projects
   (today they refuse with instructions; LIMITATIONS.md:24).
-- IMPLEMENTED — round 4 rework complete; Mac cold/warm gate outstanding:
+- IMPLEMENTED and reviewed (branch wp4/x-lifecycle, 5 review rounds, MERGE on
+  Linux evidence); Mac cold/warm gate outstanding:
   `blanket x --clean`, unregister an environment, protect a running tool from
   concurrent gc, repair a missing projection, and contain cleanup through
   open directory descriptors. (gc already knows the roots: src/gc.rs:111.)
@@ -342,8 +343,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-06 | WP4 x lifecycle implemented: `x --clean` removes and unregisters safe cached roots, inherited shared locks protect running tools, and GC remains closure-rooted. Unit, offline CLI, and ignored GC/x lifecycle tests added. |
-| 2026-09-06 | WP4 x lifecycle rework: permanent locks survive projection deletion, legacy cleanup matches exact generated packages, partial roots carry realizing markers, and registrations are removed from the closure's originating store. Race, legacy, scoped/`--from`, cross-store, and partial-root regressions added. |
-| 2026-09-06 | WP4 x lifecycle review round 2: cleanup validates the absolute home hierarchy, reserves `.locks`, filters legacy ecosystems correctly, and uses a channel-coordinated lock race regression; Mac cold/warm gate remains outstanding. |
-| 2026-09-06 | WP4 x lifecycle review round 3: cleanup uses validated directory descriptors and fd-relative removal, shared locks stay CLOEXEC until exec, ready roots repair missing projections, and the GC busy test uses a release handshake; Mac cold/warm gate remains outstanding. |
-| 2026-09-07 | WP4 x lifecycle review round 4: `x --clean` resolves the home chain the way `blanket x` does (symlinked `$HOME`/`~/.blanket` accepted, symlinked `~/.blanket/x` refused by both), a cache hit narrates each persisted exception once, cleanup unlinks its own per-root lock, the summary names `blanket gc --project` for node roots and no longer says "nothing to clean" after skipping every candidate, and the legacy-ecosystem regression moved into the offline CLI suite; Mac cold/warm gate remains outstanding. |
+| 2026-09-07 | WP4 x lifecycle (branch wp4/x-lifecycle): `blanket x --clean` removes and unregisters cached x roots through validated directory descriptors and fd-relative removal (symlinks unlinked, never traversed; candidate inode re-checked before removal); running tools hold an inherited shared lock under `~/.blanket/x/.locks/`, kept CLOEXEC until exec; cleanup resolves the home chain the way `blanket x` does, narrates each persisted exception once, unlinks its own per-root lock, and names `blanket gc --project` for node roots; legacy roots are matched by the exact generated package. Review: Codex Sol rounds 1–3 (REWORK), Claude Opus 5 subagent rounds 4 (MERGE-AFTER-FIXES) and 5 (MERGE; 5 nits recorded in REVIEW.md). Mac cold/warm gate outstanding. |
