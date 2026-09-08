@@ -25,11 +25,9 @@ USAGE:
 
 EVERYDAY:
   sync       realize and project the environment(s) from the project's inputs
-             (planned: --frozen validates the toolchain lock, never writes it)
   add        add a dependency, re-lock, sync
   remove     remove a dependency, re-lock, sync
   update     update dependencies within the manifest's constraints, sync
-             (planned: --toolchain [<ecosystem>] updates toolchain lock only)
   run        run a command or script inside the environment(s)
   x          run a tool without adding it to the project (like npx / uvx)
   build      sandboxed, network-denied build (cargo | go | elixir | dotnet)
@@ -213,7 +211,6 @@ question PLAN.md defers until a real polyglot need appears (WP1's
 blanket add <spec>...    [--dev] [--no-sync]
 blanket remove <name>... [--dev] [--no-sync]
 blanket update [<name>...] [--no-sync]
-blanket update --toolchain [<ecosystem>]       (planned: WP2 design)
 ```
 
 Flow, identical for the three: pick the ecosystem → delegate the manifest
@@ -230,9 +227,11 @@ rows for both supported platforms. --frozen never modifies project inputs,
 blanket-toolchain.toml, or the catalog cache; it may realize store objects and
 write the projection after validation succeeds; validation failure exits before
 any write. Frozen validation uses SANDBOXED evaluation only: network denied,
-project read-only, and scratch-only writes; it never evaluates project code
-unsandboxed. Thus setup.py/mix.exs compatibility comes from safe parsing or
-that probe. The setup `BuildSpec` uses
+project read-only, and scratch-only writes; where only an unsandboxed
+evaluator could answer, it refuses instead of falling back. Thus
+setup.py/mix.exs compatibility comes from safe parsing or that probe, and a
+Ruby version comes from .ruby-version or .tool-versions, never from evaluating
+the Gemfile. The setup `BuildSpec` uses
 `argv = ["/bin/sh", "-c", "exec <build-env>/bin/python setup.py egg_info
 --egg-base <scratch>/egg-info ><scratch>/egg-info.log 2>&1"]`, with the
 project root as cwd and the build environment, CPython, and scratch as roots

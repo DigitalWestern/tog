@@ -30,8 +30,9 @@ say what breaks, for whom, and how it fails (loud/silent).
   retrieval, the one hardened publication rule shared by both lock writers,
   the unconditional descriptor-relative pre-publication compare, the reusable
   pre-materialization extractor, the source matrix, per-platform BEAM rows,
-  the `--frozen` write boundary, the value-based input staleness rule, the
-  descriptor-relative root helper (`src/fsroot.rs`, not yet written), and
+  the `--frozen` write boundary, the presence- and value-based input staleness
+  rule over the whole consulted path list, the shipped provider host allowlist,
+  the descriptor-relative root helper (`src/fsroot.rs`, not yet written), and
   store-root-scoped bundle-complete `x/3` keys in ARCHITECTURE.md are not
   implementation guarantees yet. In particular,
   the generic fetch helper still accepts `file://` for mirrors and tests
@@ -43,6 +44,23 @@ say what breaks, for whom, and how it fails (loud/silent).
   Writable sync must refuse those migrations with `blanket update --toolchain`
   rather than guess; a changed recorded source takes the same loud path. This
   remains until the WP2 implementation adds complete closure evidence.
+- **One toolchain per lock root: a toolchain source file in a subdirectory is
+  not a toolchain source (WP2 design boundary).** Toolchain discovery is
+  anchored at the directory holding `blanket-toolchain.toml`, never at the
+  current directory, so that the same project yields the same lock and the same
+  `status` verdict from every directory, every developer, and every CI job. The
+  cost is that `web/.node-version` under a root-level lock is invisible to
+  blanket while `nvm` and uv would honor it. Silent divergence from those tools;
+  per-subproject toolchains would need per-subproject lock sections and are not
+  in this design.
+- **A committed toolchain lock can aim a request at any allowlisted provider
+  host (WP2 design boundary).** Honoring a lock deliberately does not consult
+  the shipped catalog, so that upgrading blanket can never invalidate a
+  committed lock. Bytes are still authorized by the recorded
+  algorithm-qualified digest and the URL by an append-only provider host
+  allowlist, so a hostile lock cannot install unverified content — but it can
+  cause an HTTPS request to a different allowlisted host, which an attacker
+  positioned there can observe. Reviewing a lock diff is reviewing its URLs.
 - **`blanket add` / `remove` / `update` delegate to store tools with
   network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
   same trust boundary as missing-lockfile generation. Rows that refuse with

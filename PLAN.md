@@ -154,7 +154,7 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (6 rounds, round-6 fixes author-verified; PR open); IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (6 rounds) + OWNER DECISIONS APPLIED (round 8, unreviewed); IMPLEMENTATION OPEN
 
 Status: the design is reworked in ARCHITECTURE.md after six adversarial
 review rounds; implementation is open and follows its ordered PRs, of which item 0 is
@@ -164,11 +164,46 @@ only a re-parsed `value` decides, a digest mismatch alone never does, in sync,
 `--frozen`, and `status` alike, so `blanket add` rewriting a multi-purpose
 manifest cannot wedge the lock — gives the descriptor-relative root helper a
 module (`src/fsroot.rs`) and named refusal tests in PR 3 and acceptance, makes
-the publication temp name pid-plus-sequence unique, defines the polyglot case
+the publication temp name unique rather than fixed (round 8 replaced the
+pid-plus-sequence shape it chose), defines the polyglot case
 (a lock missing a newly present ecosystem is stale, and `update --toolchain`
 adds it), and moves the `--frozen` write-boundary prose out of CLI.md's literal
-help screen. The design already gave both lock writers one hardened publication
-rule, kept the store root in the `x/3` key, made artifact digests
+help screen.
+
+Round 8 applies the owner's product decisions and the standing rule that the
+design prefers one dynamic mechanism over a mechanism plus its exceptions.
+(1) **The shipped catalog leaves the reproducibility path.** A lock row carries
+version, URL, algorithm-qualified digest, and recipe id, which is everything
+realization needs, so honoring a lock reads the lock and nothing else; the
+catalog is consulted only when choosing a version, at lock creation and
+`update --toolchain`. Upgrading blanket can no longer invalidate a committed
+lock. Retrieval stays constrained by the digest and by an append-only provider
+host allowlist rather than by the catalog, and recipe ids become append-only so
+blanket's own code cannot take the catalog's place as the thing an upgrade
+breaks. (2) **Publication uses OS randomness and real durability** — a
+`/dev/urandom` temp name (the source already in `src/sbom.rs`, factored into one
+helper, not a second one), `O_EXCL`, `fsync` the file, `renameat`, `fsync` the
+directory. Pid-plus-sequence is dropped because it has fixed points: a sequence
+restarts at 0 and PID namespaces reissue the same small pids, so one leftover
+`.blanket-toolchain.toml.1.0.tmp` would wedge every later run of a container
+image. The round-6 claim that `src/store.rs:69` uses that shape was wrong — it
+is pid-only — and the citation is gone. (3) **Staleness compares the whole
+consulted path list, including absence**, so adding a higher-precedence source
+(no `.python-version`, then one appears) is a row flipping from absent to
+present rather than a change nothing in the lock can see; discovery is anchored
+at the project root, never at cwd, so the verdict is a property of the project.
+(4) **`bundle_id` and the lock's canonical bytes are defined**, length-prefixed
+records with a leading serialization-version record, so the definition can grow
+without regressing old ids. (5) **The `(planned:)` markers are gone from CLI.md**
+— the help screen and grammar are specs for what ships, not a place to advertise
+unimplemented flags under a convention no other verb uses. (6) **The "never
+evaluates project code unsandboxed" claim is now structural rather than an
+Elixir-only blocklist**, which was incomplete: `src/ruby.rs:580` evaluates the
+Gemfile through an unsandboxed `Command` with network. Ruby's toolchain input
+comes from `.ruby-version`/`.tool-versions`, and frozen refuses rather than
+evaluate a Gemfile to learn a version.
+
+The design already gave both lock writers one hardened publication rule, kept the store root in the `x/3` key, made artifact digests
 algorithm-qualified so the existing sha512 rows are carried over, kept explicit
 CPython prefixes as a supported `.python-version` spelling, required an
 unconditional descriptor-relative lock snapshot compare, separated bundle ids
@@ -355,4 +390,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-07 | WP2 design (branch wp2/toolchain-lock-design, docs-only): the toolchain lock is designed in ARCHITECTURE.md — release-bundle catalog authority with catalog-authorized HTTPS artifacts and algorithm-qualified digests, recipe identities and bundle ids separate from component versions, the source-discovery matrix and supported request grammars, global cross-platform selection, one hardened descriptor-relative publication rule for both lock writers with unique temp names, an unconditional lock snapshot compare, value-based input staleness (a digest mismatch alone is never stale) in sync, `--frozen` and `status` alike, the `--frozen` write boundary with sandbox-only probes, the polyglot missing-section rule, conservative legacy seeding, store-root-scoped bundle-complete `x/3` keys, the pre-materialization extractor and `src/fsroot.rs` with named refusal tests, and dormant activation behind ordered PRs (item 0 open as #21/#22). Review: Codex Sol rounds 1–4 (REWORK), Claude Opus 5 subagent rounds 5–6 (MERGE-AFTER-FIXES), round 7 a supervising-agent recheck of the round-6 fixes (not independent). Implementation open. |
+| 2026-09-07 | WP2 design (branch wp2/toolchain-lock-design, docs-only): the toolchain lock is designed in ARCHITECTURE.md — release-bundle catalog authority with catalog-authorized HTTPS artifacts and algorithm-qualified digests, recipe identities and bundle ids separate from component versions, the source-discovery matrix and supported request grammars, global cross-platform selection, one hardened descriptor-relative publication rule for both lock writers with unique temp names, an unconditional lock snapshot compare, value-based input staleness (a digest mismatch alone is never stale) in sync, `--frozen` and `status` alike, the `--frozen` write boundary with sandbox-only probes, the polyglot missing-section rule, conservative legacy seeding, store-root-scoped bundle-complete `x/3` keys, the pre-materialization extractor and `src/fsroot.rs` with named refusal tests, and dormant activation behind ordered PRs (item 0 open as #21/#22). Round 8 applies the owner's product decisions: the shipped catalog leaves the reproducibility path (a lock is honored from its own version/URL/digest/recipe rows, with an append-only provider host allowlist and append-only recipe ids, so upgrading blanket cannot invalidate a committed lock), publication uses a `/dev/urandom` temp name with `fsync`-rename-`fsync` durability (pid-plus-sequence dropped; the false `src/store.rs:69` citation removed), staleness compares the whole consulted path list including absent rows under root-anchored discovery, `bundle_id` and canonical lock bytes are defined, CLI.md's invented `(planned:)` markers are gone, and the sandboxed-evaluation guarantee is structural rather than an Elixir-only blocklist that missed `src/ruby.rs:580`. Review: Codex Sol rounds 1–4 (REWORK), Claude Opus 5 subagent rounds 5–6 (MERGE-AFTER-FIXES), round 7 a supervising-agent recheck of the round-6 fixes (not independent), round 8 owner decisions applied by the supervising agent and not yet reviewed. Implementation open. |
