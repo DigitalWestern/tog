@@ -117,7 +117,7 @@ single most likely Mac-only break.
 
 **Mac before merge (this is the whole package):** on main, `cargo build`,
 `cargo test`, `cargo test -- --ignored` with a disposable `BLANKET_STORE`,
-`bash tests/acceptance.sh`, the nine `deps_e2e` round trips, and the `x`
+`bash tests/acceptance.sh`, the ten `deps_e2e` round trips, and the `x`
 cold/warm smoke (`blanket x ruff --version`, `blanket x prettier --version`).
 Record results in REVIEW-2026-09-06.md, add the REVIEW.md log row, and
 append a round-4 entry to LINUX_PORT.md. Any Mac-only fix goes on a
@@ -242,13 +242,14 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm done; Yarn classic/Berry remain refusal; Poetry/PDM open)
+### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm edits implemented and reviewed, PR open, Mac gate outstanding; Yarn classic/Berry remain refusal; Poetry/PDM open)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
 - Python editable installs (`-e .` / the project itself) as a declared
   mutable overlay; dev/optional dependency groups installable by flag.
-- `blanket add/remove/update` for pnpm projects (done in this package). Yarn
+- `blanket add/remove/update` for pnpm projects (branch wp4/deps-pnpm-yarn,
+  5 review rounds; Mac gate outstanding). Yarn
   classic remains a refusal because it has no lockfile-only edit mode and a
   workspace-faithful scratch edit is future work; Poetry and PDM remain
   separate follow-up work (they still refuse with instructions; see
@@ -273,9 +274,11 @@ Any of these may be taken after WP1 merges; each is its own PR.
 **Mac before merge (per item):** editable installs and dev groups exercise
 clonefile projection, so run the Python `--ignored` tests on the Mac; the
 `add/remove/update` delegates run unsandboxed and are platform-neutral, so
-the nine `deps_e2e` round trips on the Mac suffice — including all three
+the ten `deps_e2e` round trips on the Mac suffice — including all four
 pnpm cases: `pnpm_add_update_remove_roundtrip`,
-`pnpm_workspace_member_and_root_roundtrip`, and
+`pnpm_workspace_member_and_root_roundtrip`,
+`pnpm_edits_leave_an_installed_project_untouched` (runs the store pnpm's
+real `install` first), and
 `nested_independent_npm_project_does_not_use_ancestor_pnpm_lock`; `x`
 lifecycle and any compiled-tool model for cargo/go tools need a Mac
 cold/warm run because the binaries are per-platform artifacts; the
@@ -338,7 +341,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-06 | WP4 initial pnpm and Yarn classic dependency edits landed at the prior revision; the rework below removed Yarn scratch edits and returned Yarn classic to refusal. Poetry/PDM remain open. |
-| 2026-09-06 | WP4 rework narrowed dependency edits to pnpm: exact release validation, Corepack SHA-224 verification, workspace-glob lock selection, and isolated pnpm config; Yarn classic scratch delegation was removed and remains a refusal. |
-| 2026-09-06 | WP4 rework round 2 made ancestor lock boundaries pnpm-only, made exclusions order-independent, rejected mixed-root edits before delegation, accepted prerelease numeric zero, clarified pnpm lock-format guidance, strengthened wrong-digest coverage, and distinguished Yarn Berry refusal guidance. |
-| 2026-09-07 | WP4 rework round 3 accepted every Corepack hash algorithm (`sha224`/`sha256`/`sha512`, unknown algorithms refused by name instead of blaming the version), made unsupported pnpm workspace glob shapes a refusal rather than a silent non-match, renamed the pnpm delegate's HOME/XDG root to `stage-pnpm-home-<key>` so gc's stale-stage sweep reclaims it (it stays stable per project because pnpm records its store path in `node_modules/.modules.yaml`), and turned lifecycle scripts off for every pnpm verb (`--ignore-scripts` on `add`/`update`, `npm_config_ignore_scripts` for `remove`, whose pnpm parser rejects the flag). |
+| 2026-09-07 | WP4 pnpm dependency edits (branch wp4/deps-pnpm-yarn): `blanket add/remove/update` delegate to the store pnpm at the exact `packageManager` release (Corepack `+sha224/sha256/sha512` suffix verified by algorithm, other algorithms refused by name), select the lock by positively matched `pnpm-workspace.yaml` globs (unsupported glob shapes refused; ancestor npm/Yarn locks and unmatched pnpm roots are boundaries; mixed roots rejected before delegation), and run `--lockfile-only` with pnpm's modules state (`enable-modules-dir=false`, `modules-dir`, `virtual-store-dir`) redirected into a per-run store stage so an installed project's `node_modules` is neither read nor written; the `npm_config_` scrub is case-insensitive; lifecycle scripts are off for every verb. Yarn classic and Berry remain refusals with the conversion command; Poetry/PDM open. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES), round 5 a supervising-agent recheck of the round-4 fixes (not independent). Mac gate (the four pnpm `deps_e2e` round trips) outstanding. |
