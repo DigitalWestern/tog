@@ -546,7 +546,8 @@ fn dependency_verbs_offline_paths() {
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("--dev has no meaning"));
 
-    // Refuse-with-instructions rows never touch the network or the store.
+    // Refuse-with-instructions rows and missing tool declarations never touch
+    // the network or the store.
     let setup = TempDir::new("deps-setup");
     std::fs::write(
         setup.0.join("setup.py"),
@@ -566,7 +567,9 @@ fn dependency_verbs_offline_paths() {
     let out = blanket(&pnpm.0, &home.0, &["add", "-D", "react", "left-pad"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains("run 'pnpm add -D react left-pad'"),
+        text(&out.stderr).contains(
+            "pnpm-lock.yaml is lockfile format 9.0; set packageManager to the exact pnpm version your team runs, e.g. from `pnpm --version`"
+        ),
         "{}",
         text(&out.stderr)
     );
@@ -903,5 +906,40 @@ fn cached_x_narrates_each_object_exception_once() {
             .count(),
         1,
         "{stderr}"
+    );
+}
+
+/// The refusal is user-facing behaviour, not just a value the selector
+/// returns: `add` must stop before realizing anything and name both remedies.
+#[test]
+fn add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline() {
+    let home = TempDir::new("pnpm-unlisted");
+    let workspace = home.0.join("ws");
+    let project = workspace.join("packages/added-since-install");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        workspace.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/listed: {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("package.json"), "{\"name\":\"demo\"}\n").unwrap();
+
+    let out = blanket(&project, &home.0, &["add", "--no-sync", "is-number@7.0.0"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("does not list it as an importer"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pnpm install"), "{stderr}");
+    assert!(stderr.contains(".blanket directory"), "{stderr}");
+    assert!(
+        !project.join("package-lock.json").exists(),
+        "the refusal must not leave a stray npm lockfile behind"
     );
 }

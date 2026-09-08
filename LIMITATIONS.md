@@ -87,13 +87,64 @@ say what breaks, for whom, and how it fails (loud/silent).
   cause an HTTPS request to a different allowlisted host, which an attacker
   positioned there can observe. Reviewing a lock diff is reviewing its URLs.
 - **`blanket add` / `remove` / `update` delegate to store tools with
-  network, unsandboxed** (uv, the store npm, cargo, go, bundler, mix) — the
-  same trust boundary as missing-lockfile generation. Rows that refuse with
-  instructions instead of editing: Poetry and PDM projects, pnpm and yarn
-  lockfiles, setup.py/setup.cfg, `requirements/` directories, Elixir add and
-  remove, and all of .NET. The registry existence check for an ambiguous
-  bare name in a polyglot directory is one HTTPS GET per candidate
-  registry; a private-registry name needs the explicit prefix.
+  network, unsandboxed** (uv, the store npm, pinned pnpm, cargo, go,
+  bundler, mix) — the same trust boundary as missing-lockfile generation.
+  Rows that refuse with instructions instead of editing: Poetry and PDM
+  projects, setup.py/setup.cfg, `requirements/` directories, Elixir add and
+  remove, Yarn classic and Berry, and all of .NET. The registry existence
+  check for an ambiguous bare name in a polyglot directory is one HTTPS GET
+  per candidate registry; a private-registry name needs the explicit prefix.
+- **pnpm dependency edits require a root `package.json` `packageManager`
+  field** with an exact `MAJOR.MINOR.PATCH` version (an optional prerelease
+  is retained verbatim). A missing field names the pnpm lockfile format and
+  tells the user to set the exact version from `pnpm --version`; no floating
+  version is suggested. **Workspace membership is read from `pnpm-lock.yaml`'s
+  `importers` list and nothing else.** pnpm wrote that list with its own glob
+  engine, so it is exact, and blanket never parses `pnpm-workspace.yaml` or
+  matches a glob itself. A directory name containing a backslash takes the
+  same forward-slash key pnpm writes for it. The consequence to know: **a
+  workspace member added since the last `pnpm install` is not yet in the lock,
+  and blanket cannot tell it apart from a directory the workspace deliberately
+  excludes.** `add`/`remove`/`update` therefore **refuse, loudly**, naming the
+  workspace root and both remedies — run `pnpm install` at the root if it is a
+  member, or put a `.blanket` directory in the project to declare it its own
+  root if it is not. Blanket does not
+  fall back to npm there, because doing so would write a stray
+  `package-lock.json` inside a pnpm workspace and then keep finding it. A
+  lockfile that does not parse is the same refusal, because membership cannot
+  be determined without it. Other ancestor locks are boundaries. Mixed-root
+  edits are refused before delegation and name both roots. A Corepack
+  `+<algo>.<hex>` suffix is verified against the realized pnpm package
+  tarball in the verified artifact cache; `sha224`, `sha256` and `sha512`
+  are supported and any other algorithm is refused by name. **Only a subset
+  of the pnpm workspace glob grammar is matched:** none of it. blanket has no
+  glob matcher for pnpm workspaces, so no pattern grammar can be
+  misinterpreted and no pattern can be silently treated as a non-match.
+  Workspace membership is read from `pnpm-lock.yaml`'s `importers` list
+  instead, and whether an ancestor is a workspace at all is read from that
+  same list — `pnpm-workspace.yaml` existing does not mean a workspace,
+  because since pnpm 10 that file is also the project-level settings file
+  `pnpm config set --location=project` writes in a single-package
+  repository. Two consequences follow. A project the lock does not list is
+  ambiguous — a member added since the last install, or one a `!` pattern
+  deliberately excludes — so blanket refuses rather than guess, and a
+  `.blanket` directory in the project is how it declares itself its own
+  root. And a workspace whose members have never been installed has a lock
+  listing only `.`, which reads as a single-package repository, so a
+  subdirectory project there gets its own `package-lock.json`; running
+  `pnpm install` once resolves it. Delegates are resolved through the
+  store's cached `x` environments under `~/.blanket/x/`; pnpm runs with an
+  isolated HOME and XDG root in a per-run `<store>/tmp/stage-*` directory
+  that is removed when the edit returns (a leftover from a killed run is
+  swept by `blanket gc`), so its registry metadata cache is not kept between
+  edits and every edit re-fetches it. pnpm's modules state (`.modules.yaml`,
+  the virtual store) is redirected into that stage with
+  `enable-modules-dir=false`, so an installed project's `node_modules` is
+  neither read nor written; lifecycle scripts are off for every verb.
+  Delegates remain unsandboxed with network.
+- **Yarn classic dependency edits remain a refusal.** Yarn has no
+  lockfile-only edit mode, and a workspace-faithful scratch edit is future
+  work; run the Yarn command named by blanket, then `blanket`.
 - **`blanket x` covers PyPI and npm** (cargo and go later). Each tool's
   environment lives under `~/.blanket/x/` as a registered project root;
   `blanket x --clean` removes the projection and unregisters it from the
@@ -339,8 +390,8 @@ sandbox, and uv fallback still delegates resolution.
 - **Process-tree quiescence after scripts not enforced** (a daemon
   started by postinstall can outlive realization).
 - **Yarn Berry is not imported**: its cache-zip checksums are not tarball
-  integrity values, so item 7 rejects it loudly and names the npm/pnpm
-  conversion path. pnpm/yarn classic imports discover `bin` and legacy
+  integrity values, so dependency edits refuse with the npm/pnpm conversion
+  commands. pnpm/yarn classic imports discover `bin` and legacy
   `directories.bin` entries from each extracted package.json before launcher
   generation. Lockfile-less projects still fall back to npm resolution.
 

@@ -79,6 +79,7 @@ fn split_top_level(value: &str, separator: char) -> Vec<String> {
 fn split_key_value(value: &str) -> Option<(String, String)> {
     let mut depth = 0i32;
     let mut quote = None;
+    let mut at_scalar_start = true;
     let chars: Vec<char> = value.chars().collect();
     for (i, ch) in chars.iter().enumerate() {
         match quote {
@@ -91,16 +92,28 @@ fn split_key_value(value: &str) -> Option<(String, String)> {
             Some('"') if *ch == '"' => quote = None,
             Some(_) => {}
             None => match ch {
-                '\'' | '"' => quote = Some(*ch),
-                '[' | '{' | '(' => depth += 1,
-                ']' | '}' | ')' => depth -= 1,
+                '\'' | '"' if at_scalar_start => {
+                    quote = Some(*ch);
+                    at_scalar_start = false;
+                }
+                '[' | '{' | '(' => {
+                    depth += 1;
+                    at_scalar_start = true;
+                }
+                ']' | '}' | ')' => {
+                    depth -= 1;
+                    at_scalar_start = false;
+                }
+                ',' => at_scalar_start = true,
                 ':' if depth == 0 && (i + 1 == chars.len() || chars[i + 1].is_whitespace()) => {
                     return Some((
                         yaml_unquote(&chars[..i].iter().collect::<String>()),
                         chars[i + 1..].iter().collect::<String>().trim().to_string(),
                     ));
                 }
-                _ => {}
+                ':' => at_scalar_start = true,
+                c if c.is_whitespace() => {}
+                _ => at_scalar_start = false,
             },
         }
     }
@@ -315,6 +328,18 @@ fn yaml_list(value: Option<&YamlValue>) -> Vec<String> {
         Some(YamlValue::Scalar(value)) if !value.is_empty() => vec![value.to_string()],
         _ => Vec::new(),
     }
+}
+
+/// Every importer `pnpm-lock.yaml` enumerates, as paths relative to the lock
+/// root (`.` is the root itself).
+///
+/// This is the authoritative membership list for a pnpm workspace: pnpm
+/// produced it with its own glob engine, so consulting it settles membership
+/// exactly rather than reimplementing that engine's syntax.
+pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
+    let parsed = parse_yaml(lock_yaml)?;
+    let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
+    Ok(importer_map(root)?.into_keys().collect())
 }
 
 fn trim_peer_suffix(value: &str) -> &str {
@@ -2434,6 +2459,66 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_quote_inside_a_plain_key_does_not_open_a_quoted_scalar() {
+        let lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/it's: {}\n  packages/plain: {}\n";
+        assert_eq!(
+            pnpm_lock_importers(lock).unwrap(),
+            vec![
+                ".".to_string(),
+                "packages/it's".to_string(),
+                "packages/plain".to_string()
+            ],
+            "pnpm writes packages/it's unquoted, so treating the apostrophe as \
+             the start of a quoted scalar rejects the whole lockfile and wedges \
+             every project in the workspace"
+        );
+    }
+
+    #[test]
+    fn a_quote_opens_a_scalar_only_where_a_scalar_can_begin() {
+        assert_eq!(
+            split_key_value("packages/it's: {}"),
+            Some(("packages/it's".to_string(), "{}".to_string())),
+            "an apostrophe mid-token is an ordinary character"
+        );
+        assert_eq!(
+            split_key_value("'packages/a #c': {}"),
+            Some(("packages/a #c".to_string(), "{}".to_string())),
+            "a quote at the very start does open a quoted scalar"
+        );
+        assert_eq!(
+            split_key_value("key: {'a: b': 1, 'c': 2}"),
+            Some(("key".to_string(), "{'a: b': 1, 'c': 2}".to_string())),
+            "a quote after an opening brace or a comma opens a scalar, so the \
+             colon inside it must not split the line"
+        );
+        assert_eq!(
+            split_key_value("key: [{'x: y': 1}, 'z']"),
+            Some(("key".to_string(), "[{'x: y': 1}, 'z']".to_string())),
+            "nested flow collections keep the same rule"
+        );
+        assert_eq!(
+            split_key_value("a:b: value"),
+            Some(("a:b".to_string(), "value".to_string())),
+            "a colon not followed by whitespace is part of the key and starts \
+             a new scalar position"
+        );
+        assert_eq!(
+            split_key_value("a:'b': value"),
+            Some(("a:'b'".to_string(), "value".to_string())),
+            "a quote right after a non-splitting colon opens a scalar, so the \
+             quoted run is skipped rather than scanned for a separator"
+        );
+        assert_eq!(
+            split_key_value("{a: 1}'b': c"),
+            Some(("{a: 1}'b'".to_string(), "c".to_string())),
+            "a closing bracket ends the scalar position, so a quote directly \
+             after it is an ordinary character"
+        );
+        assert_eq!(split_key_value("no separator here"), None);
+    }
     use super::*;
     use std::fs;
     use std::path::PathBuf;

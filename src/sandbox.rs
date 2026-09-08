@@ -45,6 +45,12 @@ pub struct BuildSpec {
 /// Authoritative environment projection (Sol review 5, kernel primitive):
 /// strip every variable matching `remove_prefixes` or listed in `remove`,
 /// then apply the forced `set`. Python/cargo/go/ruby all need this shape.
+/// Strip every inherited variable whose name starts with one of
+/// `remove_prefixes` (compared ASCII case-insensitively: npm and pnpm collect
+/// their settings with `/^npm_config_/i`, so `Npm_Config_registry` is as live
+/// as `npm_config_registry`, and removing more of the user's environment is
+/// the safe direction for every other prefix list too) or equals one of
+/// `remove` (exact), then apply `set` last so blanket's values win.
 pub fn force_env(
     cmd: &mut Command,
     remove_prefixes: &[&str],
@@ -53,7 +59,16 @@ pub fn force_env(
 ) {
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy().into_owned();
-        if remove_prefixes.iter().any(|p| name.starts_with(p)) || remove.contains(&name.as_str()) {
+        // `str::get` rather than `name[..len]`: the index is a byte offset
+        // that need not be a char boundary, and `to_string_lossy` turns any
+        // invalid byte into a three-byte replacement character, so slicing
+        // panics on env names blanket does not control. Out-of-boundary and
+        // too-short both yield `None`, which is "no match".
+        let has_prefix = remove_prefixes.iter().any(|prefix| {
+            name.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        });
+        if has_prefix || remove.contains(&name.as_str()) {
             cmd.env_remove(&key);
         }
     }
@@ -796,6 +811,7 @@ mod tests {
     use std::collections::BTreeSet;
     #[cfg(target_os = "linux")]
     use std::fs::File;
+    use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
     use std::os::unix::io::AsRawFd;
     #[cfg(target_os = "linux")]
@@ -1707,5 +1723,103 @@ mod tests {
 (allow file-read* (subpath \"/fixed/read\"))\n\
 (allow file-read* file-write* (subpath \"/fixed/write\"))\n"
         );
+    }
+
+    /// npm and pnpm read `/^npm_config_/i`; the scrub must be as broad, and
+    /// blanket's forced value must be the only survivor.
+    #[test]
+    fn force_env_strips_prefixes_case_insensitively_and_forced_values_win() {
+        // Names are test-private so a parallel test never sees a real
+        // setting appear; only the prefix is what the scrub keys on.
+        let names = [
+            "Npm_Config_blanket_test_registry",
+            "NPM_config_blanket_test_forced",
+            "npm_config_blanket_test_forced",
+            "npm_config_blanket_test_store_dir",
+            "NPM_CONFIG_BLANKET_TEST_STORE_DIR",
+            "PNPM_BLANKET_TEST_HOME",
+            "pnpm_blanket_test_home",
+            "BLANKET_FORCE_ENV_KEEP",
+        ];
+        for name in names {
+            std::env::set_var(name, "user");
+        }
+        let mut cmd = Command::new("true");
+        force_env(
+            &mut cmd,
+            &["npm_config_", "PNPM_"],
+            &[],
+            &[("npm_config_blanket_test_forced".into(), "true".into())],
+        );
+        let envs: std::collections::BTreeMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for name in names {
+            std::env::remove_var(name);
+        }
+        for removed in [
+            "Npm_Config_blanket_test_registry",
+            "NPM_config_blanket_test_forced",
+            "npm_config_blanket_test_store_dir",
+            "NPM_CONFIG_BLANKET_TEST_STORE_DIR",
+            "PNPM_BLANKET_TEST_HOME",
+            "pnpm_blanket_test_home",
+        ] {
+            assert_eq!(
+                envs.get(removed),
+                Some(&None),
+                "{removed} survived: {envs:?}"
+            );
+        }
+        assert_eq!(
+            envs.get("npm_config_blanket_test_forced"),
+            Some(&Some("true".to_string()))
+        );
+        assert!(
+            !envs.contains_key("BLANKET_FORCE_ENV_KEEP"),
+            "an unrelated variable was touched: {envs:?}"
+        );
+    }
+
+    /// The prefix comparison indexes by byte offset. Env names are not
+    /// blanket's to choose, and `to_string_lossy` widens any invalid byte to
+    /// a three-byte replacement character, so a name can put a multi-byte
+    /// character across the offset a prefix length lands on. Slicing there
+    /// panics and takes down every caller — `blanket run` for Ruby, Elixir
+    /// and .NET as much as a pnpm edit.
+    #[test]
+    fn force_env_survives_names_that_straddle_a_prefix_boundary() {
+        // "abc" + U+FFFD: the replacement character occupies bytes 3..6, so
+        // byte 5 (the length of "PNPM_") is inside it.
+        let straddles = "abc\u{fffd}_blanket_test";
+        assert!(!straddles.is_char_boundary(5));
+        // A non-UTF-8 name reaches the same place through `to_string_lossy`.
+        let invalid = OsStr::from_bytes(b"abc\xff_blanket_test");
+        std::env::set_var(straddles, "user");
+        std::env::set_var(invalid, "user");
+        let mut cmd = Command::new("true");
+        // Prefixes of several lengths, none of which match these names.
+        force_env(&mut cmd, &["npm_config_", "PNPM_", "YARN_"], &[], &[]);
+        // Reaching this line at all is the point: the old slicing panicked
+        // here. A sibling test sets its own variables in the same process
+        // environment, so assert about these two names only.
+        let touched: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        std::env::remove_var(straddles);
+        std::env::remove_var(invalid);
+        for name in [straddles, "abc\u{fffd}_blanket_test"] {
+            assert!(
+                !touched.iter().any(|seen| seen == name),
+                "a name matching no prefix was scrubbed: {touched:?}"
+            );
+        }
     }
 }

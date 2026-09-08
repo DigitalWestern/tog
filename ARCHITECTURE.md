@@ -543,8 +543,21 @@ packages.config files fail closed.
 - Missing `Cargo.lock` → the store cargo runs `generate-lockfile`.
 
 Delegated resolvers come from the store (uv and npm are pinned toolchain
-components like CPython/Node), while existing npm lockfiles are parsed
-locally — a bare machine needs nothing installed besides blanket itself.
+components like CPython/Node; pnpm is realized as the exact Node package
+version from the root package.json `packageManager` field and cached in the
+registered `~/.blanket/x/` environment), while existing npm lockfiles are
+parsed locally — a bare machine needs nothing installed besides blanket
+itself. pnpm edits isolate HOME and XDG configuration/data/cache directories
+so user-global pnpm settings cannot change the registry or store behavior
+(the `npm_config_` scrub is case-insensitive, as npm and pnpm's own
+`/^npm_config_/i` lookup is); that root is a per-run `<store>/tmp/stage-*`
+directory removed when the delegate returns, and a leftover from a killed run
+is reclaimed by `blanket gc`'s stale-stage sweep. Lifecycle scripts are off
+for every verb: `--lockfile-only` forces pnpm's own `ignoreScripts`, `add` and
+`update` also carry `--ignore-scripts`, and `npm_config_ignore_scripts=true`
+is set for all three.
+Yarn classic remains a refusal because it has no lockfile-only edit mode and
+workspace-faithful scratch editing is future work.
 Proven with a scrubbed-PATH (`/usr/bin:/bin`) sync + run on both ecosystems,
 2026-08-31.
 
@@ -556,6 +569,42 @@ the exposure of running those tools yourself (which is the status quo it
 replaces), no more, no less. Resolving a hostile dependency tree can run
 code at plan time (PEP 517 metadata builds); blanket's guarantees start at
 realization.
+
+The same trust boundary applies to pnpm dependency edits. pnpm receives
+`--lockfile-only`, and because its modules directory stays live even then (it
+reads `node_modules/.modules.yaml` and refuses a store other than the one
+recorded there, a workspace-root `add -w` installs outright, and the
+workspace path rewrites the virtual store's `lock.yaml`), it also receives
+`--config.enable-modules-dir=false` plus `--config.modules-dir` and
+`--config.virtual-store-dir` pointed, relative to the project, into the
+per-run stage, and `--config.store-dir` into that stage as well (pnpm
+otherwise falls back to `~/.pnpm-store` whenever its default would land on
+another filesystem: outside the project, outside the store, never
+reclaimed). It also receives `--config.node-linker=isolated`, because
+`enable-modules-dir=false` is only honoured by the isolated linker — a
+committed `.npmrc` carrying `node-linker=hoisted` otherwise turns a
+workspace-root edit back into a real install that rewrites a member's
+`node_modules`. The user's `node_modules` is therefore neither read nor
+written: an already-installed project whose `.modules.yaml` names the user's
+own store is edited in place, and no blanket-internal path is left in the
+project (`tests/deps_e2e.rs::pnpm_edits_leave_an_installed_project_untouched`,
+and the workspace round trip carries a hostile `.npmrc` for the linker case).
+The delegate writes only the selected manifest and lock; an ancestor lock is
+inherited only from a root with both `pnpm-lock.yaml` and
+`pnpm-workspace.yaml`. Membership is read from the lockfile's `importers`
+and from nothing else: pnpm generated that list with its own glob engine, so
+it is exact, and blanket carries no glob matcher of its own to disagree with
+it. A directory absent from `importers` is not a member, and a lockfile that
+does not parse is a refusal rather than a guess, since membership cannot be
+decided without it. An
+ancestor package-lock, Yarn lock, or unmatched pnpm root is a boundary, so a
+nested independent project falls back to the store npm in its own directory.
+Mixed-root requests are rejected before delegation and name the roots so the
+edits can be run separately. Yarn classic has no lockfile-only edit mode and
+remains a refusal; a workspace-faithful scratch edit is future work. Yarn
+Berry remains outside the importer contract because its cache checksums do
+not authenticate npm tarballs; its dependency-edit refusal names the npm or
+pnpm conversion command rather than delegating to Yarn.
 
 Declared artifacts, honestly: the mechanism is **cache seeding** — it
 works when the declaration matches where a package's downloader looks

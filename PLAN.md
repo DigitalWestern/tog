@@ -117,7 +117,7 @@ single most likely Mac-only break.
 
 **Mac before merge (this is the whole package):** on main, `cargo build`,
 `cargo test`, `cargo test -- --ignored` with a disposable `BLANKET_STORE`,
-`bash tests/acceptance.sh`, the six `deps_e2e` round trips, and the `x`
+`bash tests/acceptance.sh`, the ten `deps_e2e` round trips, and the `x`
 cold/warm smoke (`blanket x ruff --version`, `blanket x prettier --version`).
 Record results in REVIEW-2026-09-06.md, add the REVIEW.md log row, and
 append a round-4 entry to LINUX_PORT.md. Any Mac-only fix goes on a
@@ -345,13 +345,22 @@ replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
 ### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle reviewed, MERGE on Linux evidence, PR open; Mac gate outstanding)
+### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm edits implemented, reviewed through round 9 with round-9 fixes themselves unreviewed, PR open, Mac gate outstanding; Yarn classic/Berry remain refusal; Poetry/PDM open)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
 - Python editable installs (`-e .` / the project itself) as a declared
   mutable overlay; dev/optional dependency groups installable by flag.
-- `blanket add/remove/update` for pnpm, Yarn, Poetry, and PDM projects
-  (today they refuse with instructions; LIMITATIONS.md:24).
+- `blanket add/remove/update` for pnpm projects (branch wp4/deps-pnpm-yarn,
+  9 review rounds, the round-9 fixes themselves unreviewed; Mac gate
+  outstanding). Workspace membership comes from `pnpm-lock.yaml`'s
+  `importers` list and nothing else; `pnpm-workspace.yaml` is never read,
+  because since pnpm 10 it is also the settings file of a repository that has
+  no workspace. Yarn
+  classic remains a refusal because it has no lockfile-only edit mode and a
+  workspace-faithful scratch edit is future work; Poetry and PDM remain
+  separate follow-up work (they still refuse with instructions; see
+  LIMITATIONS.md).
 - IMPLEMENTED and reviewed (branch wp4/x-lifecycle, 5 review rounds, MERGE on
   Linux evidence); Mac cold/warm gate outstanding:
   `blanket x --clean`, unregister an environment, protect a running tool from
@@ -384,10 +393,16 @@ Any of these may be taken after WP1 merges; each is its own PR.
 **Mac before merge (per item):** editable installs and dev groups exercise
 clonefile projection, so run the Python `--ignored` tests on the Mac; the
 `add/remove/update` delegates run unsandboxed and are platform-neutral, so
-the six `deps_e2e` round trips on the Mac suffice; `x` lifecycle and any
-compiled-tool model for cargo/go tools need a Mac cold/warm run because the
-binaries are per-platform artifacts; the real-project-per-ecosystem proofs
-are measured on both machines and recorded as two columns.
+the ten `deps_e2e` round trips on the Mac suffice — including all four
+pnpm cases: `pnpm_add_update_remove_roundtrip`,
+`pnpm_workspace_member_and_root_roundtrip`,
+`pnpm_edits_leave_an_installed_project_untouched` (runs the store pnpm's
+real `install` first), and
+`nested_independent_npm_project_does_not_use_ancestor_pnpm_lock`; `x`
+lifecycle and any compiled-tool model for cargo/go tools need a Mac
+cold/warm run because the binaries are per-platform artifacts; the
+real-project-per-ecosystem proofs are measured on both machines and
+recorded as two columns.
 
 ### WP5 — The company layer, all inside policy — OPEN, last
 
@@ -451,3 +466,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP2 Go exact-selection bug fixed (branch wp2/go-selected-version): realization takes the go.mod-selected version and an unpinned selection fails before store or network access; status compares the go.mod selection and treats pre-field closures as unchecked. Regression test `ensure_go_for_rejects_unpinned_version_before_store_access`. Sol: 3 rounds. |
 | 2026-09-07 | WP4 x lifecycle (branch wp4/x-lifecycle): `blanket x --clean` removes and unregisters cached x roots through validated directory descriptors and fd-relative removal (symlinks unlinked, never traversed; candidate inode re-checked before removal); running tools hold an inherited shared lock under `~/.blanket/x/.locks/`, kept CLOEXEC until exec; cleanup resolves the home chain the way `blanket x` does, narrates each persisted exception once, unlinks its own per-root lock, and names `blanket gc --project` for node roots; legacy roots are matched by the exact generated package. Review: Codex Sol rounds 1–3 (REWORK), Claude Opus 5 subagent rounds 4 (MERGE-AFTER-FIXES) and 5 (MERGE; 5 nits recorded in REVIEW.md). Mac cold/warm gate outstanding. |
 | 2026-09-07 | WP1 `blanket fmt` (branch wp1/fmt-rust): pinned rustfmt/cargo-fmt as its own store object (`rustfmt/1`, per-platform verified sha256, relative `lib` link to the paired Rust object, sandboxed pre-commit probe), lockless Cargo workspace discovery, a writable-project/no-network fmt sandbox mode on both engines with a shared setup-failure classifier, descriptor-anchored closure publication, `--check` and status pass-through, package.json `fmt` script precedence with an explicit `--eco` as the escape hatch, `stage-*` scratch so gc reclaims interrupted runs, `ls`/`sbom`/`gc` aware of the toolchain-only closure. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES) and 5 (MERGE; 3 nits recorded in REVIEW.md). Linux: `fmt_e2e`/`gc` `--ignored` green; acceptance 35/35 on 9fabfb5 (`tests/acceptance.sh`, disk-backed TMPDIR). Mac cold/warm gate outstanding. |
+| 2026-09-07 | WP4 pnpm dependency edits (branch wp4/deps-pnpm-yarn): `blanket add/remove/update` delegate to the store pnpm at the exact `packageManager` release (Corepack `+sha224/sha256/sha512` suffix verified by algorithm, other algorithms refused by name), select the lock from `pnpm-lock.yaml`'s `importers` list alone, never from `pnpm-workspace.yaml` (which since pnpm 10 is also a non-workspace repository's settings file); a project the lock does not list inside a real workspace is refused rather than guessed, ancestor npm/Yarn locks are boundaries, and mixed roots are rejected before delegation, and run `--lockfile-only` with pnpm's modules state (`enable-modules-dir=false`, `modules-dir`, `virtual-store-dir`) redirected into a per-run store stage so an installed project's `node_modules` is neither read nor written; the `npm_config_` scrub is case-insensitive; lifecycle scripts are off for every verb. Yarn classic and Berry remain refusals with the conversion command; Poetry/PDM open. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES), round 5 a supervising-agent recheck of the round-4 fixes (not independent). Mac gate (the four pnpm `deps_e2e` round trips) outstanding. |

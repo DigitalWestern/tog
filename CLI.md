@@ -317,7 +317,9 @@ exit 1, no writes.
 | Python | `poetry.lock` / `pdm.lock` present, or `[tool.poetry]` | refuse (poetry/pdm are not pinned; uv would create a second lock) | refuse | refuse |
 | Python | `setup.py` / `setup.cfg` only | refuse with the `install_requires` line | refuse | n/a |
 | Node | `package-lock.json` or no lock | store npm: `npm install --package-lock-only --ignore-scripts [--save-dev] <spec>`, `npm uninstall --package-lock-only`, `npm update --package-lock-only [<name>]` | same | same |
-| Node | `pnpm-lock.yaml` / `yarn.lock` | refuse with `pnpm add <spec>` / `yarn add <spec>` (pnpm and yarn are not pinned; running npm would create a second lock). Pinning pnpm via the store node's corepack is the follow-up that turns this row green | same | same |
+| Node | `pnpm-lock.yaml` | store pnpm at the exact version in root `package.json` `packageManager` (for example `pnpm@9.12.3`, optionally with a Corepack `+sha224.`/`+sha256.`/`+sha512.` hash, which is verified; any other algorithm is refused by name), then `pnpm add --lockfile-only --ignore-scripts`, `pnpm remove --lockfile-only`, or `pnpm update --lockfile-only --ignore-scripts`, each with `--config.enable-modules-dir=false` and `--config.modules-dir`/`--config.virtual-store-dir` pointed into a per-run store stage so the project's `node_modules` is neither read nor written; lifecycle scripts are off for all three (`--lockfile-only` forces pnpm's `ignoreScripts`; pnpm's `remove` parser rejects the flag, so `npm_config_ignore_scripts` in the delegate's environment carries it there); only a positively matched pnpm workspace root is inherited, and workspace-root edits add `-w` | same | same |
+| Node | Yarn classic v1 `yarn.lock` | refuse: run `yarn add …`, then `blanket` (Yarn classic has no lockfile-only edit mode; a workspace-faithful scratch edit is future work) | refuse: run `yarn remove …`, then `blanket` | refuse: run `yarn update`, then `blanket` |
+| Node | Yarn Berry (`.yarnrc.yml` or Yarn 2+) | refuse: Berry cache checksums are not npm tarball integrity values; convert with `npm install --package-lock-only` or `pnpm install --lockfile-only`, then `blanket` | same | same |
 | Cargo | any | store cargo: `cargo add`, `cargo remove`, `cargo update [-p <name>]` with network, exactly as `generate-lockfile` runs today | same | same |
 | Go | any | store go: `go get <mod>[@ver]`, `go get <mod>@none`, `go get -u [<mod>]`; later sync owns tidy resolution | same | same |
 | Ruby | any | store bundler: `bundle add <gem>`, `bundle remove <gem>`, `bundle update [<gem>]` with `BUNDLE_IGNORE_CONFIG` enforced and `BUNDLE_FROZEN=false` for edits; realization remains frozen | same | same |
@@ -332,6 +334,19 @@ the user owns. Rules: write atomically (temp file + rename, the store's
 existing helper); never reformat a file blanket did not fully generate (the
 requirements.txt append preserves everything above it, uv and npm preserve
 formatting themselves); print every file touched; `--no-sync` for review.
+
+If one request would edit more than one project root (for example, a Python
+file in a pnpm member and the pnpm workspace root), blanket refuses before
+delegation and names both roots; run the two adds separately.
+
+A pnpm workspace member is identified from `pnpm-lock.yaml`'s `importers`
+list, which pnpm itself produced with its own glob engine; blanket has no
+glob matcher, so no pattern can be misread and none can be silently treated
+as a non-match. `pnpm-workspace.yaml` is never consulted, because since pnpm
+10 it is also the project-level settings file of a repository that has no
+workspace at all. A project the lock does not list, under a root the lock
+shows really is a workspace, is refused by name rather than handed to npm:
+put a `.blanket` directory in the project to declare it its own root.
 
 ### 2.5 `blanket x <tool>[@version] [<args>...]`
 
@@ -431,10 +446,13 @@ Implemented on branch `cli/levels-1-2`: phase B (bare `blanket` → sync,
 ladder and the delegation table; `src/deps.rs`) and phase D (`x` for PyPI
 and npm; `src/xrun.rs`). Python and Node closures carry an additive
 `inputs` field (root manifest and lock file hashes) that `status` compares.
-Offline paths are covered by `tests/cli.rs`. The six delegating shapes now
-have real add/update/remove round trips in `tests/deps_e2e.rs`, including
-uv development dependencies. Astra review findings and final Linux gate
-results are in REVIEW-2026-09-06.md. The macOS arm64 run remains outstanding.
+Offline paths are covered by `tests/cli.rs`. The supported dependency-edit
+shapes have real add/update/remove round trips in `tests/deps_e2e.rs`,
+including uv development dependencies and pnpm workspace selection. Yarn
+classic remains a refusal because it has no lockfile-only edit mode and a
+workspace-faithful scratch edit is future work. Astra review findings and
+final Linux gate results are in REVIEW-2026-09-06.md. The macOS arm64 run
+remains outstanding.
 
 ### 2.9 Deferred within level two
 
@@ -456,7 +474,7 @@ results are in REVIEW-2026-09-06.md. The macOS arm64 run remains outstanding.
 | B | bare `blanket`, `install` alias, `blanket <script>`, `status`, `ls`, `doctor`, `completions` | M | A |
 | C | `add` / `remove` / `update` for the green rows; refuse-with-instructions for the rest | L | A |
 | D | `x` for Python and Node | M | A |
-| later | `why` (needs closure edges), `x` for cargo/go, corepack-pinned pnpm/yarn so their `add` rows go green, level three | | |
+| later | `why` (needs closure edges), `x` for cargo/go, level three | | |
 
 B before C on purpose: B is all reading and dispatch, no writes to user
 files, and it delivers most of the "easy" feel. C is where the design
@@ -477,7 +495,8 @@ go-hello, ruby-hello), and one acceptance.sh section per new verb.
 3. ~~Prefix syntax for ambiguity~~ **Decided: the evidence ladder** (name
    shape → nearest manifest → registry existence → prompt), with the prefix
    only as the non-interactive escape hatch. See 2.3.
-4. **`add` refuses for pnpm/yarn/poetry/pdm/dotnet/elixir in v0** rather
-   than growing new pins. (Recommended refuse; the message names the exact
-   command, and each row can go green later without changing the CLI.)
+4. **`add` refuses for Yarn classic/Poetry/PDM/.NET/Elixir in v0** rather
+   than growing new edit paths. pnpm uses its exact root `packageManager`
+   version and lockfile-only mode; each refusal names the exact command, and
+   a future implementation can turn a row green without changing the CLI.
 5. **`x` v0 is Python and Node only.**
