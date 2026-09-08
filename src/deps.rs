@@ -1661,7 +1661,7 @@ fn node(
         return Err(yarn_refusal(&lock_root, verb, texts, dev));
     }
     let manager = node_package_manager(&lock_root, &lock_text)?;
-    let tool_root = xrun::realize_node_tool(
+    let (tool_root, _x_lock) = xrun::realize_node_tool(
         store,
         platform,
         manager.name(),
