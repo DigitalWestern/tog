@@ -97,6 +97,13 @@ say what breaks, for whom, and how it fails (loud/silent).
   (cosmetic; build succeeds).
 - **No streaming extractors**: decompression bombs are caught by
   post-extraction size caps, not preflight limits.
+- **Only the Go toolchain tarball goes through the pre-materialization
+  extractor** (`src/archive.rs`: hostile members refused before tar writes;
+  `TAR_OPTIONS` unset). CPython, Node, Rust/rustfmt, Ruby, .NET, Elixir/OTP,
+  and native-library tarballs still rely on the platform tar's own defences
+  until their call sites migrate in the WP2 lock PRs. The bsdtar listing
+  parser is exercised only on synthetic lines until the Mac gate runs the
+  real binary.
 
 ## Python
 

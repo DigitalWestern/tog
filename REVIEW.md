@@ -170,3 +170,4 @@ Completed rounds. Add a row when an entry above reaches ✅.
 | ≤2026-09-06 | items 7, 10, 12, gc, and earlier work | GPT-6 Astra | 1–5 each | ~70 fixed, several security-relevant | 🟡 final round unverified |
 | 2026-09-06 | items 4 and 5 | supervising agent only | — | — | ⬛ not independent |
 | 2026-09-06 | CLI levels 1–2 (PR #20), Git, artifacts, #19, final fixes of #8/#10/#11/#12 | GPT-6 Astra | review + iterative fix rechecks | 15 categories; see report | ✅ reviewed and fixes rechecked; macOS validation outstanding |
+| 2026-09-07 | WP2 secure archive extractor (branch `wp2/archive-extractor`): `src/archive.rs`, Go toolchain as first consumer | supervising agent only (author's own checks: unit tests with hand-built hostile ustar members, real GNU tar listing and extraction, Go e2e) | — | — | ⬛ not independent; Mac gate (`cargo test`, `go_e2e --ignored`, bsdtar listing of a real tarball) outstanding |

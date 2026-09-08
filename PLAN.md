@@ -154,7 +154,7 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — OPEN
+### WP2 — Toolchain lock and exact version selection — OPEN (design on `wp2/toolchain-lock-design`; secure extractor on `wp2/archive-extractor`)
 
 Design before code; write the design into ARCHITECTURE.md as part of the PR.
 
@@ -331,3 +331,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
+| 2026-09-07 | WP2 secure archive extractor (branch wp2/archive-extractor, ordered PR 2 of the design): `src/archive.rs` lists every tarball member and refuses absolute names, `..`, hard links, special files, and symlinks not lexically contained after `--strip-components` before tar writes anything; delegated tar runs with `TAR_OPTIONS` unset; per-platform listing parser (GNU tar / bsdtar), unparseable lines refuse. First consumer: the Go toolchain tarball (`extract_go_toolchain`), byte-identical extraction flags. Unit tests build hostile ustar members by hand and prove an outside sentinel and the destination stay untouched. No independent review yet (supervising agent only). |
