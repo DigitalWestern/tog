@@ -281,6 +281,19 @@ raw sha256 — before bytes enter the verified cache. The comforter is a
 from the verified cache, extracted offline by the store Go (whose version
 is an identity input — the extractor is part of the recipe).
 
+The Go toolchain tarball itself is the first consumer of the
+pre-materialization extractor in `src/archive.rs` (WP2 design, ordered PR 2):
+every member is listed and judged before tar writes a byte — absolute names,
+`..` components, hard links, and special files refuse the archive, and a
+symlink is accepted only when its target is lexically contained after
+`--strip-components` — and the delegated tar then runs with `TAR_OPTIONS`
+unset. The listing parser is per platform (GNU tar's five leading columns on
+Linux, bsdtar's eight on macOS) and any line it cannot parse is a refusal,
+never a skip. The other toolchain tarballs (CPython, Node, Rust and rustfmt,
+Ruby, .NET, Elixir/OTP, native libraries) still extract the way they did and
+move over in the lock implementation PRs, one call site at a time, because
+each move must keep the object tree byte-identical.
+
 Enforcement is pure process environment (Go has no project config file):
 GOTOOLCHAIN=local (the "auto" default silently swaps toolchains!),
 GOROOT=<store go>, GOENV=off, GOWORK=off, GOFLAGS cleared, GOPROXY=off +

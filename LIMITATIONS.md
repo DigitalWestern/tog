@@ -137,6 +137,29 @@ say what breaks, for whom, and how it fails (loud/silent).
   (cosmetic; build succeeds).
 - **No streaming extractors**: decompression bombs are caught by
   post-extraction size caps, not preflight limits.
+- **Only the Go toolchain tarball goes through the pre-materialization
+  extractor** (`src/archive.rs`: hostile members refused before tar writes;
+  `TAR_OPTIONS` unset, `LC_ALL`/`LANG` pinned to `C`, `--numeric-owner` on
+  every invocation). CPython, Node, Rust/rustfmt, Ruby, .NET, Elixir/OTP,
+  and native-library tarballs still rely on the platform tar's own defences
+  until their call sites migrate in the WP2 lock PRs. **The `-tv` listing is
+  parsed by column position**, which is a human format blanket predicts from
+  the platform (5 leading columns for GNU tar, 8 for bsdtar). Owner and group
+  names come out of the archive, so `--numeric-owner` is a parsing guarantee
+  rather than a cosmetic one: a name containing a space would otherwise add
+  columns and shift the date into the parsed name, walking a `../` member
+  past the containment check. Every listing is additionally cross-checked
+  against a column-free `tar -t`, and any disagreement refuses the archive,
+  so an unmodelled column layout fails closed instead of silently
+  mis-parsing. Containment is decided lexically, which is only sound while
+  lexical resolution agrees with the filesystem's, so a symlink target that
+  would resolve *through* another symlink in the same archive is refused, as
+  is any member whose own path passes through one. Parsing a human-readable
+  listing by column remains a fragile foundation; reading tar headers
+  directly is the intended replacement before a second consumer adopts this
+  module. The bsdtar column count has been verified against libarchive
+  3.8.7 on Linux; macOS ships an older bsdtar, so the Mac gate is still what
+  confirms it there.
 
 ## Python
 

@@ -7,6 +7,7 @@
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
 
+use crate::archive::Compression;
 use crate::dirhash;
 use crate::fetch::{cache_insert, cache_verified_held, download_verified_held};
 use crate::platform::{no_pin, Platform};
@@ -90,20 +91,14 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// Extract a provider Go archive into its store staging directory. Go's
 /// release archives have exactly one `go/` root; strip that one level while
 /// retaining the complete toolchain tree below it.
-fn extract_go_toolchain(archive: &Path, staged: &Path) -> io::Result<()> {
-    let listing = Command::new("/usr/bin/tar")
-        .args(["-tzf"])
-        .arg(archive)
-        .output()
-        .map_err(|e| io::Error::new(e.kind(), format!("list Go archive: {e}")))?;
-    if !listing.status.success() {
-        return Err(err(format!(
-            "could not inspect Go archive layout: {}",
-            String::from_utf8_lossy(&listing.stderr).trim()
-        )));
-    }
+fn extract_go_toolchain(platform: Platform, archive: &Path, staged: &Path) -> io::Result<()> {
+    // List first (src/archive.rs): the layout check below and the
+    // containment rules both run before tar writes anything.
+    let entries = crate::archive::list(archive_platform(platform), archive, Compression::Gzip)
+        .map_err(|e| err(format!("could not inspect Go archive layout: {e}")))?;
     let mut saw_entry = false;
-    for raw in String::from_utf8_lossy(&listing.stdout).lines() {
+    for entry in &entries {
+        let raw = entry.name.as_str();
         let entry = raw.trim_end_matches('/');
         if entry.is_empty() {
             continue;
@@ -123,18 +118,24 @@ fn extract_go_toolchain(archive: &Path, staged: &Path) -> io::Result<()> {
         return Err(err("go archive has unexpected empty layout"));
     }
 
-    let status = Command::new("/usr/bin/tar")
-        .args(["-xzf"])
-        .arg(archive)
-        .args(["-C"])
-        .arg(staged)
-        .args(["--strip-components", "1"])
-        .status()
-        .map_err(|e| io::Error::new(e.kind(), format!("extract Go archive: {e}")))?;
-    if !status.success() || !staged.join("bin/go").is_file() {
+    crate::archive::extract_validated(
+        archive_platform(platform),
+        archive,
+        staged,
+        1,
+        Compression::Gzip,
+        &entries,
+    )?;
+    if !staged.join("bin/go").is_file() {
         return Err(err("go tarball extraction failed or has unexpected layout"));
     }
     Ok(())
+}
+
+/// The tar that runs is the host's, whatever platform the pin is for; the
+/// archive module needs the host so it parses the host tar's listing.
+fn archive_platform(platform: Platform) -> Platform {
+    Platform::host().unwrap_or(platform)
 }
 
 /// Ensure the pinned Go toolchain is realized in the store.
@@ -153,7 +154,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    extract_go_toolchain(&tarball, &staged)?;
+    extract_go_toolchain(platform, &tarball, &staged)?;
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
@@ -1211,7 +1212,7 @@ mod tests {
             .success());
         let staged = temp.join("staged");
         std::fs::create_dir_all(&staged).unwrap();
-        extract_go_toolchain(&archive, &staged).unwrap();
+        extract_go_toolchain(Platform::host().unwrap(), &archive, &staged).unwrap();
         assert!(staged.join("bin/go").is_file());
         assert!(staged.join("bin/gofmt").is_file());
         assert!(staged.join("src/README").is_file());
@@ -1232,7 +1233,9 @@ mod tests {
             .success());
         let nested_staged = temp.join("nested-staged");
         std::fs::create_dir_all(&nested_staged).unwrap();
-        let error = extract_go_toolchain(&nested_archive, &nested_staged).unwrap_err();
+        let error =
+            extract_go_toolchain(Platform::host().unwrap(), &nested_archive, &nested_staged)
+                .unwrap_err();
         assert!(error.to_string().contains("unexpected layout"));
         assert!(!nested_staged.join("go").exists());
 
