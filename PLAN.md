@@ -154,10 +154,10 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 6; IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (6 rounds, round-6 fixes author-verified; PR open); IMPLEMENTATION OPEN
 
-Status: the design is reworked in ARCHITECTURE.md after the sixth adversarial
-review; implementation is open and follows its ordered PRs, of which item 0 is
+Status: the design is reworked in ARCHITECTURE.md after six adversarial
+review rounds; implementation is open and follows its ordered PRs, of which item 0 is
 already open as PRs #21 (`wp2/python-exact-selection`) and #22
 (`wp2/go-selected-version`). Round 6 adds one staleness rule for input rows —
 only a re-parsed `value` decides, a digest mismatch alone never does, in sync,
@@ -355,10 +355,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-06 | WP2 design written; implementation open, ordered PRs listed in ARCHITECTURE.md. |
-| 2026-09-06 | WP2 design reworked after adversarial review: recipe identities, embedded components, frozen input safety, global cross-platform selection, conservative legacy seeding, and the implementation order are now explicit. |
-| 2026-09-06 | WP2 design reworked round 2: catalog-authorized HTTPS artifacts, per-platform BEAM rows, descriptor-relative input snapshots, explicit source-discovery matrix, sandbox-only frozen probes, and dormant lock activation are now explicit. |
-| 2026-09-06 | WP2 design reworked round 3: release-bundle catalog authority, pre-materialization extractor requirements, lock-file race protection, exact Go `toolchain` semantics, corrected setup.py argv, and activation-ordered acceptance tests are now explicit. |
-| 2026-09-07 | WP2 design reworked round 4: unconditional descriptor-relative lock comparison, bundle id/component-version separation with recipe-revision tie-breaking, bundle-complete `x/3` keys, supported Python request grammar, the frozen-write boundary, and assigned extractor/legacy-seeding tests are now explicit. |
-| 2026-09-07 | WP2 design reworked round 5: one hardened publication rule for both lock writers, store root kept in the `x/3` key, algorithm-qualified artifact digests carrying the existing sha512 rows, explicit CPython `.python-version` prefixes kept supported, input digests redefined as source-file content hashes, and channel dropped from the ordering key; exact-selection work recorded as open PRs #21/#22. |
-| 2026-09-07 | WP2 design reworked round 6: one value-based staleness rule for input rows (a digest mismatch alone is never stale, in sync, `--frozen`, and `status` alike), the descriptor-relative root helper given a module (`src/fsroot.rs`) and named refusal tests in PR 3 and acceptance, pid-plus-sequence unique publication temp names, the polyglot missing-section case defined as stale, and the `--frozen` write-boundary prose moved out of CLI.md's literal help screen. |
+| 2026-09-07 | WP2 design (branch wp2/toolchain-lock-design, docs-only): the toolchain lock is designed in ARCHITECTURE.md — release-bundle catalog authority with catalog-authorized HTTPS artifacts and algorithm-qualified digests, recipe identities and bundle ids separate from component versions, the source-discovery matrix and supported request grammars, global cross-platform selection, one hardened descriptor-relative publication rule for both lock writers with unique temp names, an unconditional lock snapshot compare, value-based input staleness (a digest mismatch alone is never stale) in sync, `--frozen` and `status` alike, the `--frozen` write boundary with sandbox-only probes, the polyglot missing-section rule, conservative legacy seeding, store-root-scoped bundle-complete `x/3` keys, the pre-materialization extractor and `src/fsroot.rs` with named refusal tests, and dormant activation behind ordered PRs (item 0 open as #21/#22). Review: Codex Sol rounds 1–4 (REWORK), Claude Opus 5 subagent rounds 5–6 (MERGE-AFTER-FIXES), round 7 a supervising-agent recheck of the round-6 fixes (not independent). Implementation open. |
