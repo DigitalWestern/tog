@@ -154,7 +154,7 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (6 rounds) + OWNER DECISIONS APPLIED (round 8, unreviewed); IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (8 rounds; round-8 owner decisions reviewed in round 9 and its findings fixed); IMPLEMENTATION OPEN
 
 Status: the design is reworked in ARCHITECTURE.md after six adversarial
 review rounds; implementation is open and follows its ordered PRs, of which item 0 is
@@ -202,6 +202,19 @@ Elixir-only blocklist**, which was incomplete: `src/ruby.rs:580` evaluates the
 Gemfile through an unsandboxed `Command` with network. Ruby's toolchain input
 comes from `.ruby-version`/`.tool-versions`, and frozen refuses rather than
 evaluate a Gemfile to learn a version.
+
+Round 9 reviewed round 8. Its citation audit found every reference accurate
+except `src/ruby.rs:580`, which points at the comment rather than the call
+(now `582-596`). Its one substantive finding: round 8's own sentence "main has
+two unsandboxed evaluators of project code, not one" was another incomplete
+count — `plan_dotnet` runs `dotnet restore` through a plain `Command`
+(`src/dotnet.rs:603-635`, `src/dotnet.rs:715-740`) and MSBuild evaluates the
+project's `.csproj` and `Directory.Build.props`/`.targets`, and Ruby and
+Elixir each have a second call site outside the cited ranges. Rather than
+correct the number, the guarantee is now a reachability rule that records no
+number at all — treat every planning path as unsandboxed — backed by a named
+module `src/toolchain_input.rs` with a PR owner and a per-ecosystem test that
+the reader spawns no process, mirroring how `src/fsroot.rs` is specified.
 
 The design already gave both lock writers one hardened publication rule, kept the store root in the `x/3` key, made artifact digests
 algorithm-qualified so the existing sha512 rows are carried over, kept explicit

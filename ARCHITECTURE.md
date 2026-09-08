@@ -771,23 +771,38 @@ therefore comes from safe parsing or that probe. The setup `BuildSpec` argv is
 cwd and the build environment, CPython, and scratch declared as its roots
 (`src/manifest.rs:162-178`). It is not `/bin/sh setup.py`.
 
-Frozen therefore reaches each ecosystem through one sandbox-only entry point
-that has no call path to an unsandboxed evaluator, and refuses when safe data
-is unavailable rather than falling back. The structure is the guarantee
-because a blocklist of functions-not-to-call would be the fragile version and
-is already incomplete: main has two unsandboxed evaluators of project code,
-not one. Elixir's plan gate is the known one (`src/elixir.rs:1097-1110`).
-Ruby's is larger and easier to miss — planning runs the store Ruby on a helper
-that **evaluates the Gemfile** to check Gemfile/lock equivalence and the
-`ruby` directive, and `run_ruby` is a plain `Command` with neither sandbox nor
-network denial (`src/ruby.rs:311-317`, `src/ruby.rs:333-352`, the call at
-`src/ruby.rs:580`). A Gemfile is a Ruby program: `ruby "3.3.4"` sits beside
-arbitrary code that runs to produce it. So the Ruby toolchain input comes from
-safe parsing of `.ruby-version` and the Ruby entry in `.tool-versions`, which
-is what the precedence table below already specifies, and frozen refuses
-rather than evaluate a Gemfile to learn a version. The regression is a frozen
-run against a project whose Gemfile writes a marker file when evaluated:
-validation completes and the marker does not exist.
+The guarantee is therefore stated as a rule about reachability, not as a list
+of functions not to call. **Treat every ecosystem's ordinary planning path as
+an unsandboxed evaluator of project code, and give frozen no way to reach any
+of them.** That is the only form of the rule that stays true: counting today's
+evaluators is the fragile version, and every count written so far has been
+wrong. Round 7 named Elixir's plan gate (`src/elixir.rs:1097-1110`) as the
+only one. Round 8 said two, adding Ruby — planning runs the store Ruby on a
+helper that **evaluates the Gemfile** to check Gemfile/lock equivalence and
+the `ruby` directive, through a `run_ruby` that is a plain `Command` with
+neither sandbox nor network denial (`src/ruby.rs:311-317`,
+`src/ruby.rs:333-352`, called at `src/ruby.rs:582-596`). Two was also wrong:
+`plan_dotnet` shells out to `dotnet restore --use-lock-file` through
+`run_dotnet` (`src/dotnet.rs:603-635`, `src/dotnet.rs:715-740`), another plain
+`Command` in the project directory, and MSBuild evaluates the `.csproj` plus
+any `Directory.Build.props`/`.targets` it finds, including `<Exec>` tasks
+hooked to Restore. Ruby and Elixir each have a second such call site outside
+the ranges already cited (`src/ruby.rs:560`, `src/elixir.rs:1089`). The count
+is not the point and no count is recorded here.
+
+What frozen calls instead is named, owned, and tested like every other
+guarantee in this design. `src/toolchain_input.rs`, owned by PR 3 below
+exactly as `src/fsroot.rs` is, exposes one reader per ecosystem that returns
+the toolchain request from declarative sources only — the `path`/`field` pairs
+the precedence table lists — and nothing in it calls a planner. Its unit tests
+assert per ecosystem that the reader spawns no process at all, which is a
+property a test can check directly and a call graph cannot quietly drift past.
+A Gemfile is a Ruby program — `ruby "3.3.4"` sits beside arbitrary code that
+runs to produce it — so Ruby's reader takes `.ruby-version` and the Ruby entry
+in `.tool-versions`, and frozen refuses rather than evaluate a Gemfile to
+learn a version. The end-to-end regression is a frozen run against a project
+whose Gemfile writes a marker file when evaluated: validation completes and
+the marker does not exist.
 
 ### Lifecycle and concurrency
 
@@ -1030,7 +1045,8 @@ selection, asymmetric-catalog, byte-identical BEAM, Linux-to-Mac, and
 file appearing at a path recorded `absent` reports stale, and one appearing at
 a path with no row at all is impossible because every consulted path has a row;
 a frozen run against a project whose Gemfile writes a marker when evaluated
-completes with no marker; and the project-side `src/fsroot.rs` refusals all
+completes with no marker, and every `src/toolchain_input.rs` reader spawns no
+process; and the project-side `src/fsroot.rs` refusals all
 fail closed — a symlinked `blanket-toolchain.toml`, a symlinked input file, a
 symlinked ancestor directory of either, and an occupied temp name. ACTIVATION
 stays dormant until selection sources and runtime propagation land: the feature
@@ -1039,7 +1055,7 @@ is off, and the lock is neither written nor required.
 0. **Exact selection fixes (open now as two PRs, not one)** — #21 `wp2/python-exact-selection` (`src/pyselect.rs`, `src/python.rs`) and #22 `wp2/go-selected-version` (`src/golang.rs`), each with its own unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
 1. **Shipped-table adapter and source selection** — pin modules, `src/platform.rs`, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
 2. **Secure archive extractor (own PR, before activation)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar.
-3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/fsroot.rs`, the descriptor-relative root helper (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `blanket-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
+3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It also owns `src/fsroot.rs`, the descriptor-relative root helper (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `blanket-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
 4. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
 5. **Activation and update** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: update, two-store replay including the dropped-`release` upgrade replay, no-pin creation, stale/frozen refusal (with `frozen_validation_failure_precedes_all_writes` and the Gemfile-marker regression), added-higher-precedence-source staleness, unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff.
 
