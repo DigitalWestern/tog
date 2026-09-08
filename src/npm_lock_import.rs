@@ -2475,6 +2475,50 @@ mod tests {
              every project in the workspace"
         );
     }
+
+    #[test]
+    fn a_quote_opens_a_scalar_only_where_a_scalar_can_begin() {
+        assert_eq!(
+            split_key_value("packages/it's: {}"),
+            Some(("packages/it's".to_string(), "{}".to_string())),
+            "an apostrophe mid-token is an ordinary character"
+        );
+        assert_eq!(
+            split_key_value("'packages/a #c': {}"),
+            Some(("packages/a #c".to_string(), "{}".to_string())),
+            "a quote at the very start does open a quoted scalar"
+        );
+        assert_eq!(
+            split_key_value("key: {'a: b': 1, 'c': 2}"),
+            Some(("key".to_string(), "{'a: b': 1, 'c': 2}".to_string())),
+            "a quote after an opening brace or a comma opens a scalar, so the \
+             colon inside it must not split the line"
+        );
+        assert_eq!(
+            split_key_value("key: [{'x: y': 1}, 'z']"),
+            Some(("key".to_string(), "[{'x: y': 1}, 'z']".to_string())),
+            "nested flow collections keep the same rule"
+        );
+        assert_eq!(
+            split_key_value("a:b: value"),
+            Some(("a:b".to_string(), "value".to_string())),
+            "a colon not followed by whitespace is part of the key and starts \
+             a new scalar position"
+        );
+        assert_eq!(
+            split_key_value("a:'b': value"),
+            Some(("a:'b'".to_string(), "value".to_string())),
+            "a quote right after a non-splitting colon opens a scalar, so the \
+             quoted run is skipped rather than scanned for a separator"
+        );
+        assert_eq!(
+            split_key_value("{a: 1}'b': c"),
+            Some(("{a: 1}'b'".to_string(), "c".to_string())),
+            "a closing bracket ends the scalar position, so a quote directly \
+             after it is an ordinary character"
+        );
+        assert_eq!(split_key_value("no separator here"), None);
+    }
     use super::*;
     use std::fs;
     use std::path::PathBuf;

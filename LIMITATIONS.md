@@ -42,18 +42,32 @@ say what breaks, for whom, and how it fails (loud/silent).
   and blanket cannot tell it apart from a directory the workspace deliberately
   excludes.** `add`/`remove`/`update` therefore **refuse, loudly**, naming the
   workspace root and both remedies — run `pnpm install` at the root if it is a
-  member, or give the project its own lockfile if it is not. Blanket does not
+  member, or put a `.blanket` directory in the project to declare it its own
+  root if it is not. Blanket does not
   fall back to npm there, because doing so would write a stray
   `package-lock.json` inside a pnpm workspace and then keep finding it. A
   lockfile that does not parse is the same refusal, because membership cannot
-  be determined without it. Other ancestor locks are boundaries. Mixed-root edits are
-  refused before delegation and name both roots. A Corepack
+  be determined without it. Other ancestor locks are boundaries. Mixed-root
+  edits are refused before delegation and name both roots. A Corepack
   `+<algo>.<hex>` suffix is verified against the realized pnpm package
   tarball in the verified artifact cache; `sha224`, `sha256` and `sha512`
   are supported and any other algorithm is refused by name. **Only a subset
   of the pnpm workspace glob grammar is matched:** none of it. blanket has no
   glob matcher for pnpm workspaces, so no pattern grammar can be
-  misinterpreted and no pattern can be silently treated as a non-match. Delegates are resolved through the
+  misinterpreted and no pattern can be silently treated as a non-match.
+  Workspace membership is read from `pnpm-lock.yaml`'s `importers` list
+  instead, and whether an ancestor is a workspace at all is read from that
+  same list — `pnpm-workspace.yaml` existing does not mean a workspace,
+  because since pnpm 10 that file is also the project-level settings file
+  `pnpm config set --location=project` writes in a single-package
+  repository. Two consequences follow. A project the lock does not list is
+  ambiguous — a member added since the last install, or one a `!` pattern
+  deliberately excludes — so blanket refuses rather than guess, and a
+  `.blanket` directory in the project is how it declares itself its own
+  root. And a workspace whose members have never been installed has a lock
+  listing only `.`, which reads as a single-package repository, so a
+  subdirectory project there gets its own `package-lock.json`; running
+  `pnpm install` once resolves it. Delegates are resolved through the
   store's cached `x` environments under `~/.blanket/x/`; pnpm runs with an
   isolated HOME and XDG root in a per-run `<store>/tmp/stage-*` directory
   that is removed when the edit returns (a leftover from a killed run is

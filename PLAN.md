@@ -242,14 +242,18 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm edits implemented, reviewed through round 6, PR open, Mac gate outstanding; Yarn classic/Berry remain refusal; Poetry/PDM open)
+### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm edits implemented, reviewed through round 9 with round-9 fixes themselves unreviewed, PR open, Mac gate outstanding; Yarn classic/Berry remain refusal; Poetry/PDM open)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
 - Python editable installs (`-e .` / the project itself) as a declared
   mutable overlay; dev/optional dependency groups installable by flag.
 - `blanket add/remove/update` for pnpm projects (branch wp4/deps-pnpm-yarn,
-  5 review rounds; Mac gate outstanding). Yarn
+  9 review rounds, the round-9 fixes themselves unreviewed; Mac gate
+  outstanding). Workspace membership comes from `pnpm-lock.yaml`'s
+  `importers` list and nothing else; `pnpm-workspace.yaml` is never read,
+  because since pnpm 10 it is also the settings file of a repository that has
+  no workspace. Yarn
   classic remains a refusal because it has no lockfile-only edit mode and a
   workspace-faithful scratch edit is future work; Poetry and PDM remain
   separate follow-up work (they still refuse with instructions; see
@@ -341,4 +345,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-07 | WP4 pnpm dependency edits (branch wp4/deps-pnpm-yarn): `blanket add/remove/update` delegate to the store pnpm at the exact `packageManager` release (Corepack `+sha224/sha256/sha512` suffix verified by algorithm, other algorithms refused by name), select the lock by positively matched `pnpm-workspace.yaml` globs (unsupported glob shapes refused; ancestor npm/Yarn locks and unmatched pnpm roots are boundaries; mixed roots rejected before delegation), and run `--lockfile-only` with pnpm's modules state (`enable-modules-dir=false`, `modules-dir`, `virtual-store-dir`) redirected into a per-run store stage so an installed project's `node_modules` is neither read nor written; the `npm_config_` scrub is case-insensitive; lifecycle scripts are off for every verb. Yarn classic and Berry remain refusals with the conversion command; Poetry/PDM open. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES), round 5 a supervising-agent recheck of the round-4 fixes (not independent). Mac gate (the four pnpm `deps_e2e` round trips) outstanding. |
+| 2026-09-07 | WP4 pnpm dependency edits (branch wp4/deps-pnpm-yarn): `blanket add/remove/update` delegate to the store pnpm at the exact `packageManager` release (Corepack `+sha224/sha256/sha512` suffix verified by algorithm, other algorithms refused by name), select the lock from `pnpm-lock.yaml`'s `importers` list alone, never from `pnpm-workspace.yaml` (which since pnpm 10 is also a non-workspace repository's settings file); a project the lock does not list inside a real workspace is refused rather than guessed, ancestor npm/Yarn locks are boundaries, and mixed roots are rejected before delegation, and run `--lockfile-only` with pnpm's modules state (`enable-modules-dir=false`, `modules-dir`, `virtual-store-dir`) redirected into a per-run store stage so an installed project's `node_modules` is neither read nor written; the `npm_config_` scrub is case-insensitive; lifecycle scripts are off for every verb. Yarn classic and Berry remain refusals with the conversion command; Poetry/PDM open. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES), round 5 a supervising-agent recheck of the round-4 fixes (not independent). Mac gate (the four pnpm `deps_e2e` round trips) outstanding. |

@@ -510,3 +510,38 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         text(&out.stderr)
     );
 }
+
+/// The refusal is user-facing behaviour, not just a value the selector
+/// returns: `add` must stop before realizing anything and name both remedies.
+#[test]
+fn add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline() {
+    let home = TempDir::new("pnpm-unlisted");
+    let workspace = home.0.join("ws");
+    let project = workspace.join("packages/added-since-install");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        workspace.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/listed: {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("package.json"), "{\"name\":\"demo\"}\n").unwrap();
+
+    let out = blanket(&project, &home.0, &["add", "--no-sync", "is-number@7.0.0"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("does not list it as an importer"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pnpm install"), "{stderr}");
+    assert!(stderr.contains(".blanket directory"), "{stderr}");
+    assert!(
+        !project.join("package-lock.json").exists(),
+        "the refusal must not leave a stray npm lockfile behind"
+    );
+}
