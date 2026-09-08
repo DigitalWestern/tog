@@ -30,8 +30,10 @@ say what breaks, for whom, and how it fails (loud/silent).
   retrieval, the one hardened publication rule shared by both lock writers,
   the unconditional descriptor-relative pre-publication compare, the reusable
   pre-materialization extractor, the source matrix, per-platform BEAM rows,
-  the `--frozen` write boundary, and store-root-scoped bundle-complete `x/3`
-  keys in ARCHITECTURE.md are not implementation guarantees yet. In particular,
+  the `--frozen` write boundary, the value-based input staleness rule, the
+  descriptor-relative root helper (`src/fsroot.rs`, not yet written), and
+  store-root-scoped bundle-complete `x/3` keys in ARCHITECTURE.md are not
+  implementation guarantees yet. In particular,
   the generic fetch helper still accepts `file://` for mirrors and tests
   (`src/fetch.rs:319-380`); the dormant lock cannot authorize that path.
   Implementation remains open.

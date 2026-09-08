@@ -483,11 +483,24 @@ The schema is versioned and intentionally boring:
   canonical parsed request the selector used, and `sha256` is the digest of
   that source file's whole bytes as read through the held root descriptor —
   the same whole-file digest `status` already computes for recorded inputs
-  (`sha256_file`, `src/inspect.rs:332-334`), so `changed_inputs`
-  (`src/inspect.rs:337-352`) compares it directly with no second
-  canonicalization. A matching digest proves the file is untouched and skips
-  re-parsing; a differing digest forces a re-parse, and only a changed `value`
-  is stale, so a comment or whitespace edit never fails a sync.
+  (`sha256_file`, `src/inspect.rs:332-334`). **The digest is a fast path, never
+  a verdict: an input row is stale only when re-parsing `path` yields a `value`
+  different from the recorded one, and that one rule decides staleness in
+  ordinary sync, under `--frozen`, and in `status` alike.** A matching digest
+  proves the file is untouched and lets all three skip the re-parse; a
+  differing digest forces the re-parse and nothing else, so a comment, a
+  whitespace edit, or a `blanket add` that delegates a rewrite of
+  `pyproject.toml`, `package.json`, or `go.mod` to uv, npm, or go leaves the
+  lock fresh — the `field` key exists precisely because those sources are
+  multi-purpose. An input file that is gone or no longer parses is stale:
+  there is no `value` to compare. `changed_inputs` (`src/inspect.rs:337-352`)
+  therefore cannot be reused verbatim — it reports "changed" on digest
+  inequality alone and knows nothing about `field` or `value` — so the lock
+  needs a value-aware sibling that re-parses on a digest mismatch instead. The
+  alternative, digesting only the extracted field for multi-purpose manifests,
+  is rejected: it re-encodes `value`, which the row already records in
+  readable form, and it buries a per-ecosystem extraction rule inside the
+  digest definition instead of one `sha256_file` call for every source.
   Provider-native hashes are evidence only; Blanket's own verified artifact
   digest is mandatory.
 
@@ -584,6 +597,18 @@ set comes from manifest discovery. To close TOCTOU, open the project root once
 and every input descriptor-relative beneath that held descriptor with
 `O_NOFOLLOW` at every component; a symlinked input or ancestor is an error.
 
+None of that plumbing exists today: `grep -rn "openat\|O_NOFOLLOW\|renameat\|custom_flags" src/`
+returns nothing, the tree is path-based `fs::*` plus `symlink_metadata`, and
+the only nofollow syscall is `utimensat`'s `AT_SYMLINK_NOFOLLOW`
+(`src/gitsrc.rs:1106-1110`); `libc` is already a dependency (`Cargo.toml:15`).
+So this section's descriptor-relative helper — hold a root descriptor, walk
+each component with `openat`/`O_NOFOLLOW`, create with `O_EXCL`, rename with
+`renameat` — gets a module of its own, `src/fsroot.rs`, owned by PR 3 below
+exactly as `src/archive.rs` is owned by PR 2, with the refusal tests named
+there. (The WP1 `wp1/fmt-rust` branch's descriptor-anchored closure
+publication is the model; it is not on main.) `fs::read`/`fs::write`/
+`fs::rename` do not satisfy anything in this section.
+
 The retained snapshot includes `blanket-toolchain.toml`: its held descriptor,
 identity metadata (including inode), and bytes, alongside source descriptors.
 Ordinary sync opens the lock through the held project root and keeps the
@@ -601,10 +626,19 @@ no lock, and `blanket update --toolchain` — and both publish by ONE rule, with
 no weaker path for the first write: create the temp file descriptor-relative
 in the held project-root directory with `O_EXCL` and `O_NOFOLLOW`, write and
 flush it, then rename it descriptor-relative and without following symlinks
-over `blanket-toolchain.toml`, mirroring closure publication. A repository
-that ships a symlink (or any file) at the predictable temp name therefore
-fails the create loudly instead of being written through, in a fresh clone's
-very first sync as much as in an update.
+over `blanket-toolchain.toml`, mirroring closure publication. The temp name is
+unique to this process and write — `.blanket-toolchain.toml.<pid>.<seq>.tmp`,
+the pid-plus-sequence shape the store's root registry
+(`src/store.rs:69`) and download temps (`src/fetch.rs:360-366`) already use —
+not a fixed one. `O_EXCL` and `O_NOFOLLOW` keep their whole benefit: a symlink
+or any other file at a name only this process chose still fails the create
+loudly instead of being written through, in a fresh clone's very first sync as
+much as in an update. Uniqueness only removes the wedge: a leftover from a
+`SIGKILL`ed or out-of-disk publication, or a committed file called
+`.blanket-toolchain.toml.tmp`, can no longer collide with the next attempt.
+A leftover temp is inert — never read, never an input, never a lock, and never
+consulted for staleness; it is garbage the user (or a `.gitignore` rule) may
+delete at any time.
 
 After dependency planning, on EVERY sync (including an existing-lock sync),
 reopen the source inputs through the held root descriptor with `O_NOFOLLOW` and
@@ -613,8 +647,11 @@ projection; a change aborts and leaves lock, closure, and projection untouched.
 
 --frozen never modifies project inputs, blanket-toolchain.toml, or the catalog
 cache; it may realize store objects and write the projection after validation
-succeeds; validation failure exits before any write. CLI.md repeats that
-sentence verbatim, and the regression proving it is
+succeeds; validation failure exits before any write. That sentence is
+byte-identical in exactly two places — here and in CLI.md's "Planned (WP2
+design ...)" section; CLI.md's literal help screen carries only the one-line
+`(planned)` marker its other verbs use, because that block is the spec for
+what `blanket --help` prints. The regression proving the boundary is
 `tests/toolchain_lock.rs::frozen_validation_failure_precedes_all_writes`.
 Frozen validation uses SANDBOXED evaluation only: network denied, project
 read-only, and scratch-only writes; it never evaluates project code
@@ -648,9 +685,15 @@ as a cache hit; different candidates leave the existing file, discard the
 loser, and fail naming both selections, inputs, and `blanket update
 --toolchain`. Ordinary sync creates a lock when there is none but never
 rewrites one; only `blanket update --toolchain` replaces an existing lock.
+That rule is per file, and the per-ecosystem case follows from it: a lock with
+no section for an ecosystem newly present in the project — `[toolchain.python]`
+committed, then a `package.json` appears — is stale, not absent, so ordinary
+sync refuses and names `blanket update --toolchain`, which adds the section.
 
-`blanket update --toolchain` updates all present ecosystems, or only the named
-one; it is separate from dependency update and cannot take package names. It
+`blanket update --toolchain` updates every ecosystem present in the project —
+present as source discovery finds it, not as the lock's existing sections list
+it, which is how a newly added ecosystem gains one — or only the named one; it
+is separate from dependency update and cannot take package names. It
 re-reads sources, chooses the globally selected newest compatible stable/LTS
 release described below, verifies every platform row, writes one lock
 atomically, then runs ordinary sync; it never updates a dependency lock.
@@ -770,9 +813,13 @@ and runtime ids.
 The lock digest, bundle id, runtime id, and dependency plan are written before
 projection; unchanged rows resolve the old object, while any bundle-component
 change through `update --toolchain` creates a new lock and forces a fresh
-native plan and closure. `status` compares the committed lock digest and
-normalized toolchain inputs and reports `toolchain lock stale/missing`
-(`src/inspect.rs:336-373`, `src/inspect.rs:480-572`).
+native plan and closure. `status` compares the committed lock digest and then,
+for every input row whose recorded `sha256` no longer matches, re-parses that
+file and compares the parsed `value` — the one staleness rule above, so a
+digest mismatch alone never reports stale — before reporting `toolchain lock
+stale/missing` (`src/inspect.rs:336-373`, `src/inspect.rs:480-572`). Without
+that re-parse `status` would exit 1 after every `blanket add` that rewrites a
+multi-purpose manifest, breaking its documented CI gate.
 
 ### Identity, migration, and GC
 
@@ -828,14 +875,17 @@ locks need, and an unrelated refresh cannot alter an Identity or a lock.
 Acceptance is: different catalog snapshots replay the same lock in two stores;
 a no-pin project writes it on writable sync and refuses under `--frozen`; exact
 selection, asymmetric-catalog, byte-identical BEAM, Linux-to-Mac, and catalog
-`file://`/foreign-host/hash/link rejection fixtures all pass. ACTIVATION stays
+`file://`/foreign-host/hash/link rejection fixtures all pass; and the
+project-side `src/fsroot.rs` refusals all fail closed — a symlinked
+`blanket-toolchain.toml`, a symlinked input file, a symlinked ancestor
+directory of either, and an occupied temp name. ACTIVATION stays
 dormant until selection sources and runtime propagation land: the feature is
 off, and the lock is neither written nor required.
 
 0. **Exact selection fixes (open now as two PRs, not one)** — #21 `wp2/python-exact-selection` (`src/pyselect.rs`, `src/python.rs`) and #22 `wp2/go-selected-version` (`src/golang.rs`), each with its own unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
 1. **Shipped-table adapter and source selection** — pin modules, `src/platform.rs`, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
 2. **Secure archive extractor (own PR, before activation)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar.
-3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes and the concurrent writer/reader lock. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
+3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes and the concurrent writer/reader lock. This PR also owns `src/fsroot.rs`, the descriptor-relative root helper (`openat`/`O_NOFOLLOW` walk, `O_EXCL` unique-name temp create, `renameat` publication), with unit tests that refuse a symlinked `blanket-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
 4. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
 5. **Activation and update** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: update, two-store replay, no-pin creation, stale/frozen refusal (with `frozen_validation_failure_precedes_all_writes`), unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff.
 

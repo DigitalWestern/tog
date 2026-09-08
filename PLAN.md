@@ -154,21 +154,27 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 5; IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REWORKED ROUND 6; IMPLEMENTATION OPEN
 
-Status: the design is reworked in ARCHITECTURE.md after the fifth adversarial
+Status: the design is reworked in ARCHITECTURE.md after the sixth adversarial
 review; implementation is open and follows its ordered PRs, of which item 0 is
 already open as PRs #21 (`wp2/python-exact-selection`) and #22
-(`wp2/go-selected-version`). The design now gives both lock writers one
-hardened publication rule, keeps the store root in the `x/3` key, makes
-artifact digests algorithm-qualified so the existing sha512 rows are carried
-over, keeps explicit CPython prefixes as a supported `.python-version`
-spelling, defines the input digest as the source file's own content hash,
-requires an unconditional descriptor-relative lock snapshot compare, separates
-bundle ids from component versions, defines the frozen-write boundary, and
-assigns extractor and legacy-seeding tests. Lock activation is dormant until
-source selection and runtime propagation land, so intermediate PRs neither
-write nor require a toolchain lock.
+(`wp2/go-selected-version`). Round 6 adds one staleness rule for input rows —
+only a re-parsed `value` decides, a digest mismatch alone never does, in sync,
+`--frozen`, and `status` alike, so `blanket add` rewriting a multi-purpose
+manifest cannot wedge the lock — gives the descriptor-relative root helper a
+module (`src/fsroot.rs`) and named refusal tests in PR 3 and acceptance, makes
+the publication temp name pid-plus-sequence unique, defines the polyglot case
+(a lock missing a newly present ecosystem is stale, and `update --toolchain`
+adds it), and moves the `--frozen` write-boundary prose out of CLI.md's literal
+help screen. The design already gave both lock writers one hardened publication
+rule, kept the store root in the `x/3` key, made artifact digests
+algorithm-qualified so the existing sha512 rows are carried over, kept explicit
+CPython prefixes as a supported `.python-version` spelling, required an
+unconditional descriptor-relative lock snapshot compare, separated bundle ids
+from component versions, and assigned extractor and legacy-seeding tests. Lock
+activation is dormant until source selection and runtime propagation land, so
+intermediate PRs neither write nor require a toolchain lock.
 
 The design is documented before implementation; changes to the contract update
 ARCHITECTURE.md in the same PR as the affected implementation.
@@ -355,3 +361,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-06 | WP2 design reworked round 3: release-bundle catalog authority, pre-materialization extractor requirements, lock-file race protection, exact Go `toolchain` semantics, corrected setup.py argv, and activation-ordered acceptance tests are now explicit. |
 | 2026-09-07 | WP2 design reworked round 4: unconditional descriptor-relative lock comparison, bundle id/component-version separation with recipe-revision tie-breaking, bundle-complete `x/3` keys, supported Python request grammar, the frozen-write boundary, and assigned extractor/legacy-seeding tests are now explicit. |
 | 2026-09-07 | WP2 design reworked round 5: one hardened publication rule for both lock writers, store root kept in the `x/3` key, algorithm-qualified artifact digests carrying the existing sha512 rows, explicit CPython `.python-version` prefixes kept supported, input digests redefined as source-file content hashes, and channel dropped from the ordering key; exact-selection work recorded as open PRs #21/#22. |
+| 2026-09-07 | WP2 design reworked round 6: one value-based staleness rule for input rows (a digest mismatch alone is never stale, in sync, `--frozen`, and `status` alike), the descriptor-relative root helper given a module (`src/fsroot.rs`) and named refusal tests in PR 3 and acceptance, pid-plus-sequence unique publication temp names, the polyglot missing-section case defined as stale, and the `--frozen` write-boundary prose moved out of CLI.md's literal help screen. |

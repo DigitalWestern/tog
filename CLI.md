@@ -25,10 +25,7 @@ USAGE:
 
 EVERYDAY:
   sync       realize and project the environment(s) from the project's inputs
-             (planned) --frozen never modifies project inputs,
-             blanket-toolchain.toml, or the catalog cache; it may realize
-             store objects and write the projection after validation
-             succeeds; validation failure exits before any write.
+             (planned: --frozen validates the toolchain lock, never writes it)
   add        add a dependency, re-lock, sync
   remove     remove a dependency, re-lock, sync
   update     update dependencies within the manifest's constraints, sync
