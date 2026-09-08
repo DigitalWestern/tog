@@ -1320,7 +1320,7 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
         if !key.is_empty() {
             key.push('/');
         }
-        key.push_str(part);
+        key.push_str(&part.replace('\\', "/"));
     }
     if key.is_empty() {
         key.push('.');
@@ -1330,8 +1330,9 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
         .map_err(|error| other(format!("read {}: {error}", lock_path.display())))?;
     let importers = crate::npm_lock_import::pnpm_lock_importers(&text).map_err(|error| {
         other(format!(
-            "{}: {error}; blanket reads workspace membership from this file, so it must parse. If it has an unresolved merge conflict, run 'pnpm install' to let pnpm merge it, then run blanket again",
-            lock_path.display()
+            "{}: {error}; blanket reads workspace membership from this file, so it must parse. If it is the result of an unresolved merge conflict, resolve the conflict or delete the file and run 'pnpm install' in {} to regenerate it, then run blanket again",
+            lock_path.display(),
+            root.display()
         ))
     })?;
     Ok(importers.iter().any(|importer| importer == &key))
@@ -1339,14 +1340,34 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
 
 /// Select the lockfile to edit. A lockfile in the project itself wins in the
 /// same order as sync. Only a pnpm workspace root may be inherited, and only
-/// when its positive package globs contain the project and no negative glob
-/// excludes it. Any other ancestor lock is a boundary.
+/// when that root's `pnpm-lock.yaml` lists the project among its importers.
+/// Any other ancestor lock is a boundary. When the root is a pnpm workspace
+/// but does not list the project, `unlisted_under_pnpm_root` names the root:
+/// blanket cannot tell a member added since the last install from a project
+/// the workspace deliberately excludes, and callers that would write a
+/// lockfile must refuse rather than guess.
+struct NodeLock {
+    name: String,
+    root: PathBuf,
+    unlisted_under_pnpm_root: Option<PathBuf>,
+}
+
 fn node_lock_selection(project: &Path) -> io::Result<(String, PathBuf)> {
+    let selection = node_lock_for(project)?;
+    Ok((selection.name, selection.root))
+}
+
+fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
+    let own = |name: &str| NodeLock {
+        name: name.to_string(),
+        root: project.to_path_buf(),
+        unlisted_under_pnpm_root: None,
+    };
     if let Some(lock_name) = node_lock_at(project) {
-        return Ok((lock_name.to_string(), project.to_path_buf()));
+        return Ok(own(lock_name));
     }
     if project.join(".blanket").is_dir() {
-        return Ok(("package-lock.json".to_string(), project.to_path_buf()));
+        return Ok(own("package-lock.json"));
     }
     for ancestor in project.ancestors().skip(1) {
         if let Some(lock_name) = node_lock_at(ancestor) {
@@ -1354,15 +1375,23 @@ fn node_lock_selection(project: &Path) -> io::Result<(String, PathBuf)> {
                 break;
             }
             if pnpm_workspace_contains(ancestor, project)? {
-                return Ok((lock_name.to_string(), ancestor.to_path_buf()));
+                return Ok(NodeLock {
+                    name: lock_name.to_string(),
+                    root: ancestor.to_path_buf(),
+                    unlisted_under_pnpm_root: None,
+                });
             }
-            break;
+            return Ok(NodeLock {
+                name: "package-lock.json".to_string(),
+                root: project.to_path_buf(),
+                unlisted_under_pnpm_root: Some(ancestor.to_path_buf()),
+            });
         }
         if ancestor.join(".blanket").is_dir() {
             break;
         }
     }
-    Ok(("package-lock.json".to_string(), project.to_path_buf()))
+    Ok(own("package-lock.json"))
 }
 
 fn is_yarn_berry(root: &Path) -> bool {
@@ -1551,7 +1580,17 @@ fn node(
     dev: bool,
 ) -> io::Result<NodeEdit> {
     validate_delegate_specs(texts)?;
-    let (lock_name, lock_root) = node_lock_selection(project)?;
+    let selection = node_lock_for(project)?;
+    let (lock_name, lock_root) = (selection.name, selection.root);
+    if let Some(workspace_root) = selection.unlisted_under_pnpm_root {
+        return Err(other(format!(
+            "{} sits under the pnpm workspace {} but {} does not list it as an importer, so blanket cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run blanket again. If it is deliberately outside the workspace, give it its own lockfile. Blanket refuses rather than write a package-lock.json inside a pnpm workspace",
+            project.display(),
+            workspace_root.display(),
+            workspace_root.join("pnpm-lock.yaml").display(),
+            workspace_root.display()
+        )));
+    }
     if lock_name == "package-lock.json" {
         let node_obj = npm::ensure_node_for(store, platform)?;
         let mut command = Command::new(node_obj.join("bin/npm"));
@@ -2282,6 +2321,59 @@ mod tests {
     }
 
     #[test]
+    fn a_backslash_in_a_directory_name_takes_pnpms_own_slash_importer_key() {
+        let root =
+            std::env::temp_dir().join(format!("blanket-pnpm-backslash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("packages").join("a\\b")).unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/a/b: {}\n",
+        )
+        .unwrap();
+        let member = root.join("packages").join("a\\b");
+        assert!(
+            pnpm_workspace_contains(&root, &member).unwrap(),
+            "pnpm 9.12.3 writes the importer key packages/a/b for the on-disk \
+             directory packages/a\\b, so blanket must normalise the same way"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_project_the_workspace_lock_does_not_list_refuses_instead_of_selecting_npm() {
+        let root =
+            std::env::temp_dir().join(format!("blanket-pnpm-unlisted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("packages/listed")).unwrap();
+        fs::create_dir_all(root.join("packages/added-since-install")).unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/listed: {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+
+        let listed = node_lock_for(&root.join("packages/listed")).unwrap();
+        assert_eq!(listed.name, "pnpm-lock.yaml");
+        assert_eq!(listed.root, root);
+        assert!(listed.unlisted_under_pnpm_root.is_none());
+
+        let unlisted = node_lock_for(&root.join("packages/added-since-install")).unwrap();
+        assert_eq!(
+            unlisted.unlisted_under_pnpm_root.as_deref(),
+            Some(root.as_path()),
+            "a member added since the last pnpm install must be reported, not \
+             silently handed to npm"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn node_lock_selection_prefers_own_lock_and_reads_workspace_membership_from_the_lock() {
         let root = std::env::temp_dir().join(format!(
             "blanket-node-lock-selection-{}",
@@ -2334,9 +2426,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A glob shape blanket cannot match must refuse, never fall through to
-    /// "not a member": falling through makes `add` write a stray
-    /// package-lock.json inside a pnpm workspace member.
     #[test]
     fn ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries() {
         let root = std::env::temp_dir().join(format!(

@@ -36,14 +36,17 @@ say what breaks, for whom, and how it fails (loud/silent).
   version is suggested. **Workspace membership is read from `pnpm-lock.yaml`'s
   `importers` list and nothing else.** pnpm wrote that list with its own glob
   engine, so it is exact, and blanket never parses `pnpm-workspace.yaml` or
-  matches a glob itself. The consequence to know: **a workspace member added
-  since the last `pnpm install` is not yet in the lock, so blanket does not
-  treat it as a member.** Run `pnpm install` once at the workspace root and
-  it is recognised. A lockfile that does not parse — an unresolved merge
-  conflict, most often — is a refusal naming that remedy, because membership
-  cannot be determined without it; pnpm can self-merge such a lockfile, so
-  running `pnpm install` resolves this case too. Other ancestor locks and
-  directories absent from `importers` are boundaries. Mixed-root edits are
+  matches a glob itself. A directory name containing a backslash takes the
+  same forward-slash key pnpm writes for it. The consequence to know: **a
+  workspace member added since the last `pnpm install` is not yet in the lock,
+  and blanket cannot tell it apart from a directory the workspace deliberately
+  excludes.** `add`/`remove`/`update` therefore **refuse, loudly**, naming the
+  workspace root and both remedies — run `pnpm install` at the root if it is a
+  member, or give the project its own lockfile if it is not. Blanket does not
+  fall back to npm there, because doing so would write a stray
+  `package-lock.json` inside a pnpm workspace and then keep finding it. A
+  lockfile that does not parse is the same refusal, because membership cannot
+  be determined without it. Other ancestor locks are boundaries. Mixed-root edits are
   refused before delegation and name both roots. A Corepack
   `+<algo>.<hex>` suffix is verified against the realized pnpm package
   tarball in the verified artifact cache; `sha224`, `sha256` and `sha512`

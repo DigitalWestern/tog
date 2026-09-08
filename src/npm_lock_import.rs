@@ -79,6 +79,7 @@ fn split_top_level(value: &str, separator: char) -> Vec<String> {
 fn split_key_value(value: &str) -> Option<(String, String)> {
     let mut depth = 0i32;
     let mut quote = None;
+    let mut at_scalar_start = true;
     let chars: Vec<char> = value.chars().collect();
     for (i, ch) in chars.iter().enumerate() {
         match quote {
@@ -91,16 +92,28 @@ fn split_key_value(value: &str) -> Option<(String, String)> {
             Some('"') if *ch == '"' => quote = None,
             Some(_) => {}
             None => match ch {
-                '\'' | '"' => quote = Some(*ch),
-                '[' | '{' | '(' => depth += 1,
-                ']' | '}' | ')' => depth -= 1,
+                '\'' | '"' if at_scalar_start => {
+                    quote = Some(*ch);
+                    at_scalar_start = false;
+                }
+                '[' | '{' | '(' => {
+                    depth += 1;
+                    at_scalar_start = true;
+                }
+                ']' | '}' | ')' => {
+                    depth -= 1;
+                    at_scalar_start = false;
+                }
+                ',' => at_scalar_start = true,
                 ':' if depth == 0 && (i + 1 == chars.len() || chars[i + 1].is_whitespace()) => {
                     return Some((
                         yaml_unquote(&chars[..i].iter().collect::<String>()),
                         chars[i + 1..].iter().collect::<String>().trim().to_string(),
                     ));
                 }
-                _ => {}
+                ':' => at_scalar_start = true,
+                c if c.is_whitespace() => {}
+                _ => at_scalar_start = false,
             },
         }
     }
@@ -317,11 +330,6 @@ fn yaml_list(value: Option<&YamlValue>) -> Vec<String> {
     }
 }
 
-/// Read the package globs from a pnpm workspace file. The dependency-free
-/// YAML parser used for lock imports also handles this small machine-written
-/// configuration shape, so workspace membership uses the same syntax rules
-/// as the imported lockfile instead of a line-oriented approximation.
-/// Every importer `pnpm-lock.yaml` enumerates, as paths relative to the lock
 /// Every importer `pnpm-lock.yaml` enumerates, as paths relative to the lock
 /// root (`.` is the root itself).
 ///
@@ -2451,6 +2459,22 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_quote_inside_a_plain_key_does_not_open_a_quoted_scalar() {
+        let lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/it's: {}\n  packages/plain: {}\n";
+        assert_eq!(
+            pnpm_lock_importers(lock).unwrap(),
+            vec![
+                ".".to_string(),
+                "packages/it's".to_string(),
+                "packages/plain".to_string()
+            ],
+            "pnpm writes packages/it's unquoted, so treating the apostrophe as \
+             the start of a quoted scalar rejects the whole lockfile and wedges \
+             every project in the workspace"
+        );
+    }
     use super::*;
     use std::fs;
     use std::path::PathBuf;
