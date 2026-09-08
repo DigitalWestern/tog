@@ -226,12 +226,14 @@ updating it, including its contained regular-file inputs and complete artifact
 rows for both supported platforms. --frozen never modifies project inputs,
 blanket-toolchain.toml, or the catalog cache; it may realize store objects and
 write the projection after validation succeeds; validation failure exits before
-any write. Frozen validation uses SANDBOXED evaluation only: network denied,
-project read-only, and scratch-only writes; where only an unsandboxed
-evaluator could answer, it refuses instead of falling back. Thus
-setup.py/mix.exs compatibility comes from safe parsing or that probe, and a
-Ruby version comes from .ruby-version or .tool-versions, never from evaluating
-the Gemfile. The setup `BuildSpec` uses
+any write. Frozen validation evaluates nothing at all: every ecosystem's
+reader is declarative-only, so where only an unsandboxed evaluator could
+answer, it refuses instead of falling back. setup.py-computed metadata and
+mix.exs compatibility are therefore not frozen sources, and a Ruby version
+comes from .ruby-version or .tool-versions, never from evaluating the Gemfile.
+The sandboxed probe below belongs to the ordinary planning path, where it runs
+with network denied, the project read-only, and scratch-only writes; its setup
+`BuildSpec` uses
 `argv = ["/bin/sh", "-c", "exec <build-env>/bin/python setup.py egg_info
 --egg-base <scratch>/egg-info ><scratch>/egg-info.log 2>&1"]`, with the
 project root as cwd and the build environment, CPython, and scratch as roots

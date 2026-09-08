@@ -763,9 +763,13 @@ users, and one more thing to remember to delete the day WP2 lands. Design work
 lives in the prose sections that say they are design work; the specs describe
 what ships. The regression proving the boundary is
 `tests/toolchain_lock.rs::frozen_validation_failure_precedes_all_writes`.
-Frozen validation uses SANDBOXED evaluation only: network denied, project
-read-only, and scratch-only writes. `setup.py`/`mix.exs` compatibility
-therefore comes from safe parsing or that probe. The setup `BuildSpec` argv is
+Frozen validation evaluates nothing at all: every reader below is
+declarative-only, so the sandboxed probe described here is a planning-path
+tool and never a validation one. `setup.py`-computed metadata and `mix.exs`
+compatibility are therefore not frozen sources, exactly as the Gemfile's
+`ruby` directive is not. Where the probe does run, on the ordinary planning
+path, it is sandboxed: network denied, project read-only, and scratch-only
+writes. The setup `BuildSpec` argv is
 `["/bin/sh", "-c", "exec <build-env>/bin/python setup.py egg_info --egg-base
 <scratch>/egg-info ><scratch>/egg-info.log 2>&1"]`, with the project root as
 cwd and the build environment, CPython, and scratch declared as its roots
@@ -773,8 +777,19 @@ cwd and the build environment, CPython, and scratch declared as its roots
 
 The guarantee is therefore stated as a rule about reachability, not as a list
 of functions not to call. **Treat every ecosystem's ordinary planning path as
-an unsandboxed evaluator of project code, and give frozen no way to reach any
-of them.** That is the only form of the rule that stays true: counting today's
+an unsandboxed evaluator of project code, and give frozen toolchain-lock
+validation no way to reach any of them.** The rule's scope is exactly the
+phase it names, and what happens on either side of that phase is stated here
+rather than left to inference. Validation reads its inputs, compares them to
+the lock, and decides; it plans no dependencies, and a validation failure
+exits before any evaluator runs at all. Once validation succeeds, `--frozen`
+continues into ordinary sync, where dependency planning still delegates to
+the native tools and those tools do evaluate project code: `plan_ruby`'s
+Gate 1 (`src/ruby.rs:582-596`) evaluates the Gemfile on every call, lock
+present or not. That is the delegated-resolver trust boundary this document
+already accepts for dependencies, and the toolchain lock's whole purpose is
+to stay off it — no toolchain version is ever learned from an evaluator.
+That is the only form of the rule that stays true: counting today's
 evaluators is the fragile version, and every count written so far has been
 wrong. Round 7 named Elixir's plan gate (`src/elixir.rs:1097-1110`) as the
 only one. Round 8 said two, adding Ruby — planning runs the store Ruby on a
@@ -788,7 +803,11 @@ neither sandbox nor network denial (`src/ruby.rs:311-317`,
 any `Directory.Build.props`/`.targets` it finds, including `<Exec>` tasks
 hooked to Restore. Ruby and Elixir each have a second such call site outside
 the ranges already cited (`src/ruby.rs:560`, `src/elixir.rs:1089`). The count
-is not the point and no count is recorded here.
+is not the point and no count is recorded here. Because the rule is about
+reachability rather than a catalogue, it also covers call sites that are not
+planning at all: `blanket add` and `blanket update` run the store tool in the
+project directory through `run_checked` (`src/ruby.rs:290-297`,
+`src/elixir.rs:896-904`), and frozen invokes neither verb.
 
 What frozen calls instead is named, owned, and tested like every other
 guarantee in this design. `src/toolchain_input.rs`, owned by PR 3 below
@@ -800,7 +819,15 @@ property a test can check directly and a call graph cannot quietly drift past.
 A Gemfile is a Ruby program — `ruby "3.3.4"` sits beside arbitrary code that
 runs to produce it — so Ruby's reader takes `.ruby-version` and the Ruby entry
 in `.tool-versions`, and frozen refuses rather than evaluate a Gemfile to
-learn a version. The end-to-end regression is a frozen run against a project
+learn a version. That treatment is uniform rather than a Ruby special case:
+Python's reader takes `.python-version` and a `requires-python` declared in
+`pyproject.toml`, and Elixir's takes the OTP and Elixir entries in
+`.tool-versions`. A project whose only statement of its version is computed —
+`setup.py` metadata, `mix.exs`, a Gemfile directive — fails frozen closed with
+a message naming the declarative file to add. No reader has an evaluating
+fallback, so there is no per-ecosystem exception to remember and the
+`path`/`field` rows every input requires are always real files and real
+fields. The end-to-end regression is a frozen run against a project
 whose Gemfile writes a marker file when evaluated: validation completes and
 the marker does not exist.
 
@@ -865,12 +892,12 @@ toolchains would need per-subproject sections and are not in this design.
 
 | ecosystem | native tools walk from | walk boundary | source precedence (blanket reads these from the lock root) | compatibility intersection and conflict |
 |---|---|---|---|---|
-| Python | cwd | parents through the uv project/workspace root; [uv documents this walk](https://docs.astral.sh/uv/reference/cli/) | `.python-version`, then `requires-python` / Poetry metadata | use the supported request grammar below; intersect with metadata; current code parses at `src/pyselect.rs:309-362` but reads one supplied directory at `src/pyselect.rs:368-404` |
+| Python | cwd | parents through the uv project/workspace root; [uv documents this walk](https://docs.astral.sh/uv/reference/cli/) | `.python-version`, then a `requires-python` declared in `pyproject.toml`, including Poetry's `tool.poetry.dependencies.python`; `setup.py`-computed metadata is deliberately not a source, because reading it means running a build hook | use the supported request grammar below; intersect with metadata; current code parses at `src/pyselect.rs:309-362` but reads one supplied directory at `src/pyselect.rs:368-404` |
 | Node | cwd | nearest package/workspace root | exact `.node-version`, then `engines.node` | intersect exact/range; empty intersection or conflicting same-level declarations is a hard error; current code only has platform rows (`src/npm.rs:114-146`) |
 | Cargo | cwd | Cargo workspace root | nearest `rust-toolchain`, then `rust-toolchain.toml`, then shipped default | channel, targets, and supported components must intersect the catalog; an unsupported or conflicting request is a hard error; current nearest-file walk is `src/cargo.rs:246-264` |
 | Go | module/project root | no workspace expansion; an ancestor `go.work` is refused | `go` is the minimum; non-`default` `toolchain goX.Y.Z` is exact; absent or `toolchain default` means newest compatible once | exact toolchain must be a catalog release and satisfy the minimum; otherwise fail closed; platform filtering is `go_pins` (`src/golang.rs:72-83`) and directive parsing is `src/golang.rs:243-269` |
 | Ruby | cwd | parents through the project root | exact `.ruby-version`, then a Ruby entry in `.tool-versions`; the Gemfile's `ruby` directive is deliberately not a source, because reading it means evaluating a Ruby program | intersect exact declarations; disagreement is a hard error; current code has only platform rows (`src/ruby.rs:47-67`) |
-| Elixir | cwd | parents through the Mix workspace root | exact `.tool-versions` OTP/Elixir, then `mix.exs` compatibility | intersect OTP/Elixir requirements and OTP-qualified Hex/rebar rows; empty intersection is a hard error; current plan checks `mix.exs`/`mix.lock` at `src/elixir.rs:1075-1110` and pins OTP at `src/elixir.rs:26-31` |
+| Elixir | cwd | parents through the Mix workspace root | exact `.tool-versions` OTP/Elixir; `mix.exs` compatibility is deliberately not a source, because reading it means evaluating an Elixir program | intersect OTP/Elixir requirements and OTP-qualified Hex/rebar rows; empty intersection is a hard error; current plan checks `mix.exs`/`mix.lock` at `src/elixir.rs:1075-1110` and pins OTP at `src/elixir.rs:26-31` |
 | .NET | project directory | inspect ancestors only to reject inherited SDK inputs | exact project `global.json` with `rollForward = "disable"` | no roll-forward or second source; a mismatch is a hard error; current ancestor rejection and exact gate are `src/dotnet.rs:542-593` |
 
 Python requests use a supported subset of uv's grammar: exact `X.Y.Z`, minor
@@ -1044,8 +1071,8 @@ selection, asymmetric-catalog, byte-identical BEAM, Linux-to-Mac, and
 `file://`/off-allowlist-host/hash/link rejection fixtures all pass; a source
 file appearing at a path recorded `absent` reports stale, and one appearing at
 a path with no row at all is impossible because every consulted path has a row;
-a frozen run against a project whose Gemfile writes a marker when evaluated
-completes with no marker, and every `src/toolchain_input.rs` reader spawns no
+frozen validation against a project whose Gemfile writes a marker when
+evaluated completes with no marker, and every `src/toolchain_input.rs` reader spawns no
 process; and the project-side `src/fsroot.rs` refusals all
 fail closed — a symlinked `blanket-toolchain.toml`, a symlinked input file, a
 symlinked ancestor directory of either, and an occupied temp name. ACTIVATION

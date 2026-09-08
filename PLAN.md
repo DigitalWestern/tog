@@ -154,9 +154,9 @@ Seatbelt, not bubblewrap. Run the acceptance above on the Mac cold and warm,
 plus `cargo test` and the `fmt` `--ignored` test. Darwin identity goldens
 must be unchanged.
 
-### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (8 rounds; round-8 owner decisions reviewed in round 9 and its findings fixed); IMPLEMENTATION OPEN
+### WP2 — Toolchain lock and exact version selection — DESIGN REVIEWED (10 rounds; round-10 findings fixed, those fixes themselves unreviewed); IMPLEMENTATION OPEN
 
-Status: the design is reworked in ARCHITECTURE.md after six adversarial
+Status: the design is reworked in ARCHITECTURE.md after ten adversarial
 review rounds; implementation is open and follows its ordered PRs, of which item 0 is
 already open as PRs #21 (`wp2/python-exact-selection`) and #22
 (`wp2/go-selected-version`). Round 6 adds one staleness rule for input rows —
@@ -198,8 +198,8 @@ without regressing old ids. (5) **The `(planned:)` markers are gone from CLI.md*
 — the help screen and grammar are specs for what ships, not a place to advertise
 unimplemented flags under a convention no other verb uses. (6) **The "never
 evaluates project code unsandboxed" claim is now structural rather than an
-Elixir-only blocklist**, which was incomplete: `src/ruby.rs:580` evaluates the
-Gemfile through an unsandboxed `Command` with network. Ruby's toolchain input
+Elixir-only blocklist**, which was incomplete: `src/ruby.rs:582-596` evaluates
+the Gemfile through an unsandboxed `Command` with network. Ruby's toolchain input
 comes from `.ruby-version`/`.tool-versions`, and frozen refuses rather than
 evaluate a Gemfile to learn a version.
 
@@ -215,6 +215,29 @@ correct the number, the guarantee is now a reachability rule that records no
 number at all — treat every planning path as unsandboxed — backed by a named
 module `src/toolchain_input.rs` with a PR owner and a per-ecosystem test that
 the reader spawns no process, mirroring how `src/fsroot.rs` is specified.
+
+Round 10 reviewed round 9. Its own citation audit re-opened every reference
+round 9 added or moved and found all of them accurate, including the `580` ->
+`582-596` correction. Its two blockers were in the new prose rather than the
+citations. First, the reachability rule had been promoted to an absolute claim
+about all of `--frozen`, but this document's own flow has a *passing* frozen
+run continue into ordinary sync and dependency planning, and `plan_ruby`'s
+Gate 1 evaluates the Gemfile on every call — so the rule contradicted the flow
+and the marker acceptance test was false as written. The rule is now scoped to
+frozen *toolchain-lock validation*, with what frozen does after validation
+stated plainly instead of left to inference: planning still delegates to the
+native tools, which do evaluate project code, and that is the delegated-resolver
+boundary the design already accepts for dependencies. Second, "the reader
+spawns no process at all" was unsatisfiable for two of the seven precedence
+rows, which still listed `setup.py`-computed metadata and `mix.exs`
+compatibility as sources. Every reader is now declarative-only, uniformly:
+Python reads `.python-version` and a `requires-python` declared in
+`pyproject.toml`, Elixir reads the `.tool-versions` OTP/Elixir entries, and a
+project whose only statement of its version is computed fails frozen closed
+with a message naming the declarative file to add. Round 10 also found three
+different round counts across this file and REVIEW.md, and a REVIEW.md Outcome
+cell claiming round 8 was never reviewed in the same row that records round 9
+reviewing it; both are corrected.
 
 The design already gave both lock writers one hardened publication rule, kept the store root in the `x/3` key, made artifact digests
 algorithm-qualified so the existing sha512 rows are carried over, kept explicit
@@ -403,4 +426,4 @@ exists for both engines; extend it rather than adding a new one).
 |---|---|
 | 2026-09-06 | PLAN.md created; ROADMAP.md retired; NEXT.md frozen as an index. Astra plan review: PROCEED-WITH-CHANGES, folded in above. Main at this commit has rustfmt applied and `cargo fmt --check` clean. |
 | 2026-09-06 | Platform rules added: Mac-before-merge gate per work package; WP0 restated against the last Mac-verified commit (dbf7ac4, 76 commits behind main); Windows explicitly out of scope. Local and origin main confirmed identical at 0268405. |
-| 2026-09-07 | WP2 design (branch wp2/toolchain-lock-design, docs-only): the toolchain lock is designed in ARCHITECTURE.md — release-bundle catalog authority with catalog-authorized HTTPS artifacts and algorithm-qualified digests, recipe identities and bundle ids separate from component versions, the source-discovery matrix and supported request grammars, global cross-platform selection, one hardened descriptor-relative publication rule for both lock writers with unique temp names, an unconditional lock snapshot compare, value-based input staleness (a digest mismatch alone is never stale) in sync, `--frozen` and `status` alike, the `--frozen` write boundary with sandbox-only probes, the polyglot missing-section rule, conservative legacy seeding, store-root-scoped bundle-complete `x/3` keys, the pre-materialization extractor and `src/fsroot.rs` with named refusal tests, and dormant activation behind ordered PRs (item 0 open as #21/#22). Round 8 applies the owner's product decisions: the shipped catalog leaves the reproducibility path (a lock is honored from its own version/URL/digest/recipe rows, with an append-only provider host allowlist and append-only recipe ids, so upgrading blanket cannot invalidate a committed lock), publication uses a `/dev/urandom` temp name with `fsync`-rename-`fsync` durability (pid-plus-sequence dropped; the false `src/store.rs:69` citation removed), staleness compares the whole consulted path list including absent rows under root-anchored discovery, `bundle_id` and canonical lock bytes are defined, CLI.md's invented `(planned:)` markers are gone, and the sandboxed-evaluation guarantee is structural rather than an Elixir-only blocklist that missed `src/ruby.rs:580`. Review: Codex Sol rounds 1–4 (REWORK), Claude Opus 5 subagent rounds 5–6 (MERGE-AFTER-FIXES), round 7 a supervising-agent recheck of the round-6 fixes (not independent), round 8 owner decisions applied by the supervising agent and not yet reviewed. Implementation open. |
+| 2026-09-07 | WP2 design (branch wp2/toolchain-lock-design, docs-only): the toolchain lock is designed in ARCHITECTURE.md — release-bundle catalog authority with catalog-authorized HTTPS artifacts and algorithm-qualified digests, recipe identities and bundle ids separate from component versions, the source-discovery matrix and supported request grammars, global cross-platform selection, one hardened descriptor-relative publication rule for both lock writers with unique temp names, an unconditional lock snapshot compare, value-based input staleness (a digest mismatch alone is never stale) in sync, `--frozen` and `status` alike, the `--frozen` write boundary with sandbox-only probes, the polyglot missing-section rule, conservative legacy seeding, store-root-scoped bundle-complete `x/3` keys, the pre-materialization extractor and `src/fsroot.rs` with named refusal tests, and dormant activation behind ordered PRs (item 0 open as #21/#22). Round 8 applies the owner's product decisions: the shipped catalog leaves the reproducibility path (a lock is honored from its own version/URL/digest/recipe rows, with an append-only provider host allowlist and append-only recipe ids, so upgrading blanket cannot invalidate a committed lock), publication uses a `/dev/urandom` temp name with `fsync`-rename-`fsync` durability (pid-plus-sequence dropped; the false `src/store.rs:69` citation removed), staleness compares the whole consulted path list including absent rows under root-anchored discovery, `bundle_id` and canonical lock bytes are defined, CLI.md's invented `(planned:)` markers are gone, and the sandboxed-evaluation guarantee is structural rather than an Elixir-only blocklist that missed the Ruby evaluator at `src/ruby.rs:582-596`. Review: Codex Sol rounds 1–4 (REWORK), Claude Opus 5 subagent rounds 5–6 (MERGE-AFTER-FIXES), round 7 a supervising-agent recheck of the round-6 fixes (not independent), round 8 owner decisions applied by the supervising agent and then reviewed in round 9, whose fixes round 10 reviewed in turn; round 10's fixes are the currently unreviewed layer. Implementation open. |
