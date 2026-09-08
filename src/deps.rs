@@ -21,8 +21,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
-
 use crate::platform::Platform;
 use crate::store::Store;
 use crate::{
@@ -1473,6 +1471,7 @@ fn node_delegate_args(
     texts: &[String],
     dev: bool,
     workspace_root: bool,
+    scratch: &PnpmScratch,
 ) -> Vec<String> {
     let mut args = vec![verb.command().to_string()];
     args.push("--lockfile-only".into());
@@ -1487,6 +1486,15 @@ fn node_delegate_args(
         args.push("--ignore-scripts".into());
     }
     args.extend(["--reporter", "append-only"].map(str::to_string));
+    // Keep pnpm's modules state out of the user's project (see
+    // `PnpmScratch`). `--config.<name>=<value>` is the spelling every verb's
+    // parser accepts; `remove` and `update` reject `--modules-dir` as a flag.
+    args.push("--config.enable-modules-dir=false".into());
+    args.push(format!("--config.modules-dir={}", scratch.modules_dir));
+    args.push(format!(
+        "--config.virtual-store-dir={}",
+        scratch.virtual_store_dir
+    ));
     if workspace_root {
         args.push("-w".into());
     }
@@ -1500,41 +1508,70 @@ fn node_delegate_args(
     args
 }
 
-/// pnpm's isolated HOME/XDG root for one project, stable across edits.
+/// Where pnpm keeps its modules state during an edit: a per-run stage
+/// under `<store>/tmp`, never the user's project.
 ///
-/// It has to be stable: even on the `--lockfile-only` path pnpm writes a
-/// `node_modules/.modules.yaml` recording the store directory it linked from,
-/// and the next edit refuses with `ERR_PNPM_UNEXPECTED_STORE` if that path
-/// has moved. The workspace round trip in tests/deps_e2e.rs is the proof —
-/// with a fresh directory per run, the second edit at a root that already has
-/// a `node_modules` fails. Deleting the directory between runs is safe, since
-/// it is re-created at the same path.
-///
-/// The `stage-` prefix is what makes it reclaimable: `gc::sweep_stages`
-/// removes `<store>/tmp/stage-*` older than its window, so this scratch is
-/// swept like any other. `touch_stage` keeps that window measured from the
-/// last edit, which also keeps gc from removing a directory mid-run.
-fn pnpm_home(store: &Store, project: &Path) -> io::Result<PathBuf> {
-    let project = project.canonicalize()?;
-    let key = hex::encode(Sha256::digest(
-        format!("pnpm-edit\0{}\0{}", store.root.display(), project.display()).as_bytes(),
-    ));
-    let home = store
-        .root
-        .join("tmp")
-        .join(format!("stage-pnpm-home-{}", &key[..32]));
-    fs::create_dir_all(&home)?;
-    touch_stage(&home);
-    Ok(home)
+/// Even with `--lockfile-only`, pnpm's modules directory is live: at a
+/// workspace root `add -w --lockfile-only` performs a full install, every
+/// verb reads `node_modules/.modules.yaml` and refuses with
+/// `ERR_PNPM_UNEXPECTED_STORE` when the store recorded there is not the one
+/// it is given, and the workspace path deletes `<virtual-store-dir>/lock.yaml`
+/// when the current lockfile is empty. Three settings, all honoured by
+/// `add`, `remove`, and `update` of pnpm 9.12.3 (verified against the real
+/// binary; `tests/deps_e2e.rs::pnpm_edits_leave_an_installed_project_untouched`
+/// keeps proving it), move all of that out of the project:
+/// `enable-modules-dir=false` links nothing, `modules-dir` decides where
+/// `.modules.yaml` is looked for, and `virtual-store-dir` decides where the
+/// current lockfile lives. pnpm joins both paths onto a project directory
+/// (`path.join`, so an absolute value would land inside the project), hence
+/// the relative spellings. Nothing is created at either path; the stage
+/// exists so the paths resolve somewhere blanket owns, and it is removed when
+/// the delegate returns (a leftover has the `stage-` name `gc::sweep_stages`
+/// reclaims).
+struct PnpmScratch {
+    /// `--config.modules-dir`, relative to the project pnpm runs in. pnpm
+    /// joins it onto every importer's own directory, so it is computed from
+    /// the deepest one (the project itself, at or below the lock root) and
+    /// escapes the project tree from every importer.
+    modules_dir: String,
+    /// `--config.virtual-store-dir`, relative to the lock root, which is what
+    /// pnpm resolves it against.
+    virtual_store_dir: String,
 }
 
-/// Bump a directory's mtime so gc's age window runs from this edit. std has
-/// no `set_mtime`; adding or removing an entry updates the directory's mtime
-/// on both Linux and macOS, and one of the two always happens here.
-fn touch_stage(dir: &Path) {
-    let marker = dir.join(format!(".blanket-live-{}", std::process::id()));
-    let _ = fs::write(&marker, b"");
-    let _ = fs::remove_file(&marker);
+fn pnpm_scratch(stage: &Path, project: &Path, lock_root: &Path) -> io::Result<PnpmScratch> {
+    let stage = stage.canonicalize()?;
+    let project = project.canonicalize()?;
+    let lock_root = lock_root.canonicalize()?;
+    let modules = stage.join("modules");
+    Ok(PnpmScratch {
+        modules_dir: relative_path(&project, &modules)
+            .to_string_lossy()
+            .into_owned(),
+        virtual_store_dir: relative_path(&lock_root, &modules.join(".pnpm"))
+            .to_string_lossy()
+            .into_owned(),
+    })
+}
+
+/// `to` expressed relative to the directory `from`; both must be absolute and
+/// free of `..` (canonical), so the answer is a lexical prefix strip.
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from
+        .iter()
+        .zip(to.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = PathBuf::new();
+    for _ in common..from.len() {
+        out.push("..");
+    }
+    for component in &to[common..] {
+        out.push(component);
+    }
+    out
 }
 
 struct NodeEdit {
@@ -1619,25 +1656,30 @@ fn node(
             manager.name()
         )));
     }
-    let args = node_delegate_args(
-        verb,
-        texts,
-        dev,
-        lock_name == "pnpm-lock.yaml"
-            && project == lock_root
-            && lock_root.join("pnpm-workspace.yaml").is_file(),
-    );
+    // One per-run stage holds pnpm's isolated HOME/XDG root (so pnpm never
+    // reads or writes the user's pnpm config, store or registry metadata
+    // cache) and the scratch its modules state is pointed at (see
+    // `PnpmScratch`). It is removed when the delegate returns; a leftover
+    // from a killed run carries the `stage-` name `blanket gc` sweeps.
+    let stage = store.stage()?;
     let package_path = project.join("package.json");
-    // An isolated HOME/XDG root, so pnpm never reads or writes the user's
-    // pnpm config, store or registry metadata cache. It is per project and
-    // stable (see `pnpm_home`) and named `stage-…`, so `blanket gc` reclaims
-    // it instead of letting pnpm's metadata cache grow unbounded.
-    let pnpm_home_dir = pnpm_home(store, project)?;
-    let pnpm_config = pnpm_home_dir.join("xdg-config");
-    let pnpm_data = pnpm_home_dir.join("xdg-data");
-    let pnpm_cache = pnpm_home_dir.join("xdg-cache");
-    let pnpm_state = pnpm_home_dir.join("xdg-state");
     let result = (|| -> io::Result<()> {
+        let scratch = pnpm_scratch(&stage, project, &lock_root)?;
+        let args = node_delegate_args(
+            verb,
+            texts,
+            dev,
+            lock_name == "pnpm-lock.yaml"
+                && project == lock_root
+                && lock_root.join("pnpm-workspace.yaml").is_file(),
+            &scratch,
+        );
+        let pnpm_home_dir = stage.join("home");
+        let pnpm_config = pnpm_home_dir.join("xdg-config");
+        let pnpm_data = pnpm_home_dir.join("xdg-data");
+        let pnpm_cache = pnpm_home_dir.join("xdg-cache");
+        let pnpm_state = pnpm_home_dir.join("xdg-state");
+        fs::create_dir_all(&pnpm_home_dir)?;
         let mut command = Command::new(&executable);
         command.args(&args).current_dir(project).env(
             "PATH",
@@ -1654,13 +1696,16 @@ fn node(
             .env("XDG_DATA_HOME", &pnpm_data)
             .env("XDG_CACHE_HOME", &pnpm_cache)
             .env("XDG_STATE_HOME", &pnpm_state);
-        // `npm_config_ignore_scripts` is set after the `npm_config_` strip, so
-        // it is blanket's value, not the user's. It is the only way to say
-        // "run no lifecycle script" to `pnpm remove`, whose parser rejects
-        // the `--ignore-scripts` flag; `add` and `update` carry the flag too.
+        // `npm_config_ignore_scripts` is set after the `npm_config_` strip
+        // (which `force_env` applies case-insensitively, the way npm and pnpm
+        // read `/^npm_config_/i`), so it is blanket's value, not the user's.
+        // It is the only way to say "run no lifecycle script" to
+        // `pnpm remove`, whose parser rejects the `--ignore-scripts` flag;
+        // `add` and `update` carry the flag too, and `--lockfile-only`
+        // itself forces `ignoreScripts` inside pnpm's install options.
         sandbox::force_env(
             &mut command,
-            &["npm_config_", "NPM_CONFIG_", "PNPM_", "YARN_", "COREPACK_"],
+            &["npm_config_", "PNPM_", "YARN_", "COREPACK_"],
             &["NODE_OPTIONS"],
             &[
                 ("CI".into(), "1".into()),
@@ -1670,6 +1715,7 @@ fn node(
         run_inherited(command, &format!("store {}", manager.name()))?;
         Ok(())
     })();
+    let _ = crate::store::remove_tree(&stage);
     result?;
     let package_label = package_path
         .strip_prefix(&lock_root)
@@ -2061,7 +2107,17 @@ mod tests {
 
     #[test]
     fn node_delegate_argv_is_delimited_and_workspace_aware() {
-        let args = node_delegate_args(Verb::Add, &["@scope/pkg@1.2.3".into()], true, true);
+        let scratch = PnpmScratch {
+            modules_dir: "../../store/tmp/stage-1/modules".into(),
+            virtual_store_dir: "../store/tmp/stage-1/modules/.pnpm".into(),
+        };
+        let args = node_delegate_args(
+            Verb::Add,
+            &["@scope/pkg@1.2.3".into()],
+            true,
+            true,
+            &scratch,
+        );
         assert_eq!(
             args,
             vec![
@@ -2070,6 +2126,9 @@ mod tests {
                 "--ignore-scripts",
                 "--reporter",
                 "append-only",
+                "--config.enable-modules-dir=false",
+                "--config.modules-dir=../../store/tmp/stage-1/modules",
+                "--config.virtual-store-dir=../store/tmp/stage-1/modules/.pnpm",
                 "-w",
                 "-D",
                 "--",
@@ -2082,8 +2141,17 @@ mod tests {
         // 'ignore-scripts'"), so `npm_config_ignore_scripts` in the delegate
         // environment is what stops its lifecycle scripts.
         for verb in [Verb::Add, Verb::Remove, Verb::Update] {
-            let args = node_delegate_args(verb, &[], false, false);
+            let args = node_delegate_args(verb, &[], false, false, &scratch);
             assert_eq!(args[0], verb.command());
+            // The modules-state redirection is on every verb: `remove` and
+            // `update` reject `--modules-dir` as a flag but take `--config.`.
+            assert!(args.contains(&"--config.enable-modules-dir=false".to_string()));
+            assert!(args
+                .iter()
+                .any(|arg| arg.starts_with("--config.modules-dir=")));
+            assert!(args
+                .iter()
+                .any(|arg| arg.starts_with("--config.virtual-store-dir=")));
             assert_eq!(
                 args.contains(&"--ignore-scripts".to_string()),
                 verb != Verb::Remove,
@@ -2093,40 +2161,80 @@ mod tests {
         assert!(validate_delegate_specs(&["--prefix=/tmp".into()]).is_err());
     }
 
-    /// pnpm's HOME/XDG root must be stable per project — pnpm records the
-    /// store it linked from in `node_modules/.modules.yaml` and refuses a
-    /// moved one with ERR_PNPM_UNEXPECTED_STORE — and it must be reclaimable:
-    /// `gc::sweep_stages` only removes `<store>/tmp/stage-*`.
+    /// Lexically resolve `base/relative` (`..` pops), the way pnpm's
+    /// `path.join` does, to check where a relative setting lands.
+    fn lexical_join(base: &Path, relative: &str) -> PathBuf {
+        let mut out = base.to_path_buf();
+        for component in Path::new(relative).components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::Normal(name) => out.push(name),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// pnpm joins `modules-dir` onto every importer's directory and
+    /// `virtual-store-dir` onto the lock root. From the project pnpm runs in
+    /// both land in blanket's stage; from any shallower importer the
+    /// modules dir still escapes the project tree, so no importer can be
+    /// pointed at a `.modules.yaml` inside the user's project.
     #[test]
-    fn pnpm_home_is_stable_per_project_and_named_for_the_gc_stage_sweep() {
-        let root = std::env::temp_dir().join(format!("blanket-pnpm-home-{}", std::process::id()));
+    fn pnpm_scratch_paths_escape_the_project_from_every_importer() {
+        let root =
+            std::env::temp_dir().join(format!("blanket-pnpm-scratch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("store/tmp")).unwrap();
-        let one = root.join("one");
-        let two = root.join("two");
-        fs::create_dir_all(&one).unwrap();
-        fs::create_dir_all(&two).unwrap();
-        let store = Store {
-            root: root.join("store").canonicalize().unwrap(),
-        };
-        let home = pnpm_home(&store, &one).unwrap();
-        assert_eq!(
-            home,
-            pnpm_home(&store, &one).unwrap(),
-            "pnpm's store path moved between two edits of the same project"
-        );
-        assert_ne!(home, pnpm_home(&store, &two).unwrap());
-        assert_eq!(home.parent().unwrap(), store.root.join("tmp"));
-        let name = home.file_name().unwrap().to_string_lossy().into_owned();
+        let stage = root.join("store/tmp/stage-1");
+        let lock_root = root.join("proj");
+        let member = lock_root.join("packages/lib");
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&member).unwrap();
+        let stage_c = stage.canonicalize().unwrap();
+        let lock_root_c = lock_root.canonicalize().unwrap();
+        let member_c = member.canonicalize().unwrap();
+
+        let scratch = pnpm_scratch(&stage, &member, &lock_root).unwrap();
         assert!(
-            name.starts_with("stage-"),
-            "gc's stale-stage sweep will never reclaim {name}"
+            !scratch.modules_dir.starts_with('/'),
+            "{}",
+            scratch.modules_dir
         );
-        // The mtime touch leaves nothing behind for pnpm or gc to trip over.
+        assert!(
+            !scratch.virtual_store_dir.starts_with('/'),
+            "{}",
+            scratch.virtual_store_dir
+        );
         assert_eq!(
-            fs::read_dir(&home).unwrap().count(),
-            0,
-            "{name} kept a liveness marker"
+            lexical_join(&member_c, &scratch.modules_dir),
+            stage_c.join("modules")
+        );
+        assert_eq!(
+            lexical_join(&lock_root_c, &scratch.virtual_store_dir),
+            stage_c.join("modules/.pnpm")
+        );
+        // The root importer joins the same modules-dir onto its own path.
+        let from_root = lexical_join(&lock_root_c, &scratch.modules_dir);
+        assert!(
+            !from_root.starts_with(&lock_root_c),
+            "root importer's modules dir {} is inside the project",
+            from_root.display()
+        );
+
+        let scratch = pnpm_scratch(&stage, &lock_root, &lock_root).unwrap();
+        assert_eq!(
+            lexical_join(&lock_root_c, &scratch.modules_dir),
+            stage_c.join("modules")
+        );
+        assert_eq!(
+            relative_path(Path::new("/a/b/c"), Path::new("/a/x/y")),
+            PathBuf::from("../../x/y")
+        );
+        assert_eq!(
+            relative_path(Path::new("/a"), Path::new("/a/x")),
+            PathBuf::from("x")
         );
         let _ = fs::remove_dir_all(&root);
     }

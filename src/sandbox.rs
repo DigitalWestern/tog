@@ -45,6 +45,12 @@ pub struct BuildSpec {
 /// Authoritative environment projection (Sol review 5, kernel primitive):
 /// strip every variable matching `remove_prefixes` or listed in `remove`,
 /// then apply the forced `set`. Python/cargo/go/ruby all need this shape.
+/// Strip every inherited variable whose name starts with one of
+/// `remove_prefixes` (compared ASCII case-insensitively: npm and pnpm collect
+/// their settings with `/^npm_config_/i`, so `Npm_Config_registry` is as live
+/// as `npm_config_registry`, and removing more of the user's environment is
+/// the safe direction for every other prefix list too) or equals one of
+/// `remove` (exact), then apply `set` last so blanket's values win.
 pub fn force_env(
     cmd: &mut Command,
     remove_prefixes: &[&str],
@@ -53,7 +59,10 @@ pub fn force_env(
 ) {
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy().into_owned();
-        if remove_prefixes.iter().any(|p| name.starts_with(p)) || remove.contains(&name.as_str()) {
+        let has_prefix = remove_prefixes.iter().any(|prefix| {
+            name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        });
+        if has_prefix || remove.contains(&name.as_str()) {
             cmd.env_remove(&key);
         }
     }
@@ -1584,6 +1593,68 @@ mod tests {
 (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n\
 (allow file-read* (subpath \"/fixed/read\"))\n\
 (allow file-read* file-write* (subpath \"/fixed/write\"))\n"
+        );
+    }
+
+    /// npm and pnpm read `/^npm_config_/i`; the scrub must be as broad, and
+    /// blanket's forced value must be the only survivor.
+    #[test]
+    fn force_env_strips_prefixes_case_insensitively_and_forced_values_win() {
+        // Names are test-private so a parallel test never sees a real
+        // setting appear; only the prefix is what the scrub keys on.
+        let names = [
+            "Npm_Config_blanket_test_registry",
+            "NPM_config_blanket_test_forced",
+            "npm_config_blanket_test_forced",
+            "npm_config_blanket_test_store_dir",
+            "NPM_CONFIG_BLANKET_TEST_STORE_DIR",
+            "PNPM_BLANKET_TEST_HOME",
+            "pnpm_blanket_test_home",
+            "BLANKET_FORCE_ENV_KEEP",
+        ];
+        for name in names {
+            std::env::set_var(name, "user");
+        }
+        let mut cmd = Command::new("true");
+        force_env(
+            &mut cmd,
+            &["npm_config_", "PNPM_"],
+            &[],
+            &[("npm_config_blanket_test_forced".into(), "true".into())],
+        );
+        let envs: std::collections::BTreeMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for name in names {
+            std::env::remove_var(name);
+        }
+        for removed in [
+            "Npm_Config_blanket_test_registry",
+            "NPM_config_blanket_test_forced",
+            "npm_config_blanket_test_store_dir",
+            "NPM_CONFIG_BLANKET_TEST_STORE_DIR",
+            "PNPM_BLANKET_TEST_HOME",
+            "pnpm_blanket_test_home",
+        ] {
+            assert_eq!(
+                envs.get(removed),
+                Some(&None),
+                "{removed} survived: {envs:?}"
+            );
+        }
+        assert_eq!(
+            envs.get("npm_config_blanket_test_forced"),
+            Some(&Some("true".to_string()))
+        );
+        assert!(
+            !envs.contains_key("BLANKET_FORCE_ENV_KEEP"),
+            "an unrelated variable was touched: {envs:?}"
         );
     }
 }

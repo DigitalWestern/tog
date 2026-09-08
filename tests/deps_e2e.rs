@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sha2::{Digest as _, Sha224, Sha512};
+use sha2::{Digest as _, Sha224, Sha256, Sha512};
 
 struct TempDir(PathBuf);
 
@@ -464,6 +464,211 @@ fn pnpm_add_update_remove_roundtrip() {
     assert_status_synced(&bin, project, &store, &temp);
 }
 
+/// Every entry under `dir`, with its content digest (or symlink target), so
+/// two snapshots compare a whole tree byte for byte.
+fn tree_snapshot(dir: &Path) -> Vec<(String, String)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let label = path.strip_prefix(root).unwrap().display().to_string();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            if metadata.file_type().is_symlink() {
+                out.push((
+                    label,
+                    format!("-> {}", std::fs::read_link(&path).unwrap().display()),
+                ));
+            } else if metadata.is_dir() {
+                out.push((label, "dir".into()));
+                walk(root, &path, out);
+            } else {
+                out.push((
+                    label,
+                    hex::encode(Sha256::digest(std::fs::read(&path).unwrap())),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Run the store pnpm's real `install` in `project` from a home of its own,
+/// the way the user would after a `blanket` edit realized the tool:
+/// `node_modules/.modules.yaml` then names a store blanket is never given,
+/// which is the starting state every later edit must survive.
+fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
+    let x_root = std::fs::read_dir(temp.0.join("home/.blanket/x"))
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path();
+            path.join("node_modules/.bin/pnpm")
+                .is_file()
+                .then_some(path)
+        })
+        .expect("pnpm x root");
+    let node_bin = std::fs::read_dir(store.join("objects"))
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            (name.contains("-nodejs-") && path.join("bin/node").is_file())
+                .then_some(path.join("bin"))
+        })
+        .expect("store node");
+    let user_home = temp.0.join("user-home");
+    std::fs::create_dir_all(&user_home).unwrap();
+    let install = Command::new(x_root.join("node_modules/.bin/pnpm"))
+        .current_dir(project)
+        .args(["install", "--ignore-scripts", "--reporter", "append-only"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                node_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOME", &user_home)
+        .env("XDG_CONFIG_HOME", user_home.join("config"))
+        .env("XDG_DATA_HOME", user_home.join("data"))
+        .env("XDG_CACHE_HOME", user_home.join("cache"))
+        .env("XDG_STATE_HOME", user_home.join("state"))
+        .env("CI", "1")
+        .output()
+        .unwrap();
+    assert_ok(install, "user's own pnpm install");
+    let recorded = std::fs::read_to_string(project.join("node_modules/.modules.yaml")).unwrap();
+    assert!(
+        recorded.contains(&user_home.display().to_string()),
+        "the user's install did not record its own store:\n{recorded}"
+    );
+}
+
+/// pnpm keeps state in `node_modules` even under `--lockfile-only`: it reads
+/// `.modules.yaml` and refuses a store other than the recorded one, at a
+/// workspace root it installs outright, and its virtual store's `lock.yaml`
+/// is rewritten. An already-installed project — the common starting state,
+/// with `.modules.yaml` naming the user's own store — must therefore be
+/// edited without touching anything under `node_modules`, without leaving a
+/// blanket-internal path in the project, and without any lifecycle script
+/// running, `remove` included.
+#[test]
+#[ignore]
+fn pnpm_edits_leave_an_installed_project_untouched() {
+    let temp = TempDir::new("pnpm-installed");
+    copy_fixture(&temp, "proj-pnpm");
+    let project = &temp.0;
+    let store = project.join("store");
+    set_package_manager(project, "pnpm@9.12.3");
+    let bin = binary();
+
+    // A local dependency whose lifecycle scripts all leave a marker.
+    let marker = temp.0.join("lifecycle-script-ran");
+    let scripted = project.join("scripted");
+    std::fs::create_dir_all(&scripted).unwrap();
+    let script = format!(
+        "node -e \"require('fs').writeFileSync({:?}, process.argv[1])\"",
+        marker.display().to_string()
+    );
+    let manifest = serde_json::json!({
+        "name": "scripted",
+        "version": "1.0.0",
+        "scripts": {
+            "preinstall": format!("{script} preinstall"),
+            "install": format!("{script} install"),
+            "postinstall": format!("{script} postinstall"),
+            "prepare": format!("{script} prepare"),
+        }
+    });
+    std::fs::write(
+        scripted.join("package.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let package_path = project.join("package.json");
+    let mut package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&package_path).unwrap()).unwrap();
+    package["dependencies"]["scripted"] = serde_json::Value::String("file:./scripted".into());
+    std::fs::write(&package_path, serde_json::to_vec_pretty(&package).unwrap()).unwrap();
+
+    assert_ok(
+        run(
+            &bin,
+            project,
+            &store,
+            &["add", "--no-sync", "is-number@7.0.0"],
+            &temp.0,
+        ),
+        "pnpm add (fresh project)",
+    );
+    assert!(
+        !project.join("node_modules").exists(),
+        "a lockfile-only edit created node_modules in the project"
+    );
+
+    // Install the project for real with the store's own pnpm, the way the
+    // user would, from a home that is not blanket's: `.modules.yaml` now
+    // names a store blanket will never be given.
+    install_with_store_pnpm(&temp, project, &store);
+    let modules_yaml = project.join("node_modules/.modules.yaml");
+    let recorded = std::fs::read_to_string(&modules_yaml).unwrap();
+    assert!(
+        !marker.exists(),
+        "the --ignore-scripts install ran a script"
+    );
+    let before = tree_snapshot(&project.join("node_modules"));
+    assert!(before.iter().any(|(path, _)| path == ".modules.yaml"));
+    assert!(before.iter().any(|(path, _)| path == ".pnpm/lock.yaml"));
+
+    for (label, args) in [
+        ("add", vec!["add", "--no-sync", "is-even@1.0.0"]),
+        ("update", vec!["update", "--no-sync", "is-number"]),
+        ("remove", vec!["remove", "--no-sync", "is-even"]),
+    ] {
+        assert_ok(
+            run(&bin, project, &store, &args, &temp.0),
+            &format!("pnpm {label} over an installed project"),
+        );
+        assert_eq!(
+            tree_snapshot(&project.join("node_modules")),
+            before,
+            "pnpm {label} changed the project's node_modules"
+        );
+        assert!(
+            !marker.exists(),
+            "pnpm {label} ran a lifecycle script: {:?}",
+            std::fs::read_to_string(&marker)
+        );
+        for file in ["package.json", "pnpm-lock.yaml"] {
+            let text = std::fs::read_to_string(project.join(file)).unwrap();
+            assert!(
+                !text.contains("stage-") && !text.contains(&store.display().to_string()),
+                "pnpm {label} left a blanket-internal path in {file}:\n{text}"
+            );
+        }
+        let leftover: Vec<_> = std::fs::read_dir(store.join("tmp"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("stage-"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "pnpm {label} left its scratch stage behind: {leftover:?}"
+        );
+    }
+    let package = std::fs::read_to_string(&package_path).unwrap();
+    assert!(!package.contains("is-even"), "{package}");
+    assert!(package.contains("\"is-number\""), "{package}");
+    assert_eq!(
+        std::fs::read_to_string(&modules_yaml).unwrap(),
+        recorded,
+        "the user's .modules.yaml was rewritten"
+    );
+}
+
 #[test]
 #[ignore]
 fn pnpm_workspace_member_and_root_roundtrip() {
@@ -493,6 +698,31 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
             .unwrap();
     assert!(root_package.get("devDependencies").is_none());
+    assert!(
+        !project.join("node_modules").exists() && !member.join("node_modules").exists(),
+        "a lockfile-only workspace edit created node_modules"
+    );
+
+    // From here on the workspace is installed by the user's own pnpm: a
+    // workspace-root `add -w --lockfile-only` would otherwise install into
+    // it outright, and every verb would refuse the foreign store recorded in
+    // `.modules.yaml`. The whole installed tree must survive every edit.
+    install_with_store_pnpm(&temp, project, &store);
+    let installed = (
+        tree_snapshot(&project.join("node_modules")),
+        tree_snapshot(&member.join("node_modules")),
+    );
+    assert!(installed.0.iter().any(|(path, _)| path == ".modules.yaml"));
+    let installed_unchanged = |label: &str| {
+        assert_eq!(
+            (
+                tree_snapshot(&project.join("node_modules")),
+                tree_snapshot(&member.join("node_modules")),
+            ),
+            installed,
+            "{label} changed an installed node_modules"
+        );
+    };
 
     assert_ok(
         run(
@@ -504,6 +734,7 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         ),
         "pnpm workspace member remove",
     );
+    installed_unchanged("workspace member remove");
     assert!(!std::fs::read_to_string(member.join("package.json"))
         .unwrap()
         .contains("is-even"));
@@ -518,6 +749,7 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         ),
         "pnpm workspace root add",
     );
+    installed_unchanged("workspace root add");
     let root_package: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join("package.json")).unwrap())
             .unwrap();
@@ -532,6 +764,10 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         ),
         "pnpm workspace root remove",
     );
+    installed_unchanged("workspace root remove");
+    // `blanket sync` projects its own node_modules over the user's install
+    // (moving the existing directory aside, and saying so); that is sync's
+    // documented behaviour, not the delegate's, so the snapshot ends here.
     assert_ok(
         run(&bin, project, &store, &["sync"], &temp.0),
         "pnpm workspace sync",

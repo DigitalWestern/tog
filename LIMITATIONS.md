@@ -45,12 +45,14 @@ say what breaks, for whom, and how it fails (loud/silent).
   list, a character class, `?`, or an extglob is refused by name rather
   than silently treated as a non-match. Delegates are resolved through the
   store's cached `x` environments under `~/.blanket/x/`; pnpm runs with an
-  isolated HOME and XDG root at `<store>/tmp/stage-pnpm-home-<key>`, kept
-  stable per project because pnpm records the store it linked from in
-  `node_modules/.modules.yaml` and refuses a moved one. Its `stage-` name is
-  what `blanket gc` sweeps, so the pnpm metadata cache is reclaimed with
-  every other stale stage and is re-created on the next edit; lifecycle
-  scripts are off for every verb. Delegates remain unsandboxed with network.
+  isolated HOME and XDG root in a per-run `<store>/tmp/stage-*` directory
+  that is removed when the edit returns (a leftover from a killed run is
+  swept by `blanket gc`), so its registry metadata cache is not kept between
+  edits and every edit re-fetches it. pnpm's modules state (`.modules.yaml`,
+  the virtual store) is redirected into that stage with
+  `enable-modules-dir=false`, so an installed project's `node_modules` is
+  neither read nor written; lifecycle scripts are off for every verb.
+  Delegates remain unsandboxed with network.
 - **Yarn classic dependency edits remain a refusal.** Yarn has no
   lockfile-only edit mode, and a workspace-faithful scratch edit is future
   work; run the Yarn command named by blanket, then `blanket`.
