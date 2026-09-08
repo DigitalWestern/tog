@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::platform::Platform;
 use crate::store::Store;
-use crate::{dotnet, manifest, sandbox};
+use crate::{dotnet, golang, manifest, sandbox};
 
 /// Display order; also the `ls <ecosystem>` vocabulary.
 pub const ECOSYSTEMS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
@@ -546,8 +546,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
                     lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
                 }
             }
-            "go" => object_liveness_state(body, &["go_object", "modcache_object"])
-                .unwrap_or(lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?),
+            "go" => go_status(platform, dir, body)?,
             "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(
                 lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?,
             ),
@@ -570,6 +569,57 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
         });
     }
     Ok(rows)
+}
+
+/// Compare the selected Go version in go.mod with the one recorded in the
+/// closure. This is read-only: status must never realize a toolchain or touch
+/// the network just to detect a stale selection.
+fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
+    if let Some(state) = object_liveness_state(body, &["go_object", "modcache_object"]) {
+        return Ok(state);
+    }
+
+    let mut changed = Vec::new();
+    let recorded_version = string(&body["plan"]["go_version"]);
+    if !recorded_version.is_empty() {
+        let go_mod = dir.join("go.mod");
+        match fs::read_to_string(&go_mod) {
+            Ok(text) => match golang::resolve_toolchain(platform, &text) {
+                Ok(selected) if selected == recorded_version => {}
+                Ok(_) => changed.push("go.mod".to_string()),
+                Err(_) => changed.push("go.mod (Go toolchain selection unavailable)".to_string()),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                changed.push("go.mod (removed)".to_string())
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let lock_state = lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?;
+    match lock_state {
+        State::Changed(files) => changed.extend(files),
+        State::Unchecked(reason) if changed.is_empty() => {
+            if recorded_version.is_empty() {
+                return Ok(State::Unchecked(format!(
+                    "{reason}; recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                )));
+            }
+            return Ok(State::Unchecked(reason));
+        }
+        State::Synced | State::Unchecked(_) => {}
+        _ => unreachable!("go.sum lock_state has no projection or platform state"),
+    }
+    if !changed.is_empty() {
+        return Ok(State::Changed(changed));
+    }
+    if recorded_version.is_empty() {
+        return Ok(State::Unchecked(
+            "recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                .into(),
+        ));
+    }
+    Ok(State::Synced)
 }
 
 fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
@@ -843,6 +893,22 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
     }
 
     if let Some(platform) = platform {
+        if dir.join("go.mod").is_file() {
+            match golang::resolve_project_toolchain(platform, dir) {
+                Ok(version) => checks.push(check(
+                    "go-toolchain",
+                    Level::Ok,
+                    format!("{version} selected from go.mod"),
+                )),
+                Err(error) => checks.push(check(
+                    "go-toolchain",
+                    Level::Fail,
+                    format!(
+                        "cannot select a realizable Go toolchain: {error}; use a pinned version in go.mod"
+                    ),
+                )),
+            }
+        }
         match sandbox::probe(platform) {
             Ok(detail) => checks.push(check("sandbox", Level::Ok, detail)),
             Err(error) => checks.push(check(
@@ -1180,7 +1246,7 @@ mod tests {
             dir,
             "go",
             host,
-            json!({"go_sum_sha256": sha256_file(&dir.join("go.sum")).unwrap(), "plan": {"go_version": "1.25", "modules": []}}),
+            json!({"go_sum_sha256": sha256_file(&dir.join("go.sum")).unwrap(), "plan": {"go_version": "1.27.0", "modules": []}}),
         );
         write_closure(
             dir,
@@ -1204,6 +1270,40 @@ mod tests {
             text.contains("cargo   missing     .blanket/cargo-home"),
             "{text}"
         );
+
+        // A pre-field Go closure cannot verify the selected toolchain, even
+        // when its recorded go.sum hash is still current.
+        write_closure(
+            dir,
+            "go",
+            host,
+            json!({"go_sum_sha256": sha256_file(&dir.join("go.sum")).unwrap(), "plan": {"modules": []}}),
+        );
+        let rows = status(platform, dir).unwrap();
+        assert_eq!(
+            rows[2].state,
+            State::Unchecked(
+                "recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                    .into()
+            )
+        );
+
+        write_closure(
+            dir,
+            "go",
+            host,
+            json!({"go_sum_sha256": sha256_file(&dir.join("go.sum")).unwrap(), "plan": {"go_version": "1.27.0", "modules": []}}),
+        );
+
+        // The selected Go version is an input too, even when the projection
+        // and go.sum still exist.
+        fs::write(dir.join("go.mod"), "module x\n\ngo 1.28\n").unwrap();
+        let rows = status(platform, dir).unwrap();
+        assert_eq!(
+            rows[2].state,
+            State::Changed(vec!["go.mod (Go toolchain selection unavailable)".into()])
+        );
+        fs::write(dir.join("go.mod"), "module x\n").unwrap();
 
         // Edit the manifest and the lock: both reported by name.
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();

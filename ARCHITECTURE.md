@@ -308,6 +308,17 @@ outputs are staged in scratch and moved in by blanket afterwards;
 v0 fail-closed gaps: go.work workspaces, local-path replace directives.
 cgo uses host clang (the standing accepted impurity).
 
+Go selection is exact at the realization boundary. The planner resolves the
+project's `go`/`toolchain` directives to one pinned version before acquiring
+the Go object; `ensure_go_for` looks up the `(Platform, version)` row and
+fails before store or network access when no exact row exists. The same
+selected version is recorded in `GoPlan` and used by `realize_modcache` for
+both its extractor identity and synthetic `go.mod`; `blanket run` resolves
+the recorded Go object through the closure id rather than selecting again.
+`status` reports a closure that predates the recorded Go version as
+synced-but-unchecked, while missing projections and changed lock hashes keep
+their higher-priority outcomes.
+
 ## The Ruby tailor (delegate the semantics, own the bytes)
 
 Bundler-shaped: lock parsing and platform selection are delegated to the

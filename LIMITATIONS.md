@@ -18,9 +18,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   closures written since 2026-09-06 record the root manifest and lock files
   (`inputs`); `-r` includes, `requirements/` directory members, and
   workspace-member package.json files are not recorded, so an edit there is
-  reported as synced. Cargo, Go, Ruby, Elixir and .NET compare the lock
-  hash only, not the manifest. Closures from before the field exists show
-  as "synced (unchecked)" until the next sync.
+  reported as synced. Cargo, Ruby, Elixir and .NET compare the lock hash
+  only, not the manifest. Go compares the selected `go.mod` toolchain
+  version as well as the `go.sum` hash, but `go.mod` `require`/`replace`
+  edits are still detected only indirectly through `go.sum`/`go mod tidy`.
+  Closures from before a required field exists show as "synced (unchecked)"
+  until the next sync.
 - **There is no committed toolchain lock yet (WP2 design only).** `sync`
   selects from compiled pins and does not compare `.node-version`,
   `.ruby-version`, `.tool-versions`, or a cross-platform runtime row; Node,
@@ -314,6 +317,12 @@ sandbox, and uv fallback still delegates resolution.
 
 ## Go
 
+- **One exact Go pin is realizable per supported platform.** A `go.mod`
+  selection without a matching `(platform, version)` row fails before store
+  or network access and tells the user to use a pinned version or add a
+  verified row; the regression coverage also guards the rejection against a
+  cached-default fallback. Archive extraction and a release catalog with
+  additional Go pins remain future work.
 - **Current Go selection treats a non-default `toolchain` directive as a
   lower-bound suggestion and chooses the lowest pin satisfying it and `go`**;
   a newer catalog row can therefore replace an exact upstream directive until

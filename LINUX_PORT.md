@@ -33,6 +33,12 @@ before materialization, scrub tar/unzip option environment variables, and run an
 outside-sentinel test under both GNU tar and macOS bsdtar. This is a design-only
 entry: no extractor behavior changed here, and Darwin remains asymmetric by
 inspection until the Mac gate.
+### 2026-09-06 — Go realization uses the selected platform pin
+
+Go toolchain and module-cache realization now look up the exact version
+selected from `go.mod` in the Linux platform pin row. An unpinned selection
+fails before store or network access; the Linux artifact, sha256, and object
+identity are unchanged.
 
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 

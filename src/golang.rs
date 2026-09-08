@@ -45,16 +45,31 @@ const GO_PIN_ROWS: &[GoPin] = &[
     },
 ];
 
-fn go_pin(platform: Platform) -> io::Result<&'static GoPin> {
-    GO_PIN_ROWS
+fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
+    if let Some(pin) = GO_PIN_ROWS
         .iter()
-        .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("go", platform, "stage 4"))
+        .find(|pin| pin.platform == platform && pin.version == version)
+    {
+        return Ok(pin);
+    }
+    let pins = GO_PIN_ROWS
+        .iter()
+        .filter(|pin| pin.platform == platform)
+        .map(|pin| pin.version)
+        .collect::<Vec<_>>();
+    if pins.is_empty() {
+        return Err(no_pin("go", platform, "stage 4"));
+    }
+    Err(err(format!(
+        "internal: resolved Go {version} for {} but only {} is realizable; set go.mod's `go` or `toolchain` directive to one of the pinned versions, or add a matching verified Go pin",
+        platform.triple(),
+        pins.join(", ")
+    )))
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
-    go_pin(platform).map(|_| ())
+    go_pins(platform).map(|_| ())
 }
 
 fn go_identity(pin: &GoPin) -> Identity {
@@ -139,13 +154,16 @@ fn archive_platform(platform: Platform) -> Platform {
 }
 
 /// Ensure the pinned Go toolchain is realized in the store.
-pub fn ensure_go(store: &Store) -> io::Result<PathBuf> {
-    ensure_go_for(store, Platform::host()?)
+pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
+    ensure_go_for(store, Platform::host()?, version)
 }
 
-pub fn ensure_go_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
-    let pin = go_pin(platform)?;
+    // Resolve the exact row before touching the store or downloading. A
+    // future catalog may carry several versions for one platform; falling
+    // back to GO_VERSION here would pair the plan with the wrong toolchain.
+    let pin = go_pin(platform, version)?;
     let identity = go_identity(pin);
     let id = identity.object_id();
     if store.has(&id) {
@@ -275,6 +293,17 @@ pub fn resolve_toolchain(platform: Platform, gomod: &str) -> io::Result<&'static
                 pins.join(", ")
             ))
         })
+}
+
+/// Resolve the Go version selected by a project's go.mod before realizing a
+/// toolchain. Callers use this result as the authority for `ensure_go_for`.
+pub fn resolve_project_toolchain(
+    platform: Platform,
+    project_dir: &Path,
+) -> io::Result<&'static str> {
+    let gomod = fs::read_to_string(project_dir.join("go.mod"))
+        .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    resolve_toolchain(platform, &gomod)
 }
 
 /// Go version ordering: numeric dot components, missing patch = 0.
@@ -834,7 +863,7 @@ pub fn realize_modcache(
     go_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Go module cache", "stage 4")?;
-    let pin = go_pin(platform)?;
+    let pin = go_pin(platform, &plan.go_version)?;
     let identity = modcache_identity(pin, plan);
 
     let id = identity.object_id();
@@ -851,7 +880,7 @@ pub fn realize_modcache(
         let scratch = store.stage()?;
         let mut gomod = format!("module blanket.invalid/extract\n\ngo {}\n\nrequire (\n", {
             // go directive: major.minor only
-            let mut it = GO_VERSION.split('.');
+            let mut it = plan.go_version.split('.');
             format!("{}.{}", it.next().unwrap_or("1"), it.next().unwrap_or("0"))
         });
         let mut gosum = String::new();
@@ -1024,6 +1053,52 @@ pub fn build_sandboxed(
 mod tests {
     use super::*;
 
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blanket-go-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = crate::store::remove_tree(&self.0);
+        }
+    }
+
+    fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            snapshot: &mut BTreeMap<PathBuf, std::time::SystemTime>,
+        ) {
+            let metadata = fs::metadata(path).unwrap();
+            snapshot.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                metadata.modified().unwrap(),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), snapshot);
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
     #[test]
     fn one_unique_pin_per_supported_platform() {
         assert_eq!(GO_PIN_ROWS.len(), Platform::ALL.len());
@@ -1043,7 +1118,8 @@ mod tests {
             );
         }
 
-        let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        let linux = go_pin(Platform::X86_64UnknownLinuxGnu, GO_VERSION).unwrap();
+        assert!(go_pin(Platform::X86_64UnknownLinuxGnu, "1.27").is_err());
         assert_eq!(linux.version, "1.27.0");
         assert_eq!(linux.url, "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz");
         assert_eq!(
@@ -1053,9 +1129,62 @@ mod tests {
     }
 
     #[test]
+    fn ensure_go_for_rejects_unpinned_version_before_store_access() {
+        let _lock = crate::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store { root: store_root };
+        let platform = Platform::host().unwrap();
+        let default_identity = go_identity(go_pin(platform, GO_VERSION).unwrap());
+        let default_id = default_identity.object_id();
+        let default_object = store.object_path(&default_id);
+        fs::create_dir_all(&default_object).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&default_object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&default_object, permissions).unwrap();
+        }
+        fs::write(
+            store.root.join("meta").join(format!("{default_id}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": default_id,
+                "identity": default_identity,
+                "created": 0,
+                "exceptions": [],
+                "refs": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let before = tree_snapshot(&store.root);
+
+        let error = ensure_go_for(&store, platform, "1.26.0")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("resolved Go 1.26.0"), "{error}");
+        assert!(error.contains("only 1.27.0 is realizable"), "{error}");
+        assert_eq!(
+            tree_snapshot(&store.root),
+            before,
+            "unpinned lookup created or modified store files"
+        );
+        assert!(!store.root.join("tmp/.publish.lock").exists());
+        assert!(fs::read_dir(store.root.join("tmp"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with("stage-")));
+    }
+
+    #[test]
     fn production_toolchain_identities_are_platform_distinct() {
-        let darwin = go_identity(go_pin(Platform::Aarch64AppleDarwin).unwrap());
-        let linux = go_identity(go_pin(Platform::X86_64UnknownLinuxGnu).unwrap());
+        let darwin = go_identity(go_pin(Platform::Aarch64AppleDarwin, GO_VERSION).unwrap());
+        let linux = go_identity(go_pin(Platform::X86_64UnknownLinuxGnu, GO_VERSION).unwrap());
         assert_ne!(darwin.object_id(), linux.object_id());
         assert_eq!(
             darwin.inputs.get("platform").map(String::as_str),
@@ -1070,7 +1199,7 @@ mod tests {
     #[test]
     fn darwin_identity_unchanged() {
         let platform = Platform::Aarch64AppleDarwin;
-        let pin = go_pin(platform).unwrap();
+        let pin = go_pin(platform, GO_VERSION).unwrap();
         let identity = go_identity(pin);
         assert_eq!(
             identity.object_id(),
@@ -1087,7 +1216,7 @@ mod tests {
             "go1.27.0:90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"
         );
         assert_eq!(modcache.inputs["schema"], "go-modcache/1");
-        let linux = go_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        let linux = go_pin(Platform::X86_64UnknownLinuxGnu, GO_VERSION).unwrap();
         assert_ne!(
             modcache_identity(linux, &empty).object_id(),
             modcache.object_id()
