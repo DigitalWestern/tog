@@ -76,8 +76,25 @@ fn tar_command(platform: Platform) -> Command {
     let mut command = Command::new("/usr/bin/tar");
     // The user's environment must not add extraction flags.
     command.env_remove("TAR_OPTIONS");
+    // The listing is parsed by column, and the locale decides how the date
+    // column is rendered — width, field count and even script. Pin it so the
+    // shape the parser expects is the shape tar prints.
+    command.env("LC_ALL", "C");
+    command.env("LANG", "C");
+    command.env_remove("LC_TIME");
     command
 }
+
+/// Flags every tar invocation carries. `--numeric-owner` is a parsing
+/// guarantee, not a cosmetic one: the owner and group *names* come out of the
+/// archive, so an attacker chooses them, and a name containing a space adds
+/// columns to `-tv` output. The parser skips a fixed number of leading
+/// columns, so those extra columns shift the date into the name it returns —
+/// `../escape` reaches `validate` as `"2021-01-14 03:25 ../escape"`, whose
+/// first component is `"2021-01-14 03:25 .."`, which is not `".."` and so
+/// passes the containment check that exists to stop it. Numeric ids cannot
+/// contain a space.
+const TAR_PARSE_FLAGS: [&str; 1] = ["--numeric-owner"];
 
 /// List `archive` with the platform's tar and parse every entry.
 pub fn list(
@@ -86,6 +103,7 @@ pub fn list(
     compression: Compression,
 ) -> io::Result<Vec<Entry>> {
     let output = tar_command(platform)
+        .args(TAR_PARSE_FLAGS)
         .arg(format!("-tv{}f", compression.flag()))
         .arg(archive)
         .output()
@@ -103,7 +121,58 @@ pub fn list(
             archive.display()
         ))
     })?;
-    parse_listing(platform, &listing)
+    let entries = parse_listing(platform, &listing)?;
+    // Cross-check every parsed name against a listing that has no columns at
+    // all. `-tv` is a human format whose column count blanket predicts from
+    // the platform; `-t` prints one name per line and nothing else, so it
+    // cannot be shifted by a wide field, an unexpected locale, an extra
+    // device column, or a tar version that reformats. Disagreement means the
+    // column model is wrong for this archive, and a wrong column model means
+    // `validate` is inspecting text that is not the name. Refuse rather than
+    // extract on a guess.
+    let names = list_names(platform, archive, compression)?;
+    if names.len() != entries.len()
+        || names
+            .iter()
+            .zip(entries.iter())
+            .any(|(name, entry)| name != &entry.name)
+    {
+        return Err(err(format!(
+            "list {}: tar's verbose and plain listings disagree about entry names; refusing to extract (verbose parse: {:?}, plain: {:?})",
+            archive.display(),
+            entries.iter().map(|e| &e.name).take(8).collect::<Vec<_>>(),
+            names.iter().take(8).collect::<Vec<_>>()
+        )));
+    }
+    Ok(entries)
+}
+
+/// The same archive listed without `-v`: one stored name per line, no columns.
+fn list_names(
+    platform: Platform,
+    archive: &Path,
+    compression: Compression,
+) -> io::Result<Vec<String>> {
+    let output = tar_command(platform)
+        .args(TAR_PARSE_FLAGS)
+        .arg(format!("-t{}f", compression.flag()))
+        .arg(archive)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
+    if !output.status.success() {
+        return Err(err(format!(
+            "list {} failed: {}",
+            archive.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| {
+        err(format!(
+            "list {}: tar printed a name that is not UTF-8",
+            archive.display()
+        ))
+    })?;
+    Ok(text.lines().map(str::to_string).collect())
 }
 
 /// Number of whitespace-separated columns before the name field in `tar -tv`
@@ -355,6 +424,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const GNU: Platform = Platform::X86_64UnknownLinuxGnu;
     const BSD: Platform = Platform::Aarch64AppleDarwin;
@@ -640,6 +710,71 @@ crw-r--r--  0 root   wheel     1,3 Jan  1 12:34 pkg/dev
             out.extend(std::iter::repeat(0u8).take(pad));
         }
         out
+    }
+
+    /// Set the owner/group *name* fields, which come out of the archive and
+    /// are therefore the attacker's to choose, and refresh the checksum.
+    fn with_owner_names(mut header: Vec<u8>, uname: &str, gname: &str) -> Vec<u8> {
+        assert!(uname.len() < 32 && gname.len() < 32);
+        header[265..265 + uname.len()].copy_from_slice(uname.as_bytes());
+        header[297..297 + gname.len()].copy_from_slice(gname.as_bytes());
+        header[148..156].copy_from_slice(b"        ");
+        let sum: u32 = header[..512].iter().map(|b| *b as u32).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        header
+    }
+
+    /// Owner and group names are archive content. A name containing a space
+    /// adds columns to `tar -tv`, and the parser skips a *fixed* number of
+    /// leading columns, so the surplus shifts the date into the name it
+    /// returns: `../escape` arrives at `validate` as
+    /// `"<date> <time> ../escape"`, whose first path component is not `".."`
+    /// and so walks straight through the containment check that exists to
+    /// refuse it. `--numeric-owner` removes the attacker's grip on those
+    /// columns, and the plain-listing cross-check catches any other way the
+    /// column model could be wrong.
+    #[test]
+    fn owner_names_containing_spaces_cannot_shift_the_parsed_name() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-archive-owner-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let archive = base.join("evil.tar");
+        write_tar(
+            &archive,
+            &[with_owner_names(
+                ustar("../escape", b'0', "", b"pwn\n"),
+                "ro ot",
+                "gr oup",
+            )],
+        );
+
+        // The name must survive parsing intact: `..` still reads as `..`.
+        let entries = list(host(), &archive, Compression::None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].name, "../escape",
+            "owner names shifted the parsed name"
+        );
+
+        // And containment must therefore refuse it.
+        let error = validate(&entries, 0).unwrap_err();
+        assert!(error.to_string().contains("escape"), "{error}");
+
+        let destination = base.join("dest");
+        fs::create_dir_all(&destination).unwrap();
+        assert!(extract(host(), &archive, &destination, 0, Compression::None).is_err());
+        assert!(
+            !base.join("escape").exists(),
+            "a member escaped the destination"
+        );
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        fs::remove_dir_all(&base).unwrap();
     }
 
     fn write_tar(path: &Path, members: &[Vec<u8>]) {
