@@ -30,6 +30,11 @@ pub enum Command {
         fresh: bool,
         strict: bool,
     },
+    Fmt {
+        check: bool,
+        ecosystem: Option<String>,
+        args: Vec<String>,
+    },
     Plan,
     /// Everything after `build` (ecosystem name and tool arguments); the
     /// ecosystem is inferred by the dispatcher from the project layout.
@@ -205,7 +210,14 @@ pub struct Spec {
 const HELP_OPTION: (&str, &str) = ("-h, --help", "print this help");
 const JSON_OPTION: (&str, &str) = ("--json", "machine-readable output on stdout");
 
-pub const ECOSYSTEM_WORDS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
+/// What `blanket ls` accepts as a filter word. `ls` lists closures, not
+/// ecosystems: besides the seven ecosystems it prints a row for the
+/// toolchain-only `rustfmt` closure `blanket fmt` writes, and every name
+/// `ls` can print must be a name it accepts. This is the `ls` vocabulary
+/// only; it never selects an ecosystem for sync, add, or build.
+pub const LS_WORDS: &[&str] = &[
+    "python", "node", "cargo", "go", "ruby", "elixir", "dotnet", "rustfmt",
+];
 pub const BUILD_WORDS: &[&str] = &["cargo", "go", "elixir", "dotnet"];
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
 pub const SYNC_ALIASES: &[&str] = &["install", "i"];
@@ -229,6 +241,27 @@ them instead.",
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
             ("--strict", "refuse every policy exception (same as BLANKET_STRICT=1)"),
+            HELP_OPTION,
+        ],
+        words: &[],
+    },
+    Spec {
+        name: "fmt",
+        group: Group::Everyday,
+        summary: "format the Rust project with the pinned rustfmt",
+        usage: "blanket fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
+        description: "\
+Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
+discovered with the store Cargo tool and Cargo metadata is read with
+--no-deps, so a project that has never been synced needs no Cargo.lock,
+dependency resolution, or vendor object. --check returns rustfmt's status.
+A package.json script named fmt takes precedence and is run as
+'blanket run fmt'. In a polyglot directory use --eco rust: an explicit --eco
+selects the ecosystem, so it formats Rust instead of running that script.
+Other ecosystems are not implemented yet.",
+        options: &[
+            ("--check", "check formatting without editing files"),
+            ("--eco <ecosystem>", "select the ecosystem (Rust: rust)"),
             HELP_OPTION,
         ],
         words: &[],
@@ -372,9 +405,10 @@ lock' gate.",
 Name and version of every package in each synced closure, with the
 toolchain each runs on; -v adds the artifact and store object. Read from
 .blanket/closures/*.json, no store access. Ecosystems: python, node,
-cargo, go, ruby, elixir, dotnet.",
+cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
+'blanket fmt' writes.",
         options: &[JSON_OPTION, HELP_OPTION],
-        words: ECOSYSTEM_WORDS,
+        words: LS_WORDS,
     },
     Spec {
         name: "plan",
@@ -565,8 +599,8 @@ pub fn usage() -> String {
     text.push('\n');
     text.push_str(ENVIRONMENT);
     text.push_str(
-        "\nExit status: 0 success, 1 failure, 2 usage error; 'run' passes the\n\
-         program's status through.\n",
+        "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'\n\
+         pass the program's status through.\n",
     );
     text
 }
@@ -669,6 +703,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let name = canonical_name(word);
     let command = match name {
         "sync" => parse_sync(rest)?,
+        "fmt" => parse_fmt(rest)?,
         "plan" => parse_plan(rest)?,
         "build" => parse_passthrough(rest, "build")?,
         "run" => parse_passthrough(rest, "run")?,
@@ -737,6 +772,69 @@ fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
     Ok(Some(Command::Sync { fresh, strict }))
 }
 
+fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut check = false;
+    let mut ecosystem = None;
+    let mut passthrough = false;
+    let mut tool_args = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if index == 0 && matches!(arg.as_str(), "-h" | "--help") {
+            return Ok(None);
+        }
+        if passthrough {
+            tool_args.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--" => passthrough = true,
+            "--check" => check = true,
+            "--eco" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| UsageError::new("fmt: --eco needs an ecosystem", Some("fmt")))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(UsageError::new(
+                        "fmt: --eco needs an ecosystem",
+                        Some("fmt"),
+                    ));
+                }
+                ecosystem = Some(value.clone());
+                index += 1;
+            }
+            value if value.starts_with("--eco=") => {
+                // Same rule as the separate-word form: a mistyped flag
+                // (`--eco=--check`) is a usage error, not an ecosystem name.
+                let value = &value["--eco=".len()..];
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(UsageError::new(
+                        "fmt: --eco needs an ecosystem",
+                        Some("fmt"),
+                    ));
+                }
+                ecosystem = Some(value.to_string());
+            }
+            value
+                if value.starts_with("--")
+                    && suggest(value, ["--check", "--eco"].into_iter()).is_some() =>
+            {
+                return Err(reject("fmt", value));
+            }
+            value => {
+                passthrough = true;
+                tool_args.push(value.to_string());
+            }
+        }
+        index += 1;
+    }
+    Ok(Some(Command::Fmt {
+        check,
+        ecosystem,
+        args: tool_args,
+    }))
+}
+
 fn parse_plan(args: &[String]) -> Result<Option<Command>, UsageError> {
     match args.first().map(String::as_str) {
         None => Ok(Some(Command::Plan)),
@@ -773,15 +871,15 @@ fn parse_ls(args: &[String]) -> Result<Option<Command>, UsageError> {
                         Some("ls"),
                     ));
                 }
-                if !ECOSYSTEM_WORDS.contains(&other) {
+                if !LS_WORDS.contains(&other) {
                     return Err(UsageError::new(
                         with_suggestion(
                             format!(
                                 "ls: unknown ecosystem '{other}' (one of: {})",
-                                ECOSYSTEM_WORDS.join(", ")
+                                LS_WORDS.join(", ")
                             ),
                             other,
-                            ECOSYSTEM_WORDS.iter().copied(),
+                            LS_WORDS.iter().copied(),
                         ),
                         Some("ls"),
                     ));
@@ -1748,6 +1846,55 @@ mod tests {
     }
 
     #[test]
+    fn fmt_grammar_separates_blanket_flags_from_tool_args() {
+        assert_eq!(
+            command(&["fmt"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: None,
+                args: vec![],
+            }
+        );
+        assert_eq!(
+            command(&["fmt", "--check", "--eco", "rust", "--edition", "2024"]),
+            Command::Fmt {
+                check: true,
+                ecosystem: Some("rust".into()),
+                args: argv(&["--edition", "2024"]),
+            }
+        );
+        assert_eq!(
+            command(&["fmt", "--", "--help"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: None,
+                args: argv(&["--help"]),
+            }
+        );
+        assert_eq!(
+            message(&["fmt", "--chekc"]),
+            "fmt: unknown option '--chekc'; did you mean '--check'?"
+        );
+        assert_eq!(
+            command(&["fmt", "--eco=rust"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: Some("rust".into()),
+                args: vec![],
+            }
+        );
+        assert_eq!(message(&["fmt", "--eco"]), "fmt: --eco needs an ecosystem");
+        // Both spellings reject a value that is really a mistyped flag.
+        for args in [
+            &["fmt", "--eco", "--check"][..],
+            &["fmt", "--eco=--check"],
+            &["fmt", "--eco="],
+        ] {
+            assert_eq!(message(args), "fmt: --eco needs an ecosystem", "{args:?}");
+        }
+    }
+
+    #[test]
     fn plan_takes_nothing() {
         assert_eq!(command(&["plan"]), Command::Plan);
         assert_eq!(
@@ -1783,13 +1930,21 @@ mod tests {
                 json: true
             }
         );
+        // The row `blanket fmt` makes `ls` print is a word `ls` accepts.
+        assert_eq!(
+            command(&["ls", "rustfmt"]),
+            Command::Ls {
+                ecosystem: Some("rustfmt".into()),
+                json: false
+            }
+        );
         assert_eq!(
             message(&["ls", "npm"]),
-            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet)"
+            "ls: unknown ecosystem 'npm' (one of: python, node, cargo, go, ruby, elixir, dotnet, rustfmt)"
         );
         assert_eq!(
             message(&["ls", "pyhton"]),
-            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet); did you mean 'python'?"
+            "ls: unknown ecosystem 'pyhton' (one of: python, node, cargo, go, ruby, elixir, dotnet, rustfmt); did you mean 'python'?"
         );
         assert_eq!(
             message(&["ls", "node", "python"]),

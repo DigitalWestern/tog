@@ -137,6 +137,183 @@ fn usage_errors_exit_2_with_a_next_step() {
 }
 
 #[test]
+fn fmt_is_named_and_typos_are_usage_errors() {
+    let home = TempDir::new("fmt-cli");
+    let out = blanket(&home.0, &home.0, &["fmtt"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("unknown command 'fmtt'; did you mean 'fmt'?"));
+
+    let out = blanket(&home.0, &home.0, &["fmt", "--chekc"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("fmt: unknown option '--chekc'"));
+    assert!(text(&out.stderr).contains("did you mean '--check'?"));
+
+    // A value that is really a mistyped flag is a usage error in BOTH
+    // spellings; `--eco=--check` must not be taken for an ecosystem name.
+    for args in [
+        &["fmt", "--eco", "--check"][..],
+        &["fmt", "--eco=--check"],
+        &["fmt", "--eco="],
+    ] {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            text(&out.stderr).contains("fmt: --eco needs an ecosystem"),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
+/// `blanket ls` prints a `rustfmt` row for the closure `blanket fmt` writes,
+/// so `blanket ls rustfmt` must be a legal filter rather than a usage error.
+#[test]
+fn ls_accepts_every_ecosystem_name_it_can_print() {
+    let home = TempDir::new("ls-words-home");
+    let project = TempDir::new("ls-words-project");
+    std::fs::create_dir_all(project.0.join(".blanket/closures")).unwrap();
+    std::fs::write(
+        project.0.join(".blanket/closures/rustfmt.json"),
+        r#"{"schema":"closure/1","ecosystem":"rustfmt","projected_at":0,
+            "body":{"rust_version":"1.96.1",
+                    "rust_object":{"path":"/store/objects/r","id":"r"},
+                    "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
+    )
+    .unwrap();
+
+    let out = blanket(&project.0, &home.0, &["ls", "rustfmt"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stdout).contains("rustfmt 1.96.1"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // The help text names the same set the parser accepts.
+    let help = blanket(&project.0, &home.0, &["ls", "-h"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(
+        text(&help.stdout).contains("rustfmt"),
+        "{}",
+        text(&help.stdout)
+    );
+
+    let out = blanket(&project.0, &home.0, &["ls", "npm"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("unknown ecosystem 'npm'"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn fmt_reports_ecosystem_and_project_errors_offline() {
+    let home = TempDir::new("fmt-errors");
+    let empty = TempDir::new("fmt-empty");
+    let out = blanket(&empty.0, &home.0, &["fmt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("no Rust project"));
+
+    let out = blanket(&empty.0, &home.0, &["fmt", "--eco", "python"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("fmt for python is not implemented yet"));
+}
+
+#[test]
+fn fmt_script_precedence_does_not_try_rustfmt_without_a_projection() {
+    let home = TempDir::new("fmt-script-home");
+    let project = TempDir::new("fmt-script-project");
+    std::fs::write(
+        project.0.join("package.json"),
+        r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt; exit 7'"}}"#,
+    )
+    .unwrap();
+    let out = blanket(&project.0, &home.0, &["fmt"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("command 'fmt'"), "{stderr}");
+    assert!(
+        !stderr.contains("script-fmt"),
+        "script unexpectedly ran: {stderr}"
+    );
+    assert!(!home.0.join("store/objects").is_dir());
+    assert!(!project.0.join(".blanket/closures/rustfmt.json").exists());
+}
+
+/// `--eco` is blanket's own selector: in a polyglot root whose package.json
+/// has a `fmt` script, `--eco rust` must reach the Rust path instead of
+/// running the script with a meaningless trailing `--eco rust`. The fixture
+/// pins an unrealizable toolchain so the Rust path fails offline, before any
+/// download, with a diagnostic that could only come from that path.
+#[test]
+fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
+    let home = TempDir::new("fmt-eco-home");
+    let project = TempDir::new("fmt-eco-project");
+    std::fs::write(
+        project.0.join("package.json"),
+        r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt \"$@\" > script-ran.txt; exit 7' sh"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.0.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.70.0\"\n",
+    )
+    .unwrap();
+
+    let out = blanket(&project.0, &home.0, &["fmt", "--eco", "rust"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("unsupported Rust toolchain \"1.70.0\""),
+        "--eco rust did not reach the Rust path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("command 'fmt'") && !stderr.contains("script-fmt"),
+        "--eco rust delegated to the package.json script: {stderr}"
+    );
+    assert!(!project.0.join("script-ran.txt").exists());
+
+    // A non-Rust ecosystem is still refused here, not handed to the script.
+    let out = blanket(&project.0, &home.0, &["fmt", "--eco", "python"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("fmt for python is not implemented yet"),
+        "{stderr}"
+    );
+    assert!(!project.0.join("script-ran.txt").exists());
+
+    // Without --eco the script still wins (it needs a projection, so it stops
+    // at `blanket run fmt`'s diagnostic rather than reaching rustfmt).
+    let out = blanket(&project.0, &home.0, &["fmt", "--check"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("command 'fmt'"),
+        "script no longer wins: {stderr}"
+    );
+    assert!(!stderr.contains("unsupported Rust toolchain"), "{stderr}");
+    // Opening the store creates its directories; nothing was realized in it.
+    let objects = home.0.join("store/objects");
+    assert!(
+        !objects.is_dir() || std::fs::read_dir(&objects).unwrap().next().is_none(),
+        "an object was realized offline"
+    );
+}
+
+#[test]
 fn failures_exit_1_and_survive_quiet() {
     let home = TempDir::new("fail");
     let project = TempDir::new("empty");

@@ -216,6 +216,10 @@ pub fn listing(closure: &ClosureFile) -> Listing {
                 });
             }
         }
+        "rustfmt" => {
+            let version = string(&body["rust_version"]);
+            toolchain.push(("rustfmt".into(), version));
+        }
         _ => {}
     }
     toolchain.retain(|(_, version)| !version.is_empty());
@@ -753,6 +757,7 @@ const TOOLCHAIN_KINDS: &[&str] = &[
     "uv",
     "nodejs",
     "rust",
+    "rustfmt",
     "go",
     "ruby",
     "beam",
@@ -1209,6 +1214,29 @@ mod tests {
                 .to_string()
         };
         assert!(missing.contains("no python closure here"), "{missing}");
+    }
+
+    #[test]
+    fn listing_reads_rustfmt_closure_as_a_toolchain() {
+        let temp = TempDir::new("ls-rustfmt");
+        let host = Platform::host().unwrap().triple();
+        write_closure(
+            &temp.0,
+            "rustfmt",
+            host,
+            json!({
+                "rust_version": "1.96.1",
+                "rust_object": {"id": "rust-id"},
+                "rustfmt_object": {"id": "rustfmt-id"}
+            }),
+        );
+        let closures = closures(&temp.0).unwrap();
+        let row = listing(&closures[0]);
+        assert_eq!(row.toolchain, vec![("rustfmt".into(), "1.96.1".into())]);
+        assert!(row.packages.is_empty());
+        assert!(ls(&temp.0, None, false, false)
+            .unwrap()
+            .contains("rustfmt 1.96.1"));
     }
 
     #[test]

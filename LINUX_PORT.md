@@ -83,6 +83,58 @@ The lifecycle follow-up moved the per-environment `flock` to the permanent
 share the same blocking shared / nonblocking exclusive contract, so a runner
 waiting behind cleanup revalidates a deleted root while still holding the
 lock. No sandbox, extraction, or toolchain pin changed.
+### 2026-09-07 — fmt checks the rustfmt pin before it opens the store
+
+`run_fmt` now calls `rustfmt::preflight_platform` at the top of the Rust
+path, like the other tailors do from `preflight_sync`: a host with no pinned
+rustfmt component is refused with the usual `no ... pinned for <triple>
+(LINUX_PORT.md stage 4)` message before `Store::open` and before
+`ensure_rust_for` downloads ~105 MB. It is deliberately below the `--eco`
+dispatch, so a delegated `package.json` `fmt` script still needs no rustfmt
+pin. No behaviour change on the two pinned hosts; this is the guard that
+keeps a third triple (aarch64 Linux, musl) failing early and by name.
+
+### 2026-09-06 — Rust fmt publication and contained closure writes
+
+The rustfmt publication probe now runs with an absolute staged `lib` link to
+the paired Rust object's `lib`, with no `DYLD_*` or `LD_*` environment
+variable. Immediately before `store.commit`, blanket replaces it with the
+relative `../<rust-object-id>/lib` link and verifies that committed link text
+with `read_link`. This is required for the macOS Seatbelt probe because
+protected `sandbox-exec` binaries do not retain loader-variable overrides.
+
+Closure files are created and published through project, `.blanket`, and
+`closures` directory handles using `mkdirat`, `openat`, `renameat`, and
+`unlinkat`; symlinked directory parents are refused before anything is
+created in their targets. The same descriptor-anchored path is used by the
+Linux and macOS implementations.
+
+### 2026-09-06 — Rust `blanket fmt` sandbox and rustfmt pin
+
+The Rust formatting path now runs the pinned `cargo-fmt` in the shared
+bubblewrap `BuildSpec` engine with no network, read-only Rust/rustfmt store
+objects, a writable workspace, and scratch HOME/TMPDIR. Workspace discovery
+uses Cargo metadata with `--no-deps`, so an unsynced lock-less project does not
+create `Cargo.lock` or a vendor object. The writable-root socket preflight
+also applies to fmt.
+
+The Linux rustfmt archive was verified on 2026-09-06 against its published
+sidecar: `https://static.rust-lang.org/dist/rustfmt-1.96.1-x86_64-unknown-linux-gnu.tar.xz`
+sha256 `dcee5627f709f387cdca416a1d2ae9e6c2581cd117cdb4fd097c56c196384662`.
+The paired Darwin row was verified the same day at
+`https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz`
+with sha256 `ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165`.
+Both local downloads matched their published `.sha256` files. The macOS
+Seatbelt path still requires the Mac gate before merge.
+
+### 2026-09-06 — Rust fmt rework portability and sandbox diagnostics
+
+Round 1 made the committed rustfmt object's `lib` link relative to its sibling Rust
+object, so it is independent of the store root. The current publication probe
+uses an absolute staged `lib` link and no loader-variable override, while
+Seatbelt relays stderr like bubblewrap and classifies `sandbox-exec:` setup
+failures as sandbox errors rather than formatter exit statuses. Closure publication
+also rejects symlinked `.blanket` directories before writing provenance.
 
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 

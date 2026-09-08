@@ -11,10 +11,16 @@ use crate::store::Store;
 use crate::types::{ArtifactKind, Identity, Plan};
 use crate::{pyselect, python, wheel};
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CLOSURE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Common closure envelope (Sol review 4): every tailor's provenance lands
 /// at .blanket/closures/<ecosystem>.json with a shared outer shape; the
@@ -25,11 +31,40 @@ pub fn write_closure(
     mut body: serde_json::Value,
 ) -> io::Result<()> {
     let project_dir = project_dir.canonicalize()?;
-    let dir = project_dir.join(".blanket/closures");
-    fs::create_dir_all(&dir)?;
+    let blanket_dir = project_dir.join(".blanket");
+    let closures_dir = blanket_dir.join("closures");
+
+    // Keep the directory chain open while creating and publishing the file.
+    // Path-based create/open/rename would let a swapped parent redirect a
+    // closure write after the lexical containment checks below.
+    let project_fd = open_directory(&project_dir, "project directory")?;
+    mkdir_at(project_fd.as_raw_fd(), ".blanket", &blanket_dir)?;
+    let blanket_fd = open_directory_at(project_fd.as_raw_fd(), ".blanket", &blanket_dir)?;
+    mkdir_at(blanket_fd.as_raw_fd(), "closures", &closures_dir)?;
+    let closures_fd = open_directory_at(blanket_fd.as_raw_fd(), "closures", &closures_dir)?;
+
+    for (path, label) in [
+        (&blanket_dir, ".blanket"),
+        (&closures_dir, ".blanket/closures"),
+    ] {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(io::Error::other(format!(
+                "{} is not a real directory; refusing to write closures",
+                path.display()
+            )));
+        }
+        let canonical = path.canonicalize()?;
+        if !canonical.starts_with(&project_dir) {
+            return Err(io::Error::other(format!(
+                "{label} at {} escapes the project; refusing to write closures",
+                canonical.display()
+            )));
+        }
+    }
     // A symlinked closures dir would carry provenance writes outside the
     // project (same class as the cargo-home/bin escape).
-    let dir = dir.canonicalize()?;
+    let dir = closures_dir.canonicalize()?;
     if !dir.starts_with(&project_dir) {
         return Err(io::Error::other(format!(
             "{} escapes the project; refusing to write closures there",
@@ -63,12 +98,205 @@ pub fn write_closure(
         "body": body,
     });
     let dest = dir.join(format!("{ecosystem}.json"));
-    let tmp = dir.join(format!(".{ecosystem}.json.tmp.{}", std::process::id()));
-    fs::write(&tmp, serde_json::to_vec_pretty(&envelope)?)?;
-    fs::rename(&tmp, &dest)?;
+    let bytes = serde_json::to_vec_pretty(&envelope)?;
+    let dest_name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::other("closure destination has no file name"))?;
+    let (tmp_name, mut file) = loop {
+        let counter = CLOSURE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let candidate = format!(
+            ".{ecosystem}.json.tmp.{}.{}.{}",
+            std::process::id(),
+            nanos,
+            counter
+        );
+        match open_closure_temp(closures_fd.as_raw_fd(), &candidate) {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let result = (|| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        rename_at(
+            closures_fd.as_raw_fd(),
+            &tmp_name,
+            closures_fd.as_raw_fd(),
+            dest_name,
+        )?;
+        fsync_directory(&closures_fd)
+    })();
+    if result.is_err() {
+        unlink_at(closures_fd.as_raw_fd(), &tmp_name);
+    }
+    result?;
     store.register_root(&project_dir)?;
     crate::policy::clear();
     Ok(())
+}
+
+fn open_directory(path: &Path, label: &str) -> io::Result<fs::File> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} contains a NUL byte; refusing to write closures"),
+        )
+    })?;
+    // SAFETY: path is a valid NUL-terminated path and the returned fd is
+    // immediately wrapped in a File that owns it.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("open {label}: {error}"),
+        ));
+    }
+    // SAFETY: fd was returned by open above and is now owned by File.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn mkdir_at(parent_fd: RawFd, name: &str, path: &Path) -> io::Result<()> {
+    let name_c = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} contains a NUL byte; refusing to write closures"),
+        )
+    })?;
+    // SAFETY: parent_fd is an open directory and name_c is NUL-terminated.
+    let result = unsafe { libc::mkdirat(parent_fd, name_c.as_ptr(), 0o755) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EEXIST) {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("create {}: {error}", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn open_directory_at(parent_fd: RawFd, name: &str, path: &Path) -> io::Result<fs::File> {
+    let name_c = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} contains a NUL byte; refusing to write closures"),
+        )
+    })?;
+    // SAFETY: parent_fd is an open directory and name_c is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(code) if code == libc::ELOOP || code == libc::ENOTDIR
+        ) {
+            return Err(io::Error::other(format!(
+                "{} is not a real directory; refusing to write closures",
+                path.display()
+            )));
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!("open {}: {error}", path.display()),
+        ));
+    }
+    // SAFETY: fd was returned by openat above and is now owned by File.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn open_closure_temp(parent_fd: RawFd, name: &str) -> io::Result<fs::File> {
+    let name_c = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("closure temp name {name:?} contains a NUL byte"),
+        )
+    })?;
+    // SAFETY: parent_fd is an open directory and name_c is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd was returned by openat above and is now owned by File.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn rename_at(
+    old_dir_fd: RawFd,
+    old_name: &str,
+    new_dir_fd: RawFd,
+    new_name: &std::ffi::OsStr,
+) -> io::Result<()> {
+    let old_name = CString::new(old_name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "closure temporary name contains a NUL byte",
+        )
+    })?;
+    let new_name = CString::new(new_name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "closure destination name contains a NUL byte",
+        )
+    })?;
+    // SAFETY: both fds remain open directory handles and both names are
+    // NUL-terminated relative names.
+    let result =
+        unsafe { libc::renameat(old_dir_fd, old_name.as_ptr(), new_dir_fd, new_name.as_ptr()) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("publish closure: {error}"),
+        ));
+    }
+    Ok(())
+}
+
+fn fsync_directory(dir: &fs::File) -> io::Result<()> {
+    // SAFETY: dir owns a valid open directory fd.
+    if unsafe { libc::fsync(dir.as_raw_fd()) } < 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("sync closure directory: {error}"),
+        ));
+    }
+    Ok(())
+}
+
+fn unlink_at(parent_fd: RawFd, name: &str) {
+    let Ok(name) = CString::new(name) else {
+        return;
+    };
+    // SAFETY: parent_fd is an open directory and name is a relative name.
+    let _ = unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
 }
 
 pub(crate) fn store_from_closure_body(body: &serde_json::Value) -> Option<Store> {
@@ -607,8 +835,6 @@ fn project_env_inner(
     symlink(env_obj, &tmp)?;
     fs::rename(&tmp, &venv)?; // atomic replace, including over an old symlink
 
-    let meta_dir = project_dir.join(".blanket");
-    fs::create_dir_all(&meta_dir)?;
     let python = selection
         .map(|selection| {
             serde_json::json!({
@@ -781,6 +1007,94 @@ mod closure_platform_tests {
         write_closure(&dir, None); // pre-port envelope
         assert_eq!(read_closure(&dir, "python").unwrap()["ok"], true);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn closure_test_body(store: &Store) -> serde_json::Value {
+        serde_json::json!({"store_object": store.object_path("closure-test")})
+    }
+
+    #[test]
+    fn write_closure_succeeds_for_normal_directories() {
+        let project = std::env::temp_dir().join(format!(
+            "blanket-closure-normal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = test_store("closure-normal");
+        fs::create_dir_all(&project).unwrap();
+
+        super::write_closure(&project, "python", closure_test_body(&store)).unwrap();
+
+        let closure: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(closure["ecosystem"], "python");
+        assert_eq!(
+            closure["body"]["store_object"].as_str(),
+            Some(store.object_path("closure-test").to_str().unwrap())
+        );
+        assert!(project.join(".blanket/closures").is_dir());
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(store.root);
+    }
+
+    #[test]
+    fn write_closure_rejects_symlinked_blanket_without_creating_outside_closures() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-closure-blanket-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let outside = root.join("outside");
+        let store = test_store("closure-blanket-symlink");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join(".blanket")).unwrap();
+
+        let error =
+            super::write_closure(&project, "python", closure_test_body(&store)).unwrap_err();
+        assert!(error.to_string().contains(".blanket"), "{error}");
+        assert!(error.to_string().contains("real directory"), "{error}");
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(store.root);
+    }
+
+    #[test]
+    fn write_closure_rejects_symlinked_closures_without_writing_outside() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-closure-closures-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let outside = root.join("outside");
+        let store = test_store("closure-closures-symlink");
+        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join(".blanket/closures")).unwrap();
+
+        let error =
+            super::write_closure(&project, "python", closure_test_body(&store)).unwrap_err();
+        assert!(error.to_string().contains(".blanket/closures"), "{error}");
+        assert!(error.to_string().contains("real directory"), "{error}");
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(store.root);
     }
 
     #[test]

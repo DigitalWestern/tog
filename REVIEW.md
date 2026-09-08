@@ -16,7 +16,8 @@ confused inside one paragraph of the old NEXT.md.
 - Record every completed round in the log at the bottom. An entry leaves this
   file only when it is ✅.
 
-Current status: all five review entries are ✅. The briefs below preserve the
+Current status: the five original review entries are ✅; entry 6 (WP1) is ✅
+on Linux evidence with the Mac gate outstanding. The briefs below preserve the
 original risk questions; gate outcomes and remaining platform validation are
 in [REVIEW-2026-09-06.md](REVIEW-2026-09-06.md).
 
@@ -112,6 +113,36 @@ the whole feature.
 | 12 | native libs (PR #10) | `ebf852b` | `src/nativelibs.rs` |
 | gc | (PR #8) | `f5ff425` | `src/gc.rs` |
 
+## 6. ✅ WP1 `blanket fmt` — branch `wp1/fmt-rust`
+
+Files: `src/rustfmt.rs` (new: pins, `rustfmt/1` identity, allowlisted
+extraction, `lib` link, pre-commit probe), `src/main.rs` (`run_fmt`),
+`src/cli.rs` (`parse_fmt`, `LS_WORDS`), `src/sandbox.rs` (status-returning
+runner, shared `sandbox-exec:`/`bwrap:` setup-failure classifier),
+`src/project.rs` (descriptor-anchored closure publication), `src/cargo.rs`,
+`src/inspect.rs`, `src/sbom.rs`, `src/gc.rs`, `tests/fmt_e2e.rs`,
+`tests/cli.rs`.
+
+**Why it matters.** The first command that runs a store tool with the user's
+whole workspace writable and no projection; the first store object whose
+tree links into another object; the first closure written into a workspace
+root that may be an ancestor of the directory blanket was run in.
+
+**Looked for:** argument injection into the tar and cargo-fmt command lines;
+the archive allowlist against the real tarballs on both platforms; the
+absolute-path probe leaking into a committed object; closure writes escaping
+the project through a symlinked `.blanket`; gc following the `lib` link into
+the Rust object; other callers of the split sandbox runner seeing a changed
+failure surface; script precedence hijacked from an ancestor `package.json`;
+exit-status pass-through vs blanket's own 0/1/2.
+
+Reviewed 2026-09-06/07: Sol r1–r2 (REWORK), Claude Opus 5 subagent r3–r5
+(MERGE at r5). Findings and rechecks are summarised in the log row below;
+the three open nits are listed there. Linux acceptance on the final commit
+9fabfb5: 35/35 (`tests/acceptance.sh` with a disk-backed TMPDIR); `cargo
+test`, `fmt_e2e --ignored`, and `gc --ignored` green. Mac cold/warm gate
+outstanding.
+
 ---
 
 ## Recurring defect classes
@@ -178,3 +209,4 @@ Completed rounds. Add a row when an entry above reaches ✅.
 | 2026-09-06 | WP2 Python exact selection (branch `wp2/python-exact-selection`): exact `.python-version` patch fails closed unless pinned; `python::lookup` exact-or-newest-minor | GPT-5.6 Sol (Codex), independent | 3 | r1: 3 should (non-canonical spellings accepted, minor test not order-proving, vacuous Darwin e2e); r2: 1 should (test order); r3: none | ✅ MERGE on Linux evidence; Mac gate (`cargo test`, `python_select --ignored`) outstanding |
 | 2026-09-06 | WP2 Go exact selection (branch `wp2/go-selected-version`): `ensure_go_for` takes the selected version; unpinned selection fails before store access; status compares the go.mod selection | GPT-5.6 Sol (Codex), independent | 3 | r1: 3 should (pre-field closure reported synced, test not proving lookup-before-store, stale LIMITATIONS row); r2: 1 should (test not offline under regression); r3: none | ✅ MERGE on Linux evidence; Mac gate (`cargo test`, `go_e2e --ignored`) outstanding |
 | 2026-09-07 | WP4 x lifecycle (branch `wp4/x-lifecycle`): `blanket x --clean`, per-root locks for running tools, descriptor-relative cleanup | GPT-5.6 Sol (Codex), independent, r1–r3; Claude Opus 5 subagent (fresh, did not write the code; not independent of Codex), r4–r5 | 5 | r1: 2 blocker (lock inode deleted with the root; destructive legacy prefix match) + 4 should; r2: 3 blocker (intermediate symlink followed; `.locks` not reserved; legacy roots ignore the ecosystem filter) + 2 should; r3: 1 blocker (containment TOCTOU after pathname validation) + 4 should; r4: 2 should (symlinked home chain: `x` and `--clean` disagreed; cached projection validated twice) + 4 nit; r5: none blocking, 5 nits open (lock unlink before registry removal; two fds per candidate on very large `~/.blanket/x`; three refusals lack a next step; legacy ecosystem precedence differs between matcher and summary; LINUX_PORT changelog placement — fixed) | ✅ MERGE on Linux evidence; Mac gate (`cargo test`, `gc --ignored` x lifecycle cold/warm) outstanding |
+| 2026-09-07 | WP1 `blanket fmt` (branch `wp1/fmt-rust`): pinned rustfmt object, writable fmt sandbox mode, descriptor-anchored closure publication, script precedence and `--eco` | GPT-5.6 Sol (Codex), independent, r1–r2; Claude Opus 5 subagent (fresh, did not write the code; not independent of Codex), r3–r5 | 5 | r1: 4 blocker (predictable closure temp name; absolute store path in the object; rustfmt treated as a sync component; Mac gate) + 2 should; r2: 2 blocker (`DYLD_LIBRARY_PATH` probe; closure containment) + 3 should + 1 nit; r3: 1 should (`--eco` forwarded to the script) + 2 nit; r4: 1 should (`blanket sbom` failed on the rustfmt closure) + 3 nit; r5: none blocking, 3 nits open (`--eco` typo is an exit-1 refusal, not a suggestion; host-socket scan is Linux-only — now documented in LIMITATIONS.md; `ls rustfmt` not-found advice says `sync`) | ✅ MERGE on Linux evidence; Mac gate (cold/warm acceptance, `cargo test`, `fmt_e2e --ignored`) outstanding |

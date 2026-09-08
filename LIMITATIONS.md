@@ -7,13 +7,35 @@ say what breaks, for whom, and how it fails (loud/silent).
 
 ## Kernel-wide
 
+- **`blanket fmt` is Rust-only for now**: a polyglot directory must use
+  `blanket fmt --eco rust`; other ecosystems fail clearly as not implemented.
+  The command formats Cargo workspaces with the pinned 1.96.1 component and
+  intentionally does not resolve dependencies or create `Cargo.lock`.
+- **`blanket status` ignores the rustfmt closure**: `.blanket/closures/rustfmt.json`
+  is a toolchain/GC record, not a dependency-sync projection, so `status`
+  does not show a separate row for it. `blanket ls` (including the `ls
+  rustfmt` filter), `blanket sbom` (two toolchain components, no packages)
+  and `blanket gc` do handle the closure.
+- **A Unix socket in a fmt write tree refuses the run**: Linux bubblewrap's
+  pre-mount `reject_host_sockets` scan walks the workspace and scratch roots.
+  This is intentional protection against exposing a host socket; the scan can
+  add latency on large projects (it walks `target/` on every run). The guard
+  is Linux-only: the Seatbelt path has no counterpart, so on macOS a Unix
+  socket in the workspace is not refused (silent).
+
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
-  exited 1. `blanket build -h` and `blanket run -h` now print blanket's
-  help; a tool argument that is literally `-h` needs `--` in front
-  (`blanket build -- -h`). `--verbose` shows subprocess command lines only
-  for the subprocesses `main.rs` starts (uv, npm, cargo lock generation);
-  the tailors' own subprocesses are not yet traced. See CLI.md.
+  exited 1. `run`, `x` and `fmt` pass the program's status through.
+  `blanket build -h` and `blanket run -h` now print blanket's help; a tool
+  argument that is literally `-h` needs `--` in front (`blanket build -- -h`).
+  `--verbose` shows subprocess command lines only for the subprocesses
+  `main.rs` starts (uv, npm, cargo lock generation); the tailors' own
+  subprocesses are not yet traced. See CLI.md.
+- **Rust toolchain component requests are deliberately narrower than
+  `blanket fmt`**: a `rust-toolchain.toml` `components = ["rustfmt"]` request
+  still records `toolchain-component-unavailable` during `blanket sync`,
+  because sync's Rust object contains only rustc, rust-std, and cargo.
+  `blanket fmt` realizes the matching rustfmt component on demand.
 - **`blanket status` compares recorded inputs only.** Python and Node
   closures written since 2026-09-06 record the root manifest and lock files
   (`inputs`); `-r` includes, `requirements/` directory members, and
@@ -159,7 +181,9 @@ say what breaks, for whom, and how it fails (loud/silent).
   code at PLAN time. Fails silent (it's the design).
 - **Project-side plan caches for go/python lack contained atomic writes**
   (ruby's was removed entirely); a symlinked .blanket could redirect a
-  cache write outside the project.
+  cache write outside the project. Closure-envelope publication is not part
+  of this remaining gap: it is anchored to open directory handles and rejects
+  symlinked .blanket or .blanket/closures directories.
 - **Reproducibility is asserted, not measured**: no rebuild-twice-and-
   compare checks (the last unimplemented item from Sol's original list).
 - **xcrun cache-write warnings** inside every sandboxed native build

@@ -372,7 +372,7 @@ pub struct CargoCrate {
     pub version: String,
     pub sha256: String,
     pub url: String,
-    /// A git dependency pinned to a commit (NEXT.md item 4): the crate's files
+    /// A git dependency pinned to a commit: the crate's files
     /// come from the realized commit instead of a registry `.crate` archive,
     /// and `source` is the lock's exact source string, which the generated
     /// cargo config must replace verbatim.
@@ -1418,6 +1418,13 @@ mod tests {
         f(&store, temp.path());
     }
 
+    fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::policy::clear();
+        guard
+    }
+
     fn package_lock(package: &str, version: u64) -> String {
         format!("version = {version}\n\n[[package]]\n{package}")
     }
@@ -1513,6 +1520,7 @@ checksum = "{hash_b}"
 
     #[test]
     fn resolves_toolchain_files_and_pins() {
+        let _exception_guard = exception_guard();
         let temp = TempDir::new("blanket-cargo-toolchain");
         let project = temp.path().join("project/child");
         fs::create_dir_all(&project).unwrap();
@@ -1581,6 +1589,7 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
             "1.96.1"
         );
+        crate::policy::clear();
     }
 
     #[test]
@@ -1630,7 +1639,7 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
         )
         .unwrap();
-        crate::policy::clear();
+        let _exception_guard = exception_guard();
         assert_eq!(
             resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
             "1.96.1"
@@ -1646,6 +1655,30 @@ checksum = "{hash_b}"
         )
         .unwrap();
         assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
+    }
+
+    #[test]
+    fn rustfmt_toolchain_component_is_recorded_as_unavailable_under_permissive_policy() {
+        let _exception_guard = exception_guard();
+        let temp = TempDir::new("blanket-cargo-rustfmt-policy");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"rustfmt\"]\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
+            "1.96.1"
+        );
+        assert!(crate::policy::pending().iter().any(|exception| {
+            exception.kind == crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE
+                && exception.subject.ends_with("rust-toolchain.toml")
+                && exception.detail.contains("rustfmt")
+        }));
+        crate::policy::clear();
     }
 
     fn make_component_archives(

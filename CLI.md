@@ -31,6 +31,7 @@ EVERYDAY:
   run        run a command or script inside the environment(s)
   x          run a tool without adding it to the project (like npx / uvx)
   build      sandboxed, network-denied build (cargo | go | elixir | dotnet)
+  fmt        format a Rust project with the pinned rustfmt
 
 INSPECT:
   status     is the projection current with the manifest and the lock?
@@ -58,8 +59,8 @@ PROJECT INPUTS ...        (the existing block; `.python-version` accepts a
                            minor request or an exact pinned patch)
 ENVIRONMENT ...           (BLANKET_STORE, BLANKET_STRICT, BLANKET_POLICY)
 
-Exit status: 0 success, 1 failure, 2 usage error; 'run' and 'x' pass the
-program's exit status through.
+Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
+the program's exit status through.
 ```
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
@@ -213,7 +214,33 @@ the natural extension but is **not** in this plan; it is the task-runner
 question PLAN.md defers until a real polyglot need appears (WP1's
 `blanket fmt` contract is the shape a named tool command takes).
 
-### 2.3 `blanket add`, `blanket remove`, `blanket update`
+### 2.3 `blanket fmt`
+
+`blanket fmt [--check] [--eco <ecosystem>] [--] [<args>...]` discovers the
+Cargo workspace with the pinned Cargo tool, reads metadata without resolving
+dependencies, and fetches and runs the matching pinned rustfmt when needed.
+It can format a project before its first sync, does not create `Cargo.lock` or
+a vendor object, and passes the tool's exit status through. `--check` is
+blanket's flag; after it and `--eco` (or after `--`), arguments go to
+`cargo-fmt` unchanged. Rust is the only implementation; a polyglot directory
+needs `--eco rust`. Both `--eco <ecosystem>` and `--eco=<ecosystem>` are
+accepted and validated the same way: an empty value, or one that starts with
+`-` (`--eco --check`, `--eco=--check`), is a usage error (exit 2), never an
+ecosystem name.
+
+The run writes `.blanket/closures/rustfmt.json`, a toolchain-only closure:
+`blanket ls` shows it as a `rustfmt` row, `blanket sbom` inventories the two
+store objects it pins (`rust` and `rustfmt`), `blanket gc` keeps them live,
+and `blanket status` ignores it (it has no dependency-sync state to compare).
+
+If the nearest projected root's `package.json` has a script named `fmt`, that
+script takes precedence and runs exactly as `blanket run fmt` would; `--check`
+and any pass-through arguments go to the script, `--eco` never does. Use
+`blanket run fmt` to address the script explicitly, and `blanket fmt --eco
+rust` to bypass it: an explicit `--eco` selects the ecosystem, so it always
+formats that ecosystem and never delegates to a script.
+
+### 2.4 `blanket add`, `blanket remove`, `blanket update`
 
 ```
 blanket add <spec>...    [--dev] [--no-sync]
@@ -306,7 +333,7 @@ existing helper); never reformat a file blanket did not fully generate (the
 requirements.txt append preserves everything above it, uv and npm preserve
 formatting themselves); print every file touched; `--no-sync` for review.
 
-### 2.4 `blanket x <tool>[@version] [<args>...]`
+### 2.5 `blanket x <tool>[@version] [<args>...]`
 
 Run a tool from a registry without touching the project, cached forever:
 
@@ -365,7 +392,7 @@ created that way can also be removed), both refuse a relative `HOME`, and both
 refuse a symlinked or non-directory `~/.blanket/x`. Cleanup never treats
 `.locks` as an environment.
 
-### 2.5 `blanket status`
+### 2.6 `blanket status`
 
 Per ecosystem found here: `synced`, `lock changed since sync`, `manifest
 changed since lock`, or `not synced`, computed from the closure's recorded
@@ -378,14 +405,16 @@ Older Go closures without that recorded version are shown as
 hashes remain reported first.
 `--json` is available for tooling.
 
-### 2.6 `blanket ls [<ecosystem>] [--json]`
+### 2.7 `blanket ls [<ecosystem>] [--json]`
 
 Name, version, and (with `--verbose`) artifact and store object id for every
 package in each synced closure. Straight from `.blanket/closures/*.json`;
 no store access. This is the "what is on this machine" query the enterprise
-pitch promises, made typeable.
+pitch promises, made typeable. The optional filter word is one of the seven
+ecosystems plus `rustfmt`, the toolchain-only closure `blanket fmt` writes:
+every row `ls` can print is a word `ls` accepts.
 
-### 2.7 `blanket doctor`
+### 2.8 `blanket doctor`
 
 The first-five-minutes command: platform (and whether it is supported),
 store path and whether it is writable and on which filesystem, sandbox
@@ -407,7 +436,7 @@ have real add/update/remove round trips in `tests/deps_e2e.rs`, including
 uv development dependencies. Astra review findings and final Linux gate
 results are in REVIEW-2026-09-06.md. The macOS arm64 run remains outstanding.
 
-### 2.8 Deferred within level two
+### 2.9 Deferred within level two
 
 - **`blanket why <pkg>`**: the closure records packages, not edges
   (`LockedPackage` and `NpmPackage` carry no dependency list). `why` needs
