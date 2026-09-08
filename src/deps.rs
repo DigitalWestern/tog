@@ -1336,10 +1336,39 @@ fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
 /// any of it would be matched literally, silently excluding a real member and
 /// letting `add` write a stray `package-lock.json` inside a pnpm workspace,
 /// so such a pattern is a refusal, not a non-match.
-const UNSUPPORTED_WORKSPACE_GLOB: [&str; 9] = ["!(", "+(", "@(", "*(", "{", "}", "?", "[", "]"];
+const UNSUPPORTED_WORKSPACE_GLOB: [&str; 12] = [
+    "!(", "+(", "@(", "*(", "{", "}", "?", "[", "]", "(", ")", "|",
+];
 
 fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
     let workspace_file = root.join("pnpm-workspace.yaml");
+    let canonical_root = root.canonicalize()?;
+    let canonical_project = project.canonicalize()?;
+    let relative = canonical_project
+        .strip_prefix(&canonical_root)
+        .map_err(|_| {
+            other(format!(
+                "project {} is outside pnpm workspace root {}",
+                canonical_project.display(),
+                canonical_root.display()
+            ))
+        })?;
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    // `pnpm-lock.yaml` enumerates every member pnpm resolved, using pnpm's own
+    // glob engine. Ask it before reaching for the pattern matcher below: it is
+    // exact where the matcher approximates, and it means an ordinary
+    // hand-written `pnpm-workspace.yaml` never has to parse at all.
+    let lock_path = root.join("pnpm-lock.yaml");
+    let importer_key = if relative.is_empty() { "." } else { &relative };
+    if let Ok(text) = fs::read_to_string(&lock_path) {
+        let importers = crate::npm_lock_import::pnpm_lock_importers(&text)
+            .map_err(|error| other(format!("{}: {error}", lock_path.display())))?;
+        if importers.iter().any(|importer| importer == importer_key) {
+            return Ok(true);
+        }
+    }
+    // Not in the lock. Either not a member, or a member added since the last
+    // `pnpm install`; only the patterns can tell those apart.
     let patterns = if workspace_file.is_file() {
         let text = fs::read_to_string(&workspace_file)
             .map_err(|error| other(format!("read {}: {error}", workspace_file.display())))?;
@@ -1348,16 +1377,7 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
     } else {
         Vec::new()
     };
-    let root = root.canonicalize()?;
-    let project = project.canonicalize()?;
-    let relative = project.strip_prefix(&root).map_err(|_| {
-        other(format!(
-            "project {} is outside pnpm workspace root {}",
-            project.display(),
-            root.display()
-        ))
-    })?;
-    let relative = relative.to_string_lossy().replace('\\', "/");
+    let root = canonical_root;
     let mut positive_match = false;
     let mut negative_match = false;
     for raw_pattern in &patterns {
@@ -1490,11 +1510,22 @@ fn node_delegate_args(
     // `PnpmScratch`). `--config.<name>=<value>` is the spelling every verb's
     // parser accepts; `remove` and `update` reject `--modules-dir` as a flag.
     args.push("--config.enable-modules-dir=false".into());
+    // `enable-modules-dir=false` only means "do not link into the modules
+    // directory" for the isolated linker. A project `.npmrc` carrying
+    // `node-linker=hoisted` makes the delegate a real installer again: it
+    // downloads packages and rewrites the user's `node_modules`, replacing
+    // symlinks with copied directories. `node-linker=pnp` fails with a raw
+    // pnpm stack trace. Force the linker so no project file can pick either.
+    args.push("--config.node-linker=isolated".into());
     args.push(format!("--config.modules-dir={}", scratch.modules_dir));
     args.push(format!(
         "--config.virtual-store-dir={}",
         scratch.virtual_store_dir
     ));
+    // pnpm falls back to `~/.pnpm-store` whenever its default store would
+    // land on a different filesystem from the project: outside the project,
+    // outside the blanket store, and never reclaimed by `gc`.
+    args.push(format!("--config.store-dir={}", scratch.store_dir));
     if workspace_root {
         args.push("-w".into());
     }
@@ -1529,14 +1560,26 @@ fn node_delegate_args(
 /// the delegate returns (a leftover has the `stage-` name `gc::sweep_stages`
 /// reclaims).
 struct PnpmScratch {
-    /// `--config.modules-dir`, relative to the project pnpm runs in. pnpm
-    /// joins it onto every importer's own directory, so it is computed from
-    /// the deepest one (the project itself, at or below the lock root) and
-    /// escapes the project tree from every importer.
+    /// `--config.modules-dir`, relative to the project pnpm runs in.
+    ///
+    /// pnpm joins this onto *every* importer's own directory, and one
+    /// relative path cannot escape the project from importers at differing
+    /// depths: computed for a workspace root, it lands back inside the
+    /// project for any deeper member. What keeps the project untouched is
+    /// therefore not this path but `enable-modules-dir=false` together with
+    /// `node-linker=isolated` — with both, pnpm creates no importer
+    /// `node_modules` at all, and this path only ever names a
+    /// `.modules.yaml` to read. Remove either flag and the path alone will
+    /// not save you.
     modules_dir: String,
     /// `--config.virtual-store-dir`, relative to the lock root, which is what
     /// pnpm resolves it against.
     virtual_store_dir: String,
+    /// `--config.store-dir`. Absolute: pnpm resolves the store directory
+    /// against the cwd rather than joining it onto an importer, so an
+    /// absolute path is both safe here and the only spelling that pins the
+    /// store no matter which directory the delegate runs in.
+    store_dir: String,
 }
 
 fn pnpm_scratch(stage: &Path, project: &Path, lock_root: &Path) -> io::Result<PnpmScratch> {
@@ -1551,6 +1594,7 @@ fn pnpm_scratch(stage: &Path, project: &Path, lock_root: &Path) -> io::Result<Pn
         virtual_store_dir: relative_path(&lock_root, &modules.join(".pnpm"))
             .to_string_lossy()
             .into_owned(),
+        store_dir: stage.join("pnpm-store").to_string_lossy().into_owned(),
     })
 }
 
@@ -2105,11 +2149,80 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// `pnpm-lock.yaml` decides membership, so the two shapes that used to
+    /// send `add` down the npm branch — writing a stray `package-lock.json`
+    /// inside a pnpm workspace — resolve correctly: an alternation group,
+    /// which pnpm's glob engine supports and blanket's matcher never did, and
+    /// a block sequence at the parent key's own indent, which is ordinary
+    /// hand-written YAML that blanket's lockfile-shaped parser rejects.
+    #[test]
+    fn workspace_membership_comes_from_the_lock_not_the_glob() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-ws-importers-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let member = root.join("apps/web");
+        fs::create_dir_all(&member).unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  apps/web: {}\n",
+        )
+        .unwrap();
+        // Both hostile-to-blanket shapes at once: alternation, at indent 0.
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n- '(apps|libs)/*'\n",
+        )
+        .unwrap();
+        assert!(
+            pnpm_workspace_contains(&root, &member).unwrap(),
+            "a member the lock enumerates was not recognised"
+        );
+        assert!(
+            pnpm_workspace_contains(&root, &root).unwrap(),
+            "the workspace root itself was not recognised"
+        );
+
+        // A directory the lock does not enumerate falls through to the
+        // patterns. Whatever the patterns say, the fallback must fail closed:
+        // never a silent `false`, which would send `add` down the npm branch
+        // and drop a `package-lock.json` inside a pnpm workspace. Here the
+        // indent-0 sequence is what the parser reaches first.
+        let stranger = root.join("apps/other");
+        fs::create_dir_all(&stranger).unwrap();
+        assert!(
+            pnpm_workspace_contains(&root, &stranger).is_err(),
+            "an unresolvable member returned a verdict instead of refusing"
+        );
+
+        // With patterns this parser does accept, an alternation group is
+        // itself the refusal: blanket's matcher would treat it literally and
+        // silently exclude a real member.
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - '(apps|libs)/*'\n",
+        )
+        .unwrap();
+        let error = pnpm_workspace_contains(&root, &stranger).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported pnpm workspace glob"),
+            "{error}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn node_delegate_argv_is_delimited_and_workspace_aware() {
         let scratch = PnpmScratch {
             modules_dir: "../../store/tmp/stage-1/modules".into(),
             virtual_store_dir: "../store/tmp/stage-1/modules/.pnpm".into(),
+            store_dir: "/store/tmp/stage-1/pnpm-store".into(),
         };
         let args = node_delegate_args(
             Verb::Add,
@@ -2127,8 +2240,10 @@ mod tests {
                 "--reporter",
                 "append-only",
                 "--config.enable-modules-dir=false",
+                "--config.node-linker=isolated",
                 "--config.modules-dir=../../store/tmp/stage-1/modules",
                 "--config.virtual-store-dir=../store/tmp/stage-1/modules/.pnpm",
+                "--config.store-dir=/store/tmp/stage-1/pnpm-store",
                 "-w",
                 "-D",
                 "--",
@@ -2146,6 +2261,12 @@ mod tests {
             // The modules-state redirection is on every verb: `remove` and
             // `update` reject `--modules-dir` as a flag but take `--config.`.
             assert!(args.contains(&"--config.enable-modules-dir=false".to_string()));
+            // Without a forced linker a project `.npmrc` (`node-linker=hoisted`)
+            // turns the delegate back into a real installer.
+            assert!(args.contains(&"--config.node-linker=isolated".to_string()));
+            assert!(args
+                .iter()
+                .any(|arg| arg.starts_with("--config.store-dir=")));
             assert!(args
                 .iter()
                 .any(|arg| arg.starts_with("--config.modules-dir=")));
@@ -2183,7 +2304,7 @@ mod tests {
     /// modules dir still escapes the project tree, so no importer can be
     /// pointed at a `.modules.yaml` inside the user's project.
     #[test]
-    fn pnpm_scratch_paths_escape_the_project_from_every_importer() {
+    fn pnpm_scratch_paths_resolve_where_pnpm_joins_them() {
         let root =
             std::env::temp_dir().join(format!("blanket-pnpm-scratch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -2227,6 +2348,20 @@ mod tests {
         assert_eq!(
             lexical_join(&lock_root_c, &scratch.modules_dir),
             stage_c.join("modules")
+        );
+        // A root-computed modules-dir lands INSIDE the project for a deeper
+        // importer. This is a property of `path.join` and one relative path,
+        // not something to be fixed by computing it differently; it is
+        // asserted here so nobody reads the previous claim ("escapes from
+        // every importer") back into the code. Safety comes from the linker
+        // flags in `node_delegate_args`, and
+        // `deps_e2e::pnpm_edits_leave_an_installed_project_untouched` is what
+        // proves it end to end.
+        let from_member = lexical_join(&member_c, &scratch.modules_dir);
+        assert!(
+            from_member.starts_with(&lock_root_c),
+            "expected the documented in-project landing, got {}",
+            from_member.display()
         );
         assert_eq!(
             relative_path(Path::new("/a/b/c"), Path::new("/a/x/y")),

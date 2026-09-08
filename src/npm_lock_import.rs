@@ -321,6 +321,18 @@ fn yaml_list(value: Option<&YamlValue>) -> Vec<String> {
 /// YAML parser used for lock imports also handles this small machine-written
 /// configuration shape, so workspace membership uses the same syntax rules
 /// as the imported lockfile instead of a line-oriented approximation.
+/// Every importer `pnpm-lock.yaml` enumerates, as paths relative to the lock
+/// root (`.` is the root itself). This is the authoritative membership list
+/// for a pnpm workspace: pnpm produced it with its own glob engine
+/// (fast-glob/picomatch), so consulting it settles membership exactly instead
+/// of reimplementing that engine's syntax — alternation groups `(a|b)`,
+/// extglobs, `dot: false`, the implicit `node_modules` ignore, and the rest.
+pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
+    let parsed = parse_yaml(lock_yaml)?;
+    let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
+    Ok(importer_map(root)?.into_keys().collect())
+}
+
 pub fn pnpm_workspace_packages(workspace_yaml: &str) -> io::Result<Vec<String>> {
     let parsed = parse_yaml(workspace_yaml)?;
     let root = yaml_map(&parsed, "pnpm-workspace.yaml")?;

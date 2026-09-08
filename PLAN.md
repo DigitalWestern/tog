@@ -242,7 +242,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm edits implemented and reviewed, PR open, Mac gate outstanding; Yarn classic/Berry remain refusal; Poetry/PDM open)
+### WP4 — Daily-driver gaps and the `x` lifecycle — PARTIAL (pnpm edits implemented, reviewed through round 6, PR open, Mac gate outstanding; Yarn classic/Berry remain refusal; Poetry/PDM open)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 

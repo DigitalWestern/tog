@@ -35,15 +35,26 @@ say what breaks, for whom, and how it fails (loud/silent).
   tells the user to set the exact version from `pnpm --version`; no floating
   version is suggested. Ancestor locks are never inherited unless a
   `pnpm-lock.yaml` and `pnpm-workspace.yaml` positively include the member;
-  other locks and excluded members are boundaries. Mixed-root edits are
+  other locks and excluded members are boundaries. Membership comes from the
+  lockfile's `importers` list, which pnpm wrote with its own glob engine, so
+  a member already in the lock is matched exactly and its
+  `pnpm-workspace.yaml` is never parsed. Mixed-root edits are
   refused before delegation and name both roots. A Corepack
   `+<algo>.<hex>` suffix is verified against the realized pnpm package
   tarball in the verified artifact cache; `sha224`, `sha256` and `sha512`
   are supported and any other algorithm is refused by name. **Only a subset
   of the pnpm workspace glob grammar is matched:** literal segments, `*`,
   `**`, and a leading `!` negation. A `packages:` pattern using a brace
-  list, a character class, `?`, or an extglob is refused by name rather
-  than silently treated as a non-match. Delegates are resolved through the
+  list, a character class, `?`, an extglob, or an alternation group such as
+  `(apps|libs)/*` is refused by name rather than silently treated as a
+  non-match. This fallback is reached only for a directory the lockfile does
+  not list — a member added since the last `pnpm install`. On that path the
+  workspace file is parsed by blanket's lockfile-shaped YAML reader, which is
+  stricter than pnpm's: a block sequence at the parent key's own indent, odd
+  indentation, or tabs are refused. The refusal is fail-closed (never a
+  stray `package-lock.json`), but the message names YAML rather than the
+  real cause; running `pnpm install` once, so the member reaches the lock,
+  is the workaround. Delegates are resolved through the
   store's cached `x` environments under `~/.blanket/x/`; pnpm runs with an
   isolated HOME and XDG root in a per-run `<store>/tmp/stage-*` directory
   that is removed when the edit returns (a leftover from a killed run is

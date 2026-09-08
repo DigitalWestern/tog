@@ -59,8 +59,14 @@ pub fn force_env(
 ) {
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy().into_owned();
+        // `str::get` rather than `name[..len]`: the index is a byte offset
+        // that need not be a char boundary, and `to_string_lossy` turns any
+        // invalid byte into a three-byte replacement character, so slicing
+        // panics on env names blanket does not control. Out-of-boundary and
+        // too-short both yield `None`, which is "no match".
         let has_prefix = remove_prefixes.iter().any(|prefix| {
-            name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+            name.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
         });
         if has_prefix || remove.contains(&name.as_str()) {
             cmd.env_remove(&key);
@@ -726,6 +732,7 @@ mod tests {
     use std::collections::BTreeSet;
     #[cfg(target_os = "linux")]
     use std::fs::File;
+    use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
     use std::os::unix::io::AsRawFd;
     #[cfg(target_os = "linux")]
@@ -1656,5 +1663,41 @@ mod tests {
             !envs.contains_key("BLANKET_FORCE_ENV_KEEP"),
             "an unrelated variable was touched: {envs:?}"
         );
+    }
+
+    /// The prefix comparison indexes by byte offset. Env names are not
+    /// blanket's to choose, and `to_string_lossy` widens any invalid byte to
+    /// a three-byte replacement character, so a name can put a multi-byte
+    /// character across the offset a prefix length lands on. Slicing there
+    /// panics and takes down every caller — `blanket run` for Ruby, Elixir
+    /// and .NET as much as a pnpm edit.
+    #[test]
+    fn force_env_survives_names_that_straddle_a_prefix_boundary() {
+        // "abc" + U+FFFD: the replacement character occupies bytes 3..6, so
+        // byte 5 (the length of "PNPM_") is inside it.
+        let straddles = "abc\u{fffd}_blanket_test";
+        assert!(!straddles.is_char_boundary(5));
+        // A non-UTF-8 name reaches the same place through `to_string_lossy`.
+        let invalid = OsStr::from_bytes(b"abc\xff_blanket_test");
+        std::env::set_var(straddles, "user");
+        std::env::set_var(invalid, "user");
+        let mut cmd = Command::new("true");
+        // Prefixes of several lengths, none of which match these names.
+        force_env(&mut cmd, &["npm_config_", "PNPM_", "YARN_"], &[], &[]);
+        // Reaching this line at all is the point: the old slicing panicked
+        // here. A sibling test sets its own variables in the same process
+        // environment, so assert about these two names only.
+        let touched: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        std::env::remove_var(straddles);
+        std::env::remove_var(invalid);
+        for name in [straddles, "abc\u{fffd}_blanket_test"] {
+            assert!(
+                !touched.iter().any(|seen| seen == name),
+                "a name matching no prefix was scrubbed: {touched:?}"
+            );
+        }
     }
 }

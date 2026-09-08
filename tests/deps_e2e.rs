@@ -708,6 +708,14 @@ fn pnpm_workspace_member_and_root_roundtrip() {
     // it outright, and every verb would refuse the foreign store recorded in
     // `.modules.yaml`. The whole installed tree must survive every edit.
     install_with_store_pnpm(&temp, project, &store);
+    // A committed `.npmrc` is ordinary, and `node-linker` is an ordinary
+    // setting in one. Written after the install, it disagrees with the
+    // isolated layout on disk, which is exactly when it does damage: without
+    // a forced `--config.node-linker=isolated` the delegate stops honouring
+    // `enable-modules-dir=false`, becomes a real installer, and rewrites the
+    // member's `node_modules` during a workspace-root edit. The snapshots
+    // below are what catch it.
+    std::fs::write(project.join(".npmrc"), "node-linker=hoisted\n").unwrap();
     let installed = (
         tree_snapshot(&project.join("node_modules")),
         tree_snapshot(&member.join("node_modules")),

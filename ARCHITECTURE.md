@@ -455,14 +455,27 @@ recorded there, a workspace-root `add -w` installs outright, and the
 workspace path rewrites the virtual store's `lock.yaml`), it also receives
 `--config.enable-modules-dir=false` plus `--config.modules-dir` and
 `--config.virtual-store-dir` pointed, relative to the project, into the
-per-run stage. The user's `node_modules` is therefore neither read nor
+per-run stage, and `--config.store-dir` into that stage as well (pnpm
+otherwise falls back to `~/.pnpm-store` whenever its default would land on
+another filesystem: outside the project, outside the store, never
+reclaimed). It also receives `--config.node-linker=isolated`, because
+`enable-modules-dir=false` is only honoured by the isolated linker — a
+committed `.npmrc` carrying `node-linker=hoisted` otherwise turns a
+workspace-root edit back into a real install that rewrites a member's
+`node_modules`. The user's `node_modules` is therefore neither read nor
 written: an already-installed project whose `.modules.yaml` names the user's
 own store is edited in place, and no blanket-internal path is left in the
-project (`tests/deps_e2e.rs::pnpm_edits_leave_an_installed_project_untouched`).
+project (`tests/deps_e2e.rs::pnpm_edits_leave_an_installed_project_untouched`,
+and the workspace round trip carries a hostile `.npmrc` for the linker case).
 The delegate writes only the selected manifest and lock; an ancestor lock is
-inherited only from a root with
-both `pnpm-lock.yaml` and `pnpm-workspace.yaml`, whose positive package globs
-match the member and whose negative globs do not, regardless of order. An
+inherited only from a root with both `pnpm-lock.yaml` and
+`pnpm-workspace.yaml`. Membership is read from the lockfile's `importers`,
+which pnpm itself generated with its own glob engine; only a directory absent
+from the lock falls back to matching the workspace file's globs, where any
+pattern blanket cannot match exactly — alternation groups, brace lists,
+character classes, `?`, extglobs — is a refusal rather than a silent
+non-match, since a silent non-match would drop a stray `package-lock.json`
+inside a pnpm workspace. An
 ancestor package-lock, Yarn lock, or unmatched pnpm root is a boundary, so a
 nested independent project falls back to the store npm in its own directory.
 Mixed-root requests are rejected before delegation and name the roots so the
