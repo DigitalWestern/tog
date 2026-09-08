@@ -19,6 +19,7 @@
 //! escaped text tar prints, which is sound because neither tar ever escapes
 //! `/` or `.`, the only characters the rules look for.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 use std::process::Command;
@@ -289,6 +290,7 @@ fn graphic(text: &str) -> bool {
 /// their kind is still checked: a hard link or a device is refused wherever
 /// it sits.
 pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
+    let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
     for entry in entries {
         match entry.kind {
             EntryKind::HardLink => {
@@ -311,10 +313,31 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
         if components.len() <= strip {
             continue;
         }
-        let stripped = &components[strip..];
+        let stripped: Vec<&str> = components[strip..]
+            .iter()
+            .copied()
+            .filter(|component| *component != ".")
+            .collect();
+        kept.push((entry, stripped));
+    }
+    let symlinks: BTreeSet<String> = kept
+        .iter()
+        .filter(|(entry, _)| entry.kind == EntryKind::Symlink)
+        .map(|(_, stripped)| stripped.join("/"))
+        .collect();
+    for (entry, stripped) in &kept {
+        for end in 1..stripped.len() {
+            let ancestor = stripped[..end].join("/");
+            if symlinks.contains(&ancestor) {
+                return Err(err(format!(
+                    "archive entry {:?} is written through symlink {:?}",
+                    entry.name, ancestor
+                )));
+            }
+        }
         if entry.kind == EntryKind::Symlink {
             let target = entry.link.as_deref().unwrap_or("");
-            symlink_contained(stripped, target).map_err(|reason| {
+            symlink_contained(stripped, target, &symlinks).map_err(|reason| {
                 err(format!(
                     "archive symlink {:?} -> {:?}: {reason}",
                     entry.name, target
@@ -347,28 +370,50 @@ fn contained_components(name: &str) -> Result<Vec<&str>, String> {
     Ok(components)
 }
 
-/// A symlink at `stripped` (its components after `--strip-components`) is
-/// contained when its target, resolved lexically from the link's directory,
-/// never leaves the destination root. Every symlink is checked on its own,
-/// so a chain of contained links stays contained.
-fn symlink_contained(stripped: &[&str], target: &str) -> Result<(), String> {
+/// A symlink at `stripped` is contained when its target, resolved lexically
+/// from the link's own directory, never rises above the destination root.
+///
+/// Lexical resolution is only trustworthy while it agrees with what the
+/// filesystem would do, and the two disagree exactly when the walk passes
+/// *through* another symlink: `..` applied to an unresolved name pops the
+/// name, while `..` applied to the real path pops wherever that symlink
+/// pointed. Traversing an archive-defined symlink is therefore refused
+/// outright, which restores the agreement instead of trying to model it.
+///
+/// A symlink as the target's *final* component is not a traversal — nothing
+/// is resolved through it here — and it is contained by its own validation,
+/// so composing the two stays inside.
+fn symlink_contained(
+    stripped: &[&str],
+    target: &str,
+    symlinks: &BTreeSet<String>,
+) -> Result<(), String> {
     if target.is_empty() {
         return Err("empty symlink target".into());
     }
     if target.starts_with('/') {
         return Err("absolute symlink target".into());
     }
-    let mut depth = stripped.len().saturating_sub(1);
-    for component in target.split('/') {
-        match component {
+    let mut path: Vec<&str> = stripped[..stripped.len().saturating_sub(1)].to_vec();
+    let components: Vec<&str> = target.split('/').collect();
+    for (index, component) in components.iter().enumerate() {
+        match *component {
             "" | "." => {}
             ".." => {
-                if depth == 0 {
+                if path.is_empty() {
                     return Err("symlink target escapes the destination".into());
                 }
-                depth -= 1;
+                path.pop();
             }
-            _ => depth += 1,
+            name => {
+                path.push(name);
+                if index + 1 < components.len() && symlinks.contains(&path.join("/")) {
+                    return Err(format!(
+                        "symlink target resolves through another symlink in the archive ({:?})",
+                        path.join("/")
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -401,6 +446,7 @@ pub fn extract_validated(
 ) -> io::Result<()> {
     validate(entries, strip)?;
     let status = tar_command(platform)
+        .args(TAR_PARSE_FLAGS)
         .arg(format!("-x{}f", compression.flag()))
         .arg(archive)
         .arg("-C")
@@ -775,6 +821,58 @@ crw-r--r--  0 root   wheel     1,3 Jan  1 12:34 pkg/dev
         );
         assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn dot_components_do_not_inflate_the_symlink_depth_budget() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-archive-dot-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let archive = base.join("dot.tar");
+        write_tar(&archive, &[ustar("./l", b'2', "../ESCAPED", b"")]);
+        let entries = list(host(), &archive, Compression::None).unwrap();
+        assert!(
+            validate(&entries, 0).is_err(),
+            "a `.` component bought an extra level of climb: {entries:?}"
+        );
+
+        let padded = base.join("padded.tar");
+        write_tar(
+            &padded,
+            &[ustar("pkg/././././l", b'2', "../../../../ESCAPED", b"")],
+        );
+        let entries = list(host(), &padded, Compression::None).unwrap();
+        assert!(
+            validate(&entries, 1).is_err(),
+            "padded `.` components bought an unbounded climb: {entries:?}"
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_target_resolving_through_another_archive_symlink_is_refused() {
+        let up = entry(EntryKind::Symlink, "pkg/x/up", Some(".."));
+        let out = entry(EntryKind::Symlink, "pkg/x/out", Some("up/../../ESCAPED"));
+        validate(&[up.clone()], 0).unwrap();
+        refused(
+            &[up.clone(), out.clone()],
+            0,
+            "resolves through another symlink",
+        );
+        refused(&[out, up], 0, "resolves through another symlink");
+    }
+
+    #[test]
+    fn a_member_written_through_an_archive_symlink_is_refused() {
+        let link = entry(EntryKind::Symlink, "pkg/lib", Some("real"));
+        let through = entry(EntryKind::File, "pkg/lib/payload", None);
+        refused(&[link, through], 0, "written through symlink");
     }
 
     fn write_tar(path: &Path, members: &[Vec<u8>]) {

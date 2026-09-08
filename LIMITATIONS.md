@@ -111,7 +111,13 @@ say what breaks, for whom, and how it fails (loud/silent).
   past the containment check. Every listing is additionally cross-checked
   against a column-free `tar -t`, and any disagreement refuses the archive,
   so an unmodelled column layout fails closed instead of silently
-  mis-parsing. The bsdtar column count has been verified against libarchive
+  mis-parsing. Containment is decided lexically, which is only sound while
+  lexical resolution agrees with the filesystem's, so a symlink target that
+  would resolve *through* another symlink in the same archive is refused, as
+  is any member whose own path passes through one. Parsing a human-readable
+  listing by column remains a fragile foundation; reading tar headers
+  directly is the intended replacement before a second consumer adopts this
+  module. The bsdtar column count has been verified against libarchive
   3.8.7 on Linux; macOS ships an older bsdtar, so the Mac gate is still what
   confirms it there.
 
