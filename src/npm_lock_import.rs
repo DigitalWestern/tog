@@ -322,44 +322,16 @@ fn yaml_list(value: Option<&YamlValue>) -> Vec<String> {
 /// configuration shape, so workspace membership uses the same syntax rules
 /// as the imported lockfile instead of a line-oriented approximation.
 /// Every importer `pnpm-lock.yaml` enumerates, as paths relative to the lock
-/// root (`.` is the root itself). This is the authoritative membership list
-/// for a pnpm workspace: pnpm produced it with its own glob engine
-/// (fast-glob/picomatch), so consulting it settles membership exactly instead
-/// of reimplementing that engine's syntax — alternation groups `(a|b)`,
-/// extglobs, `dot: false`, the implicit `node_modules` ignore, and the rest.
+/// Every importer `pnpm-lock.yaml` enumerates, as paths relative to the lock
+/// root (`.` is the root itself).
+///
+/// This is the authoritative membership list for a pnpm workspace: pnpm
+/// produced it with its own glob engine, so consulting it settles membership
+/// exactly rather than reimplementing that engine's syntax.
 pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
     Ok(importer_map(root)?.into_keys().collect())
-}
-
-pub fn pnpm_workspace_packages(workspace_yaml: &str) -> io::Result<Vec<String>> {
-    let parsed = parse_yaml(workspace_yaml)?;
-    let root = yaml_map(&parsed, "pnpm-workspace.yaml")?;
-    let packages = root
-        .get("packages")
-        .ok_or_else(|| err("pnpm-workspace.yaml has no packages list"))?;
-    let patterns = match packages {
-        YamlValue::Seq(values) => values
-            .iter()
-            .map(|value| {
-                yaml_str(Some(value))
-                    .filter(|pattern| !pattern.trim().is_empty())
-                    .map(str::to_string)
-                    .ok_or_else(|| err("pnpm-workspace.yaml packages entries must be strings"))
-            })
-            .collect::<io::Result<Vec<_>>>()?,
-        YamlValue::Scalar(value) if !value.is_empty() => vec![value.clone()],
-        _ => {
-            return Err(err(
-                "pnpm-workspace.yaml packages must be a list of strings",
-            ))
-        }
-    };
-    if patterns.is_empty() {
-        return Err(err("pnpm-workspace.yaml packages has no workspace globs"));
-    }
-    Ok(patterns)
 }
 
 fn trim_peer_suffix(value: &str) -> &str {

@@ -1290,58 +1290,7 @@ fn node_lock_at(directory: &Path) -> Option<&'static str> {
         .find(|name| directory.join(name).is_file())
 }
 
-fn workspace_segment_matches(pattern: &str, value: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let value: Vec<char> = value.chars().collect();
-    let mut row = vec![false; value.len() + 1];
-    row[0] = true;
-    for character in pattern {
-        let mut next = vec![false; value.len() + 1];
-        for (index, matched) in row.iter().enumerate() {
-            if !matched {
-                continue;
-            }
-            if character == '*' {
-                for slot in &mut next[index..] {
-                    *slot = true;
-                }
-            } else if index < value.len() && value[index] == character {
-                next[index + 1] = true;
-            }
-        }
-        row = next;
-    }
-    row[value.len()]
-}
-
-fn workspace_glob_matches(pattern: &str, path: &str) -> bool {
-    let pattern: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
-    let path: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    fn matches(pattern: &[&str], path: &[&str]) -> bool {
-        if pattern.is_empty() {
-            return path.is_empty();
-        }
-        if pattern[0] == "**" {
-            matches(&pattern[1..], path) || (!path.is_empty() && matches(pattern, &path[1..]))
-        } else {
-            !path.is_empty()
-                && workspace_segment_matches(pattern[0], path[0])
-                && matches(&pattern[1..], &path[1..])
-        }
-    }
-    matches(&pattern, &path)
-}
-
-/// Glob syntax `workspace_glob_matches` does NOT implement. A pattern using
-/// any of it would be matched literally, silently excluding a real member and
-/// letting `add` write a stray `package-lock.json` inside a pnpm workspace,
-/// so such a pattern is a refusal, not a non-match.
-const UNSUPPORTED_WORKSPACE_GLOB: [&str; 12] = [
-    "!(", "+(", "@(", "*(", "{", "}", "?", "[", "]", "(", ")", "|",
-];
-
 fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
-    let workspace_file = root.join("pnpm-workspace.yaml");
     let canonical_root = root.canonicalize()?;
     let canonical_project = project.canonicalize()?;
     let relative = canonical_project
@@ -1353,69 +1302,39 @@ fn pnpm_workspace_contains(root: &Path, project: &Path) -> io::Result<bool> {
                 canonical_root.display()
             ))
         })?;
-    let relative = relative.to_string_lossy().replace('\\', "/");
-    // `pnpm-lock.yaml` enumerates every member pnpm resolved, using pnpm's own
-    // glob engine. Ask it before reaching for the pattern matcher below: it is
-    // exact where the matcher approximates, and it means an ordinary
-    // hand-written `pnpm-workspace.yaml` never has to parse at all.
+    let mut key = String::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(other(format!(
+                "project {} is not a plain path below pnpm workspace root {}",
+                canonical_project.display(),
+                canonical_root.display()
+            )));
+        };
+        let part = part.to_str().ok_or_else(|| {
+            other(format!(
+                "project {} has a path component that is not UTF-8",
+                canonical_project.display()
+            ))
+        })?;
+        if !key.is_empty() {
+            key.push('/');
+        }
+        key.push_str(part);
+    }
+    if key.is_empty() {
+        key.push('.');
+    }
     let lock_path = root.join("pnpm-lock.yaml");
-    let importer_key = if relative.is_empty() { "." } else { &relative };
-    if let Ok(text) = fs::read_to_string(&lock_path) {
-        let importers = crate::npm_lock_import::pnpm_lock_importers(&text)
-            .map_err(|error| other(format!("{}: {error}", lock_path.display())))?;
-        if importers.iter().any(|importer| importer == importer_key) {
-            return Ok(true);
-        }
-    }
-    // Not in the lock. Either not a member, or a member added since the last
-    // `pnpm install`; only the patterns can tell those apart.
-    let patterns = if workspace_file.is_file() {
-        let text = fs::read_to_string(&workspace_file)
-            .map_err(|error| other(format!("read {}: {error}", workspace_file.display())))?;
-        crate::npm_lock_import::pnpm_workspace_packages(&text)
-            .map_err(|error| other(format!("{}: {error}", workspace_file.display())))?
-    } else {
-        Vec::new()
-    };
-    let root = canonical_root;
-    let mut positive_match = false;
-    let mut negative_match = false;
-    for raw_pattern in &patterns {
-        let trimmed = raw_pattern.trim();
-        if let Some(found) = UNSUPPORTED_WORKSPACE_GLOB
-            .iter()
-            .find(|token| trimmed.contains(**token))
-        {
-            return Err(other(format!(
-                "{}: unsupported pnpm workspace glob {raw_pattern:?} (contains {found:?}); blanket matches literal segments, '*', '**', and a leading '!' negation — brace lists, character classes, '?' and extglobs are not supported; rewrite the pattern, or run pnpm directly and then 'blanket'",
-                workspace_file.display()
-            )));
-        }
-        let exclude = trimmed.starts_with('!');
-        let pattern = trimmed
-            .strip_prefix('!')
-            .unwrap_or(trimmed)
-            .trim()
-            .trim_start_matches("./");
-        if pattern.is_empty()
-            || pattern.starts_with('/')
-            || pattern.contains('\\')
-            || pattern.split('/').any(|part| part == "..")
-        {
-            return Err(other(format!(
-                "{}: unsafe pnpm workspace glob {raw_pattern:?}",
-                root.join("pnpm-workspace.yaml").display()
-            )));
-        }
-        if workspace_glob_matches(pattern, &relative) {
-            if exclude {
-                negative_match = true;
-            } else {
-                positive_match = true;
-            }
-        }
-    }
-    Ok(positive_match && !negative_match)
+    let text = fs::read_to_string(&lock_path)
+        .map_err(|error| other(format!("read {}: {error}", lock_path.display())))?;
+    let importers = crate::npm_lock_import::pnpm_lock_importers(&text).map_err(|error| {
+        other(format!(
+            "{}: {error}; blanket reads workspace membership from this file, so it must parse. If it has an unresolved merge conflict, run 'pnpm install' to let pnpm merge it, then run blanket again",
+            lock_path.display()
+        ))
+    })?;
+    Ok(importers.iter().any(|importer| importer == &key))
 }
 
 /// Select the lockfile to edit. A lockfile in the project itself wins in the
@@ -2187,33 +2106,21 @@ mod tests {
             "the workspace root itself was not recognised"
         );
 
-        // A directory the lock does not enumerate falls through to the
-        // patterns. Whatever the patterns say, the fallback must fail closed:
-        // never a silent `false`, which would send `add` down the npm branch
-        // and drop a `package-lock.json` inside a pnpm workspace. Here the
-        // indent-0 sequence is what the parser reaches first.
         let stranger = root.join("apps/other");
         fs::create_dir_all(&stranger).unwrap();
         assert!(
-            pnpm_workspace_contains(&root, &stranger).is_err(),
-            "an unresolvable member returned a verdict instead of refusing"
+            !pnpm_workspace_contains(&root, &stranger).unwrap(),
+            "a directory the lock does not enumerate was treated as a member"
         );
 
-        // With patterns this parser does accept, an alternation group is
-        // itself the refusal: blanket's matcher would treat it literally and
-        // silently exclude a real member.
         fs::write(
-            root.join("pnpm-workspace.yaml"),
-            "packages:\n  - '(apps|libs)/*'\n",
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\t bad\n",
         )
         .unwrap();
-        let error = pnpm_workspace_contains(&root, &stranger).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported pnpm workspace glob"),
-            "{error}"
-        );
+        let error = pnpm_workspace_contains(&root, &member).unwrap_err();
+        assert!(error.to_string().contains("pnpm install"), "{error}");
+
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2375,7 +2282,7 @@ mod tests {
     }
 
     #[test]
-    fn node_lock_selection_prefers_own_lock_and_checks_pnpm_workspace_globs() {
+    fn node_lock_selection_prefers_own_lock_and_reads_workspace_membership_from_the_lock() {
         let root = std::env::temp_dir().join(format!(
             "blanket-node-lock-selection-{}",
             std::process::id()
@@ -2383,7 +2290,11 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages/lib")).unwrap();
         fs::create_dir_all(root.join("packages/private")).unwrap();
-        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/lib: {}\n",
+        )
+        .unwrap();
         fs::write(
             root.join("pnpm-workspace.yaml"),
             "packages:\n  - '!packages/private'\n  - packages/*\n",
@@ -2394,15 +2305,6 @@ mod tests {
             node_lock_selection(&member).unwrap(),
             ("pnpm-lock.yaml".to_string(), root.clone())
         );
-        assert!(workspace_glob_matches("packages/*", "packages/lib"));
-        assert!(workspace_glob_matches(
-            "packages/**",
-            "packages/private/deep"
-        ));
-        assert!(!workspace_glob_matches(
-            "packages/*",
-            "packages/private/deep"
-        ));
 
         let independent = root.join("packages/private");
         assert_eq!(
@@ -2435,53 +2337,6 @@ mod tests {
     /// A glob shape blanket cannot match must refuse, never fall through to
     /// "not a member": falling through makes `add` write a stray
     /// package-lock.json inside a pnpm workspace member.
-    #[test]
-    fn unsupported_pnpm_workspace_glob_shapes_refuse_instead_of_not_matching() {
-        let root = std::env::temp_dir().join(format!(
-            "blanket-workspace-glob-grammar-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let member = root.join("apps/web");
-        fs::create_dir_all(&member).unwrap();
-        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-        for pattern in [
-            "'{apps,libs}/*'",
-            "'app?/*'",
-            "'app[sx]/*'",
-            "'!(legacy)/*'",
-            "'+(apps|libs)/*'",
-            "'@(apps)/*'",
-            "'*(apps)/*'",
-        ] {
-            fs::write(
-                root.join("pnpm-workspace.yaml"),
-                format!("packages:\n  - {pattern}\n"),
-            )
-            .unwrap();
-            let error = node_lock_selection(&member)
-                .expect_err(&format!("{pattern} did not refuse"))
-                .to_string();
-            assert!(error.contains("unsupported pnpm workspace glob"), "{error}");
-            assert!(
-                error.contains("'*', '**', and a leading '!' negation"),
-                "{error}"
-            );
-        }
-        // The supported grammar still matches, and a plain '!' negation is not
-        // mistaken for an extglob.
-        fs::write(
-            root.join("pnpm-workspace.yaml"),
-            "packages:\n  - apps/*\n  - '!apps/legacy'\n",
-        )
-        .unwrap();
-        assert_eq!(
-            node_lock_selection(&member).unwrap(),
-            ("pnpm-lock.yaml".to_string(), root.clone())
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
     #[test]
     fn ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries() {
         let root = std::env::temp_dir().join(format!(
@@ -2549,7 +2404,11 @@ mod tests {
             std::env::temp_dir().join(format!("blanket-mixed-sync-roots-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages/member")).unwrap();
-        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/member: {}\n",
+        )
+        .unwrap();
         fs::write(
             root.join("pnpm-workspace.yaml"),
             "packages:\n  - packages/*\n",

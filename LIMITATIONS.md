@@ -33,28 +33,24 @@ say what breaks, for whom, and how it fails (loud/silent).
   field** with an exact `MAJOR.MINOR.PATCH` version (an optional prerelease
   is retained verbatim). A missing field names the pnpm lockfile format and
   tells the user to set the exact version from `pnpm --version`; no floating
-  version is suggested. Ancestor locks are never inherited unless a
-  `pnpm-lock.yaml` and `pnpm-workspace.yaml` positively include the member;
-  other locks and excluded members are boundaries. Membership comes from the
-  lockfile's `importers` list, which pnpm wrote with its own glob engine, so
-  a member already in the lock is matched exactly and its
-  `pnpm-workspace.yaml` is never parsed. Mixed-root edits are
+  version is suggested. **Workspace membership is read from `pnpm-lock.yaml`'s
+  `importers` list and nothing else.** pnpm wrote that list with its own glob
+  engine, so it is exact, and blanket never parses `pnpm-workspace.yaml` or
+  matches a glob itself. The consequence to know: **a workspace member added
+  since the last `pnpm install` is not yet in the lock, so blanket does not
+  treat it as a member.** Run `pnpm install` once at the workspace root and
+  it is recognised. A lockfile that does not parse — an unresolved merge
+  conflict, most often — is a refusal naming that remedy, because membership
+  cannot be determined without it; pnpm can self-merge such a lockfile, so
+  running `pnpm install` resolves this case too. Other ancestor locks and
+  directories absent from `importers` are boundaries. Mixed-root edits are
   refused before delegation and name both roots. A Corepack
   `+<algo>.<hex>` suffix is verified against the realized pnpm package
   tarball in the verified artifact cache; `sha224`, `sha256` and `sha512`
   are supported and any other algorithm is refused by name. **Only a subset
-  of the pnpm workspace glob grammar is matched:** literal segments, `*`,
-  `**`, and a leading `!` negation. A `packages:` pattern using a brace
-  list, a character class, `?`, an extglob, or an alternation group such as
-  `(apps|libs)/*` is refused by name rather than silently treated as a
-  non-match. This fallback is reached only for a directory the lockfile does
-  not list — a member added since the last `pnpm install`. On that path the
-  workspace file is parsed by blanket's lockfile-shaped YAML reader, which is
-  stricter than pnpm's: a block sequence at the parent key's own indent, odd
-  indentation, or tabs are refused. The refusal is fail-closed (never a
-  stray `package-lock.json`), but the message names YAML rather than the
-  real cause; running `pnpm install` once, so the member reaches the lock,
-  is the workaround. Delegates are resolved through the
+  of the pnpm workspace glob grammar is matched:** none of it. blanket has no
+  glob matcher for pnpm workspaces, so no pattern grammar can be
+  misinterpreted and no pattern can be silently treated as a non-match. Delegates are resolved through the
   store's cached `x` environments under `~/.blanket/x/`; pnpm runs with an
   isolated HOME and XDG root in a per-run `<store>/tmp/stage-*` directory
   that is removed when the edit returns (a leftover from a killed run is

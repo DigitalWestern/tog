@@ -469,13 +469,12 @@ project (`tests/deps_e2e.rs::pnpm_edits_leave_an_installed_project_untouched`,
 and the workspace round trip carries a hostile `.npmrc` for the linker case).
 The delegate writes only the selected manifest and lock; an ancestor lock is
 inherited only from a root with both `pnpm-lock.yaml` and
-`pnpm-workspace.yaml`. Membership is read from the lockfile's `importers`,
-which pnpm itself generated with its own glob engine; only a directory absent
-from the lock falls back to matching the workspace file's globs, where any
-pattern blanket cannot match exactly — alternation groups, brace lists,
-character classes, `?`, extglobs — is a refusal rather than a silent
-non-match, since a silent non-match would drop a stray `package-lock.json`
-inside a pnpm workspace. An
+`pnpm-workspace.yaml`. Membership is read from the lockfile's `importers`
+and from nothing else: pnpm generated that list with its own glob engine, so
+it is exact, and blanket carries no glob matcher of its own to disagree with
+it. A directory absent from `importers` is not a member, and a lockfile that
+does not parse is a refusal rather than a guess, since membership cannot be
+decided without it. An
 ancestor package-lock, Yarn lock, or unmatched pnpm root is a boundary, so a
 nested independent project falls back to the store npm in its own directory.
 Mixed-root requests are rejected before delegation and name the roots so the
