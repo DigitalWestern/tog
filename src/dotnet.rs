@@ -212,7 +212,31 @@ fn forced_env(sdk_obj: &Path, packages: &Path, scratch: &Path) -> Vec<(String, S
             "XDG_CACHE_HOME".to_string(),
             scratch.join("xdg-cache").display().to_string(),
         ),
+        (
+            "XDG_DATA_HOME".to_string(),
+            xdg_data_home(scratch).display().to_string(),
+        ),
     ]
+}
+
+fn xdg_data_home(scratch: &Path) -> PathBuf {
+    scratch.join("xdg-data")
+}
+
+/// Create the scratch layout every store-SDK invocation runs against.
+///
+/// The NuGet migration sentinel is the load-bearing part. NuGet guards its
+/// first-run migration with a machine-global named mutex ("NuGet-Migrations"),
+/// and blanket hands every invocation a fresh home, so without the sentinel
+/// every invocation re-runs that migration and contends for that single
+/// mutex; concurrent syncs then die inside `Mutex.ReleaseMutex`. A home
+/// already marked migrated never takes the mutex, and a directory blanket
+/// just created has nothing to migrate.
+fn prepare_scratch(scratch: &Path) -> io::Result<()> {
+    fs::create_dir_all(scratch.join("home"))?;
+    let migrations = xdg_data_home(scratch).join("NuGet").join("Migrations");
+    fs::create_dir_all(&migrations)?;
+    fs::write(migrations.join("1"), "")
 }
 
 /// Env for `blanket run`. Build-capable verbs are REJECTED at run (they
@@ -724,7 +748,7 @@ fn run_dotnet(
     fs::create_dir_all(packages)?;
     fs::create_dir_all(scratch)?;
     let home = scratch.join("home");
-    fs::create_dir_all(&home)?;
+    prepare_scratch(scratch)?;
     let mut cmd = Command::new(sdk_obj.join("dotnet"));
     cmd.args(args).current_dir(cwd).env_clear();
     cmd.env("PATH", format!("{}:/usr/bin:/bin", sdk_obj.display()));
@@ -898,7 +922,7 @@ pub fn realize_packages(
     let staged = store.stage()?;
     let verifier = scratch.join("verifier");
     fs::create_dir_all(&verifier)?;
-    fs::create_dir_all(scratch.join("home"))?;
+    prepare_scratch(&scratch)?;
     let tfm = target_framework(
         plan.targets
             .first()
@@ -1280,7 +1304,7 @@ pub fn build_sandboxed(
     let output_scratch = scratch.join("output");
     fs::create_dir_all(&objdir)?;
     fs::create_dir_all(&output_scratch)?;
-    fs::create_dir_all(scratch.join("home"))?;
+    prepare_scratch(&scratch)?;
     // Empty source list: everything must come from the projected packages.
     fs::write(
         scratch.join("nuget.config"),
@@ -1524,6 +1548,35 @@ mod tests {
         std::os::unix::fs::symlink(&temp, &shm).unwrap();
         assert!(ensure_dotnet_tmp_at(&temp, uid, true).is_err());
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn every_prepared_scratch_is_already_marked_nuget_migrated() {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-dn-mig-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        prepare_scratch(&base).unwrap();
+        assert!(base.join("home").is_dir());
+        let data_home = forced_env(&base, &base, &base)
+            .into_iter()
+            .find(|(k, _)| k == "XDG_DATA_HOME")
+            .map(|(_, v)| PathBuf::from(v))
+            .expect("dotnet forces XDG_DATA_HOME");
+        assert!(
+            data_home
+                .join("NuGet")
+                .join("Migrations")
+                .join("1")
+                .is_file(),
+            "NuGet reads migrations under XDG_DATA_HOME; the sentinel must land there"
+        );
+        prepare_scratch(&base).unwrap();
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
