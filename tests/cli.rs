@@ -433,21 +433,205 @@ fn x_needs_a_registry_outside_a_project() {
 }
 
 #[test]
-fn cached_x_rechecks_object_exceptions_under_project_policy() {
-    let home = TempDir::new("x-policy-home");
-    let project = TempDir::new("x-policy-project");
-    std::fs::write(
-        project.0.join(".blanket/policy.toml"),
-        "deny = [\"file-collision\"]\n",
+fn x_clean_is_offline_and_strict_about_trailing_arguments() {
+    let home = TempDir::new("x-clean");
+    let out = blanket(&home.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("nothing to clean"));
+
+    let out = blanket(&home.0, &home.0, &["x", "--clean", "ruff", "extra"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        text(&out.stderr),
+        "blanket: error: x --clean: unexpected argument 'extra'\nRun 'blanket help x' for usage.\n"
+    );
+
+    for shell in ["bash", "zsh", "fish"] {
+        let out = blanket(&home.0, &home.0, &["completions", shell]);
+        assert_eq!(out.status.code(), Some(0), "{shell}");
+        let completion = text(&out.stdout);
+        assert!(
+            completion.contains(if shell == "fish" {
+                "-l clean"
+            } else {
+                "--clean"
+            }),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
+fn x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does() {
+    // "Move the cache off the root disk": `~/.blanket` is a symlink to
+    // another volume. `blanket x` follows it when it creates, locks and
+    // registers a root, so cleanup has to reach exactly the same
+    // environment — otherwise the roots it made could never be removed.
+    let volume = TempDir::new("x-clean-volume-blanket");
+    let linked_blanket_home = TempDir::new("x-clean-linked-blanket");
+    let root = volume.0.join(".blanket/x/py-victim");
+    std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+    std::fs::remove_dir_all(linked_blanket_home.0.join(".blanket")).unwrap();
+    std::os::unix::fs::symlink(
+        volume.0.join(".blanket"),
+        linked_blanket_home.0.join(".blanket"),
     )
     .unwrap();
+    let out = blanket(
+        &linked_blanket_home.0,
+        &linked_blanket_home.0,
+        &["x", "--clean"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("removed x environment"), "{stdout}");
+    assert!(
+        !root.exists(),
+        "a root under a symlinked ~/.blanket was left behind"
+    );
 
+    // The same for a symlinked $HOME itself.
+    let real_home = TempDir::new("x-clean-real-home");
+    let links = TempDir::new("x-clean-home-links");
+    let root = real_home.0.join(".blanket/x/py-victim");
+    std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+    let home_link = links.0.join("home");
+    std::os::unix::fs::symlink(&real_home.0, &home_link).unwrap();
+    let out = blanket(&home_link, &home_link, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("removed x environment"), "{stdout}");
+    assert!(
+        !root.exists(),
+        "a root under a symlinked $HOME was left behind"
+    );
+}
+
+#[test]
+fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
+    // The final `x` component is where both `blanket x` and `x --clean`
+    // stop following, so neither can be pointed outside the home chain.
+    let outside_x = TempDir::new("x-clean-outside-x");
+    let symlinked_x_home = TempDir::new("x-clean-symlinked-x");
+    let x_victim = outside_x.0.join("x/py-victim/.blanket/closures");
+    std::fs::create_dir_all(&x_victim).unwrap();
+    std::os::unix::fs::symlink(outside_x.0.join("x"), symlinked_x_home.0.join(".blanket/x"))
+        .unwrap();
+    let out = blanket(&symlinked_x_home.0, &symlinked_x_home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("symlink") && stderr.contains("refusing"),
+        "{stderr}"
+    );
+    assert!(x_victim.is_dir(), "symlink target was removed");
+
+    let relative_home = TempDir::new("x-clean-relative-home");
+    let relative_victim = relative_home
+        .0
+        .join("relative-home/.blanket/x/py-victim/.blanket/closures");
+    std::fs::create_dir_all(&relative_victim).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_blanket"))
+        .current_dir(&relative_home.0)
+        .env("BLANKET_STORE", relative_home.0.join("store"))
+        .env("HOME", "relative-home")
+        .env_remove("BLANKET_POLICY")
+        .env_remove("BLANKET_STRICT")
+        .env("NO_COLOR", "1")
+        .args(["x", "--clean"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("HOME must be an absolute directory"),
+        "{stderr}"
+    );
+    assert!(relative_victim.is_dir(), "relative HOME target was removed");
+}
+
+/// Legacy roots (no `x.json`) must obey the ecosystem filter, and a
+/// successful removal must leave nothing behind in `.locks`. Nothing here
+/// needs the network or a realized object, so it belongs in the offline
+/// suite: `HOME` and `BLANKET_STORE` are per-child temp directories.
+#[test]
+fn x_clean_py_leaves_legacy_npm_root() {
+    let home = TempDir::new("x-clean-legacy-home");
+    let project = TempDir::new("x-clean-legacy-project");
+
+    let npm_root = home.0.join(".blanket/x/npm-legacy");
+    std::fs::create_dir_all(npm_root.join(".blanket/closures")).unwrap();
+    std::fs::write(
+        npm_root.join("package.json"),
+        r#"{"dependencies":{"prettier":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let py_root = home.0.join(".blanket/x/py-legacy");
+    std::fs::create_dir_all(py_root.join(".blanket/closures")).unwrap();
+    std::fs::write(py_root.join("requirements.in"), "ruff\n").unwrap();
+
+    let out = blanket(&project.0, &home.0, &["x", "--clean", "--py"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!py_root.exists(), "legacy Python root was not removed");
+    assert!(
+        npm_root.exists(),
+        "legacy npm root was removed by --py cleanup"
+    );
+    let stdout = text(&out.stdout);
+    assert!(
+        !stdout.contains("gc --project"),
+        "a python-only cleanup mentioned the node forests: {stdout}"
+    );
+    // The per-root lock is unlinked while it is still held, so `.locks`
+    // cannot collect one stale file per environment ever created.
+    assert!(
+        !home.0.join(".blanket/x/.locks/py-legacy.lock").exists(),
+        "cleanup left the per-root lock file behind"
+    );
+
+    let out = blanket(&project.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!npm_root.exists(), "legacy npm root cleanup did not work");
+    let stdout = text(&out.stdout);
+    // A removed node root also orphans its ~/.blanket/forests projection,
+    // which plain `blanket gc` never sweeps.
+    assert!(stdout.contains("blanket gc --project"), "{stdout}");
+    assert!(
+        !home.0.join(".blanket/x/.locks/npm-legacy.lock").exists(),
+        "cleanup left the per-root lock file behind"
+    );
+}
+
+#[test]
+fn x_clean_that_skips_every_candidate_does_not_claim_nothing_to_clean() {
+    let home = TempDir::new("x-clean-unrecoverable");
+    let root = home.0.join(".blanket/x/mystery");
+    std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+
+    let out = blanket(&home.0, &home.0, &["x", "--clean", "ruff"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("skipped x environment"), "{stdout}");
+    assert!(
+        !stdout.contains("nothing to clean"),
+        "a run that skipped a candidate reported nothing to clean: {stdout}"
+    );
+    assert!(
+        stdout.contains("removed 0 environment(s), skipped 1"),
+        "{stdout}"
+    );
+    assert!(root.is_dir(), "an unrecoverable root was removed");
+}
+
+/// Build a cached, `ready` python `x` root for `home` whose store object
+/// carries one recorded `file-collision` exception, and return the root.
+fn cached_x_root_with_exception(home: &Path) -> PathBuf {
     // Every closure blanket writes holds a path built from the store's own
     // canonicalized root, so the fixture has to canonicalize too: on macOS the
     // temp dir sits under /var, a symlink to /private/var, and an
     // uncanonicalized path here compares unequal to `store.object_path`.
-    std::fs::create_dir_all(home.0.join("store/objects/test-env/bin")).unwrap();
-    let store = home.0.join("store").canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("store/objects/test-env/bin")).unwrap();
+    let store = home.join("store").canonicalize().unwrap();
     let object = store.join("objects/test-env");
     let executable = object.join("bin/ruff");
     std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
@@ -474,7 +658,6 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         .as_bytes(),
     ));
     let root = home
-        .0
         .join(".blanket/x")
         .join(format!("py-fake-{}", &key[..16]));
     std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
@@ -494,6 +677,19 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         .to_string(),
     )
     .unwrap();
+    root
+}
+
+#[test]
+fn cached_x_rechecks_object_exceptions_under_project_policy() {
+    let home = TempDir::new("x-policy-home");
+    let project = TempDir::new("x-policy-project");
+    std::fs::write(
+        project.0.join(".blanket/policy.toml"),
+        "deny = [\"file-collision\"]\n",
+    )
+    .unwrap();
+    cached_x_root_with_exception(&home.0);
 
     let out = blanket(
         &project.0,
@@ -505,5 +701,30 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         text(&out.stderr).contains("cached object test-env carries exception"),
         "{}",
         text(&out.stderr)
+    );
+}
+
+/// A cache hit validates the projection once. When the validation ran twice
+/// every persisted exception was narrated twice and queued twice, so one
+/// exception read as two.
+#[test]
+fn cached_x_narrates_each_object_exception_once() {
+    let home = TempDir::new("x-once-home");
+    let project = TempDir::new("x-once-project");
+    cached_x_root_with_exception(&home.0);
+
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["x", "--py", "--from", "fake", "ruff"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stderr
+            .matches("exception file-collision: ruff: cached test exception")
+            .count(),
+        1,
+        "{stderr}"
     );
 }

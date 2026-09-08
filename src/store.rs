@@ -1,8 +1,11 @@
 use crate::policy::Exception;
 use crate::types::Identity;
 use std::collections::BTreeSet;
+use std::ffi::{CStr, CString, OsString};
 use std::fs;
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -337,6 +340,218 @@ impl Store {
     pub fn cache_path(&self, algo: &str, hex: &str) -> PathBuf {
         self.root.join("cache").join(algo).join(hex)
     }
+}
+
+fn errno_location() -> *mut libc::c_int {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: libc returns the calling thread's errno slot.
+        unsafe { libc::__errno_location() }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: libc returns the calling thread's errno slot.
+        unsafe { libc::__error() }
+    }
+}
+
+fn fd_set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: fcntl operates on the caller-owned descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl operates on the caller-owned descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn fd_stat(fd: RawFd) -> io::Result<libc::stat> {
+    // SAFETY: stat is initialized by fstat before it is read.
+    let mut stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fd is borrowed for the duration of this call.
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stat)
+}
+
+fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
+    let name = CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    // SAFETY: stat is initialized by fstatat before it is read, and name is a
+    // NUL-terminated path that lives through the call.
+    let mut stat = unsafe { std::mem::zeroed() };
+    // SAFETY: dirfd is borrowed for the duration of this call.
+    if unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stat)
+}
+
+fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
+}
+
+fn is_directory(stat: &libc::stat) -> bool {
+    (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
+}
+
+fn is_symlink(stat: &libc::stat) -> bool {
+    (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
+}
+
+fn entry_names_at(dirfd: RawFd) -> io::Result<Vec<OsString>> {
+    // fdopendir takes ownership of its descriptor, so duplicate the borrowed
+    // directory fd before handing it to libc.
+    // SAFETY: fcntl duplicates the borrowed descriptor.
+    let duplicate = unsafe { libc::fcntl(dirfd, libc::F_DUPFD, 0) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if let Err(error) = fd_set_cloexec(duplicate) {
+        // SAFETY: duplicate is owned here because fdopendir has not taken it.
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    // SAFETY: duplicate is a valid directory descriptor and ownership moves
+    // to the DIR until closedir.
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir failed and did not take ownership.
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: errno_location points at this thread's errno slot.
+        unsafe { *errno_location() = 0 };
+        // SAFETY: directory remains valid until closedir below.
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            // SAFETY: errno_location points at this thread's errno slot.
+            let errno = unsafe { *errno_location() };
+            // SAFETY: directory owns the duplicated descriptor.
+            unsafe { libc::closedir(directory) };
+            if errno != 0 {
+                return Err(io::Error::from_raw_os_error(errno));
+            }
+            return Ok(names);
+        }
+        // SAFETY: d_name is a NUL-terminated name supplied by readdir.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if !matches!(name.to_bytes(), b"." | b"..") {
+            names.push(OsString::from_vec(name.to_bytes().to_vec()));
+        }
+    }
+}
+
+/// Enumerate a directory through an already-open descriptor. Callers use this
+/// for directories whose pathname may be renamed while they work.
+pub(crate) fn read_dir_names_at(dirfd: RawFd) -> io::Result<Vec<OsString>> {
+    entry_names_at(dirfd)
+}
+
+fn unlink_if_same(
+    dirfd: RawFd,
+    name: &[u8],
+    expected: &libc::stat,
+    flags: libc::c_int,
+) -> io::Result<()> {
+    let current = match stat_at(dirfd, name) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !same_inode(&current, expected) {
+        return Ok(());
+    }
+    let name = CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    // SAFETY: dirfd is borrowed and name is NUL-terminated for this call.
+    if unsafe { libc::unlinkat(dirfd, name.as_ptr(), flags) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn remove_tree_entry_at(parentfd: RawFd, name: &[u8]) -> io::Result<()> {
+    let expected = match stat_at(parentfd, name) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if is_symlink(&expected) || !is_directory(&expected) {
+        return unlink_if_same(parentfd, name, &expected, 0);
+    }
+
+    let name_c = CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    // SAFETY: name_c is NUL-terminated and parentfd is borrowed.
+    let childfd = unsafe {
+        libc::openat(
+            parentfd,
+            name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if childfd < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            return Ok(());
+        }
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            // The entry became a symlink after fstatat. Re-check it without
+            // following it, then unlink only that same symlink.
+            if let Ok(current) = stat_at(parentfd, name) {
+                if is_symlink(&current) {
+                    return unlink_if_same(parentfd, name, &current, 0);
+                }
+            }
+            return Ok(());
+        }
+        return Err(error);
+    };
+    let child = unsafe { fs::File::from_raw_fd(childfd) };
+    let actual = fd_stat(child.as_raw_fd())?;
+    if !same_inode(&actual, &expected) {
+        return Ok(());
+    }
+    let mut mode = actual.st_mode;
+    mode |= 0o200;
+    // SAFETY: child is owned by this function.
+    let _ = unsafe { libc::fchmod(child.as_raw_fd(), mode) };
+    remove_tree_at(child.as_raw_fd())?;
+    unlink_if_same(parentfd, name, &expected, libc::AT_REMOVEDIR)
+}
+
+/// Remove the contents of a possibly read-only directory through a borrowed
+/// descriptor. It never resolves a child pathname: symlinks are unlinked and
+/// directories are opened with O_NOFOLLOW before recursion. The caller owns
+/// the directory itself and may remove it with unlinkat(AT_REMOVEDIR).
+pub(crate) fn remove_tree_at(dirfd: RawFd) -> io::Result<()> {
+    let stat = fd_stat(dirfd)?;
+    if !is_directory(&stat) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "descriptor is not a directory",
+        ));
+    }
+    let mut mode = stat.st_mode;
+    mode |= 0o200;
+    // SAFETY: dirfd is borrowed by the caller.
+    let _ = unsafe { libc::fchmod(dirfd, mode) };
+    for name in entry_names_at(dirfd)? {
+        remove_tree_entry_at(dirfd, name.as_os_str().as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Remove a possibly read-only staged tree (restore write bits first).

@@ -332,6 +332,39 @@ outside any project → usage error naming the prefixes. No cross-registry
 lookups to guess. Python and Node only in v0; cargo (`cargo install`-style)
 and go (`go run pkg@ver`) are the obvious next two and fit the same shape.
 
+`blanket x --clean` removes every registered environment under
+`~/.blanket/x/`, and unregisters each root. `blanket x --clean <tool>[@version]`
+selects that tool (all versions when the version is omitted); `--py`, `--npm`,
+and `--from <package>` keep their normal meanings. Cleanup accepts no
+arguments after the tool. It prints one line per removed environment and a
+summary that the immutable store objects remain until the next `blanket gc`;
+when a removed environment was a node tool the summary also names `blanket gc
+--project`, the only pass that reclaims the
+`~/.blanket/forests/<project-key>/<projection-id>` node_modules forest the
+environment used. `nothing to clean` is printed only when no candidate
+matched at all: a root that was considered and skipped (in use, or a legacy
+root whose package could not be recovered) is reported as
+`removed 0 environment(s), skipped 1`. Exit status is 0 whenever cleanup
+completed, whether or not anything was removed.
+A running tool holds a shared lock in the permanent
+`~/.blanket/x/.locks/<root-name>.lock`, made inheritable immediately before
+exec, so cleanup
+reports it as in use and leaves it for a later retry. A successful removal
+unlinks that lock file while still holding it, so `.locks` never collects one
+stale file per environment ever created; the next runner recreates it. The
+request and
+ownership state (`realizing` or `ready`) are recorded in `x.json` beside the
+closure before realization begins. For older roots without `x.json`, cleanup
+matches the exact package recovered from the generated `requirements.in` or
+`package.json`; if it cannot recover the package it skips that root with a
+removal hint. A cleanup without a tool still removes every safe x root,
+including partial realizations. Cleanup and `blanket x` accept exactly the
+same layouts: both resolve `$HOME` and `~/.blanket` once (either may be a
+symlink — moving the cache to another volume is supported, and an environment
+created that way can also be removed), both refuse a relative `HOME`, and both
+refuse a symlinked or non-directory `~/.blanket/x`. Cleanup never treats
+`.locks` as an environment.
+
 ### 2.5 `blanket status`
 
 Per ecosystem found here: `synced`, `lock changed since sync`, `manifest

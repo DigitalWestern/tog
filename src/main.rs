@@ -166,6 +166,17 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
     // host that cannot realize its objects.
     match command {
         Gc(args) => return run_gc(&args),
+        XClean {
+            ecosystem,
+            from,
+            tool,
+        } => {
+            return xrun::clean(xrun::CleanRequest {
+                ecosystem,
+                from,
+                tool,
+            });
+        }
         StoreRoots => return run_store_roots(),
         StorePath => return store::Store::open().map(|s| println!("{}", s.root.display())),
         Completions { shell } => {
@@ -261,6 +272,7 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
                 },
             )
         }
+        XClean { .. } => unreachable!("handled above"),
         Status { json } => {
             let dir = project_dir();
             let rows = inspect::status(platform, &dir)?;

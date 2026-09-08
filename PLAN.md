@@ -344,7 +344,7 @@ compiled-in table (verify with `-v` that the catalog was the source). Offline
 replay is run on the Mac with the network off. The `--offline` and "shipped
 catalog only" modes are tested on both.
 
-### WP4 — Daily-driver gaps and the `x` lifecycle — OPEN
+### WP4 — Daily-driver gaps and the `x` lifecycle — IN PROGRESS (x lifecycle reviewed, MERGE on Linux evidence, PR open; Mac gate outstanding)
 
 Any of these may be taken after WP1 merges; each is its own PR.
 
@@ -352,9 +352,21 @@ Any of these may be taken after WP1 merges; each is its own PR.
   mutable overlay; dev/optional dependency groups installable by flag.
 - `blanket add/remove/update` for pnpm, Yarn, Poetry, and PDM projects
   (today they refuse with instructions; LIMITATIONS.md:24).
-- `x` lifecycle: `blanket x --clean`, unregister an environment, protect a
-  running tool from concurrent gc. (gc already knows the roots:
-  src/gc.rs:111.)
+- IMPLEMENTED and reviewed (branch wp4/x-lifecycle, 5 review rounds, MERGE on
+  Linux evidence); Mac cold/warm gate outstanding:
+  `blanket x --clean`, unregister an environment, protect a running tool from
+  concurrent gc, repair a missing projection, and contain cleanup through
+  open directory descriptors. (gc already knows the roots: src/gc.rs:111.)
+  Covered by `cli::tests::x_owns_only_its_leading_flags`,
+  `xrun::tests::shared_x_lock_blocks_nonblocking_cleanup_until_exec`,
+  `xrun::tests::fd_relative_removal_does_not_follow_replaced_x_directory`,
+  `xrun::tests::runner_and_cleanup_agree_about_a_symlinked_home`,
+  `xrun::tests::cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file`,
+  `xrun::tests::ready_cache_hit_records_each_exception_once`,
+  `x_clean_is_offline_and_strict_about_trailing_arguments`,
+  `cached_x_narrates_each_object_exception_once`,
+  `x_clean_py_leaves_legacy_npm_root`, and the ignored
+  `x_clean_removes_registered_environment_and_running_x_is_busy`.
 - Extend `x` to cargo, go, gems, hex, nuget tools **after** WP1 has proven a
   model for compiled tools (Cargo today stores vendored sources; `cargo
   install` output is unmanaged, LIMITATIONS.md:226).
@@ -437,3 +449,4 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-07 | WP2 secure archive extractor (branch wp2/archive-extractor, ordered PR 2 of the design): `src/archive.rs` lists every tarball member and refuses absolute names, `..`, hard links, special files, and symlinks not lexically contained after `--strip-components` before tar writes anything; delegated tar runs with `TAR_OPTIONS` unset; per-platform listing parser (GNU tar / bsdtar), unparseable lines refuse. First consumer: the Go toolchain tarball (`extract_go_toolchain`), byte-identical extraction flags. Unit tests build hostile ustar members by hand and prove an outside sentinel and the destination stay untouched. No independent review yet (supervising agent only). |
 | 2026-09-06 | WP2 Python exact-selection bugs fixed (branch wp2/python-exact-selection): an exact `.python-version` patch must be pinned or sync fails closed; `python::lookup` is exact-or-newest-minor over canonical spellings; regression tests use misordered synthetic pin tables in both orders; the ignored e2e proves the store is never opened. Sol: 3 rounds. |
 | 2026-09-06 | WP2 Go exact-selection bug fixed (branch wp2/go-selected-version): realization takes the go.mod-selected version and an unpinned selection fails before store or network access; status compares the go.mod selection and treats pre-field closures as unchecked. Regression test `ensure_go_for_rejects_unpinned_version_before_store_access`. Sol: 3 rounds. |
+| 2026-09-07 | WP4 x lifecycle (branch wp4/x-lifecycle): `blanket x --clean` removes and unregisters cached x roots through validated directory descriptors and fd-relative removal (symlinks unlinked, never traversed; candidate inode re-checked before removal); running tools hold an inherited shared lock under `~/.blanket/x/.locks/`, kept CLOEXEC until exec; cleanup resolves the home chain the way `blanket x` does, narrates each persisted exception once, unlinks its own per-root lock, and names `blanket gc --project` for node roots; legacy roots are matched by the exact generated package. Review: Codex Sol rounds 1–3 (REWORK), Claude Opus 5 subagent rounds 4 (MERGE-AFTER-FIXES) and 5 (MERGE; 5 nits recorded in REVIEW.md). Mac cold/warm gate outstanding. |

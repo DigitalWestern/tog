@@ -74,7 +74,33 @@ say what breaks, for whom, and how it fails (loud/silent).
   registry; a private-registry name needs the explicit prefix.
 - **`blanket x` covers PyPI and npm** (cargo and go later). Each tool's
   environment lives under `~/.blanket/x/` as a registered project root;
-  `blanket gc --project` does not touch it, and there is no `x --clean` yet.
+  `blanket x --clean` removes the projection and unregisters it from the
+  originating store, while the immutable store object remains until the next
+  `blanket gc`. A removed **node** environment also orphans its
+  `~/.blanket/forests/<project-key>/<projection-id>` node_modules forest,
+  which plain `blanket gc` never visits: only `blanket gc --project` reclaims
+  it, and the cleanup summary says so. A permanent per-root lock under
+  `~/.blanket/x/.locks/` protects running tools, including roots being
+  recreated after cleanup; a successful removal unlinks its own lock file
+  while still holding it, so `.locks` stays bounded. Partial roots are marked
+  `realizing` before work starts and are cleanable. Cleanup requires an
+  absolute `HOME` and accepts exactly the layouts `blanket x` itself accepts:
+  `$HOME` and `~/.blanket` may be symlinks (the cache can live on another
+  volume) and are resolved once, while a symlinked or non-directory
+  `~/.blanket/x` is refused by both commands. Cleanup skips all dot-prefixed
+  entries, so the permanent lock directory cannot be mistaken for an
+  environment. Legacy
+  roots without `x.json` are matched by exact package recovered from their
+  generated manifest; an ecosystem-only filter may use only the recovered
+  manifest or the generated `py-`/`npm-` prefix as ecosystem evidence, never
+  as package evidence. Unrecoverable roots are skipped with a hint to run
+  `blanket x --clean` without a tool; a skipped root still counts as
+  considered, so such a run reports `removed 0 environment(s), skipped N`
+  rather than `nothing to clean`, and still exits 0.
+- **`x` cleanup is conservative under a concurrent rename**: removal is
+  descriptor-relative and never follows a symlink, but if a candidate name is
+  replaced while it is being removed, the replacement is left for a later
+  cleanup retry and the original registry entry is retained.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

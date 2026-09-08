@@ -71,7 +71,7 @@ pub fn write_closure(
     Ok(())
 }
 
-fn store_from_closure_body(body: &serde_json::Value) -> Option<Store> {
+pub(crate) fn store_from_closure_body(body: &serde_json::Value) -> Option<Store> {
     fn find(value: &serde_json::Value) -> Option<Store> {
         match value {
             serde_json::Value::String(text) if Path::new(text).is_absolute() => {

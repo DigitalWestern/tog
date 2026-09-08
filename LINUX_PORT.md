@@ -39,6 +39,50 @@ Go toolchain and module-cache realization now look up the exact version
 selected from `go.mod` in the Linux platform pin row. An unpinned selection
 fails before store or network access; the Linux artifact, sha256, and object
 identity are unchanged.
+### 2026-09-07 — `x` cleanup follows the same home chain the runner does
+
+`x --clean` now canonicalizes `$HOME` and `~/.blanket` once (either may be a
+symlink — the usual "move the cache to another volume" setup) and refuses only
+a symlinked or non-directory `~/.blanket/x`, which is exactly what `blanket x`
+itself refuses; containment below the anchor is carried by the no-follow
+component walk and the fd identity checks. A successful removal also unlinks
+the per-root `.locks/<root>.lock` while still holding it, and every lock
+acquisition re-checks the pathname against the inode it locked, so a waiter
+behind a cleanup relocks the recreated file. Both are the same code on Linux
+and macOS; no sandbox, extraction, or toolchain pin changed.
+
+### 2026-09-06 — `x` cleanup is descriptor-relative
+
+The Linux `x --clean` path now opens and holds the validated `~/.blanket/x`
+directory with `O_NOFOLLOW`, then enumerates, locks, and removes roots through
+directory descriptors. Recursive cleanup uses `fstatat`/`openat`/`unlinkat`,
+so symlinks are unlinked rather than traversed and a pathname swap cannot
+redirect removal to a symlink target.
+
+### 2026-09-06 — `x` cleanup validates its filesystem boundary
+
+`x --clean` now requires an absolute `HOME`, validates the real
+`HOME/.blanket/x` directory chain without following symlinks, reserves all
+dot-prefixed entries including `.locks`, and rechecks each candidate's
+canonical parent immediately before deletion. The checks are shared by the
+Linux and macOS paths; no sandbox, extraction, or toolchain pin changed.
+
+### 2026-09-06 — running `x` tools hold an inherited shared lock
+
+`blanket x` now takes a shared `flock` on each cached environment's
+`.blanket/x.lock` and clears close-on-exec before replacing itself with the
+tool. `x --clean` uses a non-blocking exclusive lock, reports a running tool
+as in use, and leaves its registered root for a later retry. This uses the
+same advisory-lock contract on Linux and macOS; no sandbox or toolchain pin
+changed.
+
+### 2026-09-06 — `x` cleanup lock made stable across projection deletion
+
+The lifecycle follow-up moved the per-environment `flock` to the permanent
+`~/.blanket/x/.locks/<root-name>.lock` directory. Linux and macOS runners
+share the same blocking shared / nonblocking exclusive contract, so a runner
+waiting behind cleanup revalidates a deleted root while still holding the
+lock. No sandbox, extraction, or toolchain pin changed.
 
 ### 2026-09-06 — ustar limits validated in-process, not delegated to tar
 

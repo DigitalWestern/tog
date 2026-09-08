@@ -64,6 +64,13 @@ pub enum Command {
         tool: String,
         args: Vec<String>,
     },
+    /// Remove cached x environments. With no tool, removes every x
+    /// environment; otherwise the tool's environments only.
+    XClean {
+        ecosystem: Option<String>,
+        from: Option<String>,
+        tool: Option<String>,
+    },
     Status {
         json: bool,
     },
@@ -303,7 +310,7 @@ form when the script name is not a blanket command. Everything after
         name: "x",
         group: Group::Everyday,
         summary: "run a tool without adding it to the project (like npx / uvx)",
-        usage: "blanket x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]",
+        usage: "blanket x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]\n  blanket x --clean [--py | --npm] [--from <package>] [<tool>[@<version>]]",
         description: "\
 Resolves the package with the store uv or npm, realizes it as an ordinary
 store environment (a store hit from the second run on), and executes the
@@ -312,8 +319,12 @@ on the tool, --py / --npm, or the current project's ecosystem (Python
 first, then Node); outside a project the prefix is required. --from names
 the package when the executable is called something else
 ('blanket x --from httpie http'). Environments live under ~/.blanket/x/
-and are gc roots like any project.",
+and are gc roots like any project. `--clean` removes every cached x
+environment, or only the selected tool's environments; store objects stay
+until the next `blanket gc`. A running tool is left in place and reported as
+in use; retry after it exits.",
         options: &[
+            ("--clean", "remove cached x environments instead of running a tool"),
             ("--py", "resolve from PyPI"),
             ("--npm", "resolve from npm"),
             ("--from <package>", "the package that provides <tool>"),
@@ -871,10 +882,12 @@ fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageErr
 fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
     let mut ecosystem = None;
     let mut from = None;
+    let mut clean = false;
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         match arg {
             "-h" | "--help" => return Ok(None),
+            "--clean" => clean = true,
             "--py" | "--python" => ecosystem = Some("python".to_string()),
             "--npm" | "--node" => ecosystem = Some("node".to_string()),
             "--from" => {
@@ -902,6 +915,19 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         index += 1;
     }
     let Some(tool) = args.get(index) else {
+        if clean {
+            if from.is_some() {
+                return Err(UsageError::new(
+                    "x: --clean --from requires a tool name",
+                    Some("x"),
+                ));
+            }
+            return Ok(Some(Command::XClean {
+                ecosystem,
+                from,
+                tool: None,
+            }));
+        }
         return Err(UsageError::new(
             "x: no tool given (e.g. 'blanket x ruff check .', 'blanket x npm:prettier --write .')",
             Some("x"),
@@ -915,6 +941,12 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         ecosystem = Some("node".to_string());
         tool = rest.to_string();
     }
+    if clean && args.get(index + 1).is_some() {
+        return Err(UsageError::new(
+            format!("x --clean: unexpected argument '{}'", args[index + 1]),
+            Some("x"),
+        ));
+    }
     if tool.is_empty() {
         return Err(UsageError::new("x: empty tool name", Some("x")));
     }
@@ -927,6 +959,13 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         validate_x_text("tool", &tool, true)?;
     }
     validate_x_version_pair(from.as_deref(), &tool)?;
+    if clean {
+        return Ok(Some(Command::XClean {
+            ecosystem,
+            from,
+            tool: Some(tool),
+        }));
+    }
     Ok(Some(Command::X {
         ecosystem,
         from,
@@ -1850,6 +1889,26 @@ mod tests {
         assert_eq!(
             message(&["x", "--pyy", "ruff"]),
             "x: unknown option '--pyy'; did you mean '--py'?"
+        );
+        assert_eq!(
+            command(&["x", "--clean"]),
+            Command::XClean {
+                ecosystem: None,
+                from: None,
+                tool: None,
+            }
+        );
+        assert_eq!(
+            command(&["x", "--clean", "--py", "ruff@0.6.1"]),
+            Command::XClean {
+                ecosystem: Some("python".into()),
+                from: None,
+                tool: Some("ruff@0.6.1".into()),
+            }
+        );
+        assert_eq!(
+            message(&["x", "--clean", "ruff", "extra"]),
+            "x --clean: unexpected argument 'extra'"
         );
     }
 
