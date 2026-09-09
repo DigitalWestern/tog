@@ -467,3 +467,310 @@ exists for both engines; extend it rather than adding a new one).
 | 2026-09-07 | WP4 x lifecycle (branch wp4/x-lifecycle): `blanket x --clean` removes and unregisters cached x roots through validated directory descriptors and fd-relative removal (symlinks unlinked, never traversed; candidate inode re-checked before removal); running tools hold an inherited shared lock under `~/.blanket/x/.locks/`, kept CLOEXEC until exec; cleanup resolves the home chain the way `blanket x` does, narrates each persisted exception once, unlinks its own per-root lock, and names `blanket gc --project` for node roots; legacy roots are matched by the exact generated package. Review: Codex Sol rounds 1–3 (REWORK), Claude Opus 5 subagent rounds 4 (MERGE-AFTER-FIXES) and 5 (MERGE; 5 nits recorded in REVIEW.md). Mac cold/warm gate outstanding. |
 | 2026-09-07 | WP1 `blanket fmt` (branch wp1/fmt-rust): pinned rustfmt/cargo-fmt as its own store object (`rustfmt/1`, per-platform verified sha256, relative `lib` link to the paired Rust object, sandboxed pre-commit probe), lockless Cargo workspace discovery, a writable-project/no-network fmt sandbox mode on both engines with a shared setup-failure classifier, descriptor-anchored closure publication, `--check` and status pass-through, package.json `fmt` script precedence with an explicit `--eco` as the escape hatch, `stage-*` scratch so gc reclaims interrupted runs, `ls`/`sbom`/`gc` aware of the toolchain-only closure. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES) and 5 (MERGE; 3 nits recorded in REVIEW.md). Linux: `fmt_e2e`/`gc` `--ignored` green; acceptance 35/35 on 9fabfb5 (`tests/acceptance.sh`, disk-backed TMPDIR). Mac cold/warm gate outstanding. |
 | 2026-09-07 | WP4 pnpm dependency edits (branch wp4/deps-pnpm-yarn): `blanket add/remove/update` delegate to the store pnpm at the exact `packageManager` release (Corepack `+sha224/sha256/sha512` suffix verified by algorithm, other algorithms refused by name), select the lock from `pnpm-lock.yaml`'s `importers` list alone, never from `pnpm-workspace.yaml` (which since pnpm 10 is also a non-workspace repository's settings file); a project the lock does not list inside a real workspace is refused rather than guessed, ancestor npm/Yarn locks are boundaries, and mixed roots are rejected before delegation, and run `--lockfile-only` with pnpm's modules state (`enable-modules-dir=false`, `modules-dir`, `virtual-store-dir`) redirected into a per-run store stage so an installed project's `node_modules` is neither read nor written; the `npm_config_` scrub is case-insensitive; lifecycle scripts are off for every verb. Yarn classic and Berry remain refusals with the conversion command; Poetry/PDM open. Review: Codex Sol rounds 1–2 (REWORK), Claude Opus 5 subagent rounds 3–4 (MERGE-AFTER-FIXES), round 5 a supervising-agent recheck of the round-4 fixes (not independent). Mac gate (the four pnpm `deps_e2e` round trips) outstanding. |
+| 2026-09-08 | GC safety brief revised after a code-grounded review: `gc --forget` and `store roots` key display move from Package D into Package A as the recovery valve for the blocked sweeps A introduces (B upgrades forgetting to exclusive activity protection; D keeps the x-cleanup unregistration rules and the shared-dependency acceptance); B states the long-job-blocks-GC consequence and names the post-C/D relaxation of the execution-time hold as a follow-up; B pins the flock per-open-file-description rationale behind the recursive-acquisition ban and prefers a process-global guard registry keyed by canonical store root; B pins the supervisor design — same process group, terminal SIGINT/SIGQUIT/SIGHUP handled as no-ops rather than forwarded, SIGTERM forwarded once, reap-then-exit with the existing 128+n status mapping and the `kill -INT`-the-supervisor edge documented, stop/continue signals left at default, x's close-on-exec lock inheritance vestigial but retained; the busy-skip outcome exits 0 per the x convention and `store roots` is classified as needing no protection; Delivery records that the C/D producer audits dominate the effort. |
+# GC safety implementation brief (2026-09-08)
+
+Status: proposed implementation; no runtime changes made by this brief.
+This is the next task requested by the owner, not a request to implement
+the unrelated toolchain-lock design. Implement the packages below in order.
+
+## Outcome and deliberate tradeoffs
+
+1. Remember what a project needs even when its folder is unavailable.
+2. Keep everything a running Blanket job could need until the job finishes.
+3. Delete only after checking complete records; uncertainty keeps data safe.
+
+First release deliberately retains every environment recorded for a project
+until the user explicitly forgets that project. It also skips GC while any
+job is using the same store, and because a job holds the shared lock through
+execution, a long-running managed job (a dev server under `run`, a long x
+session) postpones GC for its whole lifetime; cron or nightly collection on
+an active machine will often report the skipped outcome. This costs disk
+space and cleanup opportunities, but makes the initial safety contract small
+enough to verify. Automatic retirement of old environments, collecting
+unrelated objects during a running job, and — once Packages C and D make
+root records the authority — relaxing the hold so it spans realization and
+publication only, freeing GC to run during long executions, are follow-ups,
+not acceptance requirements.
+
+The guarantee covers cooperating Blanket processes on a local filesystem
+with working advisory locks and atomic rename. Do not claim protection from
+older Blanket binaries ignoring the new protocol, programs launched directly
+from store paths, malicious same-user changes to the store, or detached
+children that outlive the managed job. Document these boundaries explicitly.
+
+## Relevant existing code
+
+- `src/store.rs`: `RootEntry`, `register_root`, `roots`, `remove_root_entry`,
+  `has`, `stage`, `commit`, `publish_lock`, `gc_lock`, `object_refs`, deletion
+  helpers. Root records currently contain only a project pathname.
+- `src/gc.rs`: `collect`, `collect_roots`, `read_closures`, `read_meta`,
+  `mark_live`, and all four sweep functions. `collect_roots` currently drops
+  an entry when a directory is missing. Activity uses a ten-minute timestamp;
+  stages use a 24-hour threshold.
+- `src/project.rs::write_closure`: shared publication point for ecosystem
+  closures, already using directory descriptors for project-side writes.
+- `src/main.rs`: command dispatch, `run_gc`, `run_store_roots`, and `run_run`.
+  `src/cli.rs`: parsing, help, and completion definitions.
+- `src/fetch.rs::CacheLease`: existing cache protection using `gc_lock`.
+- `src/xrun.rs`: execution and explicit cleanup, including per-root locks.
+  `src/sandbox.rs`: inherited-descriptor cleanup; do not assume a lock
+  descriptor automatically survives sandbox execution.
+- `tests/gc.rs`: existing integration test expects deleted projects to lose
+  protection. Change that expectation, not merely the test's wording.
+
+## Package A — stop forgetting unavailable projects
+
+Ship this small safety fix first. Replace the automatic stale-root removal
+in `collect_roots`. An unreadable/missing project or closures directory with
+only a legacy pathname record must stop collection before ANY sweep starts.
+Report which record cannot be resolved and how to register it once accessible.
+Distinguish I/O errors instead of using `Path::is_dir` as a deletion decision.
+Do not remove registry entries during ordinary GC, including dry runs.
+
+Blocking is a full stop, so A also ships the recovery valve that Package D
+used to own: `blanket gc --forget <root-key>...` (repeatable, exact keys,
+no wildcard or pathname guessing) removes only that root's registry record
+and never touches project files or store objects, and `blanket store roots`
+prints each entry's key next to its path so the key of an unavailable
+project is discoverable. Forgetting validates the key against existing
+registry records alone and never resolves the project path, so it works
+while the project is unavailable; removal is a single registry-file unlink,
+and Package B wraps forgetting in exclusive activity protection once that
+exists. `--dry-run --forget` simulates the removal in memory and writes
+nothing. Registering and forgetting the same key in one invocation is
+rejected. A forgotten project loses its protection by explicit choice;
+ordinary GC still never removes records.
+
+Acceptance: delete, rename, or make a registered project inaccessible; with
+old objects and `--keep-days 0`, GC deletes nothing and preserves the record.
+Forgetting the unresolvable root unblocks the next GC, which may then
+collect its unshared objects when retention policy allows. Reject unknown
+or malformed keys with a clear error. Use injected I/O errors for permission
+coverage when tests run as root.
+
+## Package B — protect the whole job, without a timer
+
+Add a persistent `store/activity.lock` and an RAII `StoreActivity` guard in
+`src/store.rs` (or a focused new module). Jobs take a shared OS lock before
+the first store check/read/stage and hold it throughout realization,
+publication, projection, and execution. GC tries an exclusive lock and,
+if busy, returns a distinct skipped outcome: `cleanup skipped: a Blanket
+job is using this store`. Do not print a successful collection summary for
+this case; the skip is an expected outcome, not a failure, so exit 0 with
+that line, matching the existing x busy-cleanup convention. Never unlink
+this lock file. Failure to acquire/open it is an
+error, never permission to proceed.
+
+Acquire the activity lock before existing `gc_lock` and `publish_lock`.
+When both existing locks are needed, preserve `gc_lock -> publish_lock`.
+Acquire activity before x per-root locks too. Root-record writes use the
+publication lock. Avoid recursive OS lock acquisition: `File::lock` is
+flock(2), tied to the open file description, so a second `open` of the same
+lock file inside one process holds an independent lock that conflicts with
+the first — an in-process exclusive-over-exclusive acquisition deadlocks,
+and so does a shared-to-exclusive upgrade, regardless of what the lock
+names suggest. Share an existing guard for the same canonical store inside
+a process — preferred: one process-global registry keyed by canonical store
+root that hands back the already-held descriptor and counts holders, so
+nesting reuses the held descriptor instead of opening a new one — or pass
+a borrowed operation context explicitly. Do not silently open separately
+locked handles in nested calls. No shared-to-exclusive upgrades; requesting
+exclusive while shared is held in the same process is an error, not a wait.
+
+Audit every command and library entry point that consumes or changes store
+resources: implicit sync, plan when realizing tools, sync, build, run, fmt,
+dependency editing, x, registration, forget and x cleanup. Read-only
+inspections that read objects also need protection. Pure help/parsing and
+store-path reporting need none, and `store roots` reads only the registry,
+so it needs none either. Keep a coverage table in this section during implementation:
+entry point, acquisition site, last resource use, release site. A guard only
+in CLI dispatch does not protect public library realization calls; make the
+operation context required by those APIs or acquire at their outer boundary.
+
+For `run` and `x`, retain a supervising Blanket process holding the guard
+until the foreground child exits, replacing final `CommandExt::exec` where
+necessary. Preserve arguments, environment, working directory, stdio, exit
+status, interrupt handling and Unix signal behavior. Share one process
+execution helper rather than implementing these twice. Keep the child in
+the supervisor's own process group — no setsid, no process-group changes —
+so terminal-generated signals reach the child directly, and install no-op
+handlers for exactly SIGINT, SIGQUIT and SIGHUP in the supervisor:
+forwarding those would deliver each terminal signal twice. `SIGTERM` cannot
+be terminal-generated, so its handler forwards once to the child. The
+supervisor exits only after reaping the child, propagating its status with
+the existing 128+n mapping for a signal-killed child (the npm script path,
+src/main.rs:1709, is the precedent), and reports spawn failure the way the
+replaced `exec` did. An explicit `kill -INT` aimed at the supervisor alone
+is the one documented deviation: the child is not signaled, because the
+supervisor cannot distinguish that from a terminal interrupt. Leave stop
+and continue signals (SIGTSTP/SIGCONT) at their default so a ^Z stops
+supervisor and child together exactly as the shell expects, and a child
+that ignores a signal leaves the supervisor waiting, exactly as the shell
+waits on an exec'd child today. Preserve the x per-root guard through the
+same lifetime; the supervisor holding it makes the deliberate
+close-on-exec clearing that used to carry it across `exec` vestigial, and
+that mechanism stays in place — do not redesign x locking in this package.
+The supervisor must not exit on a forwarded termination signal while
+leaving the child using the store; handle and reap the child first. Normal
+sandbox child descriptor scrubbing stays intact. A killed supervisor
+or deliberately detached descendant is outside this first contract and must
+be called out; do not claim crash-proof protection for surviving descendants.
+
+GC holds exclusive activity protection from before reading roots until the
+last deletion finishes. This covers objects, cached archives, stages, forests
+and backups. Existing recency windows may remain as extra retention policy;
+they no longer establish whether a job is active. Keep existing cache leases
+until tests establish that changing them is necessary; do not redesign fetch
+locking in this package.
+
+Acceptance: two simultaneous jobs share the lock; GC skips while either is
+alive, then collects after both finish, and the skip exits 0 with the
+distinct line. Backdate an actively used object and
+stage beyond all existing windows and prove they survive. Test nested store
+calls and nested Blanket invocations without deadlock. Test foreground child
+execution, nonzero exits, spawn failure, SIGINT and SIGTERM, the 128+n exit
+status of a signal-killed child, a terminal SIGINT during the wait reaching
+the child exactly once, and an abrupt exit with no surviving child. Use
+subprocess barriers/pipes, not long sleeps.
+Run execution/locking tests on Linux and macOS before calling support complete.
+
+## Package C — keep project records inside the store
+
+Replace pathname-only records with a versioned `root/2` JSON record under
+the existing `roots/<key>` location. Retain the existing key for migration.
+Fields: schema, root key, diagnostic project path, sorted unique object IDs,
+and sorted unique managed projection references. Encode filesystem paths
+losslessly (Unix path bytes with an explicit encoding); do not use display
+strings as new authority. Projections must be typed references relative to
+approved forests/backups bases, never arbitrary deletion paths.
+
+Each successful closure publication adds its references to the root's
+existing sets. It MUST NOT replace another ecosystem's references or remove
+references from an earlier environment. The record is an accumulating safety
+record, not a mirror whose contents shrink when project files disappear.
+GC reads these records without opening the project directory. Project path
+availability is diagnostic only. Forest retention must work offline too.
+
+Introduce a typed `ClosureRefs` argument at `write_closure` and update all
+callers: Python, Node, Cargo, Go, Ruby, Elixir, .NET and rustfmt. Callers supply
+the exact environment/toolchain IDs and managed projections they created.
+Do not infer the authoritative set by recursively searching arbitrary JSON
+strings. Pass the actual Store explicitly instead of guessing it from body
+paths. Validate IDs, projection components and store ownership at the API
+boundary; reject absolute projection refs, `..`, and cross-store references.
+
+Publication sequence while activity protection is held:
+
+1. Validate the new reference set and its dependency metadata.
+2. Under `publish_lock`, read and validate the previous record, merge sets,
+   write a unique create-new temporary file, fsync it, rename atomically,
+   and fsync the registry directory. Persist initialization only after a
+   valid record is durable. Reuse existing descriptor-safe patterns.
+3. Publish the project closure using the existing descriptor-relative writer.
+
+Persist protection before publishing the closure. Failure after step 2 leaves
+extra protection, which is safe. Failure before step 2 must not publish the
+closure. Activity protection spans any earlier projection work as well.
+Serialization must prevent two ecosystems publishing concurrently from
+overwriting each other's references. Fault-inject each publication boundary.
+
+Migration: accept legacy pathname records for inspection, but never interpret
+unavailable ones as empty. `blanket gc --register <dir>` explicitly imports
+all supported closure schemas using declarative, schema-specific readers,
+then writes root/2. Unknown, malformed or ambiguous closures fail import
+without replacing the old record. Migration must never execute project code,
+run a package manager or access the network. Ordinary GC does not silently
+rewrite records. An unresolved legacy record blocks the whole sweep until
+registered or explicitly forgotten. Dry-run registration validates/reports
+the proposed import in memory and writes nothing.
+
+Acceptance: a project moved out of sight retains tools and forests; two
+ecosystems and two historical environments all remain protected; a simulated
+crash never leaves a visible closure with missing root protection. Include
+non-UTF-8 paths, unknown schema, malformed IDs and symlinked registry entries.
+
+## Package D — make deletion require complete evidence
+
+Split GC into a read/validate/plan phase and a deletion phase. No destructive
+action starts until ALL roots and metadata needed for the decision validate.
+Treat malformed roots, unknown schemas and unreadable metadata as errors.
+Missing or incomplete dependency information must not be silently treated as
+an empty dependency list. In this first implementation, abort the whole
+sweep on that uncertainty; do not invent partial-recovery rules.
+
+The present `refs` field is generated by guessing from `Identity.inputs`.
+Introduce versioned metadata with explicit typed object references and cache
+digests supplied by realization callers at commit. Audit every commit caller
+including shared toolchains, formatter-to-Rust references and native build
+inputs. Record runtime dependencies at minimum; retaining build inputs too is
+acceptable for this conservative release. Preserve existing object identity
+hashes unless actual output inputs change. On cache hits, do not silently
+certify old inferred metadata as the new complete schema.
+
+Legacy metadata with unproven reference completeness blocks destructive GC
+until explicitly migrated from a known schema with a tested adapter. Supply
+adapters for currently shipped identity kinds; unknown kinds stay blocked.
+Migration can add metadata atomically under protection without changing object
+contents, but must validate the expected ID and reject inconsistent existing
+data. `--collect-legacy` cannot override incomplete evidence; update help and
+tests to explain the stricter behavior. This may leave some old stores unable
+to collect safely; list the exact unresolved kinds and recovery action.
+
+Starting with every durable root, traverse explicit dependencies transitively.
+Also retain dependencies of objects retained by existing age/legacy policy.
+An object can be removed only when it is absent from that complete retained
+set, activity is exclusively locked, and retention policy permits deletion.
+Cached artifacts use explicit digests; managed projections use explicit root
+references. Preserve existing age settings unless separately documented.
+
+Use the same validated in-memory deletion plan for dry-run and real GC.
+Dry-run never removes roots, migrates records or refreshes timestamps. Report
+skipped/blocked decisions distinctly from candidates and freed bytes. Hold
+locks until execution finishes; do not save a plan and later execute it
+without repeating validation. Use held parent-directory descriptors and
+existing no-follow removal primitives for deletion. Never follow a symlink
+outside the managed directories. Recheck candidate identity before removing
+it; replacement or an unexpected file type stops that deletion with an error.
+
+Package A already shipped `blanket gc --forget <root-key>` (repeatable) and
+key display in `blanket store roots`: forgetting explicitly removes only that
+project's protection record, even if its folder is unavailable; it never
+deletes project files. Subsequent GC may reclaim its unshared resources.
+D's obligations are the upgrades: forgetting takes exclusive activity
+protection so it cannot race a job publishing the root, and the deletion
+plan treats a forgotten root as removed before traversal — what remains
+collectible is recomputed from the surviving records, never assumed from
+the forgotten root's contents. x cleanup may unregister its root only after
+successful validated cleanup and with the same lock order; failed/busy
+cleanup retains protection.
+
+Acceptance: shared dependency survives forgetting one of two projects; after
+forgetting both it becomes collectible when age policy allows. Corrupt a late
+root/metadata entry and prove no earlier candidate was deleted. Cover missing
+transitive metadata, cycles, unknown metadata schema, invalid refs, traversal
+strings, symlink replacement, dry-run immutability, and failed x cleanup.
+
+## Delivery and verification
+
+Use four reviewable commits/packages in the order above. The locking and
+supervision code in B is the smallest part; the producer audits in C (a
+declarative reader per shipped closure schema) and D (explicit refs at
+every commit caller plus a tested adapter per shipped identity kind) are
+the majority of the effort and should be sized as such. Within C and D,
+migrate producers before enabling collection based on the new schema. Do not
+ship a permissive fallback just to keep legacy tests green. Do not implement
+per-object leases, automatic expiry of missing roots, background GC, remote
+store locking, general path-resolution redesign or toolchain-lock validation
+as part of this task.
+
+Add fast offline subprocess tests to normal test execution; the key safety
+cases must not live only in ignored network integration tests. Test stores
+must be temporary; environment-mutating unit tests use `STORE_ENV_LOCK`.
+Run `cargo fmt --check`, `cargo test`, then relevant ignored `gc`, `fmt_e2e`
+and x lifecycle integration tests on a disposable store. Check actual test
+target names before invoking them. Record commands, results and platform
+gaps. Update CLI.md, ARCHITECTURE.md and LIMITATIONS.md to match delivered
+behavior; append review status to REVIEW.md. In the final implementation
+report, explain plainly that unavailable projects remain protected, active
+jobs postpone cleanup, and forgetting a project is now an explicit action.
