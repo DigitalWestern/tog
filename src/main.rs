@@ -1039,6 +1039,11 @@ fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
 }
 
 fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
+    // Syncing ends by registering this project as a GC root. Check that the
+    // path can be recorded before realizing or projecting anything: a
+    // finished sync that could not register would leave a projected
+    // environment nothing protects, and the next sweep would collect it.
+    store::Store::check_registrable(dir)?;
     if [
         "package.json",
         "package-lock.json",
@@ -1793,6 +1798,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Sync ends by registering the project as a GC root, so a path no
+    /// record can hold is refused before an environment is realized or
+    /// projected. Refusing at the end instead would leave the project synced,
+    /// unprotected and with no way to register it.
+    #[test]
+    fn sync_refuses_a_project_path_no_root_record_can_hold() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project ");
+        std::fs::create_dir_all(&project).unwrap();
+        let error = preflight_sync(Platform::host().unwrap(), &project).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("cannot protect"), "{error}");
     }
 
     #[test]

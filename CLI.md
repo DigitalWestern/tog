@@ -76,13 +76,15 @@ that must be restored or explicitly forgotten.
 A registry record GC cannot read — not a regular file, unreadable, not UTF-8,
 empty, padded, or holding anything but one absolute pathname — stops the
 sweep the same way instead of being skipped, and `blanket store roots` lists
-it as an unusable record rather than omitting it — the first column is
-always the key, the second is the project path for a usable record and a
-message for an unusable one. `--forget <key>` clears such a record whatever
-shape it has, and resolves that one key without reading any other record, so
-one damaged record never blocks recovering from it. Registration refuses a project path that a record cannot hold back
-exactly (not UTF-8, padded with whitespace, or spanning lines) rather than
-recording a spelling that reads back as a different project.
+it as an unusable record rather than omitting it — the first column is always
+the key, the second is the project path for a usable record and a message for
+an unusable one. `--forget <key>` clears such a record whatever shape it has,
+and resolves that one key without reading any other record, so one damaged
+record never blocks recovering from it. Registration refuses a project path
+that a record cannot hold back exactly (not UTF-8, padded with whitespace, or
+spanning lines) rather than recording a spelling that reads back as a
+different project, and `blanket sync` refuses such a path up front rather than
+leaving a synced project it cannot protect.
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they

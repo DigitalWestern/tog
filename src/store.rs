@@ -233,6 +233,14 @@ impl Store {
         root_key(&project_dir)
     }
 
+    /// Whether a project could be registered at all, without writing
+    /// anything. A project blanket cannot record is a project it cannot
+    /// protect from its own GC, so the work refuses up front instead of
+    /// discovering it after an environment has been realized and projected.
+    pub fn check_registrable(project_dir: &Path) -> io::Result<()> {
+        Self::root_key(project_dir).map(|_| ())
+    }
+
     /// Exclusive cross-process lock guarding publication and sweeping.
     /// Held only for the short rename/chmod/meta window, never during
     /// downloads or builds, so contention is negligible.
@@ -797,7 +805,8 @@ fn record_pathname(project_dir: &Path) -> io::Result<&str> {
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to register {}: the path is not valid UTF-8, so a registry record \
-                 cannot name it exactly",
+                 cannot name it exactly. A project blanket cannot record is a project it \
+                 cannot protect from `blanket gc`",
                 project_dir.display()
             ),
         )
@@ -807,7 +816,8 @@ fn record_pathname(project_dir: &Path) -> io::Result<&str> {
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to register '{text}': the path is padded with whitespace or spans \
-                 lines, so a registry record cannot name it exactly"
+                 lines, so a registry record cannot name it exactly. A project blanket \
+                 cannot record is a project it cannot protect from `blanket gc`"
             ),
         ));
     }
