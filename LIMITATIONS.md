@@ -32,17 +32,24 @@ say what breaks, for whom, and how it fails (loud/silent).
 - **A root record identifies its project by pathname alone.** GC can check
   that the recorded path resolves to a directory holding at least one closure;
   it cannot prove that directory *is* the project that was registered. If the
-  path comes to resolve to a *different* populated project — unmount a mount
-  point over a backing tree that has closures of its own, or replace the
-  registered directory with a symlink to another project — GC reads the wrong
-  project's closures and **deletes the registered project's live objects**
-  while keeping its record. The empty-backing-directory case (the reported
+  path, or the `.blanket/closures` directory inside it, comes to resolve to a
+  different tree carrying any closure that parses — a plain rename-and-recreate
+  (a restore, a re-clone, a scaffolding tool), an unmounted mount point over a
+  backing tree with closures of its own, or a symlink swap — GC reads the wrong
+  closures and **deletes the registered project's live objects** while keeping
+  its record. No mount and no symlink is required; recreating a directory at
+  the same path is enough. The empty-backing-directory case (the reported
   one) is refused, and so is a closures directory with no closure files in it,
   but that is a narrowing, not a fix: only a record that carries its own
   identity closes the class, and that is follow-up work. A closure file that
   parses but names no objects satisfies the same check while protecting
   nothing. Registration refuses a path that is not UTF-8, is padded with
-  whitespace or spans lines, since a record cannot name those back exactly.
+  whitespace or spans lines, since a record cannot name those back exactly, and
+  `blanket sync` refuses such a path before realizing anything. A path that is
+  not UTF-8 can only reach blanket as the working directory: passed as a CLI
+  argument it panics in `std::env::args` before parsing, exiting 101 rather
+  than the documented 2 — a pre-existing kernel-skeleton limitation, not part
+  of this work.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
