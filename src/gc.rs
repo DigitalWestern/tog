@@ -135,6 +135,13 @@ fn collect_roots<W: Write>(
         if options.forgotten.iter().any(|key| key == &root.key) {
             continue;
         }
+        // A record this store cannot read is the same safety stop as a
+        // project that cannot be resolved, and for the same reason: the
+        // record exists, so some project is still counting on it, and there
+        // is no way to tell which objects that project needs.
+        if let Some(reason) = &root.unusable {
+            return Err(unusable_root(root, reason));
+        }
         // A root whose project cannot be resolved is a safety stop, not a
         // cleanup candidate: with only a pathname record there is no way to
         // know what the project still needs, so dropping the record could
@@ -185,6 +192,18 @@ fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Error {
         root.key,
         root.path.display(),
         error,
+        root.key
+    ))
+}
+
+fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
+    io::Error::other(format!(
+        "refusing to sweep: root {} has an unusable registry record at {} ({}). Repair the \
+         record, or give up that project's protection explicitly with `blanket gc --forget \
+         {}`. Dry runs stop here too: the records decide what a real sweep would keep.",
+        root.key,
+        root.registry_path.display(),
+        reason,
         root.key
     ))
 }

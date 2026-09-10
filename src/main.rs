@@ -337,7 +337,7 @@ fn run_sbom(output: Option<&Path>) -> io::Result<()> {
 
 fn run_store_roots() -> io::Result<()> {
     for root in store::Store::open()?.roots()? {
-        println!("{}  {}", root.key, root.path.display());
+        println!("{}  {}", root.key, root.describe());
     }
     Ok(())
 }
@@ -382,15 +382,11 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
             writeln!(
                 stdout,
                 "blanket: would forget root {key} ({})",
-                entry.path.display()
+                entry.describe()
             )?;
         } else {
             let entry = store.forget_root(key)?;
-            writeln!(
-                stdout,
-                "blanket: forgot root {key} ({})",
-                entry.path.display()
-            )?;
+            writeln!(stdout, "blanket: forgot root {key} ({})", entry.describe())?;
         }
     }
     // Forgetting is the explicit recovery action, not an implicit sweep. A

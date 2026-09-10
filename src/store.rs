@@ -27,8 +27,25 @@ pub struct Store {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootEntry {
     pub key: String,
+    /// The registered project. Empty when the record is unusable: a record
+    /// nobody can read has no pathname to offer, and guessing one selects
+    /// somebody else's project.
     pub path: PathBuf,
     pub registry_path: PathBuf,
+    /// Why this record cannot be trusted, if it cannot. The record still
+    /// exists: it is listed and can be forgotten, but no sweep may run while
+    /// one is present.
+    pub unusable: Option<String>,
+}
+
+impl RootEntry {
+    /// What this record protects, for user-facing output.
+    pub fn describe(&self) -> String {
+        match &self.unusable {
+            Some(reason) => format!("unusable record: {reason}"),
+            None => self.path.display().to_string(),
+        }
+    }
 }
 
 const ROOTS_INITIALIZED: &str = ".initialized";
@@ -79,37 +96,34 @@ impl Store {
             key,
             path: project_dir,
             registry_path: dest,
+            unusable: None,
         })
     }
 
     /// Read the roots registry without validating whether projects still
     /// exist. `blanket store roots` is an inspection command; GC validates
     /// each path before sweeping and never drops stale records implicitly.
+    ///
+    /// Every key-named entry is reported, including the ones that cannot be
+    /// read. Skipping an unreadable record would hide a project whose record
+    /// is still on disk, and GC would then sweep the objects that project is
+    /// holding — the failure has to be visible to be refused.
     pub fn roots(&self) -> io::Result<Vec<RootEntry>> {
         let roots = self.root.join("roots");
         fs::create_dir_all(&roots)?;
         let mut entries = Vec::new();
-        for entry in fs::read_dir(roots)? {
+        for entry in fs::read_dir(&roots)? {
             let entry = entry?;
-            if !entry.file_type()?.is_file() {
+            // Records are key-named. The `.initialized` marker and the
+            // `.<key>.tmp.<pid>` staging files this store writes itself are
+            // not records and never name a project.
+            let name = entry.file_name();
+            let Some(key) = name.to_str().filter(|name| is_sha1(name)) else {
                 continue;
-            }
-            let key = entry.file_name().to_string_lossy().into_owned();
-            if !is_sha1(&key) {
-                continue;
-            }
-            let text = fs::read_to_string(entry.path())?;
-            let path = PathBuf::from(text.trim());
-            if path.as_os_str().is_empty() {
-                continue;
-            }
-            entries.push(RootEntry {
-                key,
-                path,
-                registry_path: entry.path(),
-            });
+            };
+            entries.push(root_entry(key, roots.join(key)));
         }
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        entries.sort_by(|a, b| (&a.path, &a.key).cmp(&(&b.path, &b.key)));
         Ok(entries)
     }
 
@@ -669,6 +683,59 @@ fn is_object_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
 }
 
+fn root_entry(key: &str, registry_path: PathBuf) -> RootEntry {
+    match read_root_record(&registry_path) {
+        Ok(path) => RootEntry {
+            key: key.to_string(),
+            path,
+            registry_path,
+            unusable: None,
+        },
+        Err(reason) => RootEntry {
+            key: key.to_string(),
+            path: PathBuf::new(),
+            registry_path,
+            unusable: Some(reason),
+        },
+    }
+}
+
+/// The pathname one registry record holds, or why it cannot be trusted.
+///
+/// `register_root` writes one canonical absolute pathname and a newline into
+/// a regular file. Anything else is reported instead of skipped or trimmed
+/// into shape: a skipped record is protection that silently disappears while
+/// its entry is still on disk, and a trimmed one can name a different
+/// project than the one that was registered.
+fn read_root_record(path: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("the record is a symlink, not a registry file".into());
+    }
+    if !metadata.is_file() {
+        return Err("the record is not a regular file".into());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("{error}"))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("the record is not valid UTF-8 ({error})"))?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    if text.is_empty() {
+        return Err("the record holds no pathname".into());
+    }
+    if text.trim() != text || text.contains('\n') {
+        return Err(
+            "the record's pathname is padded or spans lines, so it cannot be read back \
+             exactly as it was registered"
+                .into(),
+        );
+    }
+    let project = PathBuf::from(text);
+    if !project.is_absolute() {
+        return Err("the record's pathname is not absolute".into());
+    }
+    Ok(project)
+}
+
 fn is_sha1(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -758,6 +825,39 @@ mod tests {
         );
         store.remove_root_entry(&root).unwrap();
         assert!(store.roots().unwrap().is_empty());
+    }
+
+    /// A record that cannot be read is still a record. Reporting it keeps GC
+    /// able to refuse; skipping it silently drops a project's protection.
+    #[test]
+    fn unreadable_records_are_reported_not_skipped() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let entry = store.register_root(&project).unwrap();
+
+        for contents in [
+            b"".as_slice(),
+            b"\xff\n".as_slice(),
+            b" /padded\n".as_slice(),
+            b"relative/path\n".as_slice(),
+            b"/one\n/two\n".as_slice(),
+        ] {
+            fs::write(&entry.registry_path, contents).unwrap();
+            let roots = store.roots().unwrap();
+            assert_eq!(roots.len(), 1, "record skipped: {contents:?}");
+            assert_eq!(roots[0].key, entry.key);
+            assert!(roots[0].unusable.is_some(), "record accepted: {contents:?}");
+        }
+
+        fs::remove_file(&entry.registry_path).unwrap();
+        std::os::unix::fs::symlink(&project, &entry.registry_path).unwrap();
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "symlinked record skipped");
+        assert!(roots[0].unusable.is_some(), "symlinked record accepted");
     }
 
     #[test]

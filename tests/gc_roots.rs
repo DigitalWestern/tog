@@ -7,6 +7,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
@@ -90,6 +91,13 @@ impl Fixture {
         project
     }
 
+    /// Write a registry record by hand, exactly as `register_root` would.
+    fn record(&self, project: &Path) -> String {
+        let key = blanket::store::Store::root_key(project).unwrap();
+        self.record_as(&key, format!("{}\n", project.display()).as_bytes());
+        key
+    }
+
     fn record_as(&self, key: &str, contents: &[u8]) {
         fs::write(self.roots().join(key), contents).unwrap();
     }
@@ -164,4 +172,86 @@ fn forget_removes_only_the_exact_key_that_was_asked_for() {
         vec![lower.to_string()],
         "--forget removed the wrong record"
     );
+}
+
+/// A record the store cannot read must stop the sweep, not disappear from the
+/// registry's own listing. The review replaced a working record with a
+/// symlink, a dangling symlink and an empty file: each time `store roots`
+/// went quiet and the next sweep deleted the live object that record had been
+/// protecting a moment earlier.
+#[test]
+fn unreadable_records_block_the_sweep_instead_of_disappearing() {
+    for shape in [
+        "symlink",
+        "dangling-symlink",
+        "empty",
+        "not-utf8",
+        "directory",
+        "padded-pathname",
+        "relative-pathname",
+    ] {
+        let fixture = Fixture::new(shape);
+        let project = fixture.project("project", true);
+        let key = fixture.record(&project);
+        let record = fixture.roots().join(&key);
+
+        // Control: while the record is readable it keeps the aged object.
+        let control = fixture.run(&["gc", "--keep-days=0"]);
+        assert!(control.status.success(), "{}", stderr(&control));
+        assert!(
+            fixture.object().is_dir(),
+            "control sweep deleted the object"
+        );
+
+        fs::remove_file(&record).unwrap();
+        match shape {
+            "symlink" => {
+                let saved = fixture.base.join("saved-record");
+                fs::write(&saved, format!("{}\n", project.display())).unwrap();
+                symlink(&saved, &record).unwrap();
+            }
+            "dangling-symlink" => symlink(fixture.base.join("absent"), &record).unwrap(),
+            "empty" => fs::write(&record, b"").unwrap(),
+            "not-utf8" => fs::write(&record, b"\xff\n").unwrap(),
+            "directory" => fs::create_dir(&record).unwrap(),
+            "padded-pathname" => fs::write(&record, format!(" {}\n", project.display())).unwrap(),
+            _ => fs::write(&record, b"project\n").unwrap(),
+        }
+
+        let listing = fixture.run(&["store", "roots"]);
+        assert!(listing.status.success(), "{}", stderr(&listing));
+        assert!(
+            stdout(&listing).contains(&key) && stdout(&listing).contains("unusable record"),
+            "{shape}: the listing hid the broken record: {}",
+            stdout(&listing)
+        );
+
+        for args in [
+            vec!["gc", "--project", "--keep-days=0"],
+            vec!["gc", "--dry-run", "--keep-days=0"],
+            vec!["gc", "--keep-days=0"],
+        ] {
+            let sweep = fixture.run(&args);
+            assert!(
+                !sweep.status.success(),
+                "{shape}: swept past an unreadable record: {}",
+                stdout(&sweep)
+            );
+            let message = stderr(&sweep);
+            assert!(
+                message.contains("refusing to sweep")
+                    && message.contains(&key)
+                    && message.contains("--forget"),
+                "{shape}: unexpected refusal: {message}"
+            );
+        }
+        assert!(
+            fixture.object().is_dir(),
+            "{shape}: the sweep deleted the live object"
+        );
+        assert!(
+            fs::symlink_metadata(&record).is_ok(),
+            "{shape}: the sweep dropped the record"
+        );
+    }
 }
