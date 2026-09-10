@@ -5,8 +5,9 @@
 //! the register/forget preflight and the sweep refusals are covered together.
 //! No network, no toolchains: the store holds one hand-written object.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -74,6 +75,11 @@ impl Fixture {
     /// A project directory; `live` gives it a closure holding the object.
     fn project(&self, name: &str, live: bool) -> PathBuf {
         let project = self.base.join(name);
+        self.make_project(&project, live);
+        project
+    }
+
+    fn make_project(&self, project: &Path, live: bool) {
         let closures = project.join(".blanket/closures");
         fs::create_dir_all(&closures).unwrap();
         if live {
@@ -88,7 +94,6 @@ impl Fixture {
             )
             .unwrap();
         }
-        project
     }
 
     /// Write a registry record by hand, exactly as `register_root` would.
@@ -254,4 +259,78 @@ fn unreadable_records_block_the_sweep_instead_of_disappearing() {
             "{shape}: the sweep dropped the record"
         );
     }
+}
+
+/// A registry record is one line of text and the key hashes that same text.
+/// A pathname that does not survive the round trip has to be refused at
+/// registration: the review registered `<base>/project ` and watched the
+/// record read back as `<base>/project`, a different project, whose empty
+/// closures left the first project's live object collectible.
+#[test]
+fn a_pathname_a_record_cannot_hold_exactly_is_refused() {
+    let fixture = Fixture::new("padded-path");
+    let padded = fixture.project("project ", true);
+    let neighbour = fixture.project("project", false);
+    assert!(padded.is_dir() && neighbour.is_dir());
+
+    let register = fixture.run(&[
+        OsStr::new("gc"),
+        OsStr::new("--register"),
+        padded.as_os_str(),
+        OsStr::new("--keep-days=0"),
+    ]);
+    assert!(
+        !register.status.success(),
+        "registered a pathname no record can hold: {}",
+        stdout(&register)
+    );
+    assert!(
+        stderr(&register).contains("refusing to register"),
+        "unexpected refusal: {}",
+        stderr(&register)
+    );
+    assert!(
+        fixture.record_names().is_empty(),
+        "a record was written anyway: {:?}",
+        fixture.record_names()
+    );
+    assert!(
+        fixture.object().is_dir(),
+        "the sweep deleted the live object"
+    );
+}
+
+/// The same identity loss without any whitespace: a directory named with a
+/// byte that is not UTF-8 hashes to the key of its lossy spelling, so the
+/// registration lands on the neighbouring project's identity.
+#[test]
+fn a_pathname_that_is_not_utf8_is_refused() {
+    let fixture = Fixture::new("lossy-path");
+    let mut raw = fixture.base.as_os_str().as_bytes().to_vec();
+    raw.extend_from_slice(b"/project-\xff");
+    let raw_project = PathBuf::from(OsString::from_vec(raw));
+    fixture.make_project(&raw_project, true);
+    let lossy_twin = fixture.project("project-\u{fffd}", false);
+    let twin_key = blanket::store::Store::root_key(&lossy_twin).unwrap();
+
+    // argv stays UTF-8; the child canonicalizes `.` into the raw pathname.
+    let register = fixture.run_in(&raw_project, &["gc", "--register", ".", "--keep-days=0"]);
+    assert!(
+        !register.status.success(),
+        "registered a pathname that is not UTF-8: {}",
+        stdout(&register)
+    );
+    assert!(
+        !fixture.roots().join(&twin_key).exists(),
+        "registered under the neighbouring project's key"
+    );
+    assert!(
+        fixture.record_names().is_empty(),
+        "a record was written anyway: {:?}",
+        fixture.record_names()
+    );
+    assert!(
+        fixture.object().is_dir(),
+        "the sweep deleted the live object"
+    );
 }

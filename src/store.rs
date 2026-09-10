@@ -82,12 +82,13 @@ impl Store {
     /// new root instead of accidentally retaining the old location.
     pub fn register_root(&self, project_dir: &Path) -> io::Result<RootEntry> {
         let project_dir = project_dir.canonicalize()?;
-        let key = root_key(&project_dir);
+        let pathname = record_pathname(&project_dir)?.to_string();
+        let key = root_key(&project_dir)?;
         let roots = self.root.join("roots");
         fs::create_dir_all(&roots)?;
         let dest = roots.join(&key);
         let tmp = roots.join(format!(".{key}.tmp.{}", std::process::id()));
-        fs::write(&tmp, format!("{}\n", project_dir.display()))?;
+        fs::write(&tmp, format!("{pathname}\n"))?;
         fs::rename(&tmp, &dest)?;
         // Keep an explicit initialization marker so an empty registry can be
         // distinguished from a store upgraded from before roots existed.
@@ -203,7 +204,7 @@ impl Store {
     /// combinations before either side mutates the registry.
     pub fn root_key(project_dir: &Path) -> io::Result<String> {
         let project_dir = project_dir.canonicalize()?;
-        Ok(root_key(&project_dir))
+        root_key(&project_dir)
     }
 
     /// Exclusive cross-process lock guarding publication and sweeping.
@@ -740,9 +741,43 @@ fn is_sha1(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn root_key(project_dir: &Path) -> String {
+fn root_key(project_dir: &Path) -> io::Result<String> {
     use sha1::{Digest, Sha1};
-    hex::encode(Sha1::digest(project_dir.to_string_lossy().as_bytes()))
+    Ok(hex::encode(Sha1::digest(
+        record_pathname(project_dir)?.as_bytes(),
+    )))
+}
+
+/// The exact text a record holds for this project, or a refusal when the
+/// pathname cannot be stored unambiguously.
+///
+/// A record is one line of text and the key hashes that same text, so a
+/// pathname that does not survive the round trip is not merely cosmetic: a
+/// trailing space or a byte that is not UTF-8 registers one project under
+/// another project's identity, and GC then keeps the wrong project's objects
+/// and sweeps the live ones. Refuse the registration instead of recording a
+/// pathname that names a different directory when it is read back.
+fn record_pathname(project_dir: &Path) -> io::Result<&str> {
+    let text = project_dir.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to register {}: the path is not valid UTF-8, so a registry record \
+                 cannot name it exactly",
+                project_dir.display()
+            ),
+        )
+    })?;
+    if text.trim() != text || text.contains('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to register '{text}': the path is padded with whitespace or spans \
+                 lines, so a registry record cannot name it exactly"
+            ),
+        ));
+    }
+    Ok(text)
 }
 
 fn object_refs(identity: &Identity) -> Vec<String> {
@@ -825,6 +860,37 @@ mod tests {
         );
         store.remove_root_entry(&root).unwrap();
         assert!(store.roots().unwrap().is_empty());
+    }
+
+    /// A project whose pathname a record cannot hold exactly is refused
+    /// before anything is written: recording a lossy spelling files one
+    /// project under another project's identity.
+    #[test]
+    fn registration_refuses_a_pathname_no_record_can_hold() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let padded = temp.0.join("project ");
+        fs::create_dir_all(&padded).unwrap();
+        assert_eq!(
+            store.register_root(&padded).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            Store::root_key(&padded).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let mut raw = temp.0.canonicalize().unwrap().into_os_string().into_vec();
+        raw.extend_from_slice(b"/project-\xff");
+        let lossy = PathBuf::from(OsString::from_vec(raw));
+        fs::create_dir_all(&lossy).unwrap();
+        assert_eq!(
+            store.register_root(&lossy).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(store.roots().unwrap().is_empty(), "a record was written");
     }
 
     /// A record that cannot be read is still a record. Reporting it keeps GC
