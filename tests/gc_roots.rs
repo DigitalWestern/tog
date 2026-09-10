@@ -442,3 +442,48 @@ fn dry_run_never_writes_a_record() {
         "--register wrote nothing"
     );
 }
+
+/// `--forget` is the escape hatch every refusal points at, so one corrupt
+/// record must not disable it. The review found the opposite: with an
+/// unrelated 40-hex record holding a stray byte, forgetting the healthy key
+/// and forgetting the corrupt key both failed with "stream did not contain
+/// valid UTF-8", and neither record could be removed.
+#[test]
+fn a_corrupt_record_never_blocks_forgetting_a_key() {
+    let fixture = Fixture::new("corrupt-record");
+    let project = fixture.project("project", true);
+    let healthy = fixture.record(&project);
+    let corrupt = "e".repeat(40);
+    fixture.record_as(&corrupt, b"\xff\n");
+    let hostile = "d".repeat(40);
+    fixture.record_as(&hostile, &vec![b'x'; 64 * 1024]);
+
+    // The unrelated key is forgettable while the broken records sit there.
+    let forget = fixture.run(&["gc", "--forget", &healthy]);
+    assert!(forget.status.success(), "{}", stderr(&forget));
+    assert!(stdout(&forget).contains(&healthy), "{}", stdout(&forget));
+    assert_eq!(
+        fixture.record_names(),
+        vec![hostile.clone(), corrupt.clone()]
+    );
+
+    // So is the broken record itself, by its own key.
+    for key in [&corrupt, &hostile] {
+        let forget = fixture.run(&["gc", "--forget", key]);
+        assert!(forget.status.success(), "{}", stderr(&forget));
+        assert!(
+            stdout(&forget).contains("unusable record"),
+            "{}",
+            stdout(&forget)
+        );
+    }
+    assert!(fixture.record_names().is_empty());
+
+    // And the sweep the broken records were blocking runs again afterwards.
+    let sweep = fixture.run(&["gc", "--keep-days=0"]);
+    assert!(sweep.status.success(), "{}", stderr(&sweep));
+    assert!(
+        !fixture.object().exists(),
+        "nothing protects the object any more, but it survived"
+    );
+}

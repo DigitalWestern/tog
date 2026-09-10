@@ -50,6 +50,10 @@ impl RootEntry {
 
 const ROOTS_INITIALIZED: &str = ".initialized";
 
+/// Generous ceiling on one registry record: four times the longest pathname
+/// Linux or macOS will hand back, plus its newline.
+const RECORD_LIMIT: u64 = 16 * 1024;
+
 /// Serializes every test that sets or clears `BLANKET_STORE`. The variable is
 /// process-global, so an unguarded test clearing it mid-run sends a guarded one
 /// to the real `~/.blanket/store` — which is populated, and fails any assertion
@@ -149,6 +153,12 @@ impl Store {
     }
 
     pub fn remove_root_entry(&self, entry: &RootEntry) -> io::Result<()> {
+        // A directory sitting at a key is not a record, but it still occupies
+        // that key and still stops every sweep. Forgetting the key has to
+        // clear it too, or the escape hatch fails at the worst case.
+        if fs::symlink_metadata(&entry.registry_path).is_ok_and(|meta| meta.is_dir()) {
+            return remove_tree(&entry.registry_path);
+        }
         match fs::remove_file(&entry.registry_path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -159,20 +169,36 @@ impl Store {
     /// Look up one root record by its exact registry key without removing
     /// it. The key must match a record this store holds; the project itself
     /// is never touched, so lookups work while the project is unavailable.
+    ///
+    /// Exactly one record is read: the requested one. Resolving the key
+    /// through the whole registry would let any other record's corruption
+    /// block this lookup — and `--forget` is the escape hatch every refusal
+    /// points at, so it has to work when the registry is at its worst,
+    /// including on the corrupt record itself.
     pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
         Self::validate_root_key(key)?;
-        self.roots()?
-            .into_iter()
-            .find(|entry| entry.key == key)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "unknown root key {key}; `blanket store roots` lists the keys this \
-                         store holds"
-                    ),
-                )
-            })
+        let roots = self.root.join("roots");
+        fs::create_dir_all(&roots)?;
+        // Match the directory entry by name rather than opening the joined
+        // path: a case-insensitive filesystem would otherwise answer with a
+        // neighbouring spelling's record, which is the wrong record.
+        let mut present = false;
+        for entry in fs::read_dir(&roots)? {
+            if entry?.file_name().as_os_str().as_bytes() == key.as_bytes() {
+                present = true;
+                break;
+            }
+        }
+        if !present {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "unknown root key {key}; `blanket store roots` lists the keys this store \
+                     holds"
+                ),
+            ));
+        }
+        Ok(root_entry(key, roots.join(key)))
     }
 
     /// Remove one project's protection record by its exact registry key.
@@ -716,6 +742,14 @@ fn read_root_record(path: &Path) -> Result<PathBuf, String> {
     if !metadata.is_file() {
         return Err("the record is not a regular file".into());
     }
+    // A record is one pathname. Anything larger is not one, and reading it
+    // would make every lookup pay for whatever was left in the registry.
+    if metadata.len() > RECORD_LIMIT {
+        return Err(format!(
+            "the record is {} bytes, larger than any pathname",
+            metadata.len()
+        ));
+    }
     let bytes = fs::read(path).map_err(|error| format!("{error}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| format!("the record is not valid UTF-8 ({error})"))?;
@@ -949,6 +983,45 @@ mod tests {
         assert!(store.roots().unwrap().is_empty());
         let error = store.forget_root(&entry.key).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Exact-key recovery reads one record. Every other record can be
+    /// hostile — unreadable bytes, no permissions, a symlink, a directory,
+    /// or far too large — and the requested key still resolves.
+    #[test]
+    fn exact_key_recovery_ignores_every_other_record() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let entry = store.register_root(&project).unwrap();
+        let roots = store.root.join("roots");
+
+        let broken = ["a", "b", "c", "d", "e"].map(|c| c.repeat(40));
+        fs::write(roots.join(&broken[0]), b"\xff\n").unwrap();
+        fs::write(roots.join(&broken[1]), b"unreadable\n").unwrap();
+        fs::set_permissions(roots.join(&broken[1]), fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(&project, roots.join(&broken[2])).unwrap();
+        fs::create_dir(roots.join(&broken[3])).unwrap();
+        fs::write(roots.join(&broken[4]), vec![b'x'; 64 * 1024]).unwrap();
+
+        let found = store.lookup_root(&entry.key).unwrap();
+        assert_eq!(found.path, project.canonicalize().unwrap());
+        assert!(found.unusable.is_none());
+        assert_eq!(store.forget_root(&entry.key).unwrap().key, entry.key);
+
+        // Each broken record is reachable by its own key, so the registry can
+        // be emptied without deleting files by hand.
+        for key in &broken {
+            let entry = store.lookup_root(key).unwrap();
+            assert!(entry.unusable.is_some(), "{key} read as a usable record");
+            store.forget_root(key).unwrap();
+        }
+        assert!(store.roots().unwrap().is_empty());
     }
 
     #[test]
