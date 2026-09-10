@@ -76,10 +76,11 @@ that must be restored or explicitly forgotten.
 A registry record GC cannot read — not a regular file, unreadable, not UTF-8,
 empty, padded, or holding anything but one absolute pathname — stops the
 sweep the same way instead of being skipped, and `blanket store roots` lists
-it as an unusable record rather than omitting it. `--forget <key>` clears
-such a record whatever shape it has, and resolves that one key without
-reading any other record, so one damaged record never blocks recovering from
-it. Registration refuses a project path that a record cannot hold back
+it as an unusable record rather than omitting it — the first column is
+always the key, the second is the project path for a usable record and a
+message for an unusable one. `--forget <key>` clears such a record whatever
+shape it has, and resolves that one key without reading any other record, so
+one damaged record never blocks recovering from it. Registration refuses a project path that a record cannot hold back
 exactly (not UTF-8, padded with whitespace, or spanning lines) rather than
 recording a spelling that reads back as a different project.
 

@@ -30,15 +30,19 @@ say what breaks, for whom, and how it fails (loud/silent).
   the key from `blanket store roots` with `blanket gc --forget` only when
   giving up that protection is intentional.
 - **A root record identifies its project by pathname alone.** GC can check
-  that the recorded path resolves to a directory that holds closures; it
-  cannot prove that directory *is* the project that was registered. The
-  reachable case — unmounting a mount point so the pathname resolves to the
-  backing directory underneath — is refused because that directory has no
-  closures of its own, but a backing tree carrying unrelated closures would
-  still be accepted and would protect the wrong set of objects. Registration
-  refuses a path that is not UTF-8, is padded with whitespace or spans lines,
-  since a record cannot name those back exactly; a byte-preserving record
-  that carries its own identity is follow-up work.
+  that the recorded path resolves to a directory holding at least one closure;
+  it cannot prove that directory *is* the project that was registered. If the
+  path comes to resolve to a *different* populated project — unmount a mount
+  point over a backing tree that has closures of its own, or replace the
+  registered directory with a symlink to another project — GC reads the wrong
+  project's closures and **deletes the registered project's live objects**
+  while keeping its record. The empty-backing-directory case (the reported
+  one) is refused, and so is a closures directory with no closure files in it,
+  but that is a narrowing, not a fix: only a record that carries its own
+  identity closes the class, and that is follow-up work. A closure file that
+  parses but names no objects satisfies the same check while protecting
+  nothing. Registration refuses a path that is not UTF-8, is padded with
+  whitespace or spans lines, since a record cannot name those back exactly.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
