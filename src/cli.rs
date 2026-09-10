@@ -108,6 +108,7 @@ pub struct GcArgs {
     pub project: bool,
     pub collect_legacy: bool,
     pub register: Vec<PathBuf>,
+    pub forget: Vec<String>,
 }
 
 /// Options accepted before the command; they apply to every command.
@@ -457,14 +458,16 @@ line is ok, warn, or fail with the fix; exit status 1 on any fail.",
         name: "gc",
         group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
-        usage: "blanket gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--register <dir>...]",
+        usage: "blanket gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--register <dir>...] [--forget <key>...]",
         description: "\
 Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
 cleans stale staging directories. Objects touched in the last ten minutes
 are always kept so a concurrent sync cannot lose one. Ordinary gc never
 deletes inside project projections; --project collects old unused forests
-and backups. Usable on a copied store from any host.",
+and backups. A registered project that has become unavailable stops the
+sweep instead of losing its record; make it available again or forget it
+with --forget. Usable on a copied store from any host.",
         options: &[
             ("--dry-run", "report what would be removed without removing it"),
             ("--keep-days <n>", "retain cached artifacts used within <n> days"),
@@ -477,6 +480,11 @@ and backups. Usable on a copied store from any host.",
                 "--register <dir>...",
                 "register project roots before collecting (pre-registry projects)",
             ),
+            (
+                "--forget <key>...",
+                "forget project roots by their exact key (`store roots` prints keys); \
+                 removes only the protection record, so their objects become collectible",
+            ),
             HELP_OPTION,
         ],
         words: &[],
@@ -488,7 +496,7 @@ and backups. Usable on a copied store from any host.",
         usage: "blanket store <path | roots>",
         description: "\
   path    print the store root (~/.blanket/store unless BLANKET_STORE is set)
-  roots   list the project directories registered with this store",
+  roots   list every registered project root as '<key>  <path>'",
         options: &[HELP_OPTION],
         words: &["path", "roots"],
     },
@@ -1215,6 +1223,24 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
                     Some("gc"),
                 )?);
             }
+            "--forget" => {
+                index += 1;
+                let first = index;
+                while index < args.len() && !args[index].starts_with("--") {
+                    gc.forget.push(valid_root_key(&args[index])?);
+                    index += 1;
+                }
+                if first == index {
+                    return Err(UsageError::new(
+                        "--forget needs at least one root key",
+                        Some("gc"),
+                    ));
+                }
+                continue;
+            }
+            _ if arg.starts_with("--forget=") => {
+                gc.forget.push(valid_root_key(&arg["--forget=".len()..])?);
+            }
             "--keep-days" => {
                 let value = args
                     .get(index + 1)
@@ -1239,6 +1265,23 @@ fn parse_days(value: &str) -> Result<u64, UsageError> {
             Some("gc"),
         )
     })
+}
+
+/// Root keys are registry file names: 40 hex characters. Rejecting anything
+/// else here keeps `--forget` from ever acting on a guessed or malformed key.
+fn valid_root_key(value: &str) -> Result<String, UsageError> {
+    let is_key = value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_key {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err(UsageError::new(
+            format!(
+                "'{value}' is not a root key: expected 40 hex characters (`blanket store \
+                 roots` prints keys)"
+            ),
+            Some("gc"),
+        ))
+    }
 }
 
 fn parse_store(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -2158,6 +2201,7 @@ mod tests {
                 project: true,
                 collect_legacy: true,
                 register: vec!["/a".into(), "/b".into(), "/c".into()],
+                forget: Vec::new(),
             })
         );
         assert_eq!(
@@ -2169,6 +2213,31 @@ mod tests {
             "--register needs at least one project directory"
         );
         assert_eq!(message(&["gc", "--register="]), "--register= needs a value");
+        let key = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            command(&[
+                "gc",
+                "--forget",
+                &key,
+                "--forget=ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+            ]),
+            Command::Gc(GcArgs {
+                forget: vec![
+                    key.to_string(),
+                    "abcdef0123456789abcdef0123456789abcdef01".to_string()
+                ],
+                ..GcArgs::default()
+            })
+        );
+        assert_eq!(
+            message(&["gc", "--forget"]),
+            "--forget needs at least one root key"
+        );
+        assert_eq!(
+            message(&["gc", "--forget", "nope"]),
+            "'nope' is not a root key: expected 40 hex characters (`blanket store roots` \
+             prints keys)"
+        );
         assert_eq!(message(&["gc", "--keep-days"]), "--keep-days needs <n>");
         assert_eq!(
             message(&["gc", "--keep-days", "soon"]),

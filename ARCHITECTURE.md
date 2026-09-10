@@ -103,6 +103,25 @@ resolving the candidate pathname again. Removing a node root also orphans its
 `~/.blanket/forests` projection, which only `gc --project` sweeps; the
 cleanup summary names that command.
 
+### GC root safety
+
+The store's `roots/<sha1>` registry records every project whose closure can
+protect store objects. Ordinary GC treats a pathname-only record as durable
+authority: if the project directory or `.blanket/closures` cannot be read, the
+whole sweep stops before any deletion and the record remains. This includes a
+dry run, because previewing a sweep must not turn uncertainty into a cleanup
+decision. `blanket store roots` prints each key beside its diagnostic path so
+an unavailable project can be recovered without opening it.
+
+`blanket gc --forget <root-key>...` is the explicit recovery valve. It checks
+the exact key against the registry, removes only that registry file, and does
+not resolve or modify the project or any store object. With `--dry-run`, the
+record is excluded only from the in-memory liveness calculation. Forgetting
+is therefore an intentional loss of that project's protection; future GC may
+collect its now-unshared objects. The first implementation still relies on
+the existing activity and recency safeguards; a store-wide job lock is a
+follow-up.
+
 ## Platforms
 
 `src/platform.rs` defines `Platform` (`aarch64-apple-darwin`,

@@ -49,8 +49,9 @@ blanket run vite dev
 blanket plan                    # show the locked plan(s) (JSON)
 blanket build                   # sandboxed Cargo build (network denied)
 blanket store path              # where the store lives
-blanket store roots             # registered project roots
+blanket store roots             # root keys and registered project roots
 blanket gc --dry-run            # preview unreferenced store/cache cleanup
+blanket gc --forget <root-key>  # explicitly give up one root's protection
 blanket sync --fresh            # rebuild the projection (drops caches)
 blanket dev                     # a package.json script, like 'npm run dev'
 blanket add requests            # add a dependency with the ecosystem's own tool, re-lock, sync
@@ -109,9 +110,11 @@ belong to blanket.
 `blanket gc` follows every registered project closure, removes unreachable
 store objects and old unreferenced `cache/sha256` artifacts, and cleans stale
 staging directories. It keeps a ten-minute activity window so a concurrent
-sync cannot lose an object. Use `blanket gc --project` separately to collect
-old unused forests and backups; ordinary GC never deletes inside project
-projections.
+sync cannot lose an object. An unavailable registered project is retained and
+blocks the sweep until it returns or its exact key is explicitly passed to
+`gc --forget`; ordinary GC never removes root records. Use `blanket gc
+--project` separately to collect old unused forests and backups; ordinary GC
+never deletes inside project projections.
 
 Python uses the explicit `.python-version` request when present; otherwise
 it intersects `requires-python`/`python_requires` metadata and selects the

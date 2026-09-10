@@ -83,8 +83,8 @@ impl Store {
     }
 
     /// Read the roots registry without validating whether projects still
-    /// exist. `blanket store roots` is an inspection command; GC performs the
-    /// stale-root drop during its sweep.
+    /// exist. `blanket store roots` is an inspection command; GC validates
+    /// each path before sweeping and never drops stale records implicitly.
     pub fn roots(&self) -> io::Result<Vec<RootEntry>> {
         let roots = self.root.join("roots");
         fs::create_dir_all(&roots)?;
@@ -139,6 +139,57 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    /// Look up one root record by its exact registry key without removing
+    /// it. The key must match a record this store holds; the project itself
+    /// is never touched, so lookups work while the project is unavailable.
+    pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
+        Self::validate_root_key(key)?;
+        self.roots()?
+            .into_iter()
+            .find(|entry| entry.key == key)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "unknown root key {key}; `blanket store roots` lists the keys this \
+                         store holds"
+                    ),
+                )
+            })
+    }
+
+    /// Remove one project's protection record by its exact registry key.
+    /// Only the record is removed: project files and store objects stay, so
+    /// the project loses protection by explicit choice. Returns the removed
+    /// entry.
+    pub fn forget_root(&self, key: &str) -> io::Result<RootEntry> {
+        let entry = self.lookup_root(key)?;
+        self.remove_root_entry(&entry)?;
+        Ok(entry)
+    }
+
+    fn validate_root_key(key: &str) -> io::Result<()> {
+        if is_sha1(key) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid root key '{key}': expected 40 hex characters (`blanket store \
+                     roots` prints keys)"
+                ),
+            ))
+        }
+    }
+
+    /// The registry key a project directory would be registered under,
+    /// without writing anything. Used to reject ambiguous register/forget
+    /// combinations before either side mutates the registry.
+    pub fn root_key(project_dir: &Path) -> io::Result<String> {
+        let project_dir = project_dir.canonicalize()?;
+        Ok(root_key(&project_dir))
     }
 
     /// Exclusive cross-process lock guarding publication and sweeping.
@@ -707,6 +758,31 @@ mod tests {
         );
         store.remove_root_entry(&root).unwrap();
         assert!(store.roots().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lookup_and_forget_work_off_registry_records_alone() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let entry = store.register_root(&project).unwrap();
+
+        // Forgetting resolves the key against the registry only, so a record
+        // stays forgettable after its project is gone.
+        fs::remove_dir_all(&project).unwrap();
+        let lookup = store.lookup_root(&entry.key).unwrap();
+        assert_eq!(lookup.key, entry.key);
+
+        assert_eq!(
+            store.forget_root(&entry.key).unwrap().registry_path,
+            entry.registry_path
+        );
+        assert!(store.roots().unwrap().is_empty());
+        let error = store.forget_root(&entry.key).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

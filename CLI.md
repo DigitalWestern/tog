@@ -42,7 +42,7 @@ INSPECT:
 
 MAINTAIN:
   gc         collect unreferenced store objects and cached artifacts
-  store      'store path', 'store roots'
+  store      'store path', 'store roots' (root keys and paths)
   completions print a shell completion script (bash | zsh | fish)
   help       show help for a command
   version    print the version
@@ -62,6 +62,13 @@ ENVIRONMENT ...           (BLANKET_STORE, BLANKET_STRICT, BLANKET_POLICY)
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
 the program's exit status through.
 ```
+
+`blanket gc --forget <root-key>...` explicitly removes project protection
+records by the exact keys printed by `blanket store roots`; it never removes
+project files or store objects by itself. `--dry-run --forget` reports the
+same hypothetical removal without changing the registry. If a registered
+project or its `.blanket/closures` directory is unavailable, GC stops before
+any cleanup and names the key that must be restored or explicitly forgotten.
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they

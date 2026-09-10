@@ -110,9 +110,19 @@ fn age(path: &Path) {
     fs::File::open(path).unwrap().set_modified(old).unwrap();
 }
 
+/// Parse `blanket store roots` output: one "<key>  <path>" line per root.
+fn roots_listing(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, path) = line.split_once("  ")?;
+            Some((key.to_string(), path.to_string()))
+        })
+        .collect()
+}
+
 #[test]
 #[ignore]
-fn gc_drops_deleted_node_project_but_keeps_python_root() {
+fn gc_keeps_deleted_node_project_until_forgotten() {
     let temp = TempDir::new();
     // Keep this test independent of the shared store used by the ignored
     // end-to-end suite. Other projects may legitimately retain node objects.
@@ -126,11 +136,12 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
 
     ok(blanket(&bin, &python, &store, &["sync"]), "sync proj-a");
     ok(blanket(&bin, &node, &store, &["sync"]), "sync proj-npm");
+    let node_canonical = node.canonicalize().unwrap();
     fs::remove_dir_all(&node).unwrap();
 
     // The production safeguard intentionally keeps objects touched in the
-    // last ten minutes. Age only the now-unrooted node objects so this test
-    // exercises the sweep without sleeping.
+    // last ten minutes. Age only the now-unreachable node objects so this
+    // test exercises the sweep without sleeping.
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         let entry = entry.unwrap();
         let meta = store
@@ -148,23 +159,82 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
         }
     }
 
-    // Only now, with the node objects aged past the safeguard, does a dry run
-    // report them: the ten-minute window applies to --dry-run too, so its
-    // output is what a real sweep would do.
+    // A deleted project stops the sweep instead of losing its record: with
+    // only a pathname record, GC cannot know what the project protected.
+    let blocked = blanket(
+        &bin,
+        &python,
+        &store,
+        &["gc", "--dry-run", "--keep-days", "0"],
+    );
+    assert!(
+        !blocked.status.success(),
+        "gc silently swept a deleted project's store"
+    );
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        stderr.contains("refusing to sweep") && stderr.contains("--forget"),
+        "unexpected refusal: {stderr}"
+    );
+
+    let keys = roots_listing(&ok(
+        blanket(&bin, &python, &store, &["store", "roots"]),
+        "store roots",
+    ));
+    let node_key = keys
+        .iter()
+        .find(|(_, path)| Path::new(path) == node_canonical)
+        .map(|(key, _)| key.clone())
+        .expect("node root key in listing");
+
+    // Dry-run forget simulates only; the record survives.
     let dry = ok(
         blanket(
             &bin,
             &python,
             &store,
-            &["gc", "--dry-run", "--keep-days", "0"],
+            &["gc", "--dry-run", "--forget", &node_key],
         ),
-        "gc dry-run",
+        "gc dry-run forget",
     );
+    assert!(dry.contains("would forget root"), "{dry}");
     assert!(
-        dry.contains("node-env"),
-        "dry-run did not list node objects:\n{dry}"
+        roots_listing(&ok(
+            blanket(&bin, &python, &store, &["store", "roots"]),
+            "store roots"
+        ))
+        .iter()
+        .any(|(key, _)| key == &node_key),
+        "dry-run forgot the record"
     );
 
+    ok(
+        blanket(
+            &bin,
+            &python,
+            &store,
+            &["gc", "--forget", &node_key, "--keep-days", "0"],
+        ),
+        "forget the node root",
+    );
+    let objects_after_forget = fs::read_dir(store.join("objects"))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            fs::read_to_string(
+                store
+                    .join("meta")
+                    .join(format!("{}.json", entry.file_name().to_string_lossy())),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        objects_after_forget
+            .iter()
+            .any(|meta| meta.contains(r#""kind": "node-env""#)),
+        "forget unexpectedly swept store objects"
+    );
     ok(blanket(&bin, &python, &store, &["gc"]), "gc");
     let objects = fs::read_dir(store.join("objects"))
         .unwrap()
@@ -182,7 +252,7 @@ fn gc_drops_deleted_node_project_but_keeps_python_root() {
         objects
             .iter()
             .all(|meta| !meta.contains(r#""kind": "node-env""#)),
-        "node object survived GC"
+        "node object survived GC after its record was forgotten"
     );
     ok(
         blanket(
@@ -296,6 +366,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         .map(|entry| entry.unwrap().path())
         .find(|path| path.join(".blanket/x.json").is_file())
         .expect("ruff x root");
+    let ruff_canonical = ruff_root.canonicalize().unwrap();
     let closure: serde_json::Value = serde_json::from_reader(
         fs::File::open(ruff_root.join(".blanket/closures/python.json")).unwrap(),
     )
@@ -322,9 +393,9 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
         "x root registration",
     );
-    assert!(roots
-        .lines()
-        .any(|line| line == ruff_root.display().to_string()));
+    assert!(roots_listing(&roots)
+        .iter()
+        .any(|(_, path)| Path::new(path) == ruff_canonical));
 
     let cleaned = ok(
         blanket_home(&bin, &project, &store, &home, &["x", "--clean", "py:ruff"]),
@@ -347,9 +418,9 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
         "removed x root registration",
     );
-    assert!(!roots
-        .lines()
-        .any(|line| line == ruff_root.display().to_string()));
+    assert!(!roots_listing(&roots)
+        .iter()
+        .any(|(_, path)| Path::new(path) == ruff_canonical));
 
     // ACTIVE_WINDOW is deliberately independent of the lock. Age only the
     // now-unrooted x environment so the following GC proves cleanup leaves

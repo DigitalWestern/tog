@@ -337,7 +337,7 @@ fn run_sbom(output: Option<&Path>) -> io::Result<()> {
 
 fn run_store_roots() -> io::Result<()> {
     for root in store::Store::open()?.roots()? {
-        println!("{}", root.path.display());
+        println!("{}  {}", root.key, root.path.display());
     }
     Ok(())
 }
@@ -348,19 +348,60 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
         project: args.project,
         collect_legacy: args.collect_legacy,
         keep_days: args.keep_days.unwrap_or(gc::Options::default().keep_days),
+        forgotten: args.forget.clone(),
     };
     let store = store::Store::open()?;
     let mut stdout = io::stdout().lock();
+    // Registering and forgetting the same root in one invocation is
+    // ambiguous; compare the keys before either side touches the registry.
+    for project in &args.register {
+        let key = store::Store::root_key(project)?;
+        if args.forget.iter().any(|forget| forget == &key) {
+            return Err(io::Error::other(format!(
+                "refusing to register and forget the same root key {key} in one invocation"
+            )));
+        }
+    }
+    // Resolve every key before changing the registry. This keeps a typo or
+    // unknown key from partially applying a multi-key forget request.
+    for (index, key) in args.forget.iter().enumerate() {
+        if args.forget[..index].iter().any(|previous| previous == key) {
+            return Err(io::Error::other(format!(
+                "refusing to forget root key {key} more than once in one invocation"
+            )));
+        }
+        store.lookup_root(key)?;
+    }
     for project in &args.register {
         let entry = store.register_root(project)?;
         writeln!(stdout, "blanket: registered root {}", entry.path.display())?;
     }
+    for key in &args.forget {
+        if options.dry_run {
+            let entry = store.lookup_root(key)?;
+            writeln!(
+                stdout,
+                "blanket: would forget root {key} ({})",
+                entry.path.display()
+            )?;
+        } else {
+            let entry = store.forget_root(key)?;
+            writeln!(
+                stdout,
+                "blanket: forgot root {key} ({})",
+                entry.path.display()
+            )?;
+        }
+    }
+    // Forgetting is the explicit recovery action, not an implicit sweep. A
+    // later `blanket gc` may collect objects that are no longer protected;
+    // this invocation must only change the requested registry records.
+    if !options.dry_run && !args.forget.is_empty() {
+        return Ok(());
+    }
+    let dry_run = options.dry_run;
     let report = gc::collect(&store, options, &mut stdout)?;
-    let verb = if options.dry_run {
-        "would free"
-    } else {
-        "freed"
-    };
+    let verb = if dry_run { "would free" } else { "freed" };
     writeln!(
         stdout,
         "blanket: gc {verb} {} MB ({} objects, {} cached artifacts)",

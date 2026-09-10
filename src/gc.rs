@@ -2,8 +2,8 @@
 //!
 //! GC is deliberately rooted in project closure files rather than in the
 //! current working directory. A project becomes a root when a tailor writes a
-//! closure, and remains a root until its project directory or closure
-//! directory disappears.
+//! closure. A root never stops protecting its project: an unavailable project
+//! stops the sweep until it returns or its record is explicitly forgotten.
 
 use crate::store::{self, RootEntry, Store};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 const ACTIVE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const STAGE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub dry_run: bool,
     pub keep_days: u64,
@@ -23,6 +23,12 @@ pub struct Options {
     /// Explicit opt-in to collect objects written without reference
     /// metadata. They may belong to projects from before the roots registry.
     pub collect_legacy: bool,
+    /// Root keys this sweep must ignore. A real `--forget` removed the
+    /// record before the sweep, so this is a belt-and-braces repeat; a
+    /// `--dry-run --forget` leaves the record in place and excludes it only
+    /// here, so the sweep shows what the forgotten project would stop
+    /// protecting.
+    pub forgotten: Vec<String>,
 }
 
 impl Default for Options {
@@ -32,6 +38,16 @@ impl Default for Options {
             keep_days: 30,
             project: false,
             collect_legacy: false,
+            forgotten: Vec::new(),
+        }
+    }
+}
+
+impl Options {
+    pub fn keep_days(days: u64) -> Self {
+        Self {
+            keep_days: days,
+            ..Self::default()
         }
     }
 }
@@ -79,20 +95,20 @@ pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Re
         ));
     }
     let roots = store.roots()?;
-    let state = collect_roots(store, &roots, options, out)?;
+    let state = collect_roots(store, &roots, &options, out)?;
     // Recency and keep-days are retention decisions, not just sweep skips:
     // every retained object is a marking root so its dependencies survive it.
     let mut marking_roots = state.object_ids.clone();
-    marking_roots.extend(retained_object_ids(store, options)?);
+    marking_roots.extend(retained_object_ids(store, &options)?);
     let (live, metadata) = mark_live(store, &marking_roots)?;
-    let mut report = sweep_objects(store, &live, &metadata, options, out)?;
+    let mut report = sweep_objects(store, &live, &metadata, &options, out)?;
     report = add_report(
         report,
-        sweep_cache(store, &state, &live, &metadata, options, out)?,
+        sweep_cache(store, &state, &live, &metadata, &options, out)?,
     );
-    report = add_report(report, sweep_stages(store, options, out)?);
+    report = add_report(report, sweep_stages(store, &options, out)?);
     if options.project {
-        report = add_report(report, sweep_projects(store, &state, options, out)?);
+        report = add_report(report, sweep_projects(store, &state, &options, out)?);
     }
 
     Ok(report)
@@ -111,24 +127,66 @@ fn add_report(mut left: Report, right: Report) -> Report {
 fn collect_roots<W: Write>(
     store: &Store,
     roots: &[RootEntry],
-    options: Options,
+    options: &Options,
     out: &mut W,
 ) -> io::Result<RootState> {
     let mut state = RootState::default();
     for root in roots {
-        let closures = root.path.join(".blanket/closures");
-        if !root.path.is_dir() || !closures.is_dir() {
-            writeln!(out, "blanket: dropped stale root {}", root.path.display())?;
-            if !options.dry_run {
-                store.remove_root_entry(root)?;
-            }
+        if options.forgotten.iter().any(|key| key == &root.key) {
             continue;
         }
-        let project = root.path.canonicalize()?;
+        // A root whose project cannot be resolved is a safety stop, not a
+        // cleanup candidate: with only a pathname record there is no way to
+        // know what the project still needs, so dropping the record could
+        // expose its objects to this very sweep. Refuse the whole sweep
+        // until the record is usable, forgotten, or the project returns.
+        if let Err(error) = fs::metadata(&root.path) {
+            return Err(unresolvable_root(root, &error));
+        }
+        if !root.path.is_dir() {
+            return Err(unresolvable_root(
+                root,
+                &io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the path exists but is not a directory",
+                ),
+            ));
+        }
+        let closures = root.path.join(".blanket/closures");
+        match fs::metadata(&closures) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(unresolvable_root(
+                    root,
+                    &io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        ".blanket/closures is missing (never synced, or removed)",
+                    ),
+                ));
+            }
+            Err(error) => return Err(unresolvable_root(root, &error)),
+        }
+        let project = root
+            .path
+            .canonicalize()
+            .map_err(|error| unresolvable_root(root, &error))?;
         state.project_paths.push(project.clone());
         read_closures(store, &project, &mut state, out)?;
     }
     Ok(state)
+}
+
+fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Error {
+    io::Error::other(format!(
+        "refusing to sweep: root {} points at {}, which cannot be resolved ({}). Make the \
+         project available at that path, or give up its protection explicitly with `blanket \
+         gc --forget {}`. Dry runs stop here too: the records decide what a real sweep \
+         would keep.",
+        root.key,
+        root.path.display(),
+        error,
+        root.key
+    ))
 }
 
 fn read_closures<W: Write>(
@@ -289,7 +347,7 @@ fn mark_live(
     Ok((live, metadata))
 }
 
-fn retained_object_ids(store: &Store, options: Options) -> io::Result<HashSet<String>> {
+fn retained_object_ids(store: &Store, options: &Options) -> io::Result<HashSet<String>> {
     let mut roots = HashSet::new();
     for entry in fs::read_dir(store.root.join("objects"))? {
         let entry = entry?;
@@ -408,7 +466,7 @@ fn sweep_objects<W: Write>(
     store: &Store,
     live: &HashSet<String>,
     metadata: &HashMap<String, MetaInfo>,
-    options: Options,
+    options: &Options,
     out: &mut W,
 ) -> io::Result<Report> {
     let mut report = Report::default();
@@ -463,7 +521,7 @@ fn sweep_cache<W: Write>(
     _state: &RootState,
     live: &HashSet<String>,
     metadata: &HashMap<String, MetaInfo>,
-    options: Options,
+    options: &Options,
     out: &mut W,
 ) -> io::Result<Report> {
     let mut referenced = BTreeSet::new();
@@ -509,7 +567,7 @@ fn sweep_cache<W: Write>(
     Ok(report)
 }
 
-fn sweep_stages<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Result<Report> {
+fn sweep_stages<W: Write>(store: &Store, options: &Options, out: &mut W) -> io::Result<Report> {
     let mut report = Report::default();
     for entry in fs::read_dir(store.root.join("tmp"))? {
         let entry = entry?;
@@ -539,7 +597,7 @@ fn sweep_stages<W: Write>(store: &Store, options: Options, out: &mut W) -> io::R
 fn sweep_projects<W: Write>(
     store: &Store,
     state: &RootState,
-    options: Options,
+    options: &Options,
     out: &mut W,
 ) -> io::Result<Report> {
     let mut report = Report::default();
@@ -795,6 +853,7 @@ mod tests {
                 keep_days: 0,
                 project: false,
                 collect_legacy: false,
+                forgotten: Vec::new(),
             },
             &mut output,
         )
@@ -831,6 +890,7 @@ mod tests {
                 keep_days: 30,
                 project: false,
                 collect_legacy: false,
+                forgotten: Vec::new(),
             },
             &mut output,
         )
@@ -845,6 +905,7 @@ mod tests {
                 keep_days: 0,
                 project: false,
                 collect_legacy: true,
+                forgotten: Vec::new(),
             },
             &mut output,
         )
@@ -874,6 +935,7 @@ mod tests {
                 keep_days: 0,
                 project: false,
                 collect_legacy: false,
+                forgotten: Vec::new(),
             },
             &mut output,
         )
@@ -955,6 +1017,7 @@ mod tests {
                 keep_days: 0,
                 project: false,
                 collect_legacy: false,
+                forgotten: Vec::new(),
             },
             &mut output,
         )
@@ -980,5 +1043,189 @@ mod tests {
         let id = identity.object_id();
         store.commit(&identity, &staged, &[]).unwrap();
         assert!(recent(&store.object_path(&id), ACTIVE_WINDOW));
+    }
+
+    /// A registered project whose directory disappears must stop the sweep
+    /// and keep its record: with only a pathname record, GC cannot know what
+    /// the project still protects.
+    #[test]
+    fn missing_project_blocks_sweep_and_preserves_record() {
+        let temp = TempStore::new("missing-project");
+        let store = temp.store();
+        let id = commit(&store, "protected", None);
+        age(&store.object_path(&id));
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&id), serde_json::json!({}));
+        let entry = store.register_root(&project).unwrap();
+        fs::remove_dir_all(&project).unwrap();
+
+        for dry_run in [false, true] {
+            let mut output = Vec::new();
+            let error = collect(
+                &store,
+                Options {
+                    dry_run,
+                    keep_days: 0,
+                    project: false,
+                    collect_legacy: false,
+                    forgotten: Vec::new(),
+                },
+                &mut output,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("refusing to sweep"), "{message}");
+            assert!(message.contains(&entry.key), "{message}");
+            assert!(message.contains("--forget"), "{message}");
+        }
+        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
+        assert!(
+            store
+                .roots()
+                .unwrap()
+                .iter()
+                .any(|root| root.key == entry.key),
+            "sweep removed the record"
+        );
+
+        // Forgetting the record is the explicit way out; the next sweep then
+        // collects the object nobody protects any more.
+        store.forget_root(&entry.key).unwrap();
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+                forgotten: Vec::new(),
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(report.objects, 1);
+        assert!(!store.object_path(&id).exists());
+    }
+
+    #[test]
+    fn dry_run_forget_ignores_only_the_requested_root_and_writes_nothing() {
+        let temp = TempStore::new("dry-forget");
+        let store = temp.store();
+        let id = commit(&store, "protected", None);
+        age(&store.object_path(&id));
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&id), serde_json::json!({}));
+        let entry = store.register_root(&project).unwrap();
+        fs::remove_dir_all(&project).unwrap();
+
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: true,
+                keep_days: 0,
+                forgotten: vec![entry.key.clone()],
+                ..Options::default()
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(report.objects, 1);
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("would remove object"));
+        assert!(store.object_path(&id).exists());
+        assert!(store.lookup_root(&entry.key).is_ok());
+    }
+
+    #[test]
+    fn missing_closures_directory_blocks_sweep() {
+        let temp = TempStore::new("missing-closures");
+        let store = temp.store();
+        let id = commit(&store, "protected", None);
+        age(&store.object_path(&id));
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&id), serde_json::json!({}));
+        store.register_root(&project).unwrap();
+        fs::remove_dir_all(project.join(".blanket/closures")).unwrap();
+
+        let mut output = Vec::new();
+        let error = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+                forgotten: Vec::new(),
+            },
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("closures"), "{error}");
+        assert!(store.object_path(&id).is_dir());
+    }
+
+    /// An I/O error other than a clean miss (here: a symlink loop where the
+    /// project used to be) must stop the sweep with the underlying error
+    /// named, never silently delete the record.
+    #[test]
+    fn io_error_on_project_path_blocks_sweep() {
+        let temp = TempStore::new("io-error");
+        let store = temp.store();
+        let id = commit(&store, "protected", None);
+        age(&store.object_path(&id));
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&id), serde_json::json!({}));
+        let entry = store.register_root(&project).unwrap();
+        fs::remove_dir_all(&project).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&project, &project).unwrap();
+
+        let mut output = Vec::new();
+        let error = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+                forgotten: Vec::new(),
+            },
+            &mut output,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("refusing to sweep"), "{message}");
+        assert!(message.contains(&entry.key), "{message}");
+        assert!(store.object_path(&id).is_dir());
+        assert!(store.roots().unwrap().len() == 1, "record was removed");
+    }
+
+    #[test]
+    fn forget_rejects_unknown_and_malformed_keys() {
+        let temp = TempStore::new("forget-keys");
+        let store = temp.store();
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(
+            &project,
+            &store.object_path(&commit(&store, "x", None)),
+            serde_json::json!({}),
+        );
+        store.register_root(&project).unwrap();
+
+        let error = store.forget_root(&"a".repeat(40)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let error = store.forget_root("not-a-key").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = store.forget_root(&"g".repeat(40)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(store.roots().unwrap().len(), 1);
     }
 }

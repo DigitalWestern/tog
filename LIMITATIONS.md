@@ -22,6 +22,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   add latency on large projects (it walks `target/` on every run). The guard
   is Linux-only: the Seatbelt path has no counterpart, so on macOS a Unix
   socket in the workspace is not refused (silent).
+- **GC has no store-wide job lock yet.** The existing ten-minute recency
+  window remains the concurrent-use safeguard while the GC safety work is
+  delivered incrementally. A registered project whose directory or closure
+  directory is unavailable now blocks the entire sweep rather than being
+  silently forgotten; use the key from `blanket store roots` with
+  `blanket gc --forget` only when giving up that protection is intentional.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
