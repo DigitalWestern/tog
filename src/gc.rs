@@ -1194,6 +1194,55 @@ mod tests {
         assert!(store.lookup_root(&entry.key).is_ok());
     }
 
+    /// A forget names one root, and the preview must exclude that root and
+    /// no other. With a second registered project in the store, treating the
+    /// request as "ignore every root" would offer up the live object that
+    /// second project is still holding.
+    #[test]
+    fn dry_run_forget_excludes_only_the_named_root() {
+        let temp = TempStore::new("dry-forget-two-roots");
+        let store = temp.store();
+        let released = commit(&store, "released", None);
+        let held = commit(&store, "held", None);
+        age(&store.object_path(&released));
+        age(&store.object_path(&held));
+
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        closure(&gone, &store.object_path(&released), serde_json::json!({}));
+        let gone_entry = store.register_root(&gone).unwrap();
+
+        let present = temp.root.join("present");
+        fs::create_dir_all(&present).unwrap();
+        closure(&present, &store.object_path(&held), serde_json::json!({}));
+        let present_entry = store.register_root(&present).unwrap();
+        fs::remove_dir_all(&gone).unwrap();
+
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: true,
+                keep_days: 0,
+                forgotten: vec![gone_entry.key.clone()],
+                ..Options::default()
+            },
+            &mut output,
+        )
+        .unwrap();
+        let preview = String::from_utf8(output).unwrap();
+        assert!(preview.contains(&released), "{preview}");
+        assert!(
+            !preview.contains(&held),
+            "the root that was not forgotten stopped protecting its object: {preview}"
+        );
+        assert_eq!(report.objects, 1, "{preview}");
+        assert!(store.object_path(&held).is_dir());
+        assert!(store.object_path(&released).is_dir(), "a dry run deleted");
+        assert!(store.lookup_root(&present_entry.key).is_ok());
+        assert!(store.lookup_root(&gone_entry.key).is_ok());
+    }
+
     #[test]
     fn missing_closures_directory_blocks_sweep() {
         let temp = TempStore::new("missing-closures");

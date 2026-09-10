@@ -107,6 +107,22 @@ impl Fixture {
         fs::write(self.roots().join(key), contents).unwrap();
     }
 
+    /// Every record's name and contents, for before/after comparison.
+    fn record_snapshot(&self) -> Vec<(String, Vec<u8>)> {
+        let mut records: Vec<(String, Vec<u8>)> = fs::read_dir(self.roots())
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        records.sort();
+        records
+    }
+
     fn record_names(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.roots())
             .unwrap()
@@ -486,4 +502,78 @@ fn a_corrupt_record_never_blocks_forgetting_a_key() {
         !fixture.object().exists(),
         "nothing protects the object any more, but it survived"
     );
+}
+
+/// The register/forget preflight resolves every key before the registry
+/// changes, so an ambiguous or partly wrong request loses no record. The
+/// review found that removing the whole preflight kept the full suite and
+/// the end-to-end GC test green, so each branch is pinned here: the registry
+/// must come back byte for byte unchanged.
+#[test]
+fn an_ambiguous_or_partly_unknown_request_changes_no_record() {
+    for shape in ["same-root", "alias", "duplicate", "unknown"] {
+        let fixture = Fixture::new(shape);
+        let project = fixture.project("project", true);
+        let key = fixture.record(&project);
+        let other = fixture.project("other", true);
+        let before = fixture.record_snapshot();
+
+        let alias = fixture.base.join("alias");
+        let args: Vec<OsString> = match shape {
+            // Registering and forgetting one root in a single invocation is
+            // ambiguous in either order, including through a symlink that
+            // canonicalizes onto the same project.
+            "same-root" => vec![
+                "gc".into(),
+                "--register".into(),
+                project.clone().into(),
+                "--forget".into(),
+                key.clone().into(),
+            ],
+            "alias" => {
+                symlink(&project, &alias).unwrap();
+                vec![
+                    "gc".into(),
+                    "--forget".into(),
+                    key.clone().into(),
+                    "--register".into(),
+                    alias.clone().into(),
+                ]
+            }
+            "duplicate" => vec![
+                "gc".into(),
+                "--register".into(),
+                other.clone().into(),
+                "--forget".into(),
+                key.clone().into(),
+                key.clone().into(),
+            ],
+            // An unknown key must stop the whole request, including the
+            // registration that was asked for in the same invocation.
+            _ => vec![
+                "gc".into(),
+                "--register".into(),
+                other.clone().into(),
+                "--forget".into(),
+                key.clone().into(),
+                "f".repeat(40).into(),
+            ],
+        };
+
+        let result = fixture.run(&args);
+        assert!(
+            !result.status.success(),
+            "{shape}: applied an ambiguous request: {}",
+            stdout(&result)
+        );
+        assert_eq!(
+            fixture.record_snapshot(),
+            before,
+            "{shape}: the registry changed before the request was refused"
+        );
+        assert!(
+            fixture.object().is_dir(),
+            "{shape}: the live object was swept"
+        );
+    }
 }
