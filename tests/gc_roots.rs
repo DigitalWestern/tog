@@ -334,3 +334,52 @@ fn a_pathname_that_is_not_utf8_is_refused() {
         "the sweep deleted the live object"
     );
 }
+
+/// A registered project always owns a closure — registration happens when
+/// one is written. A root that resolves to a directory with none is a
+/// pathname that no longer names the project that was registered, which is
+/// how the review's unmounted mount point deleted a live object: the backing
+/// directory underneath carried an empty `.blanket/closures` of its own.
+#[test]
+fn a_root_that_resolves_to_no_closures_blocks_the_sweep() {
+    let fixture = Fixture::new("no-closures");
+    let project = fixture.project("project", true);
+    let key = fixture.record(&project);
+
+    let control = fixture.run(&["gc", "--keep-days=0"]);
+    assert!(control.status.success(), "{}", stderr(&control));
+    assert!(
+        fixture.object().is_dir(),
+        "control sweep deleted the object"
+    );
+
+    fs::remove_file(project.join(".blanket/closures/python.json")).unwrap();
+    for args in [
+        vec!["gc", "--project", "--keep-days=0"],
+        vec!["gc", "--dry-run", "--keep-days=0"],
+        vec!["gc", "--keep-days=0"],
+    ] {
+        let sweep = fixture.run(&args);
+        assert!(
+            !sweep.status.success(),
+            "swept a root that protects nothing: {}",
+            stdout(&sweep)
+        );
+        let message = stderr(&sweep);
+        assert!(
+            message.contains("refusing to sweep")
+                && message.contains(&key)
+                && message.contains("--forget"),
+            "unexpected refusal: {message}"
+        );
+    }
+    assert!(
+        fixture.object().is_dir(),
+        "the sweep deleted the live object"
+    );
+    assert_eq!(
+        fixture.record_names(),
+        vec![key],
+        "the sweep dropped the record"
+    );
+}

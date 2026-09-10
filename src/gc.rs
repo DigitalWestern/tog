@@ -178,7 +178,24 @@ fn collect_roots<W: Write>(
             .canonicalize()
             .map_err(|error| unresolvable_root(root, &error))?;
         state.project_paths.push(project.clone());
-        read_closures(store, &project, &mut state, out)?;
+        // A registered project owns at least one closure: registration
+        // happens when one is written. None at all means either that they
+        // were removed, or that this pathname no longer resolves to the
+        // project that was registered — unmounting a mount point exposes the
+        // backing directory underneath, which can carry an empty
+        // `.blanket/closures` of its own and would otherwise be swept as if
+        // the registered project had agreed it needed nothing.
+        if read_closures(store, &project, &mut state, out)? == 0 {
+            return Err(unresolvable_root(
+                root,
+                &io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    ".blanket/closures holds no closure files: they were removed, or the \
+                     path now resolves to a different directory than the one registered \
+                     (the backing directory of an unmounted mount point, for example)",
+                ),
+            ));
+        }
     }
     Ok(state)
 }
@@ -208,13 +225,16 @@ fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
     ))
 }
 
+/// Read a project's closures into the live set, returning how many closure
+/// files it held.
 fn read_closures<W: Write>(
     store: &Store,
     project: &Path,
     state: &mut RootState,
     out: &mut W,
-) -> io::Result<()> {
+) -> io::Result<usize> {
     let closures = project.join(".blanket/closures");
+    let mut found = 0usize;
     for entry in fs::read_dir(&closures)? {
         let entry = entry?;
         if !entry.file_type()?.is_file()
@@ -222,6 +242,7 @@ fn read_closures<W: Write>(
         {
             continue;
         }
+        found += 1;
         let path = entry.path();
         let value: serde_json::Value =
             serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
@@ -268,7 +289,7 @@ fn read_closures<W: Write>(
         }
     }
     let _ = out;
-    Ok(())
+    Ok(found)
 }
 
 fn collect_object_ids(value: &serde_json::Value, store: &Store, ids: &mut HashSet<String>) {
@@ -899,7 +920,14 @@ mod tests {
         age(&store.object_path(&id));
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        // The project needs a closure of its own to be a resolvable root; it
+        // names an object this test never commits, so the legacy object under
+        // test stays unprotected.
+        closure(
+            &project,
+            &store.object_path("0000000000000000000000000000000000000000-unrelated"),
+            serde_json::json!({}),
+        );
         store.register_root(&project).unwrap();
         let mut output = Vec::new();
         let report = collect(
@@ -1025,7 +1053,13 @@ mod tests {
         age(&store.object_path(&child));
         let parent = commit(&store, "fresh-parent", Some(&child));
         let project = temp.root.join("project");
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        // A resolvable root owns a closure; this one names an object the test
+        // never commits, so nothing here is protected by the record itself.
+        closure(
+            &project,
+            &store.object_path("0000000000000000000000000000000000000000-unrelated"),
+            serde_json::json!({}),
+        );
         store.register_root(&project).unwrap();
 
         let mut output = Vec::new();
@@ -1187,6 +1221,44 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("closures"), "{error}");
         assert!(store.object_path(&id).is_dir());
+    }
+
+    /// A root that resolves to a directory holding no closures cannot say
+    /// what it needs. The reachable version of this is a pathname that now
+    /// names something else — the backing directory of an unmounted mount
+    /// point — so it is a safety stop, not an empty contribution.
+    #[test]
+    fn empty_closures_directory_blocks_sweep() {
+        let temp = TempStore::new("empty-closures");
+        let store = temp.store();
+        let id = commit(&store, "protected", None);
+        age(&store.object_path(&id));
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&id), serde_json::json!({}));
+        let entry = store.register_root(&project).unwrap();
+        for closure in fs::read_dir(project.join(".blanket/closures")).unwrap() {
+            fs::remove_file(closure.unwrap().path()).unwrap();
+        }
+
+        for dry_run in [false, true] {
+            let mut output = Vec::new();
+            let error = collect(
+                &store,
+                Options {
+                    dry_run,
+                    keep_days: 0,
+                    ..Options::default()
+                },
+                &mut output,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("refusing to sweep"), "{message}");
+            assert!(message.contains(&entry.key), "{message}");
+        }
+        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
+        assert_eq!(store.roots().unwrap().len(), 1, "sweep removed the record");
     }
 
     /// An I/O error other than a clean miss (here: a symlink loop where the
