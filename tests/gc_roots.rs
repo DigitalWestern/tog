@@ -265,6 +265,14 @@ fn unreadable_records_block_the_sweep_instead_of_disappearing() {
                     && message.contains("--forget"),
                 "{shape}: unexpected refusal: {message}"
             );
+            // The refusal has to say the record is the problem. Falling
+            // through to the pathname checks would also stop the sweep, but
+            // it would report an empty path and point the user at a project
+            // that was never the trouble.
+            assert!(
+                message.contains("unusable registry record"),
+                "{shape}: the refusal did not name the record: {message}"
+            );
         }
         assert!(
             fixture.object().is_dir(),
