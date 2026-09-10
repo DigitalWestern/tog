@@ -985,6 +985,37 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
+    /// A record that is not a regular file is refused on its metadata,
+    /// before anything opens it. Removing that check does not make this test
+    /// fail — it makes it hang: reading a FIFO nobody writes to blocks the
+    /// listing, the sweep and `--forget` alike, which is the one registry
+    /// failure there is no way to recover from.
+    #[test]
+    fn a_record_that_is_not_a_regular_file_is_never_opened() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let roots = store.root.join("roots");
+        fs::create_dir_all(&roots).unwrap();
+
+        let fifo = roots.join("a".repeat(40));
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path in a directory this test owns.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        fs::create_dir(roots.join("b".repeat(40))).unwrap();
+
+        let records = store.roots().unwrap();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            let reason = record.unusable.expect("read as a usable record");
+            assert!(reason.contains("not a regular file"), "{reason}");
+            // The escape hatch reaches these too, without opening them.
+            store.forget_root(&record.key).unwrap();
+        }
+        assert!(store.roots().unwrap().is_empty());
+    }
+
     /// Exact-key recovery reads one record. Every other record can be
     /// hostile — unreadable bytes, no permissions, a symlink, a directory,
     /// or far too large — and the requested key still resolves.

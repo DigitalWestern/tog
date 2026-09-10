@@ -1272,6 +1272,44 @@ mod tests {
         assert!(store.object_path(&id).is_dir());
     }
 
+    /// A store from before the roots registry has no marker and no records,
+    /// so a sweep there would run with no idea what any project needs. It
+    /// must refuse from every entry, including `--project --collect-legacy`,
+    /// the combination that exists to reach exactly those old objects. The
+    /// end-to-end upgrade test covers this as well, but only in the ignored
+    /// suite, which leaves the guard unwatched on an ordinary `cargo test`.
+    #[test]
+    fn an_uninitialized_registry_blocks_every_sweep() {
+        let temp = TempStore::new("uninitialized-registry");
+        let store = temp.store();
+        let id = commit(&store, "legacy", None);
+        age(&store.object_path(&id));
+        assert!(!store.root.join("roots/.initialized").exists());
+
+        for (dry_run, project, collect_legacy) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+        ] {
+            let mut output = Vec::new();
+            let error = collect(
+                &store,
+                Options {
+                    dry_run,
+                    project,
+                    collect_legacy,
+                    keep_days: 0,
+                    forgotten: Vec::new(),
+                },
+                &mut output,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("registry is not initialized"), "{message}");
+        }
+        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
+    }
+
     /// A root that resolves to a directory holding no closures cannot say
     /// what it needs. The reachable version of this is a pathname that now
     /// names something else — the backing directory of an unmounted mount
