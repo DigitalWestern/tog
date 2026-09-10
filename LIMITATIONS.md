@@ -24,10 +24,21 @@ say what breaks, for whom, and how it fails (loud/silent).
   socket in the workspace is not refused (silent).
 - **GC has no store-wide job lock yet.** The existing ten-minute recency
   window remains the concurrent-use safeguard while the GC safety work is
-  delivered incrementally. A registered project whose directory or closure
-  directory is unavailable now blocks the entire sweep rather than being
-  silently forgotten; use the key from `blanket store roots` with
-  `blanket gc --forget` only when giving up that protection is intentional.
+  delivered incrementally. A registered project whose directory, closure
+  directory or closures are unavailable, and any registry record GC cannot
+  read, now block the entire sweep rather than being silently forgotten; use
+  the key from `blanket store roots` with `blanket gc --forget` only when
+  giving up that protection is intentional.
+- **A root record identifies its project by pathname alone.** GC can check
+  that the recorded path resolves to a directory that holds closures; it
+  cannot prove that directory *is* the project that was registered. The
+  reachable case — unmounting a mount point so the pathname resolves to the
+  backing directory underneath — is refused because that directory has no
+  closures of its own, but a backing tree carrying unrelated closures would
+  still be accepted and would protect the wrong set of objects. Registration
+  refuses a path that is not UTF-8, is padded with whitespace or spans lines,
+  since a record cannot name those back exactly; a byte-preserving record
+  that carries its own identity is follow-up work.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument

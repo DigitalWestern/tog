@@ -65,10 +65,23 @@ the program's exit status through.
 
 `blanket gc --forget <root-key>...` explicitly removes project protection
 records by the exact keys printed by `blanket store roots`; it never removes
-project files or store objects by itself. `--dry-run --forget` reports the
-same hypothetical removal without changing the registry. If a registered
-project or its `.blanket/closures` directory is unavailable, GC stops before
-any cleanup and names the key that must be restored or explicitly forgotten.
+project files or store objects by itself. Keys are matched exactly as typed,
+including case: one key names one registry file. `--dry-run --forget` reports
+the same hypothetical removal without changing the registry, and `--dry-run`
+refuses to run with `--register`, which would have to write one. If a
+registered project, its `.blanket/closures` directory or the closures
+themselves are unavailable, GC stops before any cleanup and names the key
+that must be restored or explicitly forgotten.
+
+A registry record GC cannot read — not a regular file, unreadable, not UTF-8,
+empty, padded, or holding anything but one absolute pathname — stops the
+sweep the same way instead of being skipped, and `blanket store roots` lists
+it as an unusable record rather than omitting it. `--forget <key>` clears
+such a record whatever shape it has, and resolves that one key without
+reading any other record, so one damaged record never blocks recovering from
+it. Registration refuses a project path that a record cannot hold back
+exactly (not UTF-8, padded with whitespace, or spanning lines) rather than
+recording a spelling that reads back as a different project.
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they

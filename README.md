@@ -110,9 +110,10 @@ belong to blanket.
 `blanket gc` follows every registered project closure, removes unreachable
 store objects and old unreferenced `cache/sha256` artifacts, and cleans stale
 staging directories. It keeps a ten-minute activity window so a concurrent
-sync cannot lose an object. An unavailable registered project is retained and
-blocks the sweep until it returns or its exact key is explicitly passed to
-`gc --forget`; ordinary GC never removes root records. Use `blanket gc
+sync cannot lose an object. An unavailable registered project, and any root
+record the store cannot read, are retained and block the sweep until the
+project returns or the exact key is explicitly passed to `gc --forget`;
+ordinary GC never removes root records. Use `blanket gc
 --project` separately to collect old unused forests and backups; ordinary GC
 never deletes inside project projections.
 
