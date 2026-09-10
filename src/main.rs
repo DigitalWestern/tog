@@ -352,6 +352,18 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
     };
     let store = store::Store::open()?;
     let mut stdout = io::stdout().lock();
+    // A dry run writes nothing and registration is a write, so the two
+    // cannot both be honoured. Previewing the sweep as though the project
+    // were registered would mean protecting a root with no record, which is
+    // exactly the resolution rule GC is not allowed to bend; refuse the
+    // combination instead of half-keeping either promise.
+    if args.dry_run && !args.register.is_empty() {
+        return Err(io::Error::other(
+            "refusing to combine --dry-run with --register: registering writes a record and a \
+             dry run writes nothing. Register the project, then preview with `blanket gc \
+             --dry-run`",
+        ));
+    }
     // Registering and forgetting the same root in one invocation is
     // ambiguous; compare the keys before either side touches the registry.
     for project in &args.register {

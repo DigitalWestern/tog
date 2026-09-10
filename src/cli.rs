@@ -469,7 +469,10 @@ and backups. A registered project that has become unavailable stops the
 sweep instead of losing its record; make it available again or forget it
 with --forget. Usable on a copied store from any host.",
         options: &[
-            ("--dry-run", "report what would be removed without removing it"),
+            (
+                "--dry-run",
+                "report what would be removed without removing it or writing any record",
+            ),
             ("--keep-days <n>", "retain cached artifacts used within <n> days"),
             ("--project", "also collect old unused project forests and backups"),
             (

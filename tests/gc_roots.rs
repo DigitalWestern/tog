@@ -383,3 +383,62 @@ fn a_root_that_resolves_to_no_closures_blocks_the_sweep() {
         "the sweep dropped the record"
     );
 }
+
+/// `--dry-run` writes nothing. The review combined it with `--register` and
+/// watched the new record land on disk beside the old one while the forget
+/// was only previewed, so the preview mutated the registry it was previewing.
+#[test]
+fn dry_run_never_writes_a_record() {
+    let fixture = Fixture::new("dry-register");
+    let old = fixture.project("old", true);
+    let key = fixture.record(&old);
+    fs::remove_dir_all(&old).unwrap();
+    let new = fixture.project("new", true);
+    let new_key = blanket::store::Store::root_key(&new).unwrap();
+
+    let before = fixture.record_names();
+    let combined = fixture.run(&[
+        OsStr::new("gc"),
+        OsStr::new("--dry-run"),
+        OsStr::new("--forget"),
+        OsStr::new(&key),
+        OsStr::new("--register"),
+        new.as_os_str(),
+    ]);
+    assert!(
+        !combined.status.success(),
+        "a dry run registered a root: {}",
+        stdout(&combined)
+    );
+    assert!(
+        stderr(&combined).contains("--dry-run") && stderr(&combined).contains("--register"),
+        "unexpected refusal: {}",
+        stderr(&combined)
+    );
+    assert_eq!(fixture.record_names(), before, "the dry run wrote a record");
+    assert!(!fixture.roots().join(&new_key).exists());
+
+    // The refusal is narrow: previewing a forget on its own still works and
+    // still leaves the record alone, and registering for real still writes.
+    let preview = fixture.run(&["gc", "--dry-run", "--forget", &key]);
+    assert!(preview.status.success(), "{}", stderr(&preview));
+    assert!(
+        stdout(&preview).contains("would forget root"),
+        "{}",
+        stdout(&preview)
+    );
+    assert_eq!(
+        fixture.record_names(),
+        before,
+        "the preview forgot the record"
+    );
+
+    let forget = fixture.run(&["gc", "--forget", &key]);
+    assert!(forget.status.success(), "{}", stderr(&forget));
+    let register = fixture.run(&[OsStr::new("gc"), OsStr::new("--register"), new.as_os_str()]);
+    assert!(register.status.success(), "{}", stderr(&register));
+    assert!(
+        fixture.roots().join(&new_key).exists(),
+        "--register wrote nothing"
+    );
+}
