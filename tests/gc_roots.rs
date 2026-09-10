@@ -1,0 +1,167 @@
+//! Registry-record safety at the CLI boundary.
+//!
+//! Every case builds a disposable store by hand — the shapes the independent
+//! adversarial review used — and drives the real binary, so record parsing,
+//! the register/forget preflight and the sweep refusals are covered together.
+//! No network, no toolchains: the store holds one hand-written object.
+
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
+
+const PROTECTED: &str = "1111111111111111111111111111111111111111-protected-1";
+
+struct Fixture {
+    base: PathBuf,
+    store: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = blanket::store::remove_tree(&self.base);
+    }
+}
+
+impl Fixture {
+    /// A store with one aged, referenced object and an initialized registry.
+    fn new(label: &str) -> Self {
+        let base = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "blanket-gc-roots-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&base).unwrap();
+        let store = base.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store.join(sub)).unwrap();
+        }
+        fs::write(store.join("roots/.initialized"), b"1\n").unwrap();
+        let object = store.join("objects").join(PROTECTED);
+        fs::create_dir_all(&object).unwrap();
+        fs::write(object.join("payload"), b"live data\n").unwrap();
+        fs::write(
+            store.join("meta").join(format!("{PROTECTED}.json")),
+            serde_json::json!({
+                "identity": {
+                    "kind": "test", "name": "protected", "version": "1", "inputs": {}
+                },
+                "refs": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        age(&object);
+        Self { base, store }
+    }
+
+    fn object(&self) -> PathBuf {
+        self.store.join("objects").join(PROTECTED)
+    }
+
+    fn roots(&self) -> PathBuf {
+        self.store.join("roots")
+    }
+
+    /// A project directory; `live` gives it a closure holding the object.
+    fn project(&self, name: &str, live: bool) -> PathBuf {
+        let project = self.base.join(name);
+        let closures = project.join(".blanket/closures");
+        fs::create_dir_all(&closures).unwrap();
+        if live {
+            fs::write(
+                closures.join("python.json"),
+                serde_json::json!({
+                    "schema": "closure/1",
+                    "ecosystem": "python",
+                    "body": {"env_object": self.object().display().to_string()},
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        project
+    }
+
+    fn record_as(&self, key: &str, contents: &[u8]) {
+        fs::write(self.roots().join(key), contents).unwrap();
+    }
+
+    fn record_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.roots())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".initialized")
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Output {
+        self.run_in(self.base.clone(), args)
+    }
+
+    fn run_in<S: AsRef<OsStr>, P: AsRef<Path>>(&self, cwd: P, args: &[S]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_blanket"))
+            .current_dir(cwd)
+            .env("BLANKET_STORE", &self.store)
+            .env("HOME", &self.base)
+            .env("NO_COLOR", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    }
+}
+
+/// Objects younger than the active window are never swept; age them past it.
+fn age(path: &Path) {
+    let old = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
+    fs::File::open(path).unwrap().set_modified(old).unwrap();
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A registry key names exactly one file. Two records whose names differ only
+/// in case are two different projects' protection, so forgetting the key the
+/// user typed must never remove the other spelling's record.
+#[test]
+fn forget_removes_only_the_exact_key_that_was_asked_for() {
+    let fixture = Fixture::new("case");
+    let lower = "abcdef0123456789abcdef0123456789abcdef01";
+    let upper = lower.to_ascii_uppercase();
+    let lower_project = fixture.project("lower", true);
+    let upper_project = fixture.project("upper", true);
+    fixture.record_as(lower, format!("{}\n", lower_project.display()).as_bytes());
+    fixture.record_as(&upper, format!("{}\n", upper_project.display()).as_bytes());
+
+    let listing = fixture.run(&["store", "roots"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    assert!(stdout(&listing).contains(lower), "{}", stdout(&listing));
+    assert!(stdout(&listing).contains(&upper), "{}", stdout(&listing));
+
+    let forget = fixture.run(&["gc", "--forget", &upper]);
+    assert!(forget.status.success(), "{}", stderr(&forget));
+    assert!(
+        stdout(&forget).contains(&upper) && stdout(&forget).contains("upper"),
+        "forgot a record the user did not name: {}",
+        stdout(&forget)
+    );
+    assert_eq!(
+        fixture.record_names(),
+        vec![lower.to_string()],
+        "--forget removed the wrong record"
+    );
+}
