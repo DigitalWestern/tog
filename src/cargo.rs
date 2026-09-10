@@ -1073,6 +1073,10 @@ pub fn project_cargo_env(
     lock_digest: &str,
 ) -> io::Result<()> {
     let project_dir = project_dir.canonicalize()?;
+    // The workspace root is what gets registered, and projecting a cargo-home
+    // into a root no record can name leaves wrappers pointing at objects the
+    // next sweep is free to remove.
+    Store::check_registrable(&project_dir)?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
     let meta_dir = project_dir.join(".blanket");
@@ -1853,6 +1857,35 @@ checksum = "{hash_b}"
             assert!(error.contains("tiny@1.0.0"));
             assert!(error.contains("symlink"));
         });
+    }
+
+    /// A Cargo workspace member sends its closure and its record to the
+    /// workspace root, not to the directory sync ran in, so the root gets the
+    /// same check — before a cargo-home is projected into a workspace no root
+    /// record can name and no sweep will protect.
+    #[test]
+    fn cargo_env_is_refused_for_a_root_that_cannot_be_registered() {
+        let temp = TempDir::new("blanket-cargo-unrecordable");
+        let root = temp.path().join("ws ");
+        fs::create_dir_all(&root).unwrap();
+        let plan = CargoPlan {
+            rust_version: "1.96.1".into(),
+            crates: vec![],
+            members: vec!["member".into()],
+        };
+        let error = project_cargo_env(
+            &root,
+            &temp.path().join("absent-rust"),
+            &temp.path().join("absent-vendor"),
+            &plan,
+            &lock_digest("version = 4\n"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !root.join(".blanket").exists(),
+            "projected into a workspace no record can name"
+        );
     }
 
     #[test]

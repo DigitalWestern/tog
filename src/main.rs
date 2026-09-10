@@ -480,6 +480,13 @@ fn load_cargo_inputs(
     let rust_version = cargo::resolve_toolchain(platform, cwd)?;
     let rust_obj = cargo::ensure_rust_for(store, platform, rust_version)?;
     let root = locate_cargo_root(&rust_obj, cwd)?;
+    // Cargo is the one tailor whose registered root is not the directory
+    // sync was run in: a member of a workspace sends its closure and its
+    // record to the workspace root. The preflight checked the invocation
+    // directory, so check the root as soon as it is known — before a lock,
+    // a vendor object or a cargo-home lands in a workspace that cannot be
+    // registered and so cannot be protected.
+    store::Store::check_registrable(&root)?;
     if !root.join("Cargo.lock").is_file() {
         ensure_cargo_lock(&root, &rust_obj)?;
     }

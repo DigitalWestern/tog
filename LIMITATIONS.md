@@ -45,11 +45,14 @@ say what breaks, for whom, and how it fails (loud/silent).
   parses but names no objects satisfies the same check while protecting
   nothing. Registration refuses a path that is not UTF-8, is padded with
   whitespace or spans lines, since a record cannot name those back exactly, and
-  `blanket sync` refuses such a path before realizing anything. A path that is
-  not UTF-8 can only reach blanket as the working directory: passed as a CLI
-  argument it panics in `std::env::args` before parsing, exiting 101 rather
-  than the documented 2 — a pre-existing kernel-skeleton limitation, not part
-  of this work.
+  `blanket sync` refuses such a path before anything is written or projected
+  into the project. A Cargo workspace root is only known after the pinned
+  toolchain is realized, so its refusal lands there instead — still before a
+  lock, a vendor object or a cargo-home reaches the workspace. A path that is
+  not UTF-8 can only reach blanket as the working directory: any non-UTF-8
+  argument panics in `std::env::args` before parsing, exiting 101 rather than
+  the documented 2 — a pre-existing kernel-skeleton limitation, not part of
+  this work.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
