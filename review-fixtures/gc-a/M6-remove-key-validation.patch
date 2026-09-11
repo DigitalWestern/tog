@@ -1,0 +1,12 @@
+diff --git a/src/store.rs b/src/store.rs
+index b507487..0e1c56b 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -145,7 +145,6 @@ impl Store {
+     /// it. The key must match a record this store holds; the project itself
+     /// is never touched, so lookups work while the project is unavailable.
+     pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
+-        Self::validate_root_key(key)?;
+         self.roots()?
+             .into_iter()
+             .find(|entry| entry.key == key)

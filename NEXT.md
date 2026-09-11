@@ -1,10 +1,11 @@
 # NEXT.md — frozen index (2026-09-06)
 
-The live plan is [PLAN.md](PLAN.md). This file exists only because code
-comments, user-facing strings, HITRATE.md and LIMITATIONS.md cite
-"NEXT.md item N". Every item below has shipped; the numbers must not be
-reused. Full write-ups are in the git history of this file (last complete
-version: commit 5ce0363).
+The live plan is
+[BLANKET-IMPLEMENTATION-PLAN.md](BLANKET-IMPLEMENTATION-PLAN.md). This file
+exists only because code comments, user-facing strings, HITRATE.md and
+LIMITATIONS.md cite "NEXT.md item N". Every item below has shipped; the
+numbers must not be reused. Full write-ups are in the git history of this
+file (last complete version: commit 5ce0363).
 
 | Item | What it was | Shipped |
 |---|---|---|
@@ -22,6 +23,6 @@ version: commit 5ce0363).
 | 13 | Store GC (`blanket gc`) | 2026-09-06 |
 
 (There was no item 6.) Anything these items left open is listed under WP4 in
-PLAN.md. When touching code that still says "deferred to NEXT.md item 4",
-replace the text with the behaviour it describes; that deferral no longer
-exists.
+BLANKET-IMPLEMENTATION-PLAN.md. When touching code that still says
+"deferred to NEXT.md item 4", replace the text with the behaviour it
+describes; that deferral no longer exists.

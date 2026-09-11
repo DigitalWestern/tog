@@ -22,12 +22,16 @@ say what breaks, for whom, and how it fails (loud/silent).
   add latency on large projects (it walks `target/` on every run). The guard
   is Linux-only: the Seatbelt path has no counterpart, so on macOS a Unix
   socket in the workspace is not refused (silent).
-- **GC has no store-wide job lock yet.** The existing ten-minute recency
-  window remains the concurrent-use safeguard while the GC safety work is
-  delivered incrementally. A registered project whose directory or closure
-  directory is unavailable now blocks the entire sweep rather than being
-  silently forgotten; use the key from `blanket store roots` with
-  `blanket gc --forget` only when giving up that protection is intentional.
+- **GC is conservative around legacy and uncertifiable state.** Managed jobs
+  hold a per-store shared activity lease through their final awaited child;
+  GC takes the exclusive lease and skips while work is active. A long-running
+  job can therefore postpone cleanup, and older Blanket binaries do not know
+  this protocol. New `root/2` records are self-sufficient when a project is
+  moved or deleted, but legacy pathname-only roots and unresolved object
+  metadata still block the destructive sweep; use `blanket store roots` and
+  the exact `blanket gc --forget <key>` recovery valve only when giving up
+  that protection is intentional. Legacy sibling-store forests/backups are
+  retained rather than automatically swept.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage
   error) since 2026-09-06; before that a bad `gc` or `sbom` argument
@@ -62,7 +66,7 @@ say what breaks, for whom, and how it fails (loud/silent).
   the unconditional descriptor-relative pre-publication compare, the reusable
   pre-materialization extractor, the source matrix, per-platform BEAM rows,
   the `--frozen` write boundary, the presence- and value-based input staleness
-  rule over the whole consulted path list, the shipped provider host allowlist,
+  rule over the whole consulted path list, effective configured provider endpoint policy,
   the descriptor-relative root helper (`src/fsroot.rs`, not yet written), and
   store-root-scoped bundle-complete `x/3` keys in ARCHITECTURE.md are not
   implementation guarantees yet. In particular,
@@ -156,9 +160,10 @@ say what breaks, for whom, and how it fails (loud/silent).
   `blanket x --clean` removes the projection and unregisters it from the
   originating store, while the immutable store object remains until the next
   `blanket gc`. A removed **node** environment also orphans its
-  `~/.blanket/forests/<project-key>/<projection-id>` node_modules forest,
+  `<store>/forests/<project-key>/<projection-id>` node_modules forest,
   which plain `blanket gc` never visits: only `blanket gc --project` reclaims
-  it, and the cleanup summary says so. A permanent per-root lock under
+  it, and the cleanup summary says so. Legacy sibling-home forests are
+  retained. A permanent per-root lock under
   `~/.blanket/x/.locks/` protects running tools, including roots being
   recreated after cleanup; a successful removal unlinks its own lock file
   while still holding it, so `.locks` stays bounded. Partial roots are marked
@@ -180,6 +185,73 @@ say what breaks, for whom, and how it fails (loud/silent).
   descriptor-relative and never follows a symlink, but if a candidate name is
   replaced while it is being removed, the replacement is left for a later
   cleanup retry and the original registry entry is retained.
+- **The GC safety guarantee has a stated boundary.** It covers cooperating
+  Blanket processes on a local filesystem with working advisory locks and
+  atomic rename. It does **not** cover: older Blanket binaries, which do not
+  know this protocol; programs launched directly from store paths rather than
+  through Blanket; malicious same-user modification of the store; descendants
+  that outlive the direct child Blanket awaited, whether or not they called
+  `setsid`; orphans left behind when the supervising Blanket is SIGKILLed,
+  which cannot be caught and releases the activity lease immediately; or
+  network filesystems where `flock` is advisory in name only. On NFS or a
+  similar filesystem, treat the lease as a hint rather than a lock.
+- **Signal delivery to a supervised job has three documented edges.** A
+  parent-directed TERM is forwarded to the live direct child. A
+  *group*-directed TERM reaches parent and child independently and is then
+  forwarded as well, so delivery there is at-least-once, not exactly-once.
+  Parent-only INT/QUIT/HUP are caught and waited on rather than forwarded
+  after startup; terminal process-group delivery is the supported path for
+  those, which is what an interactive `^C` uses. A cancellation that arrives
+  before the child is spawned either prevents the launch — reported as an
+  interrupted command, exit 1 — or reaches the child once it exists; it is
+  never dropped.
+- **`128 + signal` is a shell-visible number, not a wait status.** A child
+  killed by a signal makes Blanket exit `128 + signal`, matching what a shell
+  reports for the same command. Blanket's own process did not die of that
+  signal, so anything inspecting Blanket's raw wait status with `WIFSIGNALED`
+  sees a normal exit.
+- **`x` cleanup will not guess a projection's owner.** A candidate whose
+  closure claims store objects, but whose originating store cannot be
+  recovered — the store was moved or deleted, or `BLANKET_STORE` now points
+  somewhere else — is skipped and named. The store this invocation happens
+  to be pointed at is not evidence about someone else's projection, so
+  cleanup never falls back to it. A projection that claims nothing (an empty
+  shell from a partial run) references no store and is removed under the
+  per-root lock alone. The remedy for a skipped candidate is to restore the
+  store that owns it, or to delete the directory yourself once you know
+  nothing is using it.
+- **Automatic metadata migration is fail-closed, and not every old store
+  becomes collectable.** A store written before `object-meta/2` is upgraded in
+  place under the exclusive lease, but only for records whose exact dependency
+  set a per-kind, per-schema adapter can reconstruct from the record's own
+  identity inputs plus the other records in the store. There are adapters for
+  all 20 shipped kind/schema pairs (the matrix is in `ARCHITECTURE.md`), and a
+  proven record is published while an unresolved one is left untouched — but
+  a single unresolved record blocks every sweep, by design.
+  Records that will not migrate, and cannot be made to:
+  a build input an older sweep already collected (the evidence is simply
+  gone); an ambiguous match, such as two Go toolchain objects with the same
+  version and artifact digest; a `native-libs` set from a pin table this
+  binary no longer carries, whose per-archive digests exist nowhere in the
+  record; and any kind or schema no shipped producer wrote. The remedy is to
+  rebuild the object under the current producer — a cache hit is not enough,
+  because it deliberately does not certify old metadata — or to accept that
+  the store keeps its pre-D retention. Uncertainty keeps data safe; it does
+  not promise that every legacy store can be swept. See `REVIEW.md`.
+- **Package D has not been independently reviewed since its rewrite.** Its
+  first round on 2026-09-09 rejected it with seven blockers; the rewrite
+  addresses them and carries the D.10 acceptance suite, but it has had no
+  adversarial round of its own and no macOS execution. Do not merge on this
+  evidence.
+- **`cargo test -- --ignored` must run single-threaded.** The supervisor owns
+  process-wide signal dispositions and rejects a second concurrent child in
+  the same process. That is sound for production, where every entry point runs
+  its children sequentially under one lease, but a test binary runs
+  independent operations in parallel threads, so the end-to-end suites collide
+  with each other: use `cargo test --test <target> -- --ignored
+  --test-threads=1`. The offline `cargo test` suite handles this with an
+  explicit test guard (`supervise::SUPERVISION_TEST_LOCK`). This is a Package
+  B limitation that Package D's work surfaced, not a Package D behaviour.
 - **Two platforms: macOS arm64 and Linux x86_64 (glibc).** Linux landed
   2026-09-05 (LINUX_PORT.md). Not pinned: Intel macOS, aarch64 Linux,
   musl/Alpine — each is a row per pin table plus a wheel-tag band, not a

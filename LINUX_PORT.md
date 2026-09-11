@@ -978,3 +978,67 @@ object, but it is the one non-sandboxed step).
    `build.rs`); nokogiri builds from its vendored sources and only needs
    host `libz.so.1` (allowlisted in the ruby gate); full prerequisite list
    is in README.
+
+## 2026-09-09 — GC safety review round (Linux x86_64 only)
+
+Platform-behaviour changes from the independent review of the uncommitted GC
+safety work. All of it was exercised on Fedora 44 / x86_64; **none of it has
+run on macOS arm64**, and two items below are Linux-specific by construction.
+
+- `tests/supervise_signals.rs` is the B.6/B.8 signal and PTY acceptance
+  transcript. Twelve of its fifteen cases are portable; three are gated
+  `#[cfg(target_os = "linux")]` because they read process state from
+  `/proc/<pid>/stat`: the self-stop case and both terminal stop/continue
+  cases. Porting them to Darwin means replacing `proc_state` with
+  `ps -o state=` or `sysctl KERN_PROC_PID`; the rest of the harness (openpty,
+  `TIOCSCTTY`, process groups, `waitpid(WUNTRACED|WCONTINUED)`) is POSIX and
+  should run as is.
+- The PTY cases put the supervisor under a job-control shell layer that owns
+  the terminal and runs the job in its own foreground process group. Without
+  it the supervisor's group is *orphaned* and the kernel discards terminal
+  stop signals, so a `^Z` test would pass for the wrong reason. This is POSIX
+  behaviour, not Linux-specific, and the Mac run needs the same layer.
+- `StoreActivity::try_exclusive` now confirms unavailability across a bounded
+  window instead of trusting a single `flock` attempt. The reason is generic
+  POSIX: `flock` belongs to the open file description, so a child forked by
+  any thread between `fork` and `exec` transiently holds a duplicate of a
+  lease descriptor whose owner may already have released it. Expect the same
+  effect on Darwin; the Mac gate should re-run the full offline suite several
+  times, not once, since the symptom is a flake (`gc` silently reporting a
+  busy store as skipped).
+- `children_do_not_inherit_the_activity_descriptor` reads `/proc/self/fd` in
+  the child. The Darwin equivalent is `lsof -p` or `fstat`; CLAUDE.md already
+  records the macOS sandbox descriptor-scrub gap, and this test does not
+  close it.
+
+## 2026-09-09 — GC safety Package D rewrite (Linux x86_64 only)
+
+No platform behaviour changed. Two entries here are test-runbook facts the
+Mac gate needs, and one is a portability note about the new metadata reader.
+
+- **Run every `--ignored` target with `--test-threads=1`.** The supervisor
+  owns process-wide signal dispositions and rejects a second concurrent child
+  in the same process. That is correct for production — each entry point runs
+  its children sequentially under one lease — but a test binary runs
+  independent operations in parallel threads, so the end-to-end suites collide
+  with each other and fail with `another child is already being supervised in
+  this process`. Reproducible on Linux with the five `gitsrc::realization_tests`
+  cases alone, none of which Package D touches; expect the same on Darwin,
+  because the restriction is in portable Rust, not in the Linux backend. The
+  offline `cargo test` suite handles it with a new
+  `supervise::SUPERVISION_TEST_LOCK` taken by the tests that realize through a
+  child (`gitsrc`, `cargo`, `build`, `project`, `supervise`). Making the
+  supervisor wait rather than reject would remove the need for both, and is a
+  Package B decision that was deliberately not taken here.
+- **Timestamps now come from `libc::stat`, not `fs::metadata`.** The sweep
+  reads `st_mtime`/`st_mtime_nsec` from the `fstatat` it already performs for
+  the `(dev, ino)` replacement check, so a candidate's age and its identity
+  come from one syscall on one inode. `mtime_of` handles pre-epoch mtimes.
+  Both fields exist on Darwin with the same names through the `libc` crate,
+  but the Mac gate should confirm the retention tests (`--keep-days`,
+  `ACTIVE_WINDOW`, `STAGE_WINDOW`) still choose the same candidates, since
+  this replaced a `SystemTime`-based path.
+- **The offline suite was run 12 consecutive times** to establish that it is
+  deterministically green, after the supervision collision was found by
+  running it repeatedly rather than once. The Mac gate should do the same;
+  a single green run does not establish it.

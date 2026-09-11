@@ -1,0 +1,663 @@
+   Compiling blanket v0.1.0 (/home/ethan/repos/blanket-repo/wt/tmp/a-review/isolated)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.75s
+     Running unittests src/lib.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/blanket-e79fbabeb25de427)
+
+running 416 tests
+test archive::tests::bsdtar_listing_parses_with_its_eight_leading_columns ... ok
+test archive::tests::a_member_written_through_an_archive_symlink_is_refused ... ok
+test archive::tests::hard_links_and_special_files_are_refused_regardless_of_strip ... ok
+test archive::tests::a_target_resolving_through_another_archive_symlink_is_refused ... ok
+test archive::tests::gnu_listing_parses_every_kind_and_keeps_names_verbatim ... ok
+test archive::tests::names_that_could_write_outside_are_refused ... ok
+test archive::tests::symlinks_are_accepted_only_when_lexically_contained_after_strip ... ok
+test artifacts::tests::electron_artifacts_are_named_per_platform ... ok
+test archive::tests::unparseable_or_ambiguous_lines_refuse_the_listing ... ok
+test artifacts::tests::skip_table_is_unique_and_populated ... ok
+test artifacts::tests::source_build_is_detected_from_the_script_text ... ok
+test build::tests::darwin_identity_unchanged ... ok
+test artifacts::tests::the_electron_cache_directory_matches_electron_gets_own_rule ... ok
+test build::tests::recursion_cap_is_loud ... ok
+test build::tests::linux_sdist_build_uses_host_compilers ... ok
+test build::tests::build_sdist_preserves_unsupported_kind ... ok
+test build::tests::native_sdist_identity_records_linker_configuration ... ok
+test build::tests::isolated_identity_has_schema_three_and_build_env ... ok
+test build::tests::darwin_sdist_identity_unchanged ... ok
+test build_requires::tests::fast_path_predicate_covers_build_requirement_table ... ok
+test archive::tests::dot_components_do_not_inflate_the_symlink_depth_budget ... ok
+test build_requires::tests::runtime_numpy_is_a_constraint_not_a_build_requirement ... ok
+test archive::tests::owner_names_containing_spaces_cannot_shift_the_parsed_name ... ok
+test build_requires::tests::numpy_constraint_is_exact_runtime_version_only ... ok
+test cargo::git_source_tests::a_git_crate_commits_to_its_commit_in_the_vendor_identity ... ok
+test cargo::git_source_tests::cargo_git_sources_parse_only_when_pinned ... ok
+test cargo::git_source_tests::the_config_replaces_each_git_source_verbatim ... ok
+test cargo::git_source_tests::git_crate_selection_uses_the_locked_version ... ok
+test cargo::tests::build_rejects_user_config_flag ... ok
+test cargo::tests::cargo_plan_rejects_unsupported_or_hostile_lock_entries ... ok
+test cargo::git_source_tests::workspace_inheritance_and_relocated_symlinks_fail_closed ... ok
+test cargo::tests::darwin_identity_unchanged ... ok
+test build_requires::tests::absent_build_system_uses_pep517_legacy_default ... ok
+test archive::tests::real_tar_lists_a_gzip_archive_made_by_tar_itself ... ok
+test cargo::tests::linux_rust_component_urls_and_digests_are_exact ... ok
+test build_requires::tests::rejects_option_like_tar_root_without_executing_it ... ok
+test cargo::tests::projection_refuses_symlinked_bin_escape ... ok
+test cargo::tests::plans_registry_and_workspace_closure ... ok
+test archive::tests::contained_archives_extract_with_strip_and_keep_their_symlinks ... ok
+test build_requires::tests::extracts_present_build_system_from_tar_and_zip ... ok
+test cargo::tests::rust_component_sets_are_complete_unique_and_pinned ... ok
+test cargo::tests::rust_identity_is_platform_specific ... ok
+test cargo::tests::resolves_toolchain_files_and_pins ... ok
+test cargo::tests::rustfmt_toolchain_component_is_recorded_as_unavailable_under_permissive_policy ... ok
+test cli::tests::dependency_verbs ... ok
+test build_requires::tests::tar_member_with_dot_prefix_is_inspected ... ok
+test cli::tests::directory_option_spellings ... ok
+test build_requires::tests::rejects_archive_symlink_escape_before_cargo_work ... ok
+test cli::tests::fmt_grammar_separates_blanket_flags_from_tool_args ... ok
+test cli::tests::gc_options_keep_their_shapes ... ok
+test cli::tests::no_command_is_implicit_and_keeps_the_options ... ok
+test cli::tests::inspect_commands ... ok
+test cli::tests::plan_takes_nothing ... ok
+test cli::tests::output_options_are_global_and_validated ... ok
+test cli::tests::run_and_build_pass_arguments_through ... ok
+test cli::tests::sbom_output_spellings ... ok
+test cli::tests::help_and_version_at_every_level ... ok
+test cli::tests::store_and_completions_words ... ok
+test cli::tests::sync_flags_and_aliases ... ok
+test cli::tests::unknown_first_word_is_a_script_candidate ... ok
+test cli::tests::usage_lists_every_command_with_its_help ... ok
+test cli::tests::x_owns_only_its_leading_flags ... ok
+test cli::tests::completions_cover_every_command_and_option ... ok
+test build_requires::tests::malformed_build_system_is_invalid_data_for_tar_and_zip ... ok
+test deps::tests::a_backslash_in_a_directory_name_takes_pnpms_own_slash_importer_key ... ok
+test cli::tests::suggestions_are_conservative ... ok
+test deps::tests::a_project_the_workspace_lock_does_not_list_refuses_instead_of_selecting_npm ... ok
+test deps::tests::corepack_hash_suffixes_accept_every_supported_algorithm ... ok
+test deps::tests::ladder_stops_at_the_first_answer ... ok
+test deps::tests::node_delegate_argv_is_delimited_and_workspace_aware ... ok
+test deps::tests::missing_pnpm_package_manager_names_lock_format_without_floating_suggestion ... ok
+test deps::tests::a_settings_only_pnpm_workspace_yaml_does_not_make_a_single_package_repo_a_workspace ... ok
+test deps::tests::ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries ... ok
+test cargo::tests::realizes_vendor_and_writes_complete_checksums ... ok
+test deps::tests::pnpm_package_manager_requires_an_exact_release_and_verifies_hash_syntax ... ok
+test deps::tests::mixed_sync_roots_are_rejected_before_delegation ... ok
+test build::tests::darwin_native_sdist_identity_does_not_realize_native_libs ... ok
+test deps::tests::shapes_are_structural ... ok
+test deps::tests::pnpm_scratch_paths_resolve_where_pnpm_joins_them ... ok
+test deps::tests::node_lock_selection_prefers_own_lock_and_reads_workspace_membership_from_the_lock ... ok
+test deps::tests::specs_reject_empty_options_and_control_bytes ... ok
+test deps::tests::specs_split_prefix_name_and_constraint ... ok
+test deps::tests::upgrade_flags_shape ... ok
+test deps::tests::unmatched_pnpm_workspace_is_a_boundary_to_an_outer_workspace ... ok
+test dirhash::tests::real_gomod_reproduces_gosum_h1 ... ok
+test dirhash::tests::real_module_zip_reproduces_gosum_h1 ... ok
+test dirhash::tests::wrong_module_prefix_rejected_and_tamper_changes_hash ... ok
+test dotnet::tests::all_dotnet_sandbox_phases_add_only_the_selected_tmp_write_root ... ok
+test dotnet::tests::build_argument_allowlist ... ok
+test dotnet::tests::darwin_identity_unchanged ... ok
+test dotnet::tests::dotnet_tmp_paths_are_platform_specific ... ok
+test archive::tests::hostile_members_are_refused_before_anything_is_written ... ok
+test dotnet::tests::every_prepared_scratch_is_already_marked_nuget_migrated ... ok
+test dotnet::tests::dotnet_tmp_validation_is_path_specific_and_testable ... ok
+test dotnet::tests::lock_parsing_and_validation ... ok
+test cargo::tests::resolves_linux_toolchain_files_targets_and_policy ... ok
+test deps::tests::workspace_membership_comes_from_the_lock_not_the_glob ... ok
+test deps::tests::python_shapes_follow_the_sync_order ... ok
+test deps::tests::yarn_berry_uses_conversion_refusal_without_delegation ... ok
+test dotnet::tests::output_roots_reject_symlinks_and_metadata_source_is_fixed ... ok
+test dotnet::tests::sdk_identities_and_fingerprints_are_platform_specific ... ok
+test dotnet::tests::sdk_pins_cover_each_supported_platform ... ok
+test elixir::tests::build_root_is_beam_qualified ... ok
+test dotnet::tests::global_json_gate ... ok
+test dotnet::tests::precreates_shm_under_the_dotnet_tmp_dir_on_every_platform ... ok
+test elixir::tests::env_scrub_covers_beam_doors ... ok
+test elixir::tests::darwin_identity_unchanged ... ok
+test cargo::tests::rejects_symlinked_crate_entries ... ok
+test dotnet::tests::preflight_rejects_unsafe_project_shapes ... ok
+test elixir::tests::linux_fingerprint_and_build_root_track_recipe ... ok
+test elixir::tests::install_spec_has_cross_minimal_argv_cwd_and_writes ... ok
+test elixir::tests::one_otp_row_per_platform_and_pins_exact ... ok
+test elixir::tests::plan_validation_rejects_hostile_fields ... ok
+test elixir::tests::linux_identity_is_separate_and_tracks_recipe_and_store_root ... ok
+test fetch::tests::cache_lease_refreshes_mtime_and_blocks_gc ... ok
+test fetch::tests::sha1_integrity_accepts_and_rejects_at_verification ... ok
+test fetch::tests::sri_roundtrip ... ok
+test elixir::tests::install_failures_propagate_with_context ... ok
+test gc::tests::dry_run_forget_ignores_only_the_requested_root_and_writes_nothing ... ok
+test gc::tests::collect_legacy_requires_explicit_opt_in ... ok
+test elixir::tests::pre_install_layout_is_validated_without_bin_erl ... ok
+test gc::tests::io_error_on_project_path_blocks_sweep ... ok
+test gc::tests::forget_rejects_unknown_and_malformed_keys ... ok
+test gc::tests::dry_run_reports_sizes_without_removing ... ok
+test gc::tests::missing_closures_directory_blocks_sweep ... ok
+test dotnet::tests::sdk_extraction_requires_muxer_at_object_root ... ok
+test elixir::tests::both_platforms_extract_root_level_trees_without_strip ... ok
+test gc::tests::publication_refreshes_an_old_stage_mtime ... ok
+test gc::tests::missing_project_blocks_sweep_and_preserves_record ... ok
+test gc::tests::node_forest_v2_workspace_kept_when_root_link_is_missing ... ok
+test gc::tests::liveness_walks_closure_and_transitive_refs ... ok
+test gc::tests::retained_object_keeps_old_dependency ... ok
+test gitsrc::realization_tests::pack_rejects_paths_and_links_that_no_ustar_header_can_hold ... ok
+test gitsrc::realization_tests::an_unpinned_ref_is_refused_and_resolve_ref_pins_it ... ok
+test gitsrc::realization_tests::ustar_fits_matches_the_header_layout ... ok
+test gitsrc::tests::commits_must_be_full_hashes ... ok
+test gitsrc::tests::identity_commits_to_url_and_commit_only ... ok
+test gitsrc::tests::slugs_are_readable_and_safe ... ok
+test gitsrc::tests::symlinks_must_stay_inside_checkout_even_through_chains ... ok
+test gitsrc::tests::urls_normalize_to_one_spelling ... ok
+test golang::tests::build_rejects_managed_flags ... ok
+test golang::tests::darwin_identity_unchanged ... ok
+test gitsrc::realization_tests::pack_keeps_safe_links_empty_dirs_and_verbatim_names ... ok
+test golang::tests::ensure_go_for_rejects_unpinned_version_before_store_access ... ok
+test golang::tests::escaping_matches_go_rules ... ok
+test golang::tests::go_environment_policy_is_forced_and_pinned ... ok
+test golang::tests::linux_toolchain_selection_rules ... ok
+test golang::tests::local_replaces_rejected_from_gomod_text ... ok
+test gitsrc::realization_tests::a_wrong_commit_is_refused ... ok
+test golang::tests::module_path_and_workspace_guard ... ok
+test golang::tests::one_unique_pin_per_supported_platform ... ok
+test golang::tests::plan_validation_rejects_hostile_cache_fields ... ok
+test golang::tests::production_toolchain_identities_are_platform_distinct ... ok
+test gitsrc::realization_tests::checkout_rejects_attribute_transformed_content ... ok
+test golang::tests::toolchain_selection_rules ... ok
+test inspect::tests::detects_every_ecosystem_from_its_inputs ... ok
+test inspect::tests::listing_reads_every_closure_shape ... ok
+test inspect::tests::listing_reads_rustfmt_closure_as_a_toolchain ... ok
+test golang::tests::go_archive_layout_strips_only_the_go_root ... ok
+test inspect::tests::status_reports_missing_non_python_toolchain_objects ... ok
+test inspect::tests::status_validates_node_forest_and_workspace_links ... ok
+test manifest::tests::a_constraint_then_requirement_include_uses_both_contexts ... ok
+test gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata ... ok
+test manifest::tests::constraints_remain_constraint_only_after_flattening ... ok
+test manifest::tests::compact_requirement_includes_are_discovered_and_hashed ... ok
+test manifest::tests::discovery_order_prefers_requirements_then_project_then_poetry_then_setup_and_dir ... ok
+test manifest::tests::dynamic_project_dependencies_fall_through_to_requirements_directory ... ok
+test manifest::tests::dynamic_project_without_a_dependency_source_fails_loudly ... ok
+test manifest::tests::hardware_requirements_default_to_cpu_and_honor_override ... ok
+test manifest::tests::generated_lock_does_not_shadow_the_live_project_source ... ok
+test manifest::tests::indented_setup_cfg_install_requires_is_a_manifest_dependency ... ok
+test manifest::tests::marker_membership_uses_pep508_string_semantics ... ok
+test manifest::tests::no_manifest_error_names_the_search ... ok
+test manifest::tests::nested_index_options_are_removed_from_resolver_input ... ok
+test manifest::tests::parses_uv_lock_file_hashes ... ok
+test manifest::tests::poetry_constraints_cover_the_supported_table ... ok
+test manifest::tests::poetry_lock_edge_version_constraint_wins_over_first_python_variant ... ok
+test manifest::tests::poetry_lock_extra_edges_preserve_their_constraints ... ok
+test manifest::tests::poetry_lock_keeps_reachable_main_hashes_only ... ok
+test manifest::tests::poetry_python_markers_keep_patch_precision_and_marker_grammar ... ok
+test manifest::tests::poetry_lock_selects_python_conditioned_package_and_edge_variants ... ok
+test manifest::tests::poetry_serialized_extra_markers_are_filtered_before_graph_traversal ... ok
+test manifest::tests::poetry_serialized_extra_requirements_activate_nested_extras_to_fixpoint ... ok
+test manifest::tests::poetry_table_dependency_preserves_extras_and_markers ... ok
+test manifest::tests::poetry_variant_reselection_retracts_discarded_dependencies ... ok
+test manifest::tests::requirements_include_cycles_are_unreadable_manifests ... ok
+test manifest::tests::setup_cfg_empty_requires_probe_when_setup_py_declares_install_requires ... ok
+test manifest::tests::setup_cfg_multiline_and_comments ... ok
+test manifest::tests::requirements_tree_hash_changes_when_an_included_file_changes ... ok
+test manifest::tests::setup_metadata_cache_identity_includes_interpreter_platform_and_toolchain ... ok
+test manifest::tests::setup_hash_covers_imported_sources_but_excludes_generated_outputs ... ok
+test inspect::tests::status_tracks_inputs_locks_projections_and_platforms ... ok
+test manifest::tests::setup_shim_detection_accepts_multiline_setup_call ... ok
+test manifest::tests::uv_lock_empty_project_root_does_not_pull_in_dev_packages ... ok
+test manifest::tests::uv_lock_follows_selected_roots_not_unreachable_dev_packages ... ok
+test manifest::tests::uv_lock_project_root_may_omit_a_version ... ok
+test manifest::tests::uv_lock_rejects_root_constraint_that_locked_version_cannot_satisfy ... ok
+test manifest::tests::uv_lock_root_extra_traverses_optional_dependency_table ... ok
+test manifest::tests::uv_lock_selection_uses_the_selected_host_interpreter ... ok
+test manifest::tests::uv_lock_skips_inactive_root_markers ... ok
+test manifest::tests::uv_locked_postrelease_satisfies_a_normal_package_constraint ... ok
+test manifest::tests::uv_lock_selects_resolution_and_dependency_marker_variants ... ok
+test manifest::tests::uv_serialized_extra_field_activates_a_package_extra ... ok
+test nativelibs::tests::binary_rewrite_refuses_a_longer_target ... ok
+test nativelibs::tests::discovers_payload_embedded_placeholders_without_metadata ... ok
+test cargo::tests::component_layout_is_validated_before_publication ... ok
+test nativelibs::tests::binary_rewrite_preserves_the_complete_path_suffix ... ok
+test nativelibs::tests::binary_rewrite_replaces_every_placeholder_in_every_string ... ok
+test nativelibs::tests::native_env_composition_is_isolated_and_additive ... ok
+test nativelibs::tests::native_env_composition_quotes_store_paths_for_compilers ... ok
+test nativelibs::tests::rewrites_text_prefixes ... ok
+test nativelibs::tests::rewrites_binary_prefixes_with_null_padding ... ok
+test nativelibs::tests::pkg_config_wrapper_does_not_replace_isolation_variables ... ok
+test npm::git_url_tests::pinned_git_urls_are_recognized_in_every_lockfile_spelling ... ok
+test npm::tests::darwin_binding_gyp_keeps_legacy_identity_inputs ... ok
+test npm::tests::blanket_config_parsing ... ok
+test npm::tests::bundled_and_platform_skipped_subtrees ... ok
+test npm::tests::darwin_identity_unchanged ... ok
+test nativelibs::tests::linux_pin_table_is_unique_and_well_formed ... ok
+test npm::tests::empty_node_env_layout_changes_identity ... ok
+test npm::tests::darwin_restriction_semantics_are_unchanged_by_the_linux_selector ... ok
+test npm::tests::discovers_string_object_and_legacy_directory_bins ... ok
+test npm::tests::explicit_platform_selects_the_matching_esbuild_variant ... ok
+test npm::tests::git_dependency_urls_are_classified_with_repo_and_commit ... ok
+test npm::tests::lifecycle_sandbox_failure_is_fatal_before_policy_handling ... ok
+test npm::tests::lifecycle_script_failure_is_separate_from_sandbox_failure ... ok
+test npm::tests::linux_optional_platform_subtrees_are_pruned_but_siblings_remain ... ok
+test npm::tests::local_git_file_urls_preserve_the_git_suffix ... ok
+test npm::tests::node_identity_is_platform_specific ... ok
+test npm::tests::node_pins_cover_each_supported_platform ... ok
+test npm::tests::non_string_script_is_rejected ... ok
+test npm::tests::package_scripts_and_command_order ... ok
+test npm::tests::linux_restriction_lists_follow_npm_semantics ... ok
+test npm::tests::parses_nested_and_scoped ... ok
+test npm::tests::realize_node_env_preserves_unsupported_kind ... ok
+test npm::tests::realize_node_env_rejects_foreign_platform_before_store_access ... ok
+test npm::tests::rejections ... ok
+test npm::tests::required_platform_and_libc_restrictions_have_host_diagnostics ... ok
+test npm::tests::script_arguments_are_shell_quoted_literally ... ok
+test npm::tests::darwin_warm_sync_does_not_fetch_package_tarballs ... ok
+test npm::tests::workspace_parent_preflight_rejects_external_stale_workspace ... ok
+test npm::tests::stale_workspace_ownership_canonicalizes_symlinked_temp_roots ... ok
+test npm::tests::workspace_paths_and_forest_keys_are_distinct ... ok
+test npm::tests::workspace_parent_preflight_rejects_unsafe_current_workspace ... ok
+test npm::tests::linux_warm_sync_uses_persisted_archive_classification ... ok
+test npm_lock_import::git_import_tests::pnpm_sri_codeload_resolution_stays_a_tarball ... ok
+test npm_lock_import::git_import_tests::pnpm_sri_codeload_plan_preserves_integrity ... ok
+test npm_lock_import::git_import_tests::a_codeload_dependency_is_realized_not_rejected ... ok
+test npm_lock_import::tests::a_quote_opens_a_scalar_only_where_a_scalar_can_begin ... ok
+test npm_lock_import::tests::a_quote_inside_a_plain_key_does_not_open_a_quoted_scalar ... ok
+test npm_lock_import::git_import_tests::yarn_sri_codeload_plan_preserves_integrity ... ok
+test npm_lock_import::tests::local_snapshot_dependencies_are_traversed_from_the_source_link ... ok
+test npm_lock_import::tests::hoisting_has_one_root_and_one_nested_version ... ok
+test npm_lock_import::tests::nearer_conflict_nests_required_version_instead_of_skipping_to_root ... ok
+test npm_lock_import::tests::nested_workspace_uses_an_explicit_placement_past_an_intervening_workspace ... ok
+test npm_lock_import::tests::pnpm_lock_without_packages_map_is_an_empty_plan ... ok
+test npm_lock_import::tests::peer_snapshots_are_separate_nodes_with_separate_children ... ok
+test npm_lock_import::tests::pnpm_required_git_errors_but_optional_git_is_skipped ... ok
+test npm_lock_import::tests::pnpm_v6_normalizes_package_keys_before_traversal ... ok
+test npm_lock_import::tests::patched_dependencies_are_verified_and_change_the_package_identity ... ok
+test npm_lock_import::tests::semver_ordering_preserves_prereleases_and_ignores_build_metadata ... ok
+test npm_lock_import::tests::required_pnpm_platform_dependency_fails_on_foreign_platform ... ok
+test npm_lock_import::tests::pnpm_v9_catalog_peer_link_and_optional_platform ... ok
+test npm_lock_import::tests::yarn_v1_multi_key_sha1_and_berry_rejection ... ok
+test npm_lock_import::tests::workspace_importer_gets_its_own_conflicting_version ... ok
+test npm_lock_import::tests::yarn_links_every_discovered_member_at_the_root ... ok
+test pep440::tests::exclusive_ordered_comparisons_apply_pep440_exclusions ... ok
+test pep440::tests::pre_release_spellings_normalize_to_pep440_phases ... ok
+test platform::tests::host_matches_test_machine ... ok
+test platform::tests::no_pin_names_platform_and_stage ... ok
+test platform::tests::triples_are_unique_and_darwin_is_stable ... ok
+test pep440::tests::packaging_ordering_examples ... ok
+test npm_lock_import::tests::yarn_v1_workspace_manifests_supply_roots_and_links ... ok
+test policy::tests::drain_clears ... ok
+test policy::tests::record_denied_and_allowed ... ok
+test policy::tests::parses_policy_and_rejects_unknown_keys ... ok
+test policy::tests::recorded_exceptions_do_not_cross_test_threads ... ok
+test policy::tests::union_semantics_adds_all_deny_entries ... ok
+test policy::tests::loads_user_and_project_policy_union_from_files ... ok
+test project::closure_platform_tests::foreign_platform_closure_is_refused_and_legacy_is_accepted ... ok
+test project::closure_platform_tests::fast_sdist_parent_input_keeps_the_legacy_identity ... ok
+test project::closure_platform_tests::write_closure_rejects_symlinked_blanket_without_creating_outside_closures ... ok
+test project::closure_platform_tests::write_closure_rejects_symlinked_closures_without_writing_outside ... ok
+test project::closure_platform_tests::planned_and_realized_env_id_match_for_a_native_sdist ... ok
+test pypi::git_requirement_tests::a_git_line_survives_requirements_parsing ... ok
+test pypi::git_requirement_tests::pinned_git_requirements_parse_and_unpinned_ones_do_not ... ok
+test pypi::tests::abi3_is_below_exact_and_prefers_highest_compatible_floor ... ok
+test pypi::tests::abi_mismatch_and_malformed_wheels_are_rejected ... ok
+test pypi::tests::any_platform_requires_none_abi ... ok
+test pypi::tests::comment_only_when_preceded_by_whitespace ... ok
+test pypi::tests::compressed_tags_are_expanded ... ok
+test pypi::tests::cross_platform_and_foreign_architecture_wheels_are_rejected ... ok
+test pypi::tests::darwin_abi3_ranks_above_platform_none_like_pip ... ok
+test pypi::tests::glibc_version_parsing ... ok
+test pypi::tests::identifies_project_and_direct_requirements ... ok
+test pypi::tests::linux_glibc_floor_must_fit_and_equal_is_accepted ... ok
+test pypi::tests::linux_platform_none_wheel_beats_any_and_compressed_second_alternative_counts ... ok
+test pypi::tests::linux_selection_prefers_manylinux_floor_then_linux_then_any_then_sdist ... ok
+test pypi::tests::manylinux_floor_rejects_signs_and_python4_abi3_floors_are_not_floors ... ok
+test pypi::tests::multi_tag_wheels_match_any_tag ... ok
+test pypi::tests::normalizes_names ... ok
+test pypi::tests::parses_multiline_with_hashes ... ok
+test pypi::tests::pure_wheel_python_tags_are_version_checked ... ok
+test pypi::tests::rejections ... ok
+test pypi::tests::rejects_duplicates_and_bad_abi_wheels ... ok
+test pypi::tests::requirements_options_and_inline_comments_are_data_only ... ok
+test pypi::tests::requires_txt_sections_keep_markers_and_drop_extras ... ok
+test pypi::tests::selection_prefers_native_then_abi3_then_universal2_then_pure_then_sdist ... ok
+test pypi::tests::selection_ties_break_by_filename ... ok
+test pyselect::tests::arbitrary_equality_is_literal_and_empty_set_is_unconstrained ... ok
+test pyselect::tests::exact_equality_is_not_a_prefix_but_bare_python_is ... ok
+test pyselect::tests::exact_pinned_request_selects_without_warning_in_supported_spellings ... ok
+test pyselect::tests::explicit_request_pin_choice_is_newest_for_minor_and_exact_for_patch ... ok
+test pyselect::tests::explicit_version_precedes_declared_constraints_and_warns ... ok
+test pyselect::tests::invalid_specifier_names_source_and_text ... ok
+test pyselect::tests::no_constraints_keep_the_historical_default ... ok
+test pyselect::tests::poetry_python_table_comes_from_interpreter_constraints ... ok
+test pyselect::tests::python_version_formats_and_unsupported_interpreters ... ok
+test pyselect::tests::python_version_requires_canonical_release_components ... ok
+test pyselect::tests::setup_cfg_and_setup_py_extractors_handle_requested_shapes ... ok
+test pyselect::tests::setup_cfg_full_line_comments_do_not_end_install_requires ... ok
+test pyselect::tests::setup_cfg_indented_option_keys_are_options_not_continuations ... ok
+test pyselect::tests::setup_cfg_metadata_parser_returns_dependency_sections ... ok
+test pyselect::tests::specifier_selection_table_covers_pep440_and_poetry ... ok
+test pyselect::tests::unpinned_patch_request_fails_closed ... ok
+test python::tests::darwin_identity_unchanged ... ok
+test python::tests::lookup_rejects_bare_major_and_accepts_minor_and_exact_versions ... ok
+test python::tests::lookup_uses_the_newest_numeric_patch_in_a_wrongly_ordered_table ... ok
+test python::tests::pin_tables_have_five_cpython_and_one_uv_row_per_platform ... ok
+test ruby::tests::darwin_identity_unchanged ... ok
+test ruby::tests::darwin_ruby_gems_identity_unchanged ... ok
+test ruby::tests::forced_env_covers_bundler_side_doors ... ok
+test ruby::tests::linux_and_darwin_identities_are_distinct_rows_of_one_schema ... ok
+test ruby::tests::linux_identities_pinned ... ok
+test ruby::tests::linux_plan_accepts_source_and_platform_qualified_gems ... ok
+test ruby::tests::plan_validation_rejects_hostile_fields ... ok
+test ruby::tests::ruby_pins_cover_supported_platforms ... ok
+test ruby::tests::synthetic_bottle_uses_two_root_components_and_validates_layout ... ok
+test rustfmt::tests::darwin_identity_unchanged_style_golden ... ok
+test rustfmt::tests::pins_are_platform_specific_and_verified ... ok
+test rustfmt::tests::preflight_accepts_the_host_and_refuses_a_foreign_platform ... ok
+test rustfmt::tests::rustfmt_object_lib_link_is_relative_to_paired_rust_object ... ok
+test rustfmt::tests::scratch_directories_are_named_so_gc_can_sweep_them ... ok
+test sandbox::tests::both_sandbox_engines_classify_setup_failures_by_prefix ... ok
+test sandbox::tests::force_env_strips_prefixes_case_insensitively_and_forced_values_win ... ok
+test sandbox::tests::force_env_survives_names_that_straddle_a_prefix_boundary ... ok
+test project::closure_platform_tests::isolated_sdist_build_environment_changes_parent_identity ... ok
+test sandbox::tests::linux_bwrap_argv_sample ... ok
+test sandbox::tests::linux_bwrap_setup_failure_is_unsupported ... ok
+build diagnostic
+test sandbox::tests::linux_command_stderr_is_relayed_and_classified_as_command_failure ... ok
+test sandbox::tests::linux_environment_is_exact ... ok
+test sandbox::tests::linux_fcntl_cloexec_fallback_marks_fds ... ok
+touch: cannot touch '/home/ethan/gca.JQerJd/blanket-sandbox-write-3107929-3/readonly/blocked': Read-only file system
+test sandbox::tests::linux_declared_write_and_read_only_write ... ok
+ethan
+test sandbox::tests::linux_group_lookup_works ... ok
+test sandbox::tests::linux_host_socket_in_writable_root_is_rejected_before_bwrap ... ok
+test sandbox::tests::linux_home_ssh_is_invisible ... ok
+test sandbox::tests::linux_ipc_namespace_is_isolated ... ok
+test sandbox::tests::linux_inherited_directory_and_socket_fds_are_closed ... ok
+test sandbox::tests::linux_nonzero_exit_has_existing_error_shape ... ok
+touch: cannot touch '/home/ethan/gca.JQerJd/blanket-sandbox-overlap-3107929-13/parent/y': Read-only file system
+test sandbox::tests::linux_overlapping_mounts_keep_writable_child ... ok
+test sandbox::tests::linux_paths_with_space_and_unicode_work ... ok
+test sandbox::tests::linux_pid_namespace_is_small ... ok
+test sandbox::tests::linux_stdin_is_null ... ok
+test sandbox::tests::linux_unbound_cwd_is_enterable_but_empty ... ok
+cat: /home/ethan/gca.JQerJd/blanket-sandbox-read-3107929-18/sibling/secret: No such file or directory
+test sandbox::tests::linux_undeclared_read_is_denied ... ok
+test sandbox::tests::linux_writable_child_under_undeclared_cwd_stays_writable ... ok
+test sandbox::tests::macos_profile_golden ... ok
+test sbom::tests::no_closures_is_a_loud_error ... ok
+test sbom::tests::rustfmt_closure_lists_the_shared_rust_object_once ... ok
+test sbom::tests::rustfmt_closure_requires_both_objects_and_the_version ... ok
+test sbom::tests::sbom_from_synthetic_closures ... ok
+test sbom::tests::sbom_requires_package_fields ... ok
+test store::tests::commit_reconciles_cached_exceptions ... ok
+test store::tests::lookup_and_forget_work_off_registry_records_alone ... ok
+test store::tests::roots_registry_adds_atomically_and_drops_entries ... ok
+test store::tests::strict_policy_rejects_cached_exceptions ... ok
+test ui::tests::defaults_are_plain_and_loud ... ok
+test ui::tests::shell_words_quote_only_when_needed ... ok
+test wheel::tests::headers_preserve_underscore_in_distribution_name ... ok
+test wheel::tests::installs_files_scripts_and_entry_points ... ok
+test wheel::tests::installs_headers_in_venv_include_site ... ok
+test wheel::tests::later_wheel_in_sorted_order_wins_collision ... ok
+test wheel::tests::literal_backslash_in_entry_name_is_preserved ... ok
+test wheel::tests::rejects_absolute_and_escaping_data_destinations ... ok
+test wheel::tests::rejects_zip_slip_entry ... ok
+test xrun::tests::candidate_ecosystem_reads_record_then_manifest_then_name ... ok
+test xrun::tests::clean_records_package_identity_not_executable_name ... ok
+test xrun::tests::cleanup_finds_alias_registration_in_closure_store ... ok
+test golang::tests::modcache_skeleton_layout ... ok
+test xrun::tests::cleanup_refuses_a_relative_home ... ok
+test inspect::tests::doctor_reports_host_and_project ... ok
+test xrun::tests::dot_prefixed_entries_are_not_x_candidates ... ok
+test xrun::tests::ecosystem_from_spelling_or_project ... ok
+test xrun::tests::exact_node_tool_versions_are_full_releases ... ok
+test xrun::tests::fd_relative_removal_does_not_follow_replaced_x_directory ... ok
+test xrun::tests::from_version_is_split_and_conflicts_are_rejected ... ok
+test xrun::tests::legacy_clean_matching_reads_exact_generated_package ... ok
+test xrun::tests::ready_cache_hit_records_each_exception_once ... ok
+test xrun::tests::realizing_marker_makes_partial_root_a_cleanup_candidate ... ok
+test xrun::tests::runner_and_cleanup_agree_about_a_symlinked_blanket_directory ... ok
+test xrun::tests::runner_and_cleanup_agree_about_a_symlinked_home ... ok
+test xrun::tests::runner_and_cleanup_both_refuse_a_symlinked_x_directory ... ok
+test xrun::tests::shared_x_lock_blocks_nonblocking_cleanup_until_exec ... ok
+test xrun::tests::unrecoverable_candidates_count_as_matched ... ok
+test xrun::tests::versions_and_bins ... ok
+test xrun::tests::cleanup_lock_waits_for_runner_recreation ... ok
+test xrun::tests::cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file ... ok
+test elixir::tests::cross_install_embeds_final_prefix_and_leaves_no_staging_prefix ... ok
+test deps::tests::requirement_edit_does_not_follow_predictable_temp_symlink ... ok
+test project::closure_platform_tests::write_closure_succeeds_for_normal_directories ... ok
+test elixir::tests::install_that_embeds_staging_prefix_is_rejected ... ok
+test cargo::tests::projects_cargo_config_wrapper_and_closure ... ok
+test deps::tests::requirement_edits_are_logical_lossless_and_ambiguous_edits_fail ... ok
+test deps::tests::requirement_names_and_edits ... ok
+test npm::tests::stale_workspace_projection_is_removed_when_dependency_aligns ... ok
+test sandbox::tests::linux_network_is_denied ... ok
+
+test result: ok. 416 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.17s
+
+     Running unittests src/main.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/blanket-fa3333905bbc2274)
+
+running 7 tests
+test tests::dotnet_projection_refuses_resolved_package_scripts ... ok
+test tests::cache_key_builders_track_independent_inputs ... ok
+test tests::unconstrained_python_keeps_default_and_existing_cache_inputs ... ok
+test tests::plan_skipped_requirement_is_strict_or_recorded_once ... ok
+test tests::dotnet_run_guard_handles_options_and_msbuild_dll ... ok
+test tests::projected_root_skips_plain_node_modules ... ok
+test tests::cargo_participation_requires_local_manifest ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/build_isolation.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/build_isolation-68ade7ce108f1114)
+
+running 3 tests
+test insightface_sdist_builds_with_runtime_numpy_constraint ... ignored
+test pure_python_flit_sdist_uses_isolated_build_env ... ignored
+test tokenizers_rust_sdist_builds_offline_after_vendoring ... ignored
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cargo_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/cargo_e2e-f51da2fd4cfc4967)
+
+running 1 test
+test cargo_sync_build_and_run_again_offline ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/cli-925ad8a477847e12)
+
+running 27 tests
+test bare_blanket_outside_a_project_prints_usage ... ok
+test fmt_script_precedence_does_not_try_rustfmt_without_a_projection ... ok
+test add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline ... ok
+test cached_x_rechecks_object_exceptions_under_project_policy ... ok
+test fmt_reports_ecosystem_and_project_errors_offline ... ok
+test cached_x_narrates_each_object_exception_once ... ok
+test no_arguments_prints_usage_and_exits_2 ... ok
+test fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script ... ok
+test failures_exit_1_and_survive_quiet ... ok
+test directory_option_changes_where_the_command_runs ... ok
+test run_passes_arguments_through_and_needs_a_projection ... ok
+test store_path_honors_the_store_variable ... ok
+test fmt_is_named_and_typos_are_usage_errors ... ok
+test ls_accepts_every_ecosystem_name_it_can_print ... ok
+test install_alias_reaches_sync ... ok
+test version ... ok
+test x_clean_that_skips_every_candidate_does_not_claim_nothing_to_clean ... ok
+test help_goes_to_stdout_and_exits_0 ... ok
+test x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does ... ok
+test unknown_first_word_runs_a_package_json_script_or_errors ... ok
+test x_needs_a_registry_outside_a_project ... ok
+test x_clean_py_leaves_legacy_npm_root ... ok
+test x_clean_refuses_a_symlinked_x_directory_or_a_relative_home ... ok
+test x_clean_is_offline_and_strict_about_trailing_arguments ... ok
+test usage_errors_exit_2_with_a_next_step ... ok
+test inspect_verbs_offline ... ok
+test dependency_verbs_offline_paths ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/deps_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/deps_e2e-fb594b950bb102c8)
+
+running 10 tests
+test cargo_add_update_remove_roundtrip ... ignored
+test go_add_update_remove_roundtrip ... ignored
+test nested_independent_npm_project_does_not_use_ancestor_pnpm_lock ... ignored
+test npm_add_update_remove_roundtrip ... ignored
+test pnpm_add_update_remove_roundtrip ... ignored
+test pnpm_edits_leave_an_installed_project_untouched ... ignored
+test pnpm_workspace_member_and_root_roundtrip ... ignored
+test python_requirements_add_update_remove_roundtrip ... ignored
+test python_uv_add_update_remove_roundtrip ... ignored
+test ruby_add_update_remove_roundtrip ... ignored
+
+test result: ok. 0 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dotnet_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/dotnet_e2e-0cfb98c2a026537a)
+
+running 2 tests
+test dotnet_realization_does_not_evaluate_user_project ... ignored
+test dotnet_sync_sandboxed_build_and_run ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/electron_provision.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/electron_provision-3de58852b7bce660)
+
+running 1 test
+test electron_is_provisioned_where_its_installer_looks ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/elixir_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/elixir_e2e-ff8c21e346d0938f)
+
+running 1 test
+test elixir_sync_sandboxed_build_and_run ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fmt_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/fmt_e2e-4a629759fa4f50f7)
+
+running 2 tests
+test fmt_is_lockless_cached_sandboxed_and_gc_rooted ... ignored
+test fmt_script_precedence_runs_script_from_a_project_subdirectory ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gc.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/gc-40c506e2cf1a24d0)
+
+running 3 tests
+test gc_keeps_deleted_node_project_until_forgotten ... ignored
+test gc_upgrade_does_not_collect_unregistered_legacy_project ... ignored
+test x_clean_removes_registered_environment_and_running_x_is_busy ... ignored
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/git_deps.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/git_deps-f8bd1b845e5f48bf)
+
+running 5 tests
+test an_unpinned_git_reference_is_refused ... ignored
+test cargo_git_dependency_is_vendored_from_its_commit ... ignored
+test npm_git_dependency_is_realized_from_its_commit ... ignored
+test python_git_dependency_builds_a_wheel_from_its_commit ... ignored
+test git_relative_submodule_is_pinned_and_raw ... ok
+
+test result: ok. 1 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/go_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/go_e2e-600d40e87e73969a)
+
+running 1 test
+test go_sync_build_and_rebuild_offline ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/kernel_smoke.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/kernel_smoke-3e2008b6b79bec91)
+
+running 1 test
+test realize_env_and_run_python ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linux_python.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/linux_python-b91c4331df75d8c7)
+
+running 1 test
+test linux_python_sync_run_and_uv_round_trip ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/manifests.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/manifests-e2964a630410ab6f)
+
+running 2 tests
+test all_manifest_fixtures_sync_and_run ... ignored
+test dynamic_vllm_shaped_fixture_syncs_real_dependencies ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_libs.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/native_libs-613fb9a6b2a4b680)
+
+running 1 test
+test linux_native_libs_pkg_config_sdist_and_runtime ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/npm_lock_import.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/npm_lock_import-544c5aa0a70fd6ad)
+
+running 1 test
+test pnpm_and_yarn_lockfiles_import_end_to_end ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/npm_scripts.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/npm_scripts-c57965243e3b2f48)
+
+running 6 tests
+test benign_install_script_runs_and_output_is_captured ... ignored
+test linux_npm_roundtrip ... ignored
+test network_access_during_install_script_fails ... ignored
+test permissive_install_script_is_cached_but_rejected_strict ... ignored
+test prebuilt_downloader_is_told_to_build_from_source ... ignored
+test skip_download_switch_is_injected_and_recorded ... ignored
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/python_select.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/python_select-4f73b837bdee1494)
+
+running 2 tests
+test pyproject_requires_python_selects_311_and_warm_sync_is_cached ... ignored
+test unpinned_patch_request_fails_closed_before_opening_store ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ruby_e2e.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/ruby_e2e-3070f5b8a0b5a34a)
+
+running 1 test
+test ruby_sync_native_ext_and_run ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/run_scripts.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/run_scripts-1f60afe91f6ab0a2)
+
+running 1 test
+test package_json_script_runs_inside_projected_env ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sandbox_deny.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/sandbox_deny-4494b38f1a70659b)
+
+running 2 tests
+test network_access_during_build_fails ... ignored
+touch: cannot touch '/home/ethan/gca.JQerJd/blanket-sandbox-contract-3109188/forbidden/forbidden': No such file or directory
+test bwrap_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 4.02s
+
+     Running tests/sdist_build.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/sdist_build-ed3ee5b7b79e70b3)
+
+running 1 test
+test docopt_sdist_builds_in_sandbox ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wheel_data.rs (/home/ethan/repos/blanket-repo/wt/tmp/a-review/target-a/debug/deps/wheel_data-9b1be5e0c8163331)
+
+running 1 test
+test greenlet_headers_are_installed_and_importable ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests blanket
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

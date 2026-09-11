@@ -42,7 +42,7 @@ INSPECT:
 
 MAINTAIN:
   gc         collect unreferenced store objects and cached artifacts
-  store      'store path', 'store roots' (root keys and paths)
+  store      'store path', 'store roots'
   completions print a shell completion script (bash | zsh | fish)
   help       show help for a command
   version    print the version
@@ -66,9 +66,58 @@ the program's exit status through.
 `blanket gc --forget <root-key>...` explicitly removes project protection
 records by the exact keys printed by `blanket store roots`; it never removes
 project files or store objects by itself. `--dry-run --forget` reports the
-same hypothetical removal without changing the registry. If a registered
-project or its `.blanket/closures` directory is unavailable, GC stops before
-any cleanup and names the key that must be restored or explicitly forgotten.
+same hypothetical removal without changing the registry. New `root/2` records
+are self-sufficient, so a moved or deleted project keeps its objects and
+store-owned projections protected without stopping GC. A legacy pathname-only
+project or its `.blanket/closures` directory that is unavailable still stops
+cleanup and names the key that must be restored or explicitly forgotten.
+
+`blanket store roots` prints one line per registered project: the 40-hex root
+key, then the project path it was recorded for. The key is the argument
+`--forget` takes.
+
+`blanket gc` options:
+
+| Option | Effect |
+|---|---|
+| `--dry-run` | report what a sweep would remove, change nothing |
+| `--keep-days <n>` | retention window for otherwise-unreferenced objects |
+| `--project` | also sweep this store's own projection namespaces (node forests, backups). Legacy projections in the shared sibling namespace are never swept and are reported as skipped |
+| `--collect-legacy` | opt in to collecting objects written before the roots registry existed. It cannot authorise a deletion through missing evidence: a record whose dependency set is not certified still blocks the sweep |
+| `--register <dir>...` | import a project's existing closures into a durable `root/2` record. An unresolvable or foreign object reference is reported rather than dropped, because you named this project |
+| `--forget <key>...` | remove protection records by exact key; repeatable |
+| `--migrate-metadata` | upgrade legacy object metadata to `object-meta/2` and stop, without sweeping |
+
+Legacy object metadata is upgraded automatically, before the first
+resource-consuming job of an eligible writable command (`sync`, `plan`,
+`build`, `run`, `fmt`, `x`, and dependency edits) and before an ordinary
+sweep. Recovery and inspection — `gc --forget`, `gc --register`, `x --clean`,
+`store`, and help — never depend on it succeeding. If another job owns the
+store, maintenance is announced as deferred and the job continues under
+shared protection; it is retried on the next eligible invocation and it never
+weakens the sweep.
+
+`--migrate-metadata` runs that phase alone and prints
+`metadata migration: N upgraded, M unresolved`. `N` is the number of records
+actually written: proven records are published, and unresolved ones are left
+exactly as they were. An unresolved record is named with its object id, its
+kind and its schema, and the reason its evidence could not be reconstructed —
+a missing build input, an ambiguous match, an unshipped layout. It keeps the
+older, conservative retention rule.
+
+A single unresolved record blocks the destructive sweep: `blanket gc` refuses
+and names what to fix rather than risk deleting live data. `--collect-legacy`
+does not override this. `--migrate-metadata` is incompatible with the
+registry and collection options; `--dry-run` previews it and writes nothing.
+If a job holds the store's lease, `--migrate-metadata` exits 1 with a retry
+message rather than reporting a migration it never ran.
+
+`--dry-run` prints the same plan a real sweep would execute, in three
+categories: `would remove …` for deletion candidates, `blocked: …` with the
+reason and the recovery action, and `skipped: …` for retention decisions. On a
+store that still needs migration the preview adapts records in memory rather
+than writing them, so the preview and the sweep choose the same candidates
+and report the same freed-byte total.
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they
@@ -218,8 +267,9 @@ unknown first word:
 `blanket run <script>` stays the unambiguous spelling and is what docs use
 in examples. A `blanket.toml` `[tasks]` table for cross-language scripts is
 the natural extension but is **not** in this plan; it is the task-runner
-question PLAN.md defers until a real polyglot need appears (WP1's
-`blanket fmt` contract is the shape a named tool command takes).
+question BLANKET-IMPLEMENTATION-PLAN.md defers until a real polyglot need
+appears (WP1's `blanket fmt` contract is the shape a named tool command
+takes).
 
 ### 2.3 `blanket fmt`
 
@@ -388,9 +438,10 @@ and `--from <package>` keep their normal meanings. Cleanup accepts no
 arguments after the tool. It prints one line per removed environment and a
 summary that the immutable store objects remain until the next `blanket gc`;
 when a removed environment was a node tool the summary also names `blanket gc
---project`, the only pass that reclaims the
-`~/.blanket/forests/<project-key>/<projection-id>` node_modules forest the
-environment used. `nothing to clean` is printed only when no candidate
+--project`, the only pass that reclaims the store-owned
+`forests/<project-key>/<projection-id>` node_modules forest the environment
+used. Legacy sibling-home forests are retained. `nothing to clean` is printed
+only when no candidate
 matched at all: a root that was considered and skipped (in use, or a legacy
 root whose package could not be recovered) is reported as
 `removed 0 environment(s), skipped 1`. Exit status is 0 whenever cleanup

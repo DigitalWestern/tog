@@ -1,0 +1,38 @@
+[
+  {
+    "command": "M1-gc-tests",
+    "exit": 101
+  },
+  {
+    "command": "M1-build",
+    "exit": 0
+  },
+  {
+    "command": "M2-gc-tests",
+    "exit": 101
+  },
+  {
+    "command": "M3-full-suite",
+    "exit": 0
+  },
+  {
+    "command": "M3-A-integration",
+    "exit": 0
+  },
+  {
+    "command": "M4-full-suite",
+    "exit": 0
+  },
+  {
+    "command": "M4-A-integration",
+    "exit": 0
+  },
+  {
+    "command": "M5-A-integration",
+    "exit": 101
+  },
+  {
+    "command": "M6-forget-tests",
+    "exit": 101
+  }
+]

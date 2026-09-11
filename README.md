@@ -5,10 +5,11 @@ provision a toolchain, realize a locked dependency graph into an immutable
 content-addressed store, project an environment, run your code.
 
 Nix's model, without Nix's interface. See [ARCHITECTURE.md](ARCHITECTURE.md)
-for how it works, [PLAN.md](PLAN.md) for where it's pointed and what is being
-built next (one product; permissive by default, `.blanket/policy.toml` is the
-company layer), [blanket-notes.md](blanket-notes.md) for the design history,
-and [REVIEW.md](REVIEW.md) for what has not yet been independently reviewed.
+for how it works, [BLANKET-IMPLEMENTATION-PLAN.md](BLANKET-IMPLEMENTATION-PLAN.md)
+for where it's pointed and what is being built next (one product; permissive
+by default, `.blanket/policy.toml` is the company layer),
+[blanket-notes.md](blanket-notes.md) for the design history, and
+[REVIEW.md](REVIEW.md) for what has not yet been independently reviewed.
 
 The vocabulary: each language gets a **tailor** (adapter) that cuts its
 ecosystem's packages into a **pattern** (locked plan), which blanket
@@ -103,18 +104,26 @@ and is cached by the manifest tree hash. For JavaScript,
 `package-lock.json` wins; otherwise pnpm v9 (and the compatible v6 importer
 shape) or Yarn classic v1 is imported directly, including workspace links.
 Only a lockfile-less project is resolved by the store npm. An existing real
-`node_modules`/`.venv` is moved aside to `~/.blanket/backups/`. Resolution
-belongs to the ecosystem's tools — realization, verification, and provenance
-belong to blanket.
+`node_modules`/`.venv` is moved aside to the owning store's `backups/`
+namespace; older sibling-home backups are retained for compatibility.
+Resolution belongs to the ecosystem's tools — realization, verification, and
+provenance belong to blanket.
 
 `blanket gc` follows every registered project closure, removes unreachable
 store objects and old unreferenced `cache/sha256` artifacts, and cleans stale
-staging directories. It keeps a ten-minute activity window so a concurrent
-sync cannot lose an object. An unavailable registered project is retained and
-blocks the sweep until it returns or its exact key is explicitly passed to
-`gc --forget`; ordinary GC never removes root records. Use `blanket gc
---project` separately to collect old unused forests and backups; ordinary GC
-never deletes inside project projections.
+staging directories. `run` and `x` hold one shared per-store activity lease
+from before their first store read through their final awaited child; GC
+takes the exclusive lease and reports `cleanup skipped: a Blanket job is
+using this store` while a job is active. Helper commands that spawn a child
+without an outer lease (a formatter, an ecosystem delegate, a build step)
+each take their own short lease for that child's lifetime, so the store is
+protected while any of them runs but is not held between two of them.
+New `root/2` records keep their object and projection references even when a
+project is gone. Legacy pathname-only records still block a sweep until the
+project returns or its exact key is explicitly passed to `gc --forget`;
+ordinary GC never removes root records. Use `blanket gc --project` separately
+to collect old unused store-owned forests and backups; legacy sibling-home
+projections are retained rather than swept.
 
 Python uses the explicit `.python-version` request when present; otherwise
 it intersects `requires-python`/`python_requires` metadata and selects the
