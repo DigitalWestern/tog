@@ -26,7 +26,10 @@ impl TempDir {
                 .as_nanos()
         ));
         fs::create_dir_all(&path).unwrap();
-        Self(path)
+        // blanket records object paths under the store's canonicalized root
+        // and compares them exactly; on macOS the temp dir sits under /var,
+        // a symlink to /private/var.
+        Self(path.canonicalize().unwrap())
     }
 }
 

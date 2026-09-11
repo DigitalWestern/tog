@@ -17,10 +17,10 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Area | State |
 |---|---|
 | Seven ecosystems, Linux x86_64 | Shipped, acceptance-tested |
-| macOS arm64 | Shipped through 2026-09-05 (`dbf7ac4`); **nothing since then is Mac-validated**, including all GC-safety work |
+| macOS arm64 | Mac gate run 2026-09-10 on the merged GC-safety tree (uncommitted fixes in the working tree): the tree did not compile on Darwin; after the fixes, `cargo test` green ×5, `gc --ignored` 3/3, sandboxed `blanket build` of blanket green. See the 2026-09-10 entry in [docs/agent/LINUX_PORT.md](docs/agent/LINUX_PORT.md) |
 | Python + npm on real projects | Proven (Next.js, vite, prisma, native addons, FastAPI) |
 | Other ecosystems | Fixture-proven only (`tests/`) |
-| Store GC (root protection, metadata migration, fail-closed sweep) | Shipped and merged to `main` 2026-09-10; independently reviewed and mutation-tested on Linux. **Mac gate (see below) has not run — owner waived it for the merge** |
+| Store GC (root protection, metadata migration, fail-closed sweep) | Shipped and merged to `main` 2026-09-10; independently reviewed and mutation-tested on Linux. Mac gate run 2026-09-10 and green after fixes. **The gate also exposed two `gc_roots` failures that are not Mac-specific** (fixture id / A-R2 refusal message — merge `19b33e1` claimed them green); fixed, **not yet re-run on Linux and not independently reviewed** |
 | Toolchain lock design (WP2) | Designed, not implemented |
 | Security/policy work (WP3), WP5 | Designed in the archived plan, not started |
 
@@ -31,10 +31,11 @@ committed as a clean series on `wp-gc-safety` (see `git log` and
 
 ## What is next (in order)
 
-1. **macOS gate** — `cargo test` and
-   `cargo test --test gc -- --ignored` on the Mac. The GC-safety work was
-   merged with the owner's waiver; until this gate runs, treat GC behavior
-   on the Mac as unverified. Run it before relying on GC on a Mac.
+1. **Land the Mac-gate fixes** — commit the 2026-09-10 working-tree fixes
+   (Darwin compile errors, symlinked-`TMPDIR` fixtures, APFS test skips,
+   `gc_roots` fixture id, `roots_for_sweep` unusable-record routing), re-run
+   `cargo test` and `cargo test --test gc_roots` on Linux, and get the one
+   production change (`Store::roots_for_sweep`) an independent review.
 2. **Follow-up PRs** — see [FOLLOW-UPS.md](FOLLOW-UPS.md) for the list:
    C.10 test matrix (20 missing tests), B.5 lease threading, `fsroot.rs`,
    `Store::has` lock order, M05 mutation survivor.

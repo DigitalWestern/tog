@@ -13,11 +13,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
-const PROTECTED: &str = "1111111111111111111111111111111111111111-protected-1";
+/// The one hand-written object. Its id must be the real hash of its identity:
+/// the sweep's metadata reader refuses any record whose identity hashes to a
+/// different id, and a legacy (schemaless) record of an unknown kind can
+/// never be certified, so the fixture publishes a complete `object-meta/2`
+/// record the way `tests/cli.rs::publish_certified_object` does.
+fn protected_identity() -> blanket::types::Identity {
+    blanket::types::Identity {
+        kind: "test".into(),
+        name: "protected".into(),
+        version: "1".into(),
+        inputs: Default::default(),
+    }
+}
 
 struct Fixture {
     base: PathBuf,
     store: PathBuf,
+    protected: String,
 }
 
 impl Drop for Fixture {
@@ -41,31 +54,45 @@ impl Fixture {
                     .as_nanos()
             ));
         fs::create_dir_all(&base).unwrap();
+        // blanket records object paths under the store's canonicalized root
+        // and compares them exactly; on macOS the temp dir sits under /var,
+        // a symlink to /private/var.
+        let base = base.canonicalize().unwrap();
         let store = base.join("store");
         for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
             fs::create_dir_all(store.join(sub)).unwrap();
         }
         fs::write(store.join("roots/.initialized"), b"1\n").unwrap();
-        let object = store.join("objects").join(PROTECTED);
+        let identity = protected_identity();
+        let protected = identity.object_id();
+        let object = store.join("objects").join(&protected);
         fs::create_dir_all(&object).unwrap();
         fs::write(object.join("payload"), b"live data\n").unwrap();
         fs::write(
-            store.join("meta").join(format!("{PROTECTED}.json")),
+            store.join("meta").join(format!("{protected}.json")),
             serde_json::json!({
-                "identity": {
-                    "kind": "test", "name": "protected", "version": "1", "inputs": {}
-                },
-                "refs": [],
+                "schema": "object-meta/2",
+                "id": protected,
+                "identity": identity,
+                "created": 1,
+                "exceptions": [],
+                "dependencies": [],
+                "cache_digests": [],
+                "evidence": "explicit",
             })
             .to_string(),
         )
         .unwrap();
         age(&object);
-        Self { base, store }
+        Self {
+            base,
+            store,
+            protected,
+        }
     }
 
     fn object(&self) -> PathBuf {
-        self.store.join("objects").join(PROTECTED)
+        self.store.join("objects").join(&self.protected)
     }
 
     fn roots(&self) -> PathBuf {
@@ -175,6 +202,12 @@ fn forget_removes_only_the_exact_key_that_was_asked_for() {
     let upper_project = fixture.project("upper", true);
     fixture.record_as(lower, format!("{}\n", lower_project.display()).as_bytes());
     fixture.record_as(&upper, format!("{}\n", upper_project.display()).as_bytes());
+    if fixture.record_names().len() < 2 {
+        // A case-insensitive filesystem (default APFS on macOS) folds the two
+        // spellings into one file, so there is no second record to protect.
+        eprintln!("skipped: the registry filesystem is case-insensitive");
+        return;
+    }
 
     let listing = fixture.run(&["store", "roots"]);
     assert!(listing.status.success(), "{}", stderr(&listing));
@@ -333,6 +366,15 @@ fn a_pathname_that_is_not_utf8_is_refused() {
     let mut raw = fixture.base.as_os_str().as_bytes().to_vec();
     raw.extend_from_slice(b"/project-\xff");
     let raw_project = PathBuf::from(OsString::from_vec(raw));
+    match fs::create_dir_all(&raw_project) {
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            // APFS refuses non-UTF-8 file names, so the pathname under test
+            // cannot exist on macOS.
+            eprintln!("skipped: the filesystem cannot hold a non-UTF-8 name");
+            return;
+        }
+        result => result.unwrap(),
+    }
     fixture.make_project(&raw_project, true);
     let lossy_twin = fixture.project("project-\u{fffd}", false);
     let twin_key = blanket::store::Store::root_key(&lossy_twin).unwrap();

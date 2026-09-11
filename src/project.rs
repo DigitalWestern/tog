@@ -1280,7 +1280,11 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
     let source_dir = open_real_directory(source_parent, "backup source parent")?;
     let backups_dir = open_real_directory(backups, "store backups")?;
     let source_entry = crate::store::stat_at(source_dir.as_raw_fd(), source_name.as_bytes())?;
-    if source_entry.st_dev != source_stat.dev() || source_entry.st_ino != source_stat.ino() {
+    // libc's stat field widths are per-platform (st_dev is i32 on Darwin,
+    // u64 on Linux); widen to u64 to match MetadataExt.
+    if source_entry.st_dev as u64 != source_stat.dev()
+        || source_entry.st_ino as u64 != source_stat.ino()
+    {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             format!(

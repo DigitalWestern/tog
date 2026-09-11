@@ -1047,6 +1047,12 @@ fn add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline() {
 /// Build an x environment that the store has a durable root record for.
 /// Returns `(x root, root key)`.
 fn registered_x_environment(home: &Path, store_root: &Path) -> (PathBuf, String) {
+    // Same reason as `cached_x_root_with_exception`: blanket records object
+    // paths under the store's canonicalized root, so the fixture must too
+    // (on macOS the temp dir is under /var, a symlink to /private/var).
+    std::fs::create_dir_all(store_root).unwrap();
+    let store_root = store_root.canonicalize().unwrap();
+    let store_root = store_root.as_path();
     let root = home.join(".blanket/x/py-ruff-test");
     std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
     std::fs::write(root.join("requirements.in"), "ruff\n").unwrap();

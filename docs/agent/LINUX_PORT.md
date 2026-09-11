@@ -1042,3 +1042,59 @@ Mac gate needs, and one is a portability note about the new metadata reader.
   deterministically green, after the supervision collision was found by
   running it repeatedly rather than once. The Mac gate should do the same;
   a single green run does not establish it.
+
+## 2026-09-10 — macOS arm64 gate on the merged GC-safety tree
+
+First Mac build of everything since `dbf7ac4`. The tree did not compile on
+Darwin; after the fixes below the offline suite is green five consecutive
+runs (525 lib, 32 cli, 8 gc_roots, 14 supervise_signals), and
+`cargo test --test gc -- --ignored --test-threads=1` passes 3/3 against a
+disposable `BLANKET_STORE`. Findings, in the order they surfaced:
+
+- **libc struct widths differ per platform (compile errors).** `stat.st_dev`
+  is `i32` on Darwin and `u64` on Linux; `mode_t` is `u16` on Darwin and `u32`
+  on Linux; `openat` is variadic, so its mode must be passed as `c_uint`; the
+  Darwin `openpty` binding takes `*mut` for termios/winsize where Linux takes
+  `*const`. Fixed by widening (`as u64`, matching the existing pattern in
+  `xrun.rs`), casting the mode, and using `null_mut()`. Rule going forward:
+  never compare a raw `libc::stat` field to a `MetadataExt` accessor without
+  widening, and never pass a `mode_t` to a variadic call.
+- **`std::env::temp_dir()` is a symlink alias on macOS** (`/var` →
+  `/private/var`). blanket records object paths under the store's
+  *canonicalized* root and compares them exactly (`originating_store`,
+  `import_absolute_reference`), so any fixture that builds a store under an
+  uncanonicalized temp dir writes closures blanket rejects as "belongs to
+  another store". Four fixtures were canonicalized (`xrun` alias test,
+  `tests/cli.rs::registered_x_environment`, `tests/gc_roots.rs::Fixture`,
+  `tests/gc.rs::TempDir`).
+  `tests/cli.rs::cached_x_root_with_exception` had already documented this.
+- **APFS refuses non-UTF-8 file names with `EILSEQ`.** The `\xff` pathname
+  tests cannot create their subject on macOS. The two `store.rs` unit tests
+  are `cfg(target_os = "linux")`; the `gc_roots` case probes for `EILSEQ`
+  at runtime and skips with a message, so a case-sensitive or non-APFS Mac
+  volume still runs it.
+- **Default APFS is case-insensitive.** `forget_removes_only_the_exact_key`
+  writes two registry keys differing only in case; on APFS they are one file.
+  The test now detects the fold at runtime and skips.
+- **Two failures were not Mac-specific — they fail on Linux at HEAD too.**
+  The `vega/gc-a-fixes` merge (`19b33e1`) reported the eight `gc_roots`
+  tests green, but (1) its fixture hard-coded object id
+  `1111…-protected-1` with a schemaless record; Package D's metadata reader
+  refuses any record whose identity does not hash to its id, and a legacy
+  record of kind `test` can never be certified, so every sweep in that file
+  refused. The fixture now publishes a real `object-meta/2` record under the
+  computed id (as `tests/cli.rs::publish_certified_object` does). (2) The
+  A-R2 pin requires the refusal for an unreadable registry record to say
+  `refusing to sweep`, name the key, `--forget`, and `unusable registry
+  record`; D's strict `roots_for_sweep` returned its own "is not a regular
+  file" error before `gc::unusable_root` could. `roots_for_sweep` now reads
+  each key through `read_root_entry_tolerant_at` and lets `collect_roots`
+  refuse on the first unusable entry, so the sweep is still fail-closed and
+  every shape (symlink, directory, empty, padded, unknown schema) refuses
+  with one message. The unit test that pinned the old direct error
+  (`root2_rejects_unknown_schema_before_gc`) now asserts the unusable reason
+  on the entry. Both changes should be re-run on Linux to confirm.
+- **Sandboxed `blanket build` of blanket itself succeeds** (1m09s cold). rustc
+  prints a warning that `xcrun` could not write its SDK-lookup cache under
+  the read-only `TMPDIR`; harmless, but it is noise the sandbox could avoid
+  by pointing `TMPDIR` at a writable scratch dir.

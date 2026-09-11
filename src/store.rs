@@ -768,19 +768,14 @@ impl Store {
                     ),
                 ));
             }
-            let stat = stat_at(roots_dir.as_raw_fd(), name.as_os_str().as_bytes())?;
-            if !is_regular_file(&stat) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "root registry entry {key} is not a regular file; use `blanket gc --forget {key}`"
-                    ),
-                ));
-            }
+            // A key whose record cannot be read (symlink, directory, empty,
+            // padded, unknown schema) is reported on the entry as unusable
+            // rather than failing the read here, so the sweep's refusal
+            // (gc::unusable_root) names the key and `--forget` uniformly
+            // (A-R2). The sweep still fails closed: collect_roots refuses on
+            // the first unusable entry before anything is deleted.
             let path = roots.join(&name);
-            let bytes =
-                read_registry_file_at(roots_dir.as_raw_fd(), name.as_os_str().as_bytes(), &path)?;
-            entries.push(parse_root_entry(key, &path, &bytes)?);
+            entries.push(self.read_root_entry_tolerant_at(roots_dir.as_raw_fd(), key, path));
         }
         entries.sort_by(|a, b| a.key.cmp(&b.key));
         Ok((entries, crash_temps))
@@ -2421,7 +2416,9 @@ fn open_file_at(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
     // SAFETY: dirfd is borrowed for the duration of the call and name is a
     // valid NUL-terminated relative entry name.
-    let fd = unsafe { libc::openat(dirfd, name.as_ptr(), flags, mode) };
+    // openat is variadic, so mode must be passed as c_uint; mode_t is u16 on
+    // Darwin and u32 on Linux.
+    let fd = unsafe { libc::openat(dirfd, name.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -3100,14 +3097,19 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
 
-        let mut raw = temp.0.canonicalize().unwrap().into_os_string().into_vec();
-        raw.extend_from_slice(b"/project-\xff");
-        let lossy = PathBuf::from(OsString::from_vec(raw));
-        fs::create_dir_all(&lossy).unwrap();
-        assert_eq!(
-            store.register_root(&lossy).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
+        // APFS refuses non-UTF-8 file names (EILSEQ), so the lossy case can
+        // only be exercised on Linux.
+        #[cfg(target_os = "linux")]
+        {
+            let mut raw = temp.0.canonicalize().unwrap().into_os_string().into_vec();
+            raw.extend_from_slice(b"/project-\xff");
+            let lossy = PathBuf::from(OsString::from_vec(raw));
+            fs::create_dir_all(&lossy).unwrap();
+            assert_eq!(
+                store.register_root(&lossy).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
         assert!(store.roots().unwrap().is_empty(), "a record was written");
     }
 
@@ -3400,6 +3402,9 @@ mod tests {
         );
     }
 
+    // APFS refuses non-UTF-8 file names (EILSEQ); the root/2 lossless
+    // roundtrip is only observable on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn root2_roundtrips_a_non_utf8_path() {
         let temp = TempDir::new();
@@ -3444,8 +3449,10 @@ mod tests {
             serde_json::json!({"schema": "root/3", "key": key}).to_string(),
         )
         .unwrap();
-        let error = store.roots_for_sweep().unwrap_err();
-        assert!(error.to_string().contains("unknown schema"), "{error}");
+        let (entries, _) = store.roots_for_sweep().unwrap();
+        let reason = entries[0].unusable.as_deref().expect("entry is unusable");
+        assert!(reason.contains("unknown schema"), "{reason}");
+        assert_eq!(entries[0].key, key);
     }
 }
 

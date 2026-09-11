@@ -2496,7 +2496,10 @@ mod tests {
 
     #[test]
     fn cleanup_finds_alias_registration_in_closure_store() {
-        let base = std::env::temp_dir().join(format!(
+        // Closures record canonical object paths (Store::open canonicalizes
+        // its root), and originating_store compares them exactly; temp_dir()
+        // is a symlink alias on macOS (/var -> /private/var).
+        let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "blanket-x-registry-{}-{}",
             std::process::id(),
             SystemTime::now()
