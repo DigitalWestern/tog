@@ -30,7 +30,12 @@ say what breaks, for whom, and how it fails (loud/silent).
   moved or deleted, but legacy pathname-only roots and unresolved object
   metadata still block the destructive sweep; use `blanket store roots` and
   the exact `blanket gc --forget <key>` recovery valve only when giving up
-  that protection is intentional. Legacy sibling-store forests/backups are
+  that protection is intentional. A registry record GC cannot read — not a
+  regular file, unreadable, not UTF-8, empty, padded, or a directory sitting
+  at the key — blocks the sweep the same way instead of being silently
+  forgotten, `blanket store roots` lists it as an unusable record, and
+  `--forget` clears it in whatever shape it has, so the recovery valve still
+  works at the worst case. Legacy sibling-store forests/backups are
   retained rather than automatically swept.
 
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage

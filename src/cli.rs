@@ -474,7 +474,10 @@ while another Blanket job is using this store, and any object whose
 recorded evidence cannot be certified stops the sweep rather than being
 guessed at. Usable on a copied store from any host.",
         options: &[
-            ("--dry-run", "report what would be removed without removing it"),
+            (
+                "--dry-run",
+                "report what would be removed without removing it or writing any record",
+            ),
             ("--keep-days <n>", "retain cached artifacts used within <n> days"),
             ("--project", "also collect old unused project forests and backups"),
             (
@@ -1280,10 +1283,13 @@ fn parse_days(value: &str) -> Result<u64, UsageError> {
 
 /// Root keys are registry file names: 40 hex characters. Rejecting anything
 /// else here keeps `--forget` from ever acting on a guessed or malformed key.
+/// The key is passed through exactly as typed: a registry key names one file,
+/// so case-folding it here would aim `--forget` at a record the user did not
+/// ask for whenever both spellings exist.
 fn valid_root_key(value: &str) -> Result<String, UsageError> {
     let is_key = value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit());
     if is_key {
-        Ok(value.to_ascii_lowercase())
+        Ok(value.to_string())
     } else {
         Err(UsageError::new(
             format!(
@@ -2234,9 +2240,11 @@ mod tests {
                 "--forget=ABCDEF0123456789ABCDEF0123456789ABCDEF01"
             ]),
             Command::Gc(GcArgs {
+                // Keys reach the store exactly as typed: one key names one
+                // registry file, and both spellings can name records.
                 forget: vec![
                     key.to_string(),
-                    "abcdef0123456789abcdef0123456789abcdef01".to_string()
+                    "ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string()
                 ],
                 ..GcArgs::default()
             })

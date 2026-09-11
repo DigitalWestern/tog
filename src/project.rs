@@ -254,6 +254,9 @@ fn write_closure_inner(
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
     let project_dir = project_dir.canonicalize()?;
+    // Writing closures for a project that cannot be registered would leave
+    // provenance behind for a project no root record can protect.
+    Store::check_registrable(&project_dir)?;
     let blanket_dir = project_dir.join(".blanket");
     let closures_dir = blanket_dir.join("closures");
     // Keep the per-project transaction lock through both durable root
@@ -1645,6 +1648,36 @@ mod closure_platform_tests {
             v["platform"] = serde_json::Value::String(platform.to_string());
         }
         fs::write(dir.join(".blanket/closures/python.json"), v.to_string()).unwrap();
+    }
+
+    /// A project whose path no root record can hold exactly is refused
+    /// before anything is written into it. Closures for a project GC cannot
+    /// protect are provenance for an environment the next sweep deletes.
+    #[test]
+    fn closures_are_refused_for_a_project_that_cannot_be_registered() {
+        let dir = std::env::temp_dir().join(format!("blanket-unrecordable-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("project ");
+        fs::create_dir_all(&project).unwrap();
+        let store = test_store("unrecordable");
+        let activity = store
+            .activity(crate::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let error = super::write_closure(
+            &project,
+            "python",
+            serde_json::json!({}),
+            &store,
+            &activity,
+            ClosureRefs::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !project.join(".blanket").exists(),
+            "wrote into a project no record can name"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

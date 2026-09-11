@@ -119,11 +119,12 @@ without an outer lease (a formatter, an ecosystem delegate, a build step)
 each take their own short lease for that child's lifetime, so the store is
 protected while any of them runs but is not held between two of them.
 New `root/2` records keep their object and projection references even when a
-project is gone. Legacy pathname-only records still block a sweep until the
-project returns or its exact key is explicitly passed to `gc --forget`;
-ordinary GC never removes root records. Use `blanket gc --project` separately
-to collect old unused store-owned forests and backups; legacy sibling-home
-projections are retained rather than swept.
+project is gone. Legacy pathname-only records, and any root record the store
+cannot read, still block a sweep until the project returns or its exact key
+is explicitly passed to `gc --forget` (which clears an unreadable record in
+whatever shape it has); ordinary GC never removes root records. Use
+`blanket gc --project` separately to collect old unused store-owned forests
+and backups; legacy sibling-home projections are retained rather than swept.
 
 Python uses the explicit `.python-version` request when present; otherwise
 it intersects `requires-python`/`python_requires` metadata and selects the

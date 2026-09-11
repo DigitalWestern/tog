@@ -65,16 +65,20 @@ the program's exit status through.
 
 `blanket gc --forget <root-key>...` explicitly removes project protection
 records by the exact keys printed by `blanket store roots`; it never removes
-project files or store objects by itself. `--dry-run --forget` reports the
-same hypothetical removal without changing the registry. New `root/2` records
-are self-sufficient, so a moved or deleted project keeps its objects and
-store-owned projections protected without stopping GC. A legacy pathname-only
-project or its `.blanket/closures` directory that is unavailable still stops
-cleanup and names the key that must be restored or explicitly forgotten.
+project files or store objects by itself. Keys are matched exactly as typed,
+including case: one key names one registry file. `--dry-run --forget` reports
+the same hypothetical removal without changing the registry, and `--dry-run`
+refuses to run with `--register`, which would have to write one. New `root/2`
+records are self-sufficient, so a moved or deleted project keeps its objects
+and store-owned projections protected without stopping GC. A legacy
+pathname-only project or its `.blanket/closures` directory that is unavailable
+still stops cleanup and names the key that must be restored or explicitly
+forgotten.
 
 `blanket store roots` prints one line per registered project: the 40-hex root
-key, then the project path it was recorded for. The key is the argument
-`--forget` takes.
+key, then the project path it was recorded for — or, for a record the store
+cannot read, a message naming the defect. The key is the argument `--forget`
+takes.
 
 `blanket gc` options:
 
@@ -118,6 +122,17 @@ reason and the recovery action, and `skipped: …` for retention decisions. On a
 store that still needs migration the preview adapts records in memory rather
 than writing them, so the preview and the sweep choose the same candidates
 and report the same freed-byte total.
+
+A registry record GC cannot read — not a regular file, unreadable, not UTF-8,
+empty, padded, or holding anything but one absolute pathname — stops the
+sweep the same way instead of being skipped, and `blanket store roots` lists
+it as an unusable record rather than omitting it. `--forget <key>` clears such
+a record whatever shape it has, and resolves that one key without reading any
+other record, so one damaged record never blocks recovering from it.
+Registration refuses a project path that a record cannot hold back exactly
+(not UTF-8, padded with whitespace, or spanning lines) rather than recording a
+spelling that reads back as a different project, and `blanket sync` refuses
+such a path up front rather than leaving a synced project it cannot protect.
 
 The kernel's vocabulary (plan, store, closure, sbom) is demoted to INSPECT
 and MAINTAIN. Tailor, comforter, closet never appear in argv or in help; they

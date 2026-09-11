@@ -397,6 +397,18 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
     };
     let store = store::Store::open()?;
     let mut stdout = io::stdout().lock();
+    // A dry run writes nothing and registration is a write, so the two
+    // cannot both be honoured. Previewing the sweep as though the project
+    // were registered would mean protecting a root with no record, which is
+    // exactly the resolution rule GC is not allowed to bend; refuse the
+    // combination instead of half-keeping either promise (A-R5).
+    if args.dry_run && !args.register.is_empty() {
+        return Err(io::Error::other(
+            "refusing to combine --dry-run with --register: registering writes a record and a \
+             dry run writes nothing. Register the project, then preview with `blanket gc \
+             --dry-run`",
+        ));
+    }
     let Some(activity) = store.try_activity_exclusive()? else {
         // An explicitly requested mutation fails loudly; an opportunistic
         // sweep skips quietly. Migration is a requested mutation: a script
@@ -470,15 +482,11 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
             writeln!(
                 stdout,
                 "blanket: would forget root {key} ({})",
-                entry.path.display()
+                entry.describe()
             )?;
         } else {
             let entry = store.forget_root_with_activity(&activity, key)?;
-            writeln!(
-                stdout,
-                "blanket: forgot root {key} ({})",
-                entry.path.display()
-            )?;
+            writeln!(stdout, "blanket: forgot root {key} ({})", entry.describe())?;
         }
     }
     // Forgetting is the explicit recovery action, not an implicit sweep. A
@@ -559,6 +567,13 @@ fn load_cargo_inputs(
     let rust_version = cargo::resolve_toolchain(platform, cwd)?;
     let rust_obj = cargo::ensure_rust_for(store, platform, rust_version)?;
     let root = locate_cargo_root(&rust_obj, cwd, store)?;
+    // Cargo is the one tailor whose registered root is not the directory
+    // sync was run in: a member of a workspace sends its closure and its
+    // record to the workspace root. The preflight checked the invocation
+    // directory, so check the root as soon as it is known — before a lock,
+    // a vendor object or a cargo-home lands in a workspace that cannot be
+    // registered and so cannot be protected (A-R3 residual class).
+    store::Store::check_registrable(&root)?;
     if !root.join("Cargo.lock").is_file() {
         ensure_cargo_lock(&root, &rust_obj, store)?;
     }
@@ -1114,6 +1129,11 @@ fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> io::
 }
 
 fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
+    // Syncing ends by registering this project as a GC root. Check that the
+    // path can be recorded before realizing or projecting anything: a
+    // finished sync that could not register would leave a projected
+    // environment nothing protects, and the next sweep would collect it.
+    store::Store::check_registrable(dir)?;
     if [
         "package.json",
         "package-lock.json",
@@ -1896,6 +1916,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Sync ends by registering the project as a GC root, so a path no
+    /// record can hold is refused before an environment is realized or
+    /// projected. Refusing at the end instead would leave the project synced,
+    /// unprotected and with no way to register it.
+    #[test]
+    fn sync_refuses_a_project_path_no_root_record_can_hold() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project ");
+        std::fs::create_dir_all(&project).unwrap();
+        let error = preflight_sync(Platform::host().unwrap(), &project).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("cannot protect"), "{error}");
     }
 
     #[test]

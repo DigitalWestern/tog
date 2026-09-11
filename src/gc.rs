@@ -160,6 +160,13 @@ fn collect_roots<W: Write>(
         if options.forgotten.iter().any(|key| key == &root.key) {
             continue;
         }
+        // A record this store cannot read is the same safety stop as a
+        // project that cannot be resolved, and for the same reason: the
+        // record exists, so some project is still counting on it, and there
+        // is no way to tell which objects that project needs (A-R2).
+        if let Some(reason) = &root.unusable {
+            return Err(unusable_root(root, reason));
+        }
         if let Some(record) = &root.record {
             // root/2 is self-sufficient.  Its diagnostic project path is
             // intentionally never resolved during a sweep: a moved,
@@ -217,7 +224,24 @@ fn collect_roots<W: Write>(
             .canonicalize()
             .map_err(|error| unresolvable_root(root, &error))?;
         state.project_paths.push(project.clone());
-        read_closures(store, &project, &mut state, out)?;
+        // A registered project owns at least one closure: registration
+        // happens when one is written. None at all means either that they
+        // were removed, or that this pathname no longer resolves to the
+        // project that was registered — unmounting a mount point exposes the
+        // backing directory underneath, which can carry an empty
+        // `.blanket/closures` of its own and would otherwise be swept as if
+        // the registered project had agreed it needed nothing.
+        if read_closures(store, &project, &mut state, out)? == 0 {
+            return Err(unresolvable_root(
+                root,
+                &io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    ".blanket/closures holds no closure files: they were removed, or the \
+                     path now resolves to a different directory than the one registered \
+                     (the backing directory of an unmounted mount point, for example)",
+                ),
+            ));
+        }
     }
     Ok(state)
 }
@@ -235,13 +259,28 @@ fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Error {
     ))
 }
 
+fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
+    io::Error::other(format!(
+        "refusing to sweep: root {} has an unusable registry record at {} ({}). Repair the \
+         record, or give up that project's protection explicitly with `blanket gc --forget \
+         {}`. Dry runs stop here too: the records decide what a real sweep would keep.",
+        root.key,
+        root.registry_path.display(),
+        reason,
+        root.key
+    ))
+}
+
+/// Read a project's closures into the live set, returning how many closure
+/// files it held.
 fn read_closures<W: Write>(
     store: &Store,
     project: &Path,
     state: &mut RootState,
     out: &mut W,
-) -> io::Result<()> {
+) -> io::Result<usize> {
     let closures = project.join(".blanket/closures");
+    let mut found = 0usize;
     for entry in fs::read_dir(&closures)? {
         let entry = entry?;
         if !entry.file_type()?.is_file()
@@ -249,6 +288,7 @@ fn read_closures<W: Write>(
         {
             continue;
         }
+        found += 1;
         let path = entry.path();
         let value: serde_json::Value =
             serde_json::from_reader(fs::File::open(&path)?).map_err(|e| {
@@ -298,7 +338,7 @@ fn read_closures<W: Write>(
         }
     }
     let _ = out;
-    Ok(())
+    Ok(found)
 }
 
 fn collect_object_ids(value: &serde_json::Value, store: &Store, ids: &mut HashSet<String>) {
@@ -2234,7 +2274,12 @@ mod tests {
         age(&store.object_path(&id));
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        // The project needs a closure of its own to be a resolvable root; it
+        // names a real committed object (an unresolvable reference is what
+        // the sweep refuses), which the root record then protects — so the
+        // legacy object under test stays unprotected.
+        let anchor = commit(&store, "anchor", None);
+        closure(&project, &store.object_path(&anchor), serde_json::json!({}));
         store.register_root(&project).unwrap();
         let mut output = Vec::new();
         let report = collect(
@@ -2397,7 +2442,10 @@ mod tests {
         age(&store.object_path(&child));
         let parent = commit(&store, "fresh-parent", Some(&child));
         let project = temp.root.join("project");
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        // A resolvable root owns a closure naming a real object (an
+        // unresolvable reference is exactly what the sweep refuses); the
+        // object it names is the fresh parent, which retention keeps anyway.
+        closure(&project, &store.object_path(&parent), serde_json::json!({}));
         store.register_root(&project).unwrap();
 
         let mut output = Vec::new();
@@ -2534,6 +2582,55 @@ mod tests {
         assert!(store.lookup_root(&entry.key).is_ok());
     }
 
+    /// A forget names one root, and the preview must exclude that root and
+    /// no other. With a second registered project in the store, treating the
+    /// request as "ignore every root" would offer up the live object that
+    /// second project is still holding.
+    #[test]
+    fn dry_run_forget_excludes_only_the_named_root() {
+        let temp = TempStore::new("dry-forget-two-roots");
+        let store = temp.store();
+        let released = commit(&store, "released", None);
+        let held = commit(&store, "held", None);
+        age(&store.object_path(&released));
+        age(&store.object_path(&held));
+
+        let gone = temp.root.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        closure(&gone, &store.object_path(&released), serde_json::json!({}));
+        let gone_entry = store.register_root(&gone).unwrap();
+
+        let present = temp.root.join("present");
+        fs::create_dir_all(&present).unwrap();
+        closure(&present, &store.object_path(&held), serde_json::json!({}));
+        let present_entry = store.register_root(&present).unwrap();
+        fs::remove_dir_all(&gone).unwrap();
+
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: true,
+                keep_days: 0,
+                forgotten: vec![gone_entry.key.clone()],
+                ..Options::default()
+            },
+            &mut output,
+        )
+        .unwrap();
+        let preview = String::from_utf8(output).unwrap();
+        assert!(preview.contains(&released), "{preview}");
+        assert!(
+            !preview.contains(&held),
+            "the root that was not forgotten stopped protecting its object: {preview}"
+        );
+        assert_eq!(report.objects, 1, "{preview}");
+        assert!(store.object_path(&held).is_dir());
+        assert!(store.object_path(&released).is_dir(), "a dry run deleted");
+        assert!(store.lookup_root(&present_entry.key).is_ok());
+        assert!(store.lookup_root(&gone_entry.key).is_ok());
+    }
+
     #[test]
     fn missing_closures_directory_blocks_sweep() {
         let temp = TempStore::new("missing-closures");
@@ -2561,6 +2658,82 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("closures"), "{error}");
         assert!(store.object_path(&id).is_dir());
+    }
+
+    /// A store from before the roots registry has no marker and no records,
+    /// so a sweep there would run with no idea what any project needs. It
+    /// must refuse from every entry, including `--project --collect-legacy`,
+    /// the combination that exists to reach exactly those old objects. The
+    /// end-to-end upgrade test covers this as well, but only in the ignored
+    /// suite, which leaves the guard unwatched on an ordinary `cargo test`.
+    #[test]
+    fn an_uninitialized_registry_blocks_every_sweep() {
+        let temp = TempStore::new("uninitialized-registry");
+        let store = temp.store();
+        let id = commit(&store, "legacy", None);
+        age(&store.object_path(&id));
+        assert!(!store.root.join("roots/.initialized").exists());
+
+        for (dry_run, project, collect_legacy) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+        ] {
+            let mut output = Vec::new();
+            let error = collect(
+                &store,
+                Options {
+                    dry_run,
+                    project,
+                    collect_legacy,
+                    keep_days: 0,
+                    forgotten: Vec::new(),
+                },
+                &mut output,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("registry is not initialized"), "{message}");
+        }
+        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
+    }
+
+    /// A root that resolves to a directory holding no closures cannot say
+    /// what it needs. The reachable version of this is a pathname that now
+    /// names something else — the backing directory of an unmounted mount
+    /// point — so it is a safety stop, not an empty contribution.
+    #[test]
+    fn empty_closures_directory_blocks_sweep() {
+        let temp = TempStore::new("empty-closures");
+        let store = temp.store();
+        let id = commit(&store, "protected", None);
+        age(&store.object_path(&id));
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&id), serde_json::json!({}));
+        let entry = store.register_root(&project).unwrap();
+        for closure in fs::read_dir(project.join(".blanket/closures")).unwrap() {
+            fs::remove_file(closure.unwrap().path()).unwrap();
+        }
+
+        for dry_run in [false, true] {
+            let mut output = Vec::new();
+            let error = collect(
+                &store,
+                Options {
+                    dry_run,
+                    keep_days: 0,
+                    ..Options::default()
+                },
+                &mut output,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("refusing to sweep"), "{message}");
+            assert!(message.contains(&entry.key), "{message}");
+        }
+        assert!(store.object_path(&id).is_dir(), "sweep deleted the object");
+        assert_eq!(store.roots().unwrap().len(), 1, "sweep removed the record");
     }
 
     /// An I/O error other than a clean miss (here: a symlink loop where the
@@ -3959,7 +4132,21 @@ mod tests {
                     store.forget_root(&entry.key).unwrap();
                 }
                 _ => {
-                    fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+                    // Restore the project to a state a sweep may run over:
+                    // an empty closures directory does not count (A-R4) —
+                    // a registered project owns at least one closure.
+                    let closure = project.join(".blanket/closures/python.json");
+                    fs::create_dir_all(closure.parent().unwrap()).unwrap();
+                    fs::write(
+                        closure,
+                        serde_json::json!({
+                            "schema": "closure/1",
+                            "ecosystem": "python",
+                            "body": {"ok": true}
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
                 }
             }
             let (report, text) = sweep(
