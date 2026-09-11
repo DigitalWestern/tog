@@ -1,11 +1,12 @@
 # blanket
 
-Rust workspace: universal package-manager kernel. Read ARCHITECTURE.md first;
-design history in blanket-notes.md. BLANKET-IMPLEMENTATION-PLAN.md is the
-single working document: decisions, agent working rules, and the ordered work
-packages — take the next open one. NEXT.md is a frozen index of shipped item
-numbers. What has not been independently reviewed is in REVIEW.md — check it
-before trusting a recent feature. Run `cargo fmt --check` before committing.
+Rust workspace: universal package-manager kernel. Start with STATUS.md
+(where the project is, what is next) and docs/human/ARCHITECTURE.md (how
+it works). Design history lives in blanket-notes.md; the full archived
+plan is docs/agent/PLAN-2026-09-09.md. docs/agent/REVIEW.md is the review
+ledger — check it before trusting a recent feature. docs/agent/NEXT.md is
+a frozen index of shipped item numbers (code comments cite it; do not
+rename or reuse numbers). Run `cargo fmt --check` before committing.
 
 - Build: `cargo build` · unit tests: `cargo test` (offline)
 - Heavy integration tests (network + real PyPI): `cargo test -- --ignored`
@@ -15,8 +16,10 @@ before trusting a recent feature. Run `cargo fmt --check` before committing.
 - Never point `BLANKET_STORE` at a real store in tests — use a temp dir. It is
   process-global, so a test that sets or clears it must hold
   `store::STORE_ENV_LOCK`, or it will redirect a concurrent test to the real
-  store. Tests that record policy exceptions take the matching guard around
-  `policy::clear()`.
+  store. Tests that realize through a child take
+  `supervise::SUPERVISION_TEST_LOCK`; `--ignored` targets need
+  `--test-threads=1`. Tests that record policy exceptions take the matching
+  guard around `policy::clear()`.
 - Store objects are immutable and input-addressed; changing what goes INTO
   an object (inputs map in `Identity`) changes its id — never mutate an
   existing object's semantics without a new identity field.
@@ -30,5 +33,9 @@ before trusting a recent feature. Run `cargo fmt --check` before committing.
   with `BLANKET_SANDBOX_TESTS=required` and `TMPDIR` on a real disk (the
   tests keep per-run stores under TMPDIR; a 12 GB tmpfs fills). The
   offline checks in acceptance.sh use `unshare -rn` on Linux.
-- LINUX_PORT.md is the port's plan + changelog; append to it when you
+- docs/agent/LINUX_PORT.md is the port's changelog; append to it when you
   change platform behavior.
+- Documentation layout: root + docs/human/ are for humans (concise, current);
+  docs/agent/ is for agents (ledgers, evidence, archives — verbose is fine
+  there). When a document stops being current, archive it under docs/agent/
+  rather than letting it lie at the root.

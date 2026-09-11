@@ -60,7 +60,7 @@ sufficient (the position taken here), or does the incident warrant a
 line-level diff of the committed `src/gc.rs` against Sol's pristine copy plus
 the re-applied fix set? Evidence pointers: `/tmp/opencode-sol-D-1ter4V/`
 (`pristine/`, `snapshot-files.sha256`, `REVIEW-REPORT.md`),
-`D10-ACCEPTANCE-2026-09-09.md` §8, `REVIEW.md` D rows. Note the pristine copy
+`docs/agent/D10-ACCEPTANCE-2026-09-09.md` §8, `docs/agent/REVIEW.md` D rows. Note the pristine copy
 predates Rho's fixes, so a plain diff is expected to differ; the comparison
 must include the four fix hunks (F1 grammar table, F2 `clear_crash_temps`,
 F3 report accounting, F4 acceptance tests).
@@ -82,7 +82,7 @@ F3 report accounting, F4 acceptance tests).
    on the Mac, including the case-insensitive-filesystem paths the root-key
    code relies on. Nothing Linux-side clears this.
 6. **M05 mutation survivor** — redundant-marking acceptance gap, known and
-   documented in `D10-ACCEPTANCE-2026-09-09.md` §8.
+   documented in `docs/agent/D10-ACCEPTANCE-2026-09-09.md` §8.
 7. **Grammar-table drift for the 21st (kind,schema) pair** — adding a pair
    requires extending `objmeta::grammar_for`; unlisted pairs fail closed
    (refusal), but a listed pair with a wrong grammar needs its own drift test.
