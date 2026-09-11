@@ -9,7 +9,7 @@
 //! env vars, so every blanket-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
-use crate::fetch::download_verified_held;
+use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::sandbox::{force_env, BuildSpec};
 use crate::store::Store;
@@ -242,7 +242,7 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     let pin = ruby_pin(platform)?;
     let identity = ruby_identity(pin);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -252,7 +252,13 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
         let _ = crate::store::remove_tree(&staged);
         return Err(error);
     }
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    store
+        .commit_with_deps(&identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps
+        })
+        .map(|(path, _)| path)
 }
 
 /// The forced environment for EVERY blanket-controlled ruby/bundler run.
@@ -732,7 +738,7 @@ pub fn realize_gems(
     validate_plan(plan)?;
     let identity = ruby_gems_identity(pin, plan);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -854,7 +860,14 @@ pub fn realize_gems(
         })?;
     }
     let _ = crate::store::remove_tree(&scratch);
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    let mut deps = crate::store::ObjectDeps::new();
+    deps.object_id(&crate::store::object_id_from_path(ruby_obj)?)?;
+    for gem in &plan.gems {
+        deps.cache_digest(Digest::sha256(&gem.sha256)?);
+    }
+    store
+        .commit_with_deps(&identity, &staged, &[], &deps)
+        .map(|(path, _)| path)
 }
 
 /// Project provenance (closure envelope); enforcement is env, set at run.
@@ -865,6 +878,11 @@ pub fn project_ruby_env(
     plan: &RubyPlan,
     lock_sha256: &str,
 ) -> io::Result<()> {
+    let ruby_obj = ruby_obj.canonicalize()?;
+    let gems_obj = gems_obj.canonicalize()?;
+    let store = crate::project::store_from_object_path(&ruby_obj)
+        .ok_or_else(|| err("Ruby object is not in a Blanket store"))?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -872,6 +890,9 @@ pub fn project_ruby_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
+    let mut refs = crate::project::ClosureRefs::new();
+    refs.object_path(&store, &activity, &ruby_obj)?;
+    refs.object_path(&store, &activity, &gems_obj)?;
     crate::project::write_closure(
         project_dir,
         "ruby",
@@ -881,6 +902,9 @@ pub fn project_ruby_env(
             "gemfile_lock_sha256": lock_sha256,
             "plan": plan,
         }),
+        &store,
+        &activity,
+        refs,
     )
 }
 

@@ -730,6 +730,37 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
     assert!(relative_victim.is_dir(), "relative HOME target was removed");
 }
 
+/// A projection that claims store objects whose store cannot be recovered is
+/// never removed, however empty the caller's own store happens to be. The
+/// caller's `BLANKET_STORE` is not evidence about someone else's projection.
+#[test]
+fn x_clean_keeps_a_projection_whose_originating_store_is_unrecoverable() {
+    let home = TempDir::new("x-clean-foreign-home");
+    let project = TempDir::new("x-clean-foreign-project");
+    let victim = home.0.join(".blanket/x/py-foreign");
+    std::fs::create_dir_all(victim.join(".blanket/closures")).unwrap();
+    // A closure naming an object in a store this invocation knows nothing
+    // about — the shape a projection has after the machine's real store was
+    // moved, or when BLANKET_STORE points somewhere new.
+    std::fs::write(
+        victim.join(".blanket/closures/python.json"),
+        r#"{"schema":"closure/1","ecosystem":"python","body":{"env_object":"/somewhere/else/store/objects/0000000000000000000000000000000000000000-python.env-9"}}"#,
+    )
+    .unwrap();
+
+    let out = blanket(&project.0, &home.0, &["x", "--clean"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        victim.is_dir(),
+        "a projection with an unrecoverable originating store was deleted: {stdout}"
+    );
+    assert!(
+        stdout.contains("originating store could not be recovered"),
+        "the skip was not narrated: {stdout}"
+    );
+}
+
 /// Legacy roots (no `x.json`) must obey the ecosystem filter, and a
 /// successful removal must leave nothing behind in `.locks`. Nothing here
 /// needs the network or a realized object, so it belongs in the offline
@@ -942,4 +973,241 @@ fn add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline() {
         !project.join("package-lock.json").exists(),
         "the refusal must not leave a stray npm lockfile behind"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D.10: `x --clean` may unregister a root only after successful cleanup.
+//
+// Both cases run offline through the real binary with a per-child HOME and
+// BLANKET_STORE, so they belong in the ordinary suite rather than behind
+// `--ignored`. See BLANKET-IMPLEMENTATION-PLAN.md §5.4 D.8.
+// ---------------------------------------------------------------------------
+
+/// Build an x environment that the store has a durable root record for.
+/// Returns `(x root, root key)`.
+fn registered_x_environment(home: &Path, store_root: &Path) -> (PathBuf, String) {
+    let root = home.join(".blanket/x/py-ruff-test");
+    std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+    std::fs::write(root.join("requirements.in"), "ruff\n").unwrap();
+    let object = publish_certified_object(store_root, "x-env");
+    std::fs::write(
+        root.join(".blanket/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".blanket/x.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "x-request/2",
+            "ecosystem": "python",
+            "package": "ruff",
+            "version": serde_json::Value::Null,
+            "state": "ready",
+            "store_root": store_root.display().to_string(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let canonical = root.canonicalize().unwrap();
+    let key = hex::encode(sha1_of(canonical.to_string_lossy().as_bytes()));
+    (root, key)
+}
+
+/// Publish a complete, fully certified store object by hand. Registration
+/// requires the closure to name one, and these cases must not depend on a
+/// realized toolchain or the network.
+fn publish_certified_object(store_root: &Path, name: &str) -> PathBuf {
+    let identity = blanket::types::Identity {
+        kind: "test".into(),
+        name: name.into(),
+        version: "1".into(),
+        inputs: Default::default(),
+    };
+    let id = identity.object_id();
+    let object = store_root.join("objects").join(&id);
+    std::fs::create_dir_all(&object).unwrap();
+    std::fs::write(object.join("payload"), name).unwrap();
+    // An object is complete only when its directory is read-only and its
+    // record is present, in that order.
+    let mut perms = std::fs::metadata(&object).unwrap().permissions();
+    perms.set_mode(perms.mode() & !0o222);
+    std::fs::set_permissions(&object, perms).unwrap();
+    std::fs::create_dir_all(store_root.join("meta")).unwrap();
+    std::fs::write(
+        store_root.join("meta").join(format!("{id}.json")),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "object-meta/2",
+            "id": id,
+            "identity": identity,
+            "created": 1,
+            "exceptions": [],
+            "dependencies": [],
+            "cache_digests": [],
+            "evidence": "explicit",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    object
+}
+
+fn sha1_of(bytes: &[u8]) -> [u8; 20] {
+    use sha1::Digest as _;
+    sha1::Sha1::digest(bytes).into()
+}
+
+fn registered_root_keys(home: &Path, cwd: &Path) -> Vec<String> {
+    let out = blanket(cwd, home, &["store", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    text(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+/// A tool still running in the environment holds its per-root lock. Cleanup
+/// must skip that candidate and leave its root record protecting the objects.
+#[test]
+fn busy_x_cleanup_retains_the_root_record() {
+    let home = TempDir::new("x-clean-busy-home");
+    let store_root = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store_root);
+
+    let out = blanket(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        registered_root_keys(&home.0, &home.0).contains(&key),
+        "the fixture was not registered"
+    );
+
+    // Hold the per-root lock the way a running tool does. `x --clean` takes
+    // it non-blocking and exclusive, so this makes the candidate busy.
+    let locks = home.0.join(".blanket/x/.locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    let lock_path = locks.join("py-ruff-test.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    use std::os::unix::io::AsRawFd;
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH) },
+        0,
+        "could not take the runner's shared lock"
+    );
+
+    let out = blanket(&home.0, &home.0, &["x", "--clean"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        stdout.contains("in use by a running tool"),
+        "a busy candidate was not narrated: {stdout}"
+    );
+    assert!(root.is_dir(), "a busy environment was removed: {stdout}");
+    assert!(
+        registered_root_keys(&home.0, &home.0).contains(&key),
+        "busy cleanup gave up the root record: {stdout}"
+    );
+    drop(lock);
+}
+
+/// Cleanup that cannot complete must not unregister anything either. Here the
+/// recorded originating store is not a real store, so the candidate's origin
+/// can never be revalidated and the run fails before any removal.
+#[test]
+fn failed_x_cleanup_retains_the_root_record() {
+    let home = TempDir::new("x-clean-failed-home");
+    let store_root = home.0.join("store");
+    let (root, key) = registered_x_environment(&home.0, &store_root);
+
+    let out = blanket(
+        &home.0,
+        &home.0,
+        &["gc", "--register", root.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // Point the marker at a directory that exists but is not a store.
+    let impostor = home.0.join("not-a-store");
+    std::fs::create_dir_all(&impostor).unwrap();
+    // `objects` is a regular file, so the recorded origin is structurally
+    // not a store and can never be revalidated.
+    std::fs::write(impostor.join("objects"), b"not a directory").unwrap();
+    std::fs::write(
+        root.join(".blanket/x.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "x-request/2",
+            "ecosystem": "python",
+            "package": "ruff",
+            "version": serde_json::Value::Null,
+            "state": "ready",
+            "store_root": impostor.display().to_string(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = blanket(&home.0, &home.0, &["x", "--clean"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a cleanup that could not validate its origin reported success: {}",
+        text(&out.stdout)
+    );
+    assert!(stderr.contains("not a real store"), "{stderr}");
+    assert!(root.is_dir(), "a failed cleanup removed the environment");
+    assert!(
+        registered_root_keys(&home.0, &home.0).contains(&key),
+        "failed cleanup gave up the root record"
+    );
+}
+
+/// C.10: cleanup must recover the originating store from either spelling —
+/// the explicit `x.json` marker, or a legacy environment's closure records —
+/// and act on that store's registry, never on the caller's `BLANKET_STORE`.
+#[test]
+fn x_cleanup_revalidates_explicit_or_legacy_origin() {
+    for spelling in ["explicit", "legacy"] {
+        let home = TempDir::new(&format!("x-clean-origin-{spelling}"));
+        let store_root = home.0.join("store");
+        let (root, key) = registered_x_environment(&home.0, &store_root);
+        if spelling == "legacy" {
+            // A pre-`x-request/2` environment: the origin is only derivable
+            // from the store object its closure names.
+            std::fs::remove_file(root.join(".blanket/x.json")).unwrap();
+        }
+
+        let out = blanket(
+            &home.0,
+            &home.0,
+            &["gc", "--register", root.to_str().unwrap()],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert!(registered_root_keys(&home.0, &home.0).contains(&key));
+
+        let out = blanket(&home.0, &home.0, &["x", "--clean"]);
+        let stdout = text(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert!(
+            !root.exists(),
+            "{spelling} origin was not resolved, so nothing was cleaned: {stdout}"
+        );
+        assert!(
+            !registered_root_keys(&home.0, &home.0).contains(&key),
+            "{spelling}: successful cleanup left the root record behind: {stdout}"
+        );
+    }
 }

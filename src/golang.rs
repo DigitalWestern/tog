@@ -9,7 +9,7 @@
 
 use crate::archive::Compression;
 use crate::dirhash;
-use crate::fetch::{cache_insert, cache_verified_held, download_verified_held};
+use crate::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::sandbox::BuildSpec;
 use crate::store::Store;
@@ -204,14 +204,20 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
     let pin = go_pin(platform, version)?;
     let identity = go_identity(pin);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     extract_go_toolchain_for(store, platform, &tarball, &staged)?;
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    store
+        .commit_with_deps(&identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps
+        })
+        .map(|(path, _)| path)
 }
 
 /// The forced environment for EVERY blanket-controlled go invocation.
@@ -916,7 +922,7 @@ pub fn realize_modcache(
     let identity = modcache_identity(pin, plan);
 
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -964,7 +970,16 @@ pub fn realize_modcache(
     }
     // The extraction writes lock files under cache/lock and per-module
     // .lock files; harmless immutable residue.
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    let mut deps = crate::store::ObjectDeps::new();
+    deps.object_id(&crate::store::object_id_from_path(go_obj)?)?;
+    for module in &plan.modules {
+        deps.cache_digest(Digest::sha256(&module.zip_sha256)?);
+        deps.cache_digest(Digest::sha256(&module.modfile_sha256)?);
+        deps.cache_digest(Digest::sha256(&module.info_sha256)?);
+    }
+    store
+        .commit_with_deps(&identity, &staged, &[], &deps)
+        .map(|(path, _)| path)
 }
 
 /// Project provenance (closure envelope). Go needs no wrapper or config
@@ -976,6 +991,11 @@ pub fn project_go_env(
     plan: &GoPlan,
     gosum_sha256: &str,
 ) -> io::Result<()> {
+    let go_obj = go_obj.canonicalize()?;
+    let modcache_obj = modcache_obj.canonicalize()?;
+    let store = crate::project::store_from_object_path(&go_obj)
+        .ok_or_else(|| err("Go object is not in a Blanket store"))?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -983,6 +1003,9 @@ pub fn project_go_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
+    let mut refs = crate::project::ClosureRefs::new();
+    refs.object_path(&store, &activity, &go_obj)?;
+    refs.object_path(&store, &activity, &modcache_obj)?;
     crate::project::write_closure(
         project_dir,
         "go",
@@ -992,6 +1015,9 @@ pub fn project_go_env(
             "go_sum_sha256": gosum_sha256,
             "plan": plan,
         }),
+        &store,
+        &activity,
+        refs,
     )
 }
 

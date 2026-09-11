@@ -12,9 +12,9 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 
 use sha2::{Digest, Sha224, Sha256, Sha512};
 
@@ -486,6 +486,7 @@ fn acquire_x_root(root: &Path) -> io::Result<fs::File> {
     Ok(lock)
 }
 
+#[cfg(test)]
 fn write_x_request(
     root: &Path,
     ecosystem: &str,
@@ -493,11 +494,33 @@ fn write_x_request(
     version: Option<&str>,
     state: &str,
 ) -> io::Result<()> {
+    write_x_request_inner(root, ecosystem, package, version, state, None)
+}
+
+fn write_x_request_for_store(
+    root: &Path,
+    store: &Store,
+    ecosystem: &str,
+    package: &str,
+    version: Option<&str>,
+    state: &str,
+) -> io::Result<()> {
+    write_x_request_inner(root, ecosystem, package, version, state, Some(&store.root))
+}
+
+fn write_x_request_inner(
+    root: &Path,
+    ecosystem: &str,
+    package: &str,
+    version: Option<&str>,
+    state: &str,
+    store_root: Option<&Path>,
+) -> io::Result<()> {
     let path = root.join(X_REQUEST_FILE);
     if let Ok(metadata) = fs::symlink_metadata(&path) {
-        if metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(other(format!(
-                "x: request record {} is a symlink; refusing to overwrite it",
+                "x: request record {} is not a regular file; refusing to overwrite it",
                 path.display()
             )));
         }
@@ -505,13 +528,16 @@ fn write_x_request(
     let tmp = root
         .join(".blanket")
         .join(format!(".x.json.tmp.{}", std::process::id()));
-    let record = serde_json::json!({
-        "schema": "x-request/1",
+    let mut record = serde_json::json!({
+        "schema": if store_root.is_some() { "x-request/2" } else { "x-request/1" },
         "ecosystem": ecosystem,
         "package": package,
         "version": version,
         "state": state,
     });
+    if let Some(store_root) = store_root {
+        record["store_root"] = serde_json::Value::String(store_root.display().to_string());
+    }
     fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
     fs::rename(tmp, path)
 }
@@ -699,40 +725,53 @@ fn check_projection_target(
             if projection_id.is_empty() || !projection_id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(missing());
             }
-            let home = store
-                .root
-                .parent()
-                .ok_or_else(|| other("x: cannot locate blanket home for cached projection"))?;
-            let project_key = hex::encode(Sha256::digest(
-                root.canonicalize()?.to_string_lossy().as_bytes(),
-            ));
-            let projection = home
-                .join("forests")
-                .join(&project_key[..32])
-                .join(projection_id);
-            let expected = projection
-                .join("node_modules")
-                .canonicalize()
-                .map_err(|_| missing())?;
-            if canonical_link_target(&root.join("node_modules")) != Some(expected) {
-                return Err(missing());
-            }
-            if let Some(workspaces) = closure["workspaces"].as_array() {
-                for workspace in workspaces {
-                    let source = workspace.as_str().ok_or_else(missing)?;
-                    let encoded = encoded_workspace(source).ok_or_else(missing)?;
-                    let expected = projection
-                        .join("workspaces")
-                        .join(encoded)
-                        .join("node_modules")
-                        .canonicalize()
-                        .map_err(|_| missing())?;
-                    if canonical_link_target(&root.join(source).join("node_modules"))
-                        != Some(expected)
-                    {
-                        return Err(missing());
-                    }
+            let project_key =
+                hex::encode(Sha256::digest(root.canonicalize()?.as_os_str().as_bytes()));
+            // New projections are owned by the originating store. Keep a
+            // read-only compatibility candidate for pre-root/2 x records,
+            // whose forest lived beside the store under blanket home.
+            let mut forest_bases = vec![store.root.join("forests")];
+            if let Some(home) = store.root.parent() {
+                let legacy = home.join("forests");
+                if legacy != forest_bases[0] {
+                    forest_bases.push(legacy);
                 }
+            }
+            let workspaces = closure["workspaces"].as_array();
+            let found = forest_bases
+                .into_iter()
+                .map(|base| base.join(&project_key[..32]).join(projection_id))
+                .any(|projection| {
+                    let Some(expected) = projection.join("node_modules").canonicalize().ok() else {
+                        return false;
+                    };
+                    if canonical_link_target(&root.join("node_modules")) != Some(expected) {
+                        return false;
+                    }
+                    workspaces.is_none_or(|workspaces| {
+                        workspaces.iter().all(|workspace| {
+                            let Some(source) = workspace.as_str() else {
+                                return false;
+                            };
+                            let Some(encoded) = encoded_workspace(source) else {
+                                return false;
+                            };
+                            let Some(expected) = projection
+                                .join("workspaces")
+                                .join(encoded)
+                                .join("node_modules")
+                                .canonicalize()
+                                .ok()
+                            else {
+                                return false;
+                            };
+                            canonical_link_target(&root.join(source).join("node_modules"))
+                                == Some(expected)
+                        })
+                    })
+                });
+            if !found {
+                return Err(missing());
             }
         }
         _ => {}
@@ -763,15 +802,23 @@ fn cached_projection(
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         })
         .map(str::to_owned)
-        .ok_or_else(|| other("x: cached closure has a malformed environment object"))?;
-    if path != store.object_path(&id) || !store.has(&id) {
+        .ok_or_else(|| {
+            other(
+                "x: cached closure has a malformed environment object; \
+                 run the command again to rebuild it",
+            )
+        })?;
+    if path != store.object_path(&id) || !store.has(&id)? {
         return Err(other(
             "x: cached environment object is missing or outside the active store; run the command again",
         ));
     }
-    let env_path = path
-        .canonicalize()
-        .map_err(|_| other("x: cached environment object is unavailable"))?;
+    let env_path = path.canonicalize().map_err(|_| {
+        other(
+            "x: cached environment object is unavailable; \
+             run the command again to rebuild it",
+        )
+    })?;
     check_projection_target(store, root, ecosystem, &closure, &env_path)?;
     Ok((closure, id))
 }
@@ -802,6 +849,7 @@ struct XRecord {
     package: String,
     version: Option<String>,
     state: Option<String>,
+    store_root: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -814,14 +862,28 @@ struct CleanFilter {
 struct XCandidate {
     path: PathBuf,
     name: OsString,
-    x_dir: fs::File,
+    /// The shared `~/.blanket/x` descriptor, not a per-candidate clone. It is
+    /// the same directory for every candidate and is only ever read from, so
+    /// cloning it per entry cost one extra descriptor each and put a large
+    /// `~/.blanket/x` against the process descriptor limit before cleanup had
+    /// removed anything.
+    x_dir: Rc<fs::File>,
     directory: fs::File,
     identity: (u64, u64),
 }
 
 fn read_x_request(root: &Path) -> Option<XRecord> {
-    let value: serde_json::Value =
-        serde_json::from_reader(fs::File::open(root.join(X_REQUEST_FILE)).ok()?).ok()?;
+    let path = root.join(X_REQUEST_FILE);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .ok()?;
+    let stat = file.metadata().ok()?;
+    if !stat.is_file() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_reader(file).ok()?;
     Some(XRecord {
         ecosystem: value.get("ecosystem")?.as_str()?.to_string(),
         package: value.get("package")?.as_str()?.to_string(),
@@ -833,8 +895,16 @@ fn read_x_request(root: &Path) -> Option<XRecord> {
             .get("state")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        store_root: value
+            .get("store_root")
+            .and_then(|value| value.as_str().map(PathBuf::from)),
     })
-    .filter(|_| value.get("schema").and_then(serde_json::Value::as_str) == Some("x-request/1"))
+    .filter(|_| {
+        matches!(
+            value.get("schema").and_then(serde_json::Value::as_str),
+            Some("x-request/1" | "x-request/2")
+        )
+    })
 }
 
 fn clean_filter(request: CleanRequest) -> io::Result<CleanFilter> {
@@ -1024,12 +1094,13 @@ fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
         return Ok(Vec::new());
     };
     let mut candidates = Vec::new();
-    for name in store::read_dir_names_at(validated.directory.as_raw_fd())? {
+    let shared_x_dir = Rc::new(validated.directory);
+    for name in store::read_dir_names_at(shared_x_dir.as_raw_fd())? {
         if name.as_bytes().first() == Some(&b'.') {
             continue;
         }
         let path = validated.path.join(&name);
-        let metadata = match stat_at(validated.directory.as_raw_fd(), name.as_bytes()) {
+        let metadata = match stat_at(shared_x_dir.as_raw_fd(), name.as_bytes()) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
@@ -1040,7 +1111,7 @@ fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
         let Some(canonical) = safe_x_root(&path, &validated.path) else {
             continue;
         };
-        let directory = match open_directory_at(validated.directory.as_raw_fd(), name.as_bytes()) {
+        let directory = match open_directory_at(shared_x_dir.as_raw_fd(), name.as_bytes()) {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) if error.raw_os_error() == Some(libc::ELOOP) => continue,
@@ -1067,7 +1138,7 @@ fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
         candidates.push(XCandidate {
             path: canonical,
             name,
-            x_dir: validated.directory.try_clone()?,
+            x_dir: Rc::clone(&shared_x_dir),
             directory,
             identity: stat_identity(&metadata),
         });
@@ -1280,42 +1351,228 @@ fn x_request_file_exists(root: &Path) -> bool {
 }
 
 enum Registration {
-    Found { store: Store, entry: RootEntry },
+    Found {
+        store: Store,
+        entry: RootEntry,
+    },
     NotFound,
+    #[cfg(test)]
     Unknown,
 }
 
 fn originating_store(root: &Path) -> io::Result<Option<Store>> {
+    let marker = root.join(X_REQUEST_FILE);
+    let marker_present = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(other(format!(
+                    "x: explicit request marker {} is not a regular file",
+                    marker.display()
+                )));
+            }
+            true
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if marker_present {
+        let record = read_x_request(root).ok_or_else(|| {
+            other(format!(
+                "x: explicit request marker {} is malformed",
+                marker.display()
+            ))
+        })?;
+        if let Some(store_root) = record.store_root {
+            let store_root = store_root.canonicalize().map_err(|error| {
+                other(format!(
+                    "x: recorded originating store {} is unavailable: {error}",
+                    store_root.display()
+                ))
+            })?;
+            let root_stat = fs::symlink_metadata(&store_root)?;
+            let objects = store_root.join("objects");
+            let objects_stat = fs::symlink_metadata(&objects)?;
+            if root_stat.file_type().is_symlink()
+                || !root_stat.is_dir()
+                || objects_stat.file_type().is_symlink()
+                || !objects_stat.is_dir()
+            {
+                return Err(other(format!(
+                    "x: recorded originating store {} is not a real store",
+                    store_root.display()
+                )));
+            }
+            return Ok(Some(Store { root: store_root }));
+        }
+    }
+
     let closures = root.join(".blanket/closures");
     let entries = match fs::read_dir(&closures) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    let mut found: Option<Store> = None;
     for entry in entries {
         let entry = entry?;
-        if !entry.file_type()?.is_file()
+        let stat = fs::symlink_metadata(entry.path())?;
+        if stat.file_type().is_symlink()
+            || !stat.is_file()
             || entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")
         {
             continue;
         }
-        let value: serde_json::Value = match serde_json::from_reader(fs::File::open(entry.path())?)
-        {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(entry.path())?;
+        let value: serde_json::Value = match serde_json::from_reader(file) {
             Ok(value) => value,
             Err(_) => continue,
         };
         let body = value.get("body").unwrap_or(&value);
-        if let Some(store) = project::store_from_closure_body(body) {
-            return Ok(Some(store));
+        let mut paths = Vec::new();
+        collect_legacy_object_references(body, &mut paths);
+        for path in paths {
+            let Some(store) = project::store_from_object_path(&path) else {
+                continue;
+            };
+            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !store::is_object_id(id) || store.object_path(id) != path {
+                continue;
+            }
+            let object_stat = match fs::symlink_metadata(&path) {
+                Ok(stat) => stat,
+                Err(_) => continue,
+            };
+            if object_stat.file_type().is_symlink() || !object_stat.is_dir() {
+                continue;
+            }
+            if let Some(previous) = &found {
+                if previous.root != store.root {
+                    return Err(other(
+                        "x: legacy closure references more than one originating store",
+                    ));
+                }
+            } else {
+                found = Some(store);
+            }
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
-fn registration_for(root: &Path) -> io::Result<Registration> {
-    let Some(store) = originating_store(root)? else {
-        return Ok(Registration::Unknown);
+/// Does this candidate's closure claim any store object at all?
+///
+/// `originating_store` answers "which store owns this?", and returns `None`
+/// both for a projection that names objects nobody can resolve and for one
+/// that names nothing. Those are very different: the first is an unresolved
+/// ownership claim that cleanup must defer on, the second is an empty shell
+/// left by a partial run, which references nothing and can be removed under
+/// the x-root lock alone.
+fn closure_claims_an_object(root: &Path) -> io::Result<bool> {
+    if read_x_request(root)
+        .and_then(|record| record.store_root)
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let closures = root.join(".blanket/closures");
+    let entries = match fs::read_dir(&closures) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
+    for entry in entries {
+        let entry = entry?;
+        let stat = fs::symlink_metadata(entry.path())?;
+        if stat.file_type().is_symlink()
+            || !stat.is_file()
+            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")
+        {
+            continue;
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(entry.path())?;
+        let value: serde_json::Value = match serde_json::from_reader(file) {
+            Ok(value) => value,
+            // An unreadable closure is itself an unresolved claim.
+            Err(_) => return Ok(true),
+        };
+        let body = value.get("body").unwrap_or(&value);
+        let mut paths = Vec::new();
+        collect_legacy_object_references(body, &mut paths);
+        for path in paths {
+            // The question is what the closure *claims*, not what still
+            // resolves. A store that has been moved or deleted makes
+            // `store_from_object_path` fail, and that is exactly the case
+            // where deleting the projection would be a guess.
+            if names_a_store_object(&path) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Structural test for `<any store>/objects/<object-id>`, with no
+/// requirement that the store still exists.
+fn names_a_store_object(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    path.components()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| {
+            let (std::path::Component::Normal(objects), std::path::Component::Normal(id)) =
+                (pair[0], pair[1])
+            else {
+                return false;
+            };
+            objects == "objects" && id.to_str().is_some_and(store::is_object_id)
+        })
+}
+
+fn collect_legacy_object_references(value: &serde_json::Value, paths: &mut Vec<PathBuf>) {
+    match value {
+        serde_json::Value::String(text) => {
+            let path = Path::new(text);
+            if path.is_absolute() {
+                paths.push(path.to_path_buf());
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_legacy_object_references(value, paths);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if let (Some(id), Some(path)) = (
+                values.get("id").and_then(serde_json::Value::as_str),
+                values.get("path").and_then(serde_json::Value::as_str),
+            ) {
+                let path = Path::new(path);
+                if path.is_absolute()
+                    && store::is_object_id(id)
+                    && path.file_name() == Some(id.as_ref())
+                {
+                    paths.push(path.to_path_buf());
+                }
+            }
+            for value in values.values() {
+                collect_legacy_object_references(value, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn registration_for_store(root: &Path, store: Store) -> io::Result<Registration> {
     let canonical = root.canonicalize()?;
     let entry = store.roots()?.into_iter().find(|entry| {
         entry
@@ -1329,6 +1586,14 @@ fn registration_for(root: &Path) -> io::Result<Registration> {
             entry,
         }),
     )
+}
+
+#[cfg(test)]
+fn registration_for(root: &Path) -> io::Result<Registration> {
+    let Some(store) = originating_store(root)? else {
+        return Ok(Registration::Unknown);
+    };
+    registration_for_store(root, store)
 }
 
 /// Remove cached x projections. The store objects remain available for the
@@ -1360,6 +1625,38 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         }
         matched += 1;
         let ecosystem = candidate_ecosystem(&candidate.path);
+        // Origin metadata is only a hint until the originating store is
+        // protected. Never delete an x projection whose store cannot be
+        // recovered, and never use the caller's current BLANKET_STORE as a
+        // substitute for that provenance.
+        let origin = originating_store(&candidate.path)?;
+        if origin.is_none() && closure_claims_an_object(&candidate.path)? {
+            // An unresolved ownership claim is a named skip, never permission
+            // to delete. The caller's current BLANKET_STORE is not evidence
+            // about this candidate: the projection can belong to a store that
+            // is not the one this invocation happens to be pointed at.
+            println!(
+                "blanket: skipped x environment {} (it claims store objects whose originating store could not be recovered; restore that store's closure, or remove the directory yourself once you know nothing is using it)",
+                candidate.path.display()
+            );
+            skipped += 1;
+            continue;
+        }
+        // An empty projection claims nothing, so there is no originating
+        // store to protect and the x-root lock below is the whole guard.
+        let unowned = origin.is_none();
+        let origin_store = match origin {
+            Some(store) => store,
+            None => Store::open()?,
+        };
+        let Some(activity) = origin_store.try_activity_exclusive()? else {
+            println!(
+                "blanket: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
+                candidate.path.display()
+            );
+            skipped += 1;
+            continue;
+        };
         let Some(_lock) = lock_x_root_at(candidate.x_dir.as_raw_fd(), &candidate.name, true, true)?
         else {
             println!(
@@ -1369,11 +1666,33 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             skipped += 1;
             continue;
         };
-        let registration = registration_for(&candidate.path)?;
-        // The candidate descriptor belongs to the directory that passed the
-        // containment checks. Removing by pathname here would let a rename
-        // followed by a symlink replacement redirect deletion elsewhere.
-        store::remove_tree_at(candidate.directory.as_raw_fd())?;
+        let _project_lock = origin_store.project_lock(&candidate.path)?;
+        // Re-read the untrusted origin after both guards. A changed marker is
+        // a race, not permission to remove the candidate. An unowned
+        // projection must still be unowned: gaining a claim while it was
+        // being locked is the same race.
+        match originating_store(&candidate.path)? {
+            Some(revalidated_store) if !unowned => {
+                if revalidated_store.root != origin_store.root {
+                    println!(
+                        "blanket: skipped x environment {} (originating store changed while it was being locked; retry later)",
+                        candidate.path.display()
+                    );
+                    skipped += 1;
+                    continue;
+                }
+            }
+            None if unowned && !closure_claims_an_object(&candidate.path)? => {}
+            _ => {
+                println!(
+                    "blanket: skipped x environment {} (origin changed while it was being locked; retry later)",
+                    candidate.path.display()
+                );
+                skipped += 1;
+                continue;
+            }
+        }
+        let registration = registration_for_store(&candidate.path, origin_store.clone())?;
         let current = match stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes()) {
             Ok(current) => current,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1386,6 +1705,19 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             }
             Err(error) => return Err(error),
         };
+        if stat_identity(&current) != candidate.identity || !stat_is_real_directory(&current) {
+            println!(
+                "blanket: skipped x environment {} (it disappeared or changed; retry later)",
+                candidate.path.display()
+            );
+            skipped += 1;
+            continue;
+        }
+        // The candidate descriptor belongs to the directory that passed the
+        // containment checks. Removing by pathname here would let a rename
+        // followed by a symlink replacement redirect deletion elsewhere.
+        store::remove_tree_at(candidate.directory.as_raw_fd())?;
+        let current = stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes())?;
         if stat_identity(&current) != candidate.identity || !stat_is_real_directory(&current) {
             println!(
                 "blanket: skipped x environment {} (it disappeared or changed; retry later)",
@@ -1408,16 +1740,12 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         {
             return Err(io::Error::last_os_error());
         }
-        // The environment is gone, so its lock file has nothing left to
-        // protect. Drop it while the exclusive lock is still held to keep
-        // `.locks` bounded; a later runner recreates it.
-        remove_x_root_lock_at(candidate.x_dir.as_raw_fd(), &candidate.name)?;
         if ecosystem == Some("node") {
             removed_node = true;
         }
         match registration {
             Registration::Found { store, entry } => {
-                store.remove_root_entry(&entry)?;
+                store.remove_root_entry_with_activity(&activity, &entry)?;
                 println!(
                     "blanket: removed x environment {}",
                     candidate.path.display()
@@ -1427,11 +1755,20 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
                 "blanket: removed x environment {} (no matching registry entry in its originating store)",
                 candidate.path.display()
             ),
+            #[cfg(test)]
             Registration::Unknown => println!(
                 "blanket: removed x environment {} (registry entry could not be dropped: originating store not found)",
                 candidate.path.display()
             ),
         }
+        // Only now has the environment stopped existing anywhere: the tree is
+        // gone and so is its registry entry. Unlinking the lock before the
+        // registry removal left a window in which a fresh runner could take a
+        // new lock on the same name while the originating store still listed
+        // the environment as registered. This still runs under the exclusive
+        // lock taken above, so `.locks` stays bounded; a later runner
+        // recreates the file.
+        remove_x_root_lock_at(candidate.x_dir.as_raw_fd(), &candidate.name)?;
         removed += 1;
     }
     if matched == 0 {
@@ -1503,16 +1840,25 @@ pub fn run(
                 // when its projected executable already exists.
                 let ready = x_request_is_ready(&store, &root, "python", &executable)?;
                 if !ready {
-                    write_x_request(&root, ecosystem, package, version, "realizing")?;
+                    write_x_request_for_store(
+                        &root,
+                        &store,
+                        ecosystem,
+                        package,
+                        version,
+                        "realizing",
+                    )?;
                     realize_python(&store, activity, platform, &root, package, version)?;
-                    write_x_request(&root, ecosystem, package, version, "ready")?;
+                    write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
                 } else {
                     // `x_request_is_ready` already validated this projection
                     // against the store and the active policy. Validating it
                     // again would narrate and queue every persisted exception
                     // twice.
                     if !x_request_file_exists(&root) {
-                        write_x_request(&root, ecosystem, package, version, "ready")?;
+                        write_x_request_for_store(
+                            &root, &store, ecosystem, package, version, "ready",
+                        )?;
                     }
                 }
                 if !executable.is_file() {
@@ -1531,13 +1877,22 @@ pub fn run(
                 let executable = node_modules.join(".bin").join(bin);
                 let ready = x_request_is_ready(&store, &root, "node", &executable)?;
                 if !ready {
-                    write_x_request(&root, ecosystem, package, version, "realizing")?;
+                    write_x_request_for_store(
+                        &root,
+                        &store,
+                        ecosystem,
+                        package,
+                        version,
+                        "realizing",
+                    )?;
                     realize_node(&store, activity, platform, &root, package, version)?;
-                    write_x_request(&root, ecosystem, package, version, "ready")?;
+                    write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
                 } else {
                     // Already validated by `x_request_is_ready`; see above.
                     if !x_request_file_exists(&root) {
-                        write_x_request(&root, ecosystem, package, version, "ready")?;
+                        write_x_request_for_store(
+                            &root, &store, ecosystem, package, version, "ready",
+                        )?;
                     }
                 }
                 if !executable.is_file() {
@@ -2119,6 +2474,7 @@ mod tests {
                 package: "httpie".into(),
                 version: None,
                 state: Some("ready".into()),
+                store_root: None,
             },
             &from
         ));

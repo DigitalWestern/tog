@@ -602,7 +602,15 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
         let _ = crate::store::remove_tree(&work);
         return Err(e);
     }
-    store.commit(&identity, &work, &[]).map(|(path, _)| path)
+    store
+        .commit_with_activity_and_deps(
+            &activity,
+            &identity,
+            &work,
+            &[],
+            &crate::store::ObjectDeps::new(),
+        )
+        .map(|(path, _)| path)
 }
 
 #[cfg(test)]

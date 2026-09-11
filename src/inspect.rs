@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -437,15 +438,27 @@ fn node_projection_state(dir: &Path, body: &Value) -> State {
     let Some(projection_id) = body["projection_id"].as_str() else {
         return State::ProjectionMissing("node_modules".into());
     };
-    let Some(home) = store_home_from_object(Path::new(env_text)) else {
-        return State::ProjectionMissing("node_modules".into());
+    let expected_root = if let Some(path) = body["forest_path"].as_str() {
+        let path = PathBuf::from(path);
+        if path.file_name().and_then(|name| name.to_str()) != Some("node_modules") {
+            return State::ProjectionMissing("node_modules".into());
+        }
+        let Some(root) = path.parent().map(Path::to_path_buf) else {
+            return State::ProjectionMissing("node_modules".into());
+        };
+        root
+    } else {
+        let Some(home) = store_home_from_object(Path::new(env_text)) else {
+            return State::ProjectionMissing("node_modules".into());
+        };
+        let Ok(project_key) = dir
+            .canonicalize()
+            .map(|path| hex::encode(Sha256::digest(path.as_os_str().as_bytes()))[..32].to_string())
+        else {
+            return State::ProjectionMissing("node_modules".into());
+        };
+        home.join("forests").join(project_key).join(projection_id)
     };
-    let Ok(project_key) = dir.canonicalize().map(|path| {
-        hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()))[..32].to_string()
-    }) else {
-        return State::ProjectionMissing("node_modules".into());
-    };
-    let expected_root = home.join("forests").join(project_key).join(projection_id);
     let Some(expected) = expected_root.join("node_modules").canonicalize().ok() else {
         return State::ProjectionMissing("node_modules".into());
     };

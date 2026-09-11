@@ -6,7 +6,7 @@
 //! to the native-libs object. macOS has no native pin yet and fails before it
 //! touches the store or network.
 
-use crate::fetch::download_verified_held;
+use crate::fetch::{download_verified_held, Digest as FetchDigest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -598,7 +598,12 @@ pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<Nativ
         return Err(error);
     }
     validate_layout(&work)?;
-    let (object, _) = store.commit(&identity, &work, &[])?;
+    let mut deps = crate::store::ObjectDeps::new();
+    for package in packages {
+        deps.cache_digest(FetchDigest::sha256(package.sha256)?);
+    }
+    let (object, _) =
+        store.commit_with_activity_and_deps(&activity, &identity, &work, &[], &deps)?;
     validate_layout(&object)?;
     Ok(NativeLibSet {
         id,

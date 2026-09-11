@@ -20,6 +20,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -894,7 +895,14 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(staged.join("rebar3"), fs::Permissions::from_mode(0o755))?;
         }
-        store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+        let mut deps = crate::store::ObjectDeps::new();
+        deps.cache_digest(Digest::sha256(pin.sha256)?);
+        deps.cache_digest(Digest::sha256(ELIXIR_SHA256)?);
+        deps.cache_digest(Digest::sha512(HEX_SHA512)?);
+        deps.cache_digest(Digest::sha512(REBAR3_SHA512)?);
+        store
+            .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
+            .map(|(path, _)| path)
     })();
     if result.is_err() {
         let _ = crate::store::remove_tree(&staged);
@@ -1458,7 +1466,14 @@ pub fn realize_deps(
         }
     }
     let _ = crate::store::remove_tree(&scratch);
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    let mut deps = crate::store::ObjectDeps::new();
+    deps.object_id(&crate::store::object_id_from_path(beam_obj)?)?;
+    for dep in &plan.deps {
+        deps.cache_digest(Digest::sha256(&dep.outer_sha256)?);
+    }
+    store
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
+        .map(|(path, _)| path)
 }
 
 /// The ONE forest path a project's deps projection may live at: derived
@@ -1469,17 +1484,17 @@ pub fn expected_projection(
     project_dir: &Path,
     deps_obj: &Path,
 ) -> io::Result<PathBuf> {
-    let home = store
-        .root
-        .parent()
-        .ok_or_else(|| err("cannot locate blanket home"))?;
-    let key =
-        hex::encode(&Sha256::digest(project_dir.canonicalize()?.to_string_lossy().as_bytes())[..8]);
+    let key = hex::encode(&Sha256::digest(project_dir.canonicalize()?.as_os_str().as_bytes())[..8]);
     let obj_id = deps_obj
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| err("deps object id not UTF-8"))?;
-    Ok(home.join("forests").join(key).join(obj_id).join("hex-deps"))
+    Ok(store
+        .root
+        .join("forests")
+        .join(key)
+        .join(obj_id)
+        .join("hex-deps"))
 }
 
 /// Project: clonefile the deps object into a writable per-project tree
@@ -1496,8 +1511,24 @@ pub fn project_elixir_env(
 ) -> io::Result<PathBuf> {
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
-    let store = Store::open()?;
+    let store = crate::project::store_from_object_path(&beam_obj)
+        .ok_or_else(|| err("BEAM object is not in a Blanket store"))?;
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let project_lock = store.project_lock(project_dir)?;
+    store.ensure_namespace(Path::new("forests"))?;
+    let mut refs = crate::project::ClosureRefs::new();
+    refs.object_path(&store, &activity, &beam_obj)?;
+    refs.object_path(&store, &activity, &deps_obj)?;
+    refs.forest(&store, &activity, &proj_dir)?;
+    // Protect the dependency projection before cloning or publishing it.
+    crate::project::persist_root_for_refs_with_project_lock(
+        project_dir,
+        &store,
+        &activity,
+        &refs,
+        &project_lock,
+    )?;
     if fresh && proj_dir.exists() {
         crate::store::remove_tree(&proj_dir)?;
     }
@@ -1510,7 +1541,7 @@ pub fn project_elixir_env(
         if tmp.exists() {
             crate::store::remove_tree(&tmp)?;
         }
-        crate::project::clone_tree_for(&deps_obj, &tmp, platform)?;
+        crate::project::clone_tree_for_store(&store, &deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
@@ -1520,7 +1551,7 @@ pub fn project_elixir_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
-    crate::project::write_closure(
+    crate::project::write_closure_with_project_lock(
         project_dir,
         "elixir",
         serde_json::json!({
@@ -1532,6 +1563,10 @@ pub fn project_elixir_env(
             "beam_fingerprint": beam_fingerprint(platform)?,
             "plan": plan,
         }),
+        &store,
+        &activity,
+        refs,
+        &project_lock,
     )?;
     Ok(proj_dir)
 }

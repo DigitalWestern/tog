@@ -96,9 +96,16 @@ pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> 
     let tarball = download_verified_digest_held(store, pin.url, &Digest::sha512(pin.sha512)?)?;
     let staged = store.stage_with_activity(&activity)?;
     extract_sdk_archive_for(store, &tarball, &staged)?;
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    store
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            deps.cache_digest(Digest::sha512(pin.sha512)?);
+            deps
+        })
+        .map(|(path, _)| path)
 }
 
+#[cfg(test)]
 fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
     let st = Command::new("/usr/bin/tar")
         .args(["-xzf"])
@@ -1014,7 +1021,14 @@ pub fn realize_packages(
         }
     }
     let _ = crate::store::remove_tree(&scratch);
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    let mut deps = crate::store::ObjectDeps::new();
+    deps.object_id(&crate::store::object_id_from_path(&sdk_obj)?)?;
+    for raw_sha256 in raw_hashes.values() {
+        deps.cache_digest(Digest::sha256(raw_sha256)?);
+    }
+    store
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
+        .map(|(path, _)| path)
 }
 
 pub fn project_dotnet_env(
@@ -1024,6 +1038,11 @@ pub fn project_dotnet_env(
     plan: &DotnetPlan,
     lock_sha256: &str,
 ) -> io::Result<()> {
+    let sdk_obj = sdk_obj.canonicalize()?;
+    let packages_obj = packages_obj.canonicalize()?;
+    let store = crate::project::store_from_object_path(&sdk_obj)
+        .ok_or_else(|| err(".NET SDK object is not in a Blanket store"))?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -1031,6 +1050,9 @@ pub fn project_dotnet_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
+    let mut refs = crate::project::ClosureRefs::new();
+    refs.object_path(&store, &activity, &sdk_obj)?;
+    refs.object_path(&store, &activity, &packages_obj)?;
     crate::project::write_closure(
         project_dir,
         "dotnet",
@@ -1040,6 +1062,9 @@ pub fn project_dotnet_env(
             "packages_lock_sha256": lock_sha256,
             "plan": plan,
         }),
+        &store,
+        &activity,
+        refs,
     )
 }
 

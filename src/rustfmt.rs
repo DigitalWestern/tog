@@ -1,7 +1,7 @@
 //! The pinned Rust formatting component used by `blanket fmt`.
 
 use crate::cargo;
-use crate::fetch::download_verified_held;
+use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::sandbox::BuildSpec;
 use crate::store::Store;
@@ -107,7 +107,7 @@ pub fn ensure_rustfmt(
     let pin = component(platform)?;
     let identity = rustfmt_identity(platform, rust_version, &rust_object)?;
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -168,7 +168,19 @@ pub fn ensure_rustfmt(
     }
 
     store
-        .commit(&identity, &staged, &[])
+        .commit_with_deps(&identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            deps.object_id(
+                rust_object
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Rust object has no id")
+                    })?,
+            )?;
+            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps
+        })
         .map(|(path, _)| path)
         .map_err(|error| io::Error::new(error.kind(), format!("commit rustfmt object: {error}")))
 }

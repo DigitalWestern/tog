@@ -1,6 +1,6 @@
 //! The Cargo tailor: Cargo.lock importer and registry vendor realization.
 
-use crate::fetch::download_verified_held;
+use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -179,7 +179,13 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
     extract_rust_components_for(store, &staged, platform, &components, &tarballs)?;
 
     store
-        .commit(&identity, &staged, &[])
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            for component in &components {
+                deps.cache_digest(Digest::sha256(component.sha256)?);
+            }
+            deps
+        })
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
 }
@@ -861,8 +867,27 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         })?;
     }
 
+    let mut deps = crate::store::ObjectDeps::new();
+    for krate in &crates {
+        if krate.git.is_some() {
+            let (_, object) = git_roots
+                .iter()
+                .find(|(candidate, _)| {
+                    candidate.name == krate.name && candidate.version == krate.version
+                })
+                .ok_or_else(|| {
+                    err(format!(
+                        "missing realized git source for {}@{}",
+                        krate.name, krate.version
+                    ))
+                })?;
+            deps.object_id(&crate::store::object_id_from_path(object)?)?;
+        } else {
+            deps.cache_digest(Digest::sha256(&krate.sha256)?);
+        }
+    }
     store
-        .commit(&identity, &staged, &[])
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
 }
@@ -1114,6 +1139,9 @@ pub fn project_cargo_env(
     let project_dir = project_dir.canonicalize()?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
+    let store = crate::project::store_from_object_path(&rust_obj)
+        .ok_or_else(|| err("Rust object is not in a Blanket store"))?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
     let cargo_home = project_child_dir(&project_dir, ".blanket/cargo-home")?;
@@ -1157,16 +1185,35 @@ pub fn project_cargo_env(
             "id": id,
         }))
     };
-    crate::project::write_closure(
-        &project_dir,
-        "cargo",
-        serde_json::json!({
-            "rust_object": object_ref(&rust_obj)?,
-            "vendor_object": object_ref(&vendor_obj)?,
-            "cargo_lock_sha256": lock_digest,
-            "plan": plan,
-        }),
-    )
+    let body = serde_json::json!({
+        "rust_object": object_ref(&rust_obj)?,
+        "vendor_object": object_ref(&vendor_obj)?,
+        "cargo_lock_sha256": lock_digest,
+        "plan": plan,
+    });
+    let valid_objects = [rust_obj.as_path(), vendor_obj.as_path()]
+        .iter()
+        .all(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::store::is_object_id)
+        });
+    if !valid_objects {
+        #[cfg(test)]
+        {
+            return crate::project::write_closure_legacy(&project_dir, "cargo", body);
+        }
+        #[cfg(not(test))]
+        {
+            return Err(err(
+                "Cargo closure references must name complete store objects",
+            ));
+        }
+    }
+    let mut refs = crate::project::ClosureRefs::new();
+    refs.object_path(&store, &activity, &rust_obj)?;
+    refs.object_path(&store, &activity, &vendor_obj)?;
+    crate::project::write_closure(&project_dir, "cargo", body, &store, &activity, refs)
 }
 
 /// Build a Cargo project in the existing network-denied seatbelt sandbox.

@@ -1,4 +1,4 @@
-use crate::fetch::download_verified_held;
+use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -223,7 +223,7 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
         .ok_or_else(|| no_pin("uv", platform, "stage 2"))?;
     let identity = uv_identity(pin);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -241,7 +241,13 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     if !status.success() || !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    store
+        .commit_with_deps(&identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps
+        })
+        .map(|(path, _)| path)
 }
 
 /// Ensure the given CPython is realized in the store. Returns the object path
@@ -269,7 +275,7 @@ pub(crate) fn ensure_python_for(
     }
     let identity = cpython_identity(pin);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -291,7 +297,13 @@ pub(crate) fn ensure_python_for(
             "tar extraction failed",
         ));
     }
-    store.commit(&identity, &staged, &[]).map(|(path, _)| path)
+    store
+        .commit_with_deps(&identity, &staged, &[], &{
+            let mut deps = crate::store::ObjectDeps::new();
+            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps
+        })
+        .map(|(path, _)| path)
 }
 
 #[cfg(test)]

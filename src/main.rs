@@ -362,8 +362,12 @@ fn run_sbom(output: Option<&Path>) -> io::Result<()> {
 }
 
 fn run_store_roots() -> io::Result<()> {
-    for root in store::Store::open()?.roots()? {
-        println!("{}  {}", root.key, root.path.display());
+    for root in store::Store::open()?.root_diagnostics()? {
+        match (root.path, root.problem) {
+            (Some(path), None) => println!("{}  {}", root.key, path.display()),
+            (_, Some(problem)) => println!("{}  <invalid: {}>", root.key, problem),
+            _ => println!("{}  <invalid root record>", root.key),
+        }
     }
     Ok(())
 }
@@ -403,8 +407,18 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
         store.lookup_root(key)?;
     }
     for project in &args.register {
-        let entry = store.register_root(project)?;
-        writeln!(stdout, "blanket: registered root {}", entry.path.display())?;
+        if options.dry_run {
+            let record = store.root_record_from_project(project)?;
+            writeln!(
+                stdout,
+                "blanket: would register root {} ({} objects)",
+                record.project_path.display(),
+                record.objects.len()
+            )?;
+        } else {
+            let entry = store.register_root_from_project_with_activity(&activity, project)?;
+            writeln!(stdout, "blanket: registered root {}", entry.path.display())?;
+        }
     }
     for key in &args.forget {
         if options.dry_run {
@@ -1491,6 +1505,9 @@ fn run_fmt(
             "id": id,
         }))
     };
+    let mut refs = project::ClosureRefs::new();
+    refs.object_path(&store, &activity, &rust_object)?;
+    refs.object_path(&store, &activity, &rustfmt_object)?;
     project::write_closure(
         &workspace_root,
         "rustfmt",
@@ -1500,6 +1517,9 @@ fn run_fmt(
             "rust_version": rust_version,
             "workspace_root": workspace_root.display().to_string(),
         }),
+        &store,
+        &activity,
+        refs,
     )?;
     let invocation_dir = cwd.canonicalize()?;
     let status = rustfmt::run_sandboxed(

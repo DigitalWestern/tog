@@ -2,7 +2,7 @@
 //! without execution and, when needed, realized as a separate Python env.
 
 use crate::build_requires::{self, ArchiveInfo};
-use crate::fetch::download_verified_held;
+use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::project;
 use crate::sandbox::Sandbox;
@@ -677,7 +677,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let fast_identity = sdist_identity(platform, pkg, pin);
     if fast_sdist {
         let fast_id = fast_identity.object_id();
-        if store.has(&fast_id) {
+        if store.has(&fast_id)? {
             crate::policy::check_cached(store, &fast_id)?;
             return find_wheel(&store.object_path(&fast_id));
         }
@@ -770,7 +770,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         )
     };
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has(&id)? {
         crate::policy::check_cached(store, &id)?;
         let _ = crate::store::remove_tree(&work);
         return find_wheel(&store.object_path(&id));
@@ -842,7 +842,18 @@ pub(crate) fn build_sdist_wheel_at_depth(
     fs::copy(&built, staged.join(built.file_name().unwrap()))?;
     let _ = crate::store::remove_tree(&work);
     let candidate = crate::policy::object_exceptions();
-    let (object, _) = store.commit(&identity, &staged, &candidate)?;
+    let mut deps = crate::store::ObjectDeps::new();
+    deps.object_id(&crate::store::object_id_from_path(&cpython_obj)?)?;
+    deps.object_id(&crate::store::object_id_from_path(&build_env)?)?;
+    deps.cache_digest(Digest::sha256(&pkg.sha256)?);
+    if let Some(inputs) = &rust_inputs {
+        deps.object_id(&inputs.rust_id)?;
+        deps.object_id(&inputs.vendor_id)?;
+    }
+    if let Some(native_libs) = native_libs.as_ref() {
+        deps.object_id(&crate::store::object_id_from_path(&native_libs.path)?)?;
+    }
+    let (object, _) = store.commit_with_deps(&identity, &staged, &candidate, &deps)?;
     find_wheel(&object)
 }
 
