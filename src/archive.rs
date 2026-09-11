@@ -25,6 +25,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::platform::Platform;
+use crate::store::Store;
 
 /// One archive member as tar lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,11 +104,33 @@ pub fn list(
     archive: &Path,
     compression: Compression,
 ) -> io::Result<Vec<Entry>> {
-    let output = tar_command(platform)
+    list_inner(platform, archive, compression, None)
+}
+
+/// Store-consuming archive listing. The tar child is supervised for the
+/// complete read, so GC cannot observe the store as idle while a caller still
+/// depends on an extracted/cache input.
+pub(crate) fn list_for_store(
+    store: &Store,
+    platform: Platform,
+    archive: &Path,
+    compression: Compression,
+) -> io::Result<Vec<Entry>> {
+    list_inner(platform, archive, compression, Some(store))
+}
+
+fn list_inner(
+    platform: Platform,
+    archive: &Path,
+    compression: Compression,
+    store: Option<&Store>,
+) -> io::Result<Vec<Entry>> {
+    let mut command = tar_command(platform);
+    command
         .args(TAR_PARSE_FLAGS)
         .arg(format!("-tv{}f", compression.flag()))
-        .arg(archive)
-        .output()
+        .arg(archive);
+    let output = output_for(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
     if !output.status.success() {
         return Err(err(format!(
@@ -131,7 +154,7 @@ pub fn list(
     // column model is wrong for this archive, and a wrong column model means
     // `validate` is inspecting text that is not the name. Refuse rather than
     // extract on a guess.
-    let names = list_names(platform, archive, compression)?;
+    let names = list_names(platform, archive, compression, store)?;
     if names.len() != entries.len()
         || names
             .iter()
@@ -153,12 +176,14 @@ fn list_names(
     platform: Platform,
     archive: &Path,
     compression: Compression,
+    store: Option<&Store>,
 ) -> io::Result<Vec<String>> {
-    let output = tar_command(platform)
+    let mut command = tar_command(platform);
+    command
         .args(TAR_PARSE_FLAGS)
         .arg(format!("-t{}f", compression.flag()))
-        .arg(archive)
-        .output()
+        .arg(archive);
+    let output = output_for(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
     if !output.status.success() {
         return Err(err(format!(
@@ -444,16 +469,57 @@ pub fn extract_validated(
     compression: Compression,
     entries: &[Entry],
 ) -> io::Result<()> {
+    extract_validated_inner(
+        platform,
+        archive,
+        destination,
+        strip,
+        compression,
+        entries,
+        None,
+    )
+}
+
+pub(crate) fn extract_validated_for_store(
+    store: &Store,
+    platform: Platform,
+    archive: &Path,
+    destination: &Path,
+    strip: usize,
+    compression: Compression,
+    entries: &[Entry],
+) -> io::Result<()> {
+    extract_validated_inner(
+        platform,
+        archive,
+        destination,
+        strip,
+        compression,
+        entries,
+        Some(store),
+    )
+}
+
+fn extract_validated_inner(
+    platform: Platform,
+    archive: &Path,
+    destination: &Path,
+    strip: usize,
+    compression: Compression,
+    entries: &[Entry],
+    store: Option<&Store>,
+) -> io::Result<()> {
     validate(entries, strip)?;
-    let status = tar_command(platform)
+    let mut command = tar_command(platform);
+    command
         .args(TAR_PARSE_FLAGS)
         .arg(format!("-x{}f", compression.flag()))
         .arg(archive)
         .arg("-C")
         .arg(destination)
         .arg("--strip-components")
-        .arg(strip.to_string())
-        .status()
+        .arg(strip.to_string());
+    let status = status_for(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;
     if !status.success() {
         return Err(err(format!(
@@ -463,6 +529,23 @@ pub fn extract_validated(
         )));
     }
     Ok(())
+}
+
+fn output_for(command: &mut Command, store: Option<&Store>) -> io::Result<std::process::Output> {
+    match store {
+        Some(store) => crate::supervise::output_owned(command, store),
+        None => command.output(),
+    }
+}
+
+fn status_for(
+    command: &mut Command,
+    store: Option<&Store>,
+) -> io::Result<std::process::ExitStatus> {
+    match store {
+        Some(store) => crate::supervise::status_owned(command, store),
+        None => command.status(),
+    }
 }
 
 #[cfg(test)]

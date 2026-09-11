@@ -152,6 +152,7 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
 
 pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let components = rust_components(platform)?;
     if version != RUST_VERSION {
         return Err(err(format!(
@@ -160,7 +161,7 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
     }
     let identity = rust_identity(platform, &components);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -174,8 +175,8 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
         )?);
     }
 
-    let staged = store.stage()?;
-    extract_rust_components(&staged, platform, &components, &tarballs)?;
+    let staged = store.stage_with_activity(&activity)?;
+    extract_rust_components_for(store, &staged, platform, &components, &tarballs)?;
 
     store
         .commit(&identity, &staged, &[])
@@ -183,6 +184,42 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
         .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
 }
 
+fn extract_rust_components_for(
+    store: &Store,
+    staged: &Path,
+    platform: Platform,
+    components: &[&RustComponent],
+    tarballs: &[impl AsRef<Path>],
+) -> io::Result<()> {
+    if components.len() != tarballs.len() {
+        return Err(err("Rust component/archive count mismatch"));
+    }
+    for (component, tarball) in components.iter().zip(tarballs) {
+        let tarball: &Path = tarball.as_ref();
+        let mut command = Command::new("/usr/bin/tar");
+        command
+            .args(["-xJf"])
+            .arg(tarball.as_os_str())
+            .args(["-C"])
+            .arg(staged)
+            .args(["--strip-components", "2"]);
+        let status = crate::supervise::status_owned(&mut command, store).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("spawn tar for {}: {e}", component.component),
+            )
+        })?;
+        if !status.success() {
+            return Err(err(format!(
+                "{} tarball extraction failed",
+                component.component
+            )));
+        }
+    }
+    validate_rust_layout(staged, platform)
+}
+
+#[cfg(test)]
 fn extract_rust_components(
     staged: &Path,
     platform: Platform,
@@ -689,9 +726,10 @@ fn reject_workspace_inheritance(crate_dir: &Path, name: &str) -> io::Result<()> 
 }
 
 fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -728,18 +766,19 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         archives.push(archive);
     }
 
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(&activity)?;
     for (krate, root) in &git_roots {
         // Cargo's directory source wants the crate's own directory, so a
         // workspace repository is searched for the crate the lock names.
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         let source_dir = crate_dir_in_repo(root, &krate.name, &krate.version)?;
-        crate::project::clone_tree(&source_dir, &crate_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
-            )
-        })?;
+        crate::project::clone_tree_for_store(store, &source_dir, &crate_dir, Platform::host()?)
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
+                )
+            })?;
         crate::gitsrc::validate_symlinks(&crate_dir).map_err(|e| {
             io::Error::new(
                 e.kind(),
@@ -774,19 +813,19 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
                 format!("{}@{}: create staging dir: {e}", krate.name, krate.version),
             )
         })?;
-        let status = Command::new("/usr/bin/tar")
+        let mut command = Command::new("/usr/bin/tar");
+        command
             .args(["-xzf"])
             .arg(&*archive)
             .args(["-C"])
             .arg(&crate_dir)
-            .args(["--strip-components", "1"])
-            .status()
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}@{}: spawn tar: {e}", krate.name, krate.version),
-                )
-            })?;
+            .args(["--strip-components", "1"]);
+        let status = crate::supervise::status(&mut command, &activity).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("{}@{}: spawn tar: {e}", krate.name, krate.version),
+            )
+        })?;
         if !status.success() {
             return Err(err(format!(
                 "{}@{}: crate extraction failed",
@@ -1138,6 +1177,7 @@ pub fn build_sandboxed(
     vendor_obj: &Path,
     args: &[String],
 ) -> io::Result<()> {
+    let store = Store::open()?;
     reject_user_config(args)?;
     let project_dir = project_dir.canonicalize()?;
     let rust_obj = rust_obj.canonicalize()?;
@@ -1201,7 +1241,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
     };
-    let result = crate::sandbox::run_build_spec_on(platform, &spec);
+    let result = crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store);
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
         io::Error::new(e.kind(), format!(
@@ -1799,6 +1839,9 @@ checksum = "{hash_b}"
 
     #[test]
     fn realizes_vendor_and_writes_complete_checksums() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
             let source = root.join("source");
             fs::create_dir_all(&source).unwrap();
@@ -1834,6 +1877,9 @@ checksum = "{hash_b}"
 
     #[test]
     fn rejects_symlinked_crate_entries() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
             let source = root.join("source");
             fs::create_dir_all(&source).unwrap();

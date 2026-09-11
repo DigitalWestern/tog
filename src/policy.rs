@@ -239,6 +239,16 @@ pub fn object_exceptions() -> Vec<Exception> {
 
 /// Refuse a cached object when its recorded exceptions are denied now.
 pub fn check_cached(store: &Store, id: &str) -> io::Result<()> {
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    check_cached_with_activity(store, &activity, id)
+}
+
+pub fn check_cached_with_activity(
+    store: &Store,
+    activity: &crate::activity::StoreActivity,
+    id: &str,
+) -> io::Result<()> {
+    store.require_activity(activity, "cached policy check")?;
     let exceptions = store.exceptions(id)?;
     check_exception_set(id, &exceptions)?;
     for exception in &exceptions {

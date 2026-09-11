@@ -1,7 +1,7 @@
 use blanket::{
-    cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest, npm, npm_lock_import,
-    platform::Platform, policy, project, pypi, pyselect, python, ruby, rustfmt, sbom, store, types,
-    ui, xrun,
+    activity::ActivityMode, cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest, npm,
+    npm_lock_import, platform::Platform, policy, project, pypi, pyselect, python, ruby, rustfmt,
+    sbom, store, supervise, types, ui, xrun,
 };
 
 use std::io;
@@ -96,7 +96,7 @@ fn main() {
         }
     };
     let code = match dispatch(command) {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(error) => {
             ui::error(&error.to_string());
             cli::EXIT_FAILURE
@@ -159,13 +159,13 @@ fn resolve(pending: Pending) -> io::Result<cli::Command> {
     }
 }
 
-fn dispatch(command: cli::Command) -> io::Result<()> {
+fn dispatch(command: cli::Command) -> io::Result<i32> {
     use cli::Command::*;
     // Maintenance commands do not need host-platform validation. In
     // particular, GC must remain usable when inspecting a copied store on a
     // host that cannot realize its objects.
     match command {
-        Gc(args) => return run_gc(&args),
+        Gc(args) => return run_gc(&args).map(|_| 0),
         XClean {
             ecosystem,
             from,
@@ -175,50 +175,72 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
                 ecosystem,
                 from,
                 tool,
+            })
+            .map(|_| 0);
+        }
+        StoreRoots => return run_store_roots().map(|_| 0),
+        StorePath => {
+            return store::Store::open().map(|s| {
+                println!("{}", s.root.display());
+                0
             });
         }
-        StoreRoots => return run_store_roots(),
-        StorePath => return store::Store::open().map(|s| println!("{}", s.root.display())),
         Completions { shell } => {
             print!("{}", cli::completions(shell));
-            return Ok(());
+            return Ok(0);
         }
         Doctor { json } => {
+            let store = store::Store::open()?;
+            let _activity = store.activity(ActivityMode::Shared)?;
             let checks = inspect::doctor(&project_dir());
             print!("{}", inspect::render_doctor(&checks, json)?);
             if checks
                 .iter()
                 .any(|check| check.level == inspect::Level::Fail)
             {
-                exit(cli::EXIT_FAILURE);
+                return Ok(cli::EXIT_FAILURE);
             }
-            return Ok(());
+            return Ok(0);
         }
         Ls {
             ref ecosystem,
             json,
         } => {
+            let store = store::Store::open()?;
+            let _activity = store.activity(ActivityMode::Shared)?;
             print!(
                 "{}",
                 inspect::ls(&project_dir(), ecosystem.as_deref(), json, ui::verbose())?
             );
-            return Ok(());
+            return Ok(0);
         }
         _ => {}
     }
     // Real subcommands validate the host once before any store-touching work.
     let platform = Platform::host()?;
+    // A package.json `fmt` script is deliberately resolved before opening the
+    // store. This preserves the cheap script path for a non-Rust project.
+    if let cli::Command::Fmt {
+        check,
+        ref ecosystem,
+        ref args,
+    } = command
+    {
+        return run_fmt(platform, check, ecosystem.as_deref(), args);
+    }
+    // Keep the operation protected from its first store read through its
+    // final child/projection use. Individual Store helpers acquire a short
+    // compatibility lease when called directly; this long-lived lease is
+    // what prevents GC from racing a CLI job.
+    let store = store::Store::open()?;
+    let _activity = store.activity(ActivityMode::Shared)?;
     match command {
-        Sync { fresh, strict } => run_sync(platform, fresh, strict),
-        Fmt {
-            check,
-            ecosystem,
-            args,
-        } => run_fmt(platform, check, ecosystem.as_deref(), &args),
-        Plan => run_plan(platform),
-        Build { args } => run_build(platform, &args),
-        Run { command } => run_run(platform, &command),
-        Sbom { output } => run_sbom(output.as_deref()),
+        Sync { fresh, strict } => run_sync(platform, fresh, strict).map(|_| 0),
+        Fmt { .. } => unreachable!("handled before opening the store"),
+        Plan => run_plan(platform, &store).map(|_| 0),
+        Build { args } => run_build(platform, &args, &store).map(|_| 0),
+        Run { command } => run_run(platform, &command, &store, &_activity),
+        Sbom { output } => run_sbom(output.as_deref()).map(|_| 0),
         Add {
             specs,
             dev,
@@ -231,7 +253,8 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
                 dev,
             },
             no_sync,
-        ),
+        )
+        .map(|_| 0),
         Remove {
             names,
             dev,
@@ -244,7 +267,8 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
                 dev,
             },
             no_sync,
-        ),
+        )
+        .map(|_| 0),
         Update { names, no_sync } => run_deps(
             platform,
             deps::Request {
@@ -253,7 +277,8 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
                 dev: false,
             },
             no_sync,
-        ),
+        )
+        .map(|_| 0),
         X {
             ecosystem,
             from,
@@ -275,6 +300,7 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
                     tool,
                     args,
                 },
+                &_activity,
             )
         }
         XClean { .. } => unreachable!("handled above"),
@@ -289,9 +315,9 @@ fn dispatch(command: cli::Command) -> io::Result<()> {
             }
             print!("{}", inspect::render_status(&dir, &rows, json)?);
             if !rows.iter().all(inspect::EcosystemStatus::is_synced) {
-                exit(cli::EXIT_FAILURE);
+                return Ok(cli::EXIT_FAILURE);
             }
-            Ok(())
+            Ok(0)
         }
         Gc(_) | StorePath | StoreRoots | Completions { .. } | Doctor { .. } | Ls { .. } => {
             unreachable!("handled above")
@@ -352,6 +378,10 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
     };
     let store = store::Store::open()?;
     let mut stdout = io::stdout().lock();
+    let Some(activity) = store.try_activity_exclusive()? else {
+        writeln!(stdout, "cleanup skipped: a Blanket job is using this store")?;
+        return Ok(());
+    };
     // Registering and forgetting the same root in one invocation is
     // ambiguous; compare the keys before either side touches the registry.
     for project in &args.register {
@@ -385,7 +415,7 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
                 entry.path.display()
             )?;
         } else {
-            let entry = store.forget_root(key)?;
+            let entry = store.forget_root_with_activity(&activity, key)?;
             writeln!(
                 stdout,
                 "blanket: forgot root {key} ({})",
@@ -434,7 +464,7 @@ struct CargoInputs {
 /// Workspace rooting is delegated to the pinned Cargo itself
 /// (`locate-project --workspace`): an ancestor-walk for Cargo.lock picks an
 /// unrelated outer lock when independent packages nest (Sol review, repro'd).
-fn locate_cargo_root(rust_obj: &Path, cwd: &Path) -> io::Result<PathBuf> {
+fn locate_cargo_root(rust_obj: &Path, cwd: &Path, store: &store::Store) -> io::Result<PathBuf> {
     let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
     command
         .args([
@@ -448,8 +478,7 @@ fn locate_cargo_root(rust_obj: &Path, cwd: &Path) -> io::Result<PathBuf> {
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
     ui::trace_command(&command);
-    let out = command
-        .output()
+    let out = supervise::output_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store cargo locate-project: {e}")))?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
@@ -471,9 +500,9 @@ fn load_cargo_inputs(
 ) -> io::Result<CargoInputs> {
     let rust_version = cargo::resolve_toolchain(platform, cwd)?;
     let rust_obj = cargo::ensure_rust_for(store, platform, rust_version)?;
-    let root = locate_cargo_root(&rust_obj, cwd)?;
+    let root = locate_cargo_root(&rust_obj, cwd, store)?;
     if !root.join("Cargo.lock").is_file() {
-        ensure_cargo_lock(&root, &rust_obj)?;
+        ensure_cargo_lock(&root, &rust_obj, store)?;
     }
     let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
     let plan = cargo::plan_cargo(&lock, rust_version)?;
@@ -485,7 +514,7 @@ fn load_cargo_inputs(
     })
 }
 
-fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
+fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> io::Result<()> {
     eprintln!(
         "blanket: no Cargo.lock; generating it with the store Rust toolchain \
          (network allowed, unsandboxed)..."
@@ -498,7 +527,7 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path) -> io::Result<()> {
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
     ui::trace_command(&command);
-    let status = command.status().map_err(|e| {
+    let status = supervise::status_owned(&mut command, store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -556,18 +585,17 @@ fn python_input_records(
     project::input_records(dir, &candidates)
 }
 
-fn read_plan(platform: Platform, dir: &Path) -> io::Result<PythonPlan> {
+fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
     let mut manifest = manifest::discover(platform, dir)?;
     let mut selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
     if manifest.requires_setup() {
-        let store = store::Store::open()?;
         let dynamic_dependencies = manifest.dynamic_dependencies;
         const MAX_SETUP_PROBES: usize = 3;
         let mut selection_history = vec![selection.pin.version.to_string()];
         let mut stabilized = false;
         for _ in 0..MAX_SETUP_PROBES {
             let probed_version = selection.pin.version;
-            if let Err(error) = manifest.prepare_setup(platform, dir, &store, probed_version) {
+            if let Err(error) = manifest.prepare_setup(platform, dir, store, probed_version) {
                 if !dynamic_dependencies {
                     return Err(error);
                 }
@@ -682,6 +710,7 @@ fn read_plan(platform: Platform, dir: &Path) -> io::Result<PythonPlan> {
                 locked_requirements(
                     platform,
                     dir,
+                    store,
                     &input,
                     &resolver_source,
                     pin.version,
@@ -693,6 +722,7 @@ fn read_plan(platform: Platform, dir: &Path) -> io::Result<PythonPlan> {
         locked_requirements(
             platform,
             dir,
+            store,
             &input,
             &resolver_source,
             pin.version,
@@ -801,6 +831,7 @@ fn is_fully_pinned(text: &str) -> bool {
 fn locked_requirements(
     platform: Platform,
     dir: &Path,
+    store: &store::Store,
     input: &str,
     source: &str,
     pyver: &str,
@@ -829,7 +860,7 @@ fn locked_requirements(
     }
     eprintln!("blanket: {input} is not hash-pinned; resolving with the store uv...");
     // Store-pinned uv, not host uv: a bare machine needs only blanket.
-    let uv = python::ensure_uv_for(&store::Store::open()?, platform)?.join("uv");
+    let uv = python::ensure_uv_for(store, platform)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut command = std::process::Command::new(&uv);
     command.args(["pip", "compile", compile_input, "--generate-hashes"]);
@@ -851,8 +882,7 @@ fn locked_requirements(
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
     ui::trace_command(&command);
-    let status = command
-        .status()
+    let status = supervise::status_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
@@ -876,13 +906,13 @@ fn lock_source_hash(pyver: &str, source: &str) -> String {
     hex::encode(Sha256::digest(format!("{pyver}\x00{source}").as_bytes()))
 }
 
-fn run_plan(platform: Platform) -> io::Result<()> {
+fn run_plan(platform: Platform, store: &store::Store) -> io::Result<()> {
     let dir = project_dir();
     policy::init(&dir, false)?;
-    ensure_npm_lock(platform, &dir)?;
+    ensure_npm_lock(platform, &dir, store)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let (plan, _selection, _inputs) = read_plan(platform, &dir)?;
+        let (plan, _selection, _inputs) = read_plan(platform, &dir, store)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
@@ -905,28 +935,24 @@ fn run_plan(platform: Platform) -> io::Result<()> {
         any = true;
     }
     if is_cargo_here(&dir) {
-        let store = store::Store::open()?;
-        let inputs = load_cargo_inputs(platform, &dir, &store)?;
+        let inputs = load_cargo_inputs(platform, &dir, store)?;
         println!("{}", serde_json::to_string_pretty(&inputs.plan)?);
         any = true;
     }
     if dir.join("go.mod").is_file() {
-        let store = store::Store::open()?;
-        let inputs = load_go_inputs(platform, &dir, &store)?;
+        let inputs = load_go_inputs(platform, &dir, store)?;
         println!("{}", serde_json::to_string_pretty(&inputs.plan)?);
         any = true;
     }
     if dir.join("Gemfile").is_file() {
-        let store = store::Store::open()?;
-        let ruby_obj = ruby::ensure_ruby_for(&store, platform)?;
-        let (plan, _) = ruby::plan_ruby(&store, &dir, &ruby_obj)?;
+        let ruby_obj = ruby::ensure_ruby_for(store, platform)?;
+        let (plan, _) = ruby::plan_ruby(store, &dir, &ruby_obj)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
     if dir.join("mix.exs").is_file() {
-        let store = store::Store::open()?;
-        let beam = elixir::ensure_beam_for(&store, platform)?;
-        let (plan, _) = elixir::plan_elixir(&store, &dir, &beam)?;
+        let beam = elixir::ensure_beam_for(store, platform)?;
+        let (plan, _) = elixir::plan_elixir(store, &dir, &beam)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
@@ -934,9 +960,8 @@ fn run_plan(platform: Platform) -> io::Result<()> {
         // Preflight before SDK realization: a broken layout should fail
         // loudly here, not after a toolchain download.
         dotnet::preflight(&dir)?;
-        let store = store::Store::open()?;
-        let sdk = dotnet::ensure_sdk_for(&store, platform)?;
-        let (plan, _) = dotnet::plan_dotnet(&store, &dir, &sdk)?;
+        let sdk = dotnet::ensure_sdk_for(store, platform)?;
+        let (plan, _) = dotnet::plan_dotnet(store, &dir, &sdk)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
         any = true;
     }
@@ -985,7 +1010,7 @@ fn load_go_inputs(platform: Platform, dir: &Path, store: &store::Store) -> io::R
 /// A package.json without a package-lock.json (bun/yarn/pnpm projects):
 /// delegate lock generation to npm, mirroring the uv flow for Python.
 /// Resolution is the ecosystem's job; realization is blanket's.
-fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
+fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<()> {
     if !dir.join("package.json").exists()
         || dir.join("package-lock.json").exists()
         || dir.join("pnpm-lock.yaml").exists()
@@ -1005,7 +1030,7 @@ fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
     eprintln!("blanket: no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
     // blanket. npm-cli's shebang is `env node`, so the store bin leads PATH.
-    let node = npm::ensure_node_for(&store::Store::open()?, platform)?;
+    let node = npm::ensure_node_for(store, platform)?;
     let path = format!(
         "{}:{}",
         node.join("bin").display(),
@@ -1018,7 +1043,7 @@ fn ensure_npm_lock(platform: Platform, dir: &Path) -> io::Result<()> {
     }
     command.current_dir(dir).env("PATH", path);
     ui::trace_command(&command);
-    let status = command.status().map_err(|e| {
+    let status = supervise::status_owned(&mut command, store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("run store npm ({}/bin/npm): {e}", node.display()),
@@ -1070,10 +1095,10 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     policy::init(&dir, strict)?;
     preflight_sync(platform, &dir)?;
     let store = store::Store::open()?;
-    ensure_npm_lock(platform, &dir)?;
+    ensure_npm_lock(platform, &dir, &store)?;
     let mut any = false;
     if has_python_input(&dir)? {
-        let (plan, selection, inputs) = read_plan(platform, &dir)?;
+        let (plan, selection, inputs) = read_plan(platform, &dir, &store)?;
         let env = project::realize_env(&store, platform, &plan)?;
         project::project_env_with_inputs(&dir, &env, &plan, &selection, &inputs)?;
         ui::synced(".venv", &env);
@@ -1229,7 +1254,7 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
 
 /// `blanket build [ecosystem] [args...]`: explicit ecosystem, or inferred
 /// when exactly one build-capable ecosystem is present (Sol review 4).
-fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
+fn run_build(platform: Platform, args: &[String], store: &store::Store) -> io::Result<()> {
     let cwd = project_dir();
     let (eco, rest): (&str, &[String]) = match args.first().map(String::as_str) {
         Some("cargo") => ("cargo", &args[1..]),
@@ -1299,7 +1324,6 @@ fn run_build(platform: Platform, args: &[String]) -> io::Result<()> {
         _ => cwd.clone(),
     };
     policy::init(&root, false)?;
-    let store = store::Store::open()?;
     match eco {
         "cargo" => {
             let inputs = load_cargo_inputs(platform, &cwd, &store)?;
@@ -1372,7 +1396,7 @@ fn run_fmt(
     check: bool,
     ecosystem: Option<&str>,
     args: &[String],
-) -> io::Result<()> {
+) -> io::Result<i32> {
     let cwd = project_dir();
     policy::init(&cwd, false)?;
 
@@ -1404,12 +1428,23 @@ fn run_fmt(
                     .is_some();
             if is_script {
                 ui::trace("'fmt' is a package.json script: running it");
+                // `run` only executes package scripts in a projected
+                // environment. Preserve that early, store-free refusal for a
+                // package that has a script but has never been synced.
+                if !script_root.join(".blanket/closures").is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "no environment projected here for command 'fmt'; run `blanket sync` first",
+                    ));
+                }
                 let mut command = vec!["fmt".to_string()];
                 if check {
                     command.push("--check".into());
                 }
                 command.extend(args.iter().cloned());
-                return run_run(platform, &command);
+                let store = store::Store::open()?;
+                let activity = store.activity(ActivityMode::Shared)?;
+                return run_run(platform, &command, &store, &activity);
             }
         }
     }
@@ -1439,10 +1474,11 @@ fn run_fmt(
     }
 
     let store = store::Store::open()?;
+    let activity = store.activity(ActivityMode::Shared)?;
     let rust_version = cargo::resolve_toolchain(platform, &cwd)?.to_string();
     let rust_object = cargo::ensure_rust_for(&store, platform, &rust_version)?;
     let rustfmt_object = rustfmt::ensure_rustfmt(&store, platform, &rust_version, &rust_object)?;
-    let workspace_root = locate_cargo_root(&rust_object, &cwd)?.canonicalize()?;
+    let workspace_root = locate_cargo_root(&rust_object, &cwd, &store)?.canonicalize()?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -1472,16 +1508,11 @@ fn run_fmt(
         &workspace_root,
         &rust_object,
         &rustfmt_object,
+        &store,
         check,
         args,
     )?;
-    use std::os::unix::process::ExitStatusExt;
-    exit(
-        status
-            .code()
-            .or_else(|| status.signal().map(|signal| 128 + signal))
-            .unwrap_or(1),
-    );
+    Ok(child_status_code(&status))
 }
 
 /// Nearest ancestor that is a blanket projection: every tailor writes
@@ -1500,7 +1531,12 @@ fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool
     has_dotnet_closure && script_resolved
 }
 
-fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
+fn run_run(
+    platform: Platform,
+    cmd: &[String],
+    store: &store::Store,
+    activity: &blanket::activity::StoreActivity,
+) -> io::Result<i32> {
     if cmd.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1594,16 +1630,14 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
             prefix.push(nm.join(".bin").to_string_lossy().into_owned());
         }
         // Node toolchain from the store (cache hit after sync).
-        let store = store::Store::open()?;
-        let node = npm::ensure_node_for(&store, platform)?;
+        let node = npm::ensure_node_for(store, platform)?;
         prefix.push(node.join("bin").to_string_lossy().into_owned());
     }
     if cargo_home.exists() {
-        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "cargo")?;
         // Store-contained resolution: a project-editable closure must never
         // inject arbitrary executable paths (Sol review 5).
-        let rust_obj = project::closure_object(&store, &closure, "rust_object", "bin/rustc")?;
+        let rust_obj = project::closure_object(store, &closure, "rust_object", "bin/rustc")?;
         prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());
         prefix.push(rust_obj.join("bin").to_string_lossy().into_owned());
         command.env("CARGO_HOME", cargo_home.canonicalize()?);
@@ -1611,10 +1645,9 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         command.env_remove("RUSTUP_TOOLCHAIN");
     }
     if dir.join(".blanket/closures/go.json").exists() {
-        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "go")?;
-        let go_obj = project::closure_object(&store, &closure, "go_object", "bin/go")?;
-        let modcache = project::closure_object(&store, &closure, "modcache_object", "")?;
+        let go_obj = project::closure_object(store, &closure, "go_object", "bin/go")?;
+        let modcache = project::closure_object(store, &closure, "modcache_object", "")?;
         prefix.push(go_obj.join("bin").to_string_lossy().into_owned());
         for (k, v) in golang::go_env(&go_obj, &modcache, true) {
             if v.is_empty() {
@@ -1625,10 +1658,9 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         }
     }
     if dir.join(".blanket/closures/ruby.json").exists() {
-        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "ruby")?;
-        let ruby_obj = project::closure_object(&store, &closure, "ruby_object", "bin/ruby")?;
-        let gems_obj = project::closure_object(&store, &closure, "gems_object", "")?;
+        let ruby_obj = project::closure_object(store, &closure, "ruby_object", "bin/ruby")?;
+        let gems_obj = project::closure_object(store, &closure, "gems_object", "")?;
         // Ruby FIRST, then gem binstubs (a gem exe must never shadow ruby).
         prefix.push(ruby_obj.join("bin").to_string_lossy().into_owned());
         prefix.push(gems_obj.join("bin").to_string_lossy().into_owned());
@@ -1636,17 +1668,16 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if dir.join(".blanket/closures/elixir.json").exists() {
-        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "elixir")?;
-        let beam = project::closure_object(&store, &closure, "beam_object", "elixir/bin/mix")?;
+        let beam = project::closure_object(store, &closure, "beam_object", "elixir/bin/mix")?;
         // The deps projection is a writable clone OUTSIDE the store; verify
         // it lives under the blanket home and matches the recorded deps id.
-        let deps_obj = project::closure_object(&store, &closure, "deps_object", "")?;
+        let deps_obj = project::closure_object(store, &closure, "deps_object", "")?;
         // Never trust the recorded projection path: reconstruct the ONE
         // expected forest path from canonical project + deps id and require
         // exact canonical equality (Sol: lexical checks admitted foreign
         // forests, dot-dot tricks, and symlinked dirs).
-        let projection = elixir::expected_projection(&store, &dir, &deps_obj)?;
+        let projection = elixir::expected_projection(store, &dir, &deps_obj)?;
         let recorded = closure["deps_projection"].as_str().map(PathBuf::from);
         if recorded.as_deref().and_then(|p| p.canonicalize().ok()) != Some(projection.clone())
             || !projection.is_dir()
@@ -1677,10 +1708,9 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
         if let Some(reason) = dotnet::refused_run_command(cmd) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
         }
-        let store = store::Store::open()?;
         let closure = project::read_closure(&dir, "dotnet")?;
-        let sdk = project::closure_object(&store, &closure, "sdk_object", "dotnet")?;
-        let packages = project::closure_object(&store, &closure, "packages_object", "")?;
+        let sdk = project::closure_object(store, &closure, "sdk_object", "dotnet")?;
+        let packages = project::closure_object(store, &closure, "packages_object", "")?;
         prefix.push(sdk.to_string_lossy().into_owned());
         let scratch = std::env::temp_dir().join(format!("blanket-dn-run-{}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
@@ -1739,24 +1769,24 @@ fn run_run(platform: Platform, cmd: &[String]) -> io::Result<()> {
             }
             step.env("npm_package_json", package_json_path);
             step.env("INIT_CWD", &cwd);
-            let status = step
-                .status()
+            let status = blanket::supervise::status(&mut step, activity)
                 .map_err(|e| io::Error::new(e.kind(), format!("run npm script {event}: {e}")))?;
             if !status.success() {
-                use std::os::unix::process::ExitStatusExt;
-                exit(
-                    status
-                        .code()
-                        .or_else(|| status.signal().map(|signal| 128 + signal))
-                        .unwrap_or(1),
-                );
+                return Ok(child_status_code(&status));
             }
         }
-        return Ok(());
+        return Ok(0);
     }
-    use std::os::unix::process::CommandExt;
-    let err = command.exec(); // only returns on failure
-    Err(err)
+    let status = blanket::supervise::status(&mut command, activity)?;
+    Ok(child_status_code(&status))
+}
+
+fn child_status_code(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 #[cfg(test)]

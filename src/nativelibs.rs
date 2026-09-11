@@ -6,7 +6,7 @@
 //! to the native-libs object. macOS has no native pin yet and fails before it
 //! touches the store or network.
 
-use crate::fetch::download_verified;
+use crate::fetch::download_verified_held;
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;
 use crate::types::Identity;
@@ -572,11 +572,12 @@ pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
 
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
     crate::platform::require_host(platform, "native library set", "stage 3")?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let identity = identity(store, platform)?;
     let id = identity.object_id();
     let object = store.object_path(&id);
     let manifest_sha256 = identity.inputs["manifest_sha256"].clone();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         validate_layout(&object)?;
         return Ok(NativeLibSet {
@@ -587,10 +588,11 @@ pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<Nativ
         });
     }
 
-    let work = store.stage()?;
+    let work = store.stage_with_activity(&activity)?;
     let package_work = work.join("packages");
     fs::create_dir_all(&package_work)?;
-    let result = realize_staged(store, &work, &package_work, &object, packages(platform)?);
+    let packages = packages(platform)?;
+    let result = realize_staged(store, &work, &package_work, &object, packages);
     if let Err(error) = result {
         let _ = crate::store::remove_tree(&work);
         return Err(error);
@@ -615,17 +617,18 @@ fn realize_staged(
 ) -> io::Result<()> {
     let mut placeholders = Vec::new();
     for (index, package) in packages.iter().enumerate() {
-        let archive = download_verified(store, &package.url(), package.sha256).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("fetch native package {}: {e}", package.filename),
-            )
-        })?;
+        let archive =
+            download_verified_held(store, &package.url(), package.sha256).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("fetch native package {}: {e}", package.filename),
+                )
+            })?;
         let package_root = package_work.join(format!("{index}-payload"));
         let info_root = package_work.join(format!("{index}-info"));
         fs::create_dir_all(&package_root)?;
         fs::create_dir_all(&info_root)?;
-        extract_package(&archive, package, &package_root, &info_root)?;
+        extract_package(store, &archive, package, &package_root, &info_root)?;
         let mut package_placeholders = prefix_placeholders(&info_root)?;
         package_placeholders.extend(discover_payload_placeholders(&package_root)?);
         package_placeholders.sort();
@@ -670,21 +673,23 @@ fn validate_layout(root: &Path) -> io::Result<()> {
 }
 
 fn extract_package(
+    store: &Store,
     archive: &Path,
     package: &NativePackage,
     package_root: &Path,
     info_root: &Path,
 ) -> io::Result<()> {
     if archive.to_string_lossy().ends_with(".conda") || package.filename.ends_with(".conda") {
-        extract_conda(archive, package_root, info_root)
+        extract_conda(store, archive, package_root, info_root)
     } else {
-        let status = Command::new("/usr/bin/tar")
+        let mut command = Command::new("/usr/bin/tar");
+        command
             .args(["-xjf"])
             .arg(archive)
             .arg("-C")
             .arg(package_root)
-            .args(["--no-same-owner", "--no-same-permissions"])
-            .status()
+            .args(["--no-same-owner", "--no-same-permissions"]);
+        let status = crate::supervise::status_owned(&mut command, store)
             .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", package.filename)))?;
         if !status.success() {
             return Err(io::Error::new(
@@ -701,7 +706,12 @@ fn extract_package(
     }
 }
 
-fn extract_conda(archive: &Path, package_root: &Path, info_root: &Path) -> io::Result<()> {
+fn extract_conda(
+    store: &Store,
+    archive: &Path,
+    package_root: &Path,
+    info_root: &Path,
+) -> io::Result<()> {
     let file = File::open(archive)?;
     let mut zip = ZipArchive::new(file).map_err(|e| {
         io::Error::new(
@@ -733,10 +743,10 @@ fn extract_conda(archive: &Path, package_root: &Path, info_root: &Path) -> io::R
     unzip_member(archive, &info, &info_zst)?;
     let pkg_tar = pkg_zst.with_extension("tar");
     let info_tar = info_zst.with_extension("tar");
-    zstd_decompress(&pkg_zst, &pkg_tar)?;
-    zstd_decompress(&info_zst, &info_tar)?;
-    extract_tar(&pkg_tar, package_root)?;
-    extract_tar(&info_tar, info_root)?;
+    zstd_decompress(store, &pkg_zst, &pkg_tar)?;
+    zstd_decompress(store, &info_zst, &info_tar)?;
+    extract_tar(store, &pkg_tar, package_root)?;
+    extract_tar(store, &info_tar, info_root)?;
     for path in [pkg_zst, info_zst, pkg_tar, info_tar] {
         let _ = fs::remove_file(path);
     }
@@ -754,7 +764,7 @@ fn unzip_member(archive: &Path, member: &str, destination: &Path) -> io::Result<
     fs::write(destination, bytes)
 }
 
-fn zstd_decompress(input: &Path, output: &Path) -> io::Result<()> {
+fn zstd_decompress(store: &Store, input: &Path, output: &Path) -> io::Result<()> {
     let program = ["/usr/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/unzstd"]
         .iter()
         .map(Path::new)
@@ -765,11 +775,12 @@ fn zstd_decompress(input: &Path, output: &Path) -> io::Result<()> {
                 "native .conda extraction needs zstd/unzstd",
             )
         })?;
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(["-d", "-f", "-q", "-o"])
         .arg(output)
-        .arg(input)
-        .status()?;
+        .arg(input);
+    let status = crate::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(invalid_conda(format!(
             "zstd failed for {}",
@@ -779,14 +790,15 @@ fn zstd_decompress(input: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn extract_tar(archive: &Path, destination: &Path) -> io::Result<()> {
-    let status = Command::new("/usr/bin/tar")
+fn extract_tar(store: &Store, archive: &Path, destination: &Path) -> io::Result<()> {
+    let mut command = Command::new("/usr/bin/tar");
+    command
         .args(["-xf"])
         .arg(archive)
         .arg("-C")
         .arg(destination)
-        .args(["--no-same-owner", "--no-same-permissions"])
-        .status()?;
+        .args(["--no-same-owner", "--no-same-permissions"]);
+    let status = crate::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(invalid_conda(format!(
             "tar extraction failed for {}",

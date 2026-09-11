@@ -221,7 +221,7 @@ pub fn provision(
     }
     let (sha256, sums, release_url, zip_name) = resolve_electron(store, platform, version)?;
     let zip =
-        crate::fetch::download_verified(store, &format!("{release_url}/{zip_name}"), &sha256)?;
+        crate::fetch::download_verified_held(store, &format!("{release_url}/{zip_name}"), &sha256)?;
 
     let cache_root = scratch.join(".cache/blanket-electron");
     let dir = cache_root.join(electron_cache_directory(&release_url));
@@ -235,7 +235,7 @@ pub fn provision(
             dir.display()
         )));
     }
-    fs::copy(&zip, &zip_dest)?;
+    fs::copy(&*zip, &zip_dest)?;
     fs::write(dir.join("SHASUMS256.txt"), sums.as_bytes())?;
 
     Ok(Some(Provisioning {

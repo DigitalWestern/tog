@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod archive;
 pub mod artifacts;
 pub mod build;
@@ -29,6 +30,7 @@ pub mod rustfmt;
 pub mod sandbox;
 pub mod sbom;
 pub mod store;
+pub mod supervise;
 pub mod types;
 pub mod ui;
 pub mod wheel;

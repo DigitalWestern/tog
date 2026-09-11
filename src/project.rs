@@ -404,6 +404,39 @@ pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io:
     restore_write_bits(dest)
 }
 
+/// Store-aware copy-on-write clone. The copy utility is a child that reads a
+/// store object and writes a managed projection, so its complete spawn/wait
+/// interval must remain under operation protection.
+pub(crate) fn clone_tree_for_store(
+    store: &Store,
+    src: &Path,
+    dest: &Path,
+    platform: Platform,
+) -> io::Result<()> {
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let clone = if platform.is_macos() {
+        let mut command = std::process::Command::new("/bin/cp");
+        command.args(["-Rc"]).arg(src).arg(dest);
+        crate::supervise::status(&mut command, &activity)?
+    } else {
+        let mut command = std::process::Command::new("/bin/cp");
+        command.args(["-a", "--reflink=auto"]).arg(src).arg(dest);
+        crate::supervise::status(&mut command, &activity)?
+    };
+    if !clone.success() {
+        if dest.exists() {
+            crate::store::remove_tree(dest)?;
+        }
+        let mut plain = std::process::Command::new("/bin/cp");
+        plain.arg("-R").arg(src).arg(dest);
+        let plain_status = crate::supervise::status(&mut plain, &activity)?;
+        if !plain_status.success() {
+            return Err(io::Error::other("cloning projected tree failed"));
+        }
+    }
+    restore_write_bits(dest)
+}
+
 fn restore_write_bits(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let md = fs::symlink_metadata(path)?;
@@ -991,6 +1024,9 @@ mod closure_platform_tests {
 
     #[test]
     fn foreign_platform_closure_is_refused_and_legacy_is_accepted() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let host = Platform::host().unwrap();
         let foreign = Platform::ALL.iter().copied().find(|p| *p != host).unwrap();
         let dir = std::env::temp_dir().join(format!("blanket-closure-plat-{}", std::process::id()));
@@ -1045,6 +1081,9 @@ mod closure_platform_tests {
 
     #[test]
     fn write_closure_rejects_symlinked_blanket_without_creating_outside_closures() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
             "blanket-closure-blanket-symlink-{}-{}",
             std::process::id(),
@@ -1072,6 +1111,9 @@ mod closure_platform_tests {
 
     #[test]
     fn write_closure_rejects_symlinked_closures_without_writing_outside() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
             "blanket-closure-closures-symlink-{}-{}",
             std::process::id(),
@@ -1099,6 +1141,9 @@ mod closure_platform_tests {
 
     #[test]
     fn fast_sdist_parent_input_keeps_the_legacy_identity() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let store = test_store("fast-golden");
         let fast = local_sdist(&store, "fast-golden", "\"setuptools>=40.8\"");
         let plan = Plan {
@@ -1138,6 +1183,9 @@ mod closure_platform_tests {
 
     #[test]
     fn isolated_sdist_build_environment_changes_parent_identity() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let store = test_store("isolated-input");
         let isolated = local_sdist(&store, "isolated-input", "\"setuptools~=83.1\"");
         let fast = local_sdist(&store, "fast-input", "\"setuptools>=40.8\"");
@@ -1168,6 +1216,9 @@ mod closure_platform_tests {
 
     #[test]
     fn planned_and_realized_env_id_match_for_a_native_sdist() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let store = test_store("native-sdist-identity");
         let platform = Platform::host().unwrap();
         let native = local_native_sdist(&store, "native-sdist-identity");

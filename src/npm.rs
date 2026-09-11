@@ -195,13 +195,14 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     let staged = store
         .stage()
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
-    let status = Command::new("/usr/bin/tar")
+    let mut command = Command::new("/usr/bin/tar");
+    command
         .arg("-xzf")
         .arg(&tarball)
         .arg("-C")
         .arg(&staged)
-        .args(["--strip-components", "1"])
-        .status()
+        .args(["--strip-components", "1"]);
+    let status = crate::supervise::status_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn tar: {e}")))?;
     if !status.success() {
         return Err(err("node tarball extraction failed"));
@@ -985,17 +986,15 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn tarball_has_binding_gyp(path: &Path) -> io::Result<bool> {
-    let output = Command::new("/usr/bin/tar")
-        .args(["-tzf"])
-        .arg(path)
-        .output()
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("list npm tarball {}: {e}", path.display()),
-            )
-        })?;
+fn tarball_has_binding_gyp(store: &Store, path: &Path) -> io::Result<bool> {
+    let mut command = Command::new("/usr/bin/tar");
+    command.args(["-tzf"]).arg(path);
+    let output = crate::supervise::output_owned(&mut command, store).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("list npm tarball {}: {e}", path.display()),
+        )
+    })?;
     if !output.status.success() {
         return Err(err(format!(
             "list npm tarball {} failed: {}",
@@ -1175,7 +1174,7 @@ fn classify_downloaded_archives(
         let digest = Digest::from_sri(&package.integrity)?;
         // The tarball was returned by download_verified_digest, so inspect the
         // verified bytes and persist the result before planning the identity.
-        let binding_gyp = tarball_has_binding_gyp(tarball)?;
+        let binding_gyp = tarball_has_binding_gyp(store, tarball)?;
         write_archive_classification(store, &digest, binding_gyp)?;
         has_native |= binding_gyp;
     }
@@ -1434,7 +1433,7 @@ fn realize_node_env_with_node_object(
             // identical either way (LINUX_PORT.md, stage 5 follow-up).
             tar.arg("--delay-directory-restore");
         }
-        let status = tar.status()?;
+        let status = crate::supervise::status_owned(&mut tar, store)?;
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
@@ -1458,17 +1457,17 @@ fn realize_node_env_with_node_object(
                 )));
             }
             let file = fs::File::open(patch_path)?;
-            let status = Command::new("/usr/bin/patch")
+            let mut command = Command::new("/usr/bin/patch");
+            command
                 .args(["-p1", "--batch", "--forward"])
                 .current_dir(&dest)
-                .stdin(file)
-                .status()
-                .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!("{}: spawn /usr/bin/patch for {}: {e}", p.path, patch.path),
-                    )
-                })?;
+                .stdin(file);
+            let status = crate::supervise::status_owned(&mut command, store).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{}: spawn /usr/bin/patch for {}: {e}", p.path, patch.path),
+                )
+            })?;
             if !status.success() {
                 return Err(err(format!(
                     "{}: applying patch {} failed",
@@ -1535,7 +1534,7 @@ fn realize_node_env_with_node_object(
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
         let _ = crate::store::remove_tree(&staging);
-        crate::project::clone_tree(&source_root, &staging)
+        crate::project::clone_tree_for_store(store, &source_root, &staging, platform)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path)))?;
         for entry in fs::read_dir(&staging)? {
             let entry = entry?;
@@ -1727,6 +1726,7 @@ fn run_install_scripts_staged(
     native_libs: Option<&Path>,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     // Deepest first: nested deps build before their dependents.
     let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
     pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
@@ -1817,7 +1817,7 @@ fn run_install_scripts_staged(
         let snapshot_root = store.stage()?;
         cleanup.push(snapshot_root.clone());
         let snapshot = snapshot_root.join("package");
-        crate::project::clone_tree_for(&pkg_dir, &snapshot, platform)?;
+        crate::project::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
 
         let python = match &python_obj {
             Some(p) => p.clone(),
@@ -1964,13 +1964,14 @@ fn run_install_scripts_staged(
                 .cloned()
                 .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
                 .collect();
-            let result = sandbox.run_in_on(
+            let result = sandbox.run_in_on_with_activity(
                 platform,
                 &["/bin/sh", "-c", script],
                 &path_env,
                 &tmp,
                 &pkg_dir,
                 &envs_phase,
+                &activity,
             );
             // A missing sandbox backend is never a script failure: it must
             // not become a permissive install-script-failed exception.

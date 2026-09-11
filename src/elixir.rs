@@ -462,6 +462,7 @@ fn otp_install_spec(otp_root: &Path, final_root: &Path, scratch: &Path) -> io::R
 /// build sandbox (Unsupported on Linux until LINUX_PORT.md stage 3 lands).
 /// Its result is checked by verify_otp_install, including a whole-tree scan
 /// for the staging prefix and a runtime probe before anything is committed.
+#[cfg(test)]
 fn run_installer_spec(spec: &BuildSpec) -> io::Result<()> {
     let (program, args) = spec
         .argv
@@ -495,7 +496,61 @@ fn run_installer_spec(spec: &BuildSpec) -> io::Result<()> {
     Ok(())
 }
 
+fn run_installer_spec_for(store: &Store, spec: &BuildSpec) -> io::Result<()> {
+    let (program, args) = spec
+        .argv
+        .split_first()
+        .ok_or_else(|| err("installer spec has empty argv"))?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&spec.cwd)
+        .env_clear()
+        .env("PATH", &spec.path)
+        .env("HOME", &spec.scratch)
+        .env("TMPDIR", &spec.scratch)
+        .env("LANG", "C")
+        .stdin(std::process::Stdio::null());
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    let output = crate::supervise::output_owned(&mut command, store)
+        .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let stderr: String = stderr.chars().take(2000).collect();
+        return Err(io::Error::other(format!(
+            "installer failed ({}): {:?}\n{stderr}",
+            output.status, spec.argv
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn run_otp_install_with<F>(
+    otp_root: &Path,
+    final_root: &Path,
+    scratch: &Path,
+    runner: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&BuildSpec) -> io::Result<()>,
+{
+    let spec = otp_install_spec(otp_root, final_root, scratch)?;
+    runner(&spec).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "OTP Install -cross -minimal failed in staging {}: {e}",
+                otp_root.display()
+            ),
+        )
+    })
+}
+
+fn run_otp_install_with_store<F>(
     otp_root: &Path,
     final_root: &Path,
     scratch: &Path,
@@ -663,8 +718,9 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
 /// this host (glibc floor, libcrypto/libssl symbol set — the failure mode
 /// that disqualified the Ubuntu build) and that the launcher resolves its
 /// root. The launcher self-locates from $0, so this works from staging.
-fn probe_otp_runtime(otp_root: &Path, scratch: &Path) -> io::Result<()> {
-    let output = Command::new(otp_root.join("bin/erl"))
+fn probe_otp_runtime(store: &Store, otp_root: &Path, scratch: &Path) -> io::Result<()> {
+    let mut command = Command::new(otp_root.join("bin/erl"));
+    command
         .args([
             "-noshell",
             "-eval",
@@ -681,8 +737,8 @@ fn probe_otp_runtime(otp_root: &Path, scratch: &Path) -> io::Result<()> {
         .env("HOME", scratch)
         .env("TMPDIR", scratch)
         .env("LANG", "C")
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(std::process::Stdio::null());
+    let output = crate::supervise::output_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
@@ -720,6 +776,7 @@ fn otp_strip_components(platform: Platform) -> u32 {
     }
 }
 
+#[cfg(test)]
 fn extract_otp_archive(archive: &Path, destination: &Path, platform: Platform) -> io::Result<()> {
     let mut command = Command::new("/usr/bin/tar");
     command.arg("-xzf").arg(archive).arg("-C").arg(destination);
@@ -728,6 +785,29 @@ fn extract_otp_archive(archive: &Path, destination: &Path, platform: Platform) -
         command.arg(format!("--strip-components={strip}"));
     }
     let status = command.status()?;
+    if !status.success() {
+        return Err(err(format!(
+            "OTP extraction failed ({status}) for {} into {}",
+            archive.display(),
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
+fn extract_otp_archive_for(
+    store: &Store,
+    archive: &Path,
+    destination: &Path,
+    platform: Platform,
+) -> io::Result<()> {
+    let mut command = Command::new("/usr/bin/tar");
+    command.arg("-xzf").arg(archive).arg("-C").arg(destination);
+    let strip = otp_strip_components(platform);
+    if strip > 0 {
+        command.arg(format!("--strip-components={strip}"));
+    }
+    let status = crate::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(err(format!(
             "OTP extraction failed ({status}) for {} into {}",
@@ -747,10 +827,11 @@ pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let pin = otp_pin(platform)?;
     let identity = beam_identity(pin, &store.root)?;
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
@@ -759,11 +840,11 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     let hex_ez = download_verified_digest_held(store, HEX_URL, &Digest::sha512(HEX_SHA512)?)?;
     let rebar3 = download_verified_digest_held(store, REBAR3_URL, &Digest::sha512(REBAR3_SHA512)?)?;
 
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(&activity)?;
     let result = (|| {
         let otp_root = staged.join("otp");
         fs::create_dir_all(&otp_root)?;
-        extract_otp_archive(&otp_tar, &otp_root, platform)?;
+        extract_otp_archive_for(store, &otp_tar, &otp_root, platform)?;
         if platform.is_macos() {
             if !otp_root.join("bin/erl").is_file() {
                 return Err(err("OTP extraction failed or has unexpected layout"));
@@ -774,34 +855,37 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             // staging, then prove the result before the ordinary commit.
             let layout = validate_otp_pre_install(&otp_root)?;
             let final_root = store.object_path(&id).join("otp");
-            let scratch = store.stage()?;
-            let installed =
-                run_otp_install_with(&otp_root, &final_root, &scratch, run_installer_spec)
-                    .and_then(|()| verify_otp_install(&otp_root, &final_root, &layout))
-                    .and_then(|()| probe_otp_runtime(&otp_root, &scratch));
+            let scratch = store.stage_with_activity(&activity)?;
+            let installed = run_otp_install_with_store(&otp_root, &final_root, &scratch, |spec| {
+                run_installer_spec_for(store, spec)
+            })
+            .and_then(|()| verify_otp_install(&otp_root, &final_root, &layout))
+            .and_then(|()| probe_otp_runtime(store, &otp_root, &scratch));
             let _ = crate::store::remove_tree(&scratch);
             installed?;
         }
 
         fs::create_dir_all(staged.join("elixir"))?;
-        let st = Command::new("/usr/bin/unzip")
+        let mut command = Command::new("/usr/bin/unzip");
+        command
             .args(["-oq"])
             .arg(&elixir_zip)
             .args(["-d"])
-            .arg(staged.join("elixir"))
-            .status()?;
+            .arg(staged.join("elixir"));
+        let st = crate::supervise::status(&mut command, &activity)?;
         if !st.success() || !staged.join("elixir/bin/mix").is_file() {
             return Err(err("Elixir extraction failed or has unexpected layout"));
         }
         // Hex archive: MIX_ARCHIVES holds unpacked .ez dirs (ez root is
         // hex-<ver>/). Unzip preserves that root.
         fs::create_dir_all(staged.join("archives"))?;
-        let st = Command::new("/usr/bin/unzip")
+        let mut command = Command::new("/usr/bin/unzip");
+        command
             .args(["-oq"])
             .arg(&hex_ez)
             .args(["-d"])
-            .arg(staged.join(format!("archives/hex-{HEX_VERSION}")))
-            .status()?;
+            .arg(staged.join(format!("archives/hex-{HEX_VERSION}")));
+        let st = crate::supervise::status(&mut command, &activity)?;
         if !st.success() {
             return Err(err("Hex archive extraction failed"));
         }
@@ -894,6 +978,7 @@ fn beam_path(beam_obj: &Path) -> String {
 
 /// Run the store mix for a delegated edit (`blanket update`).
 pub(crate) fn run_checked(
+    store: &Store,
     beam_obj: &Path,
     cwd: &Path,
     scratch: &Path,
@@ -901,7 +986,7 @@ pub(crate) fn run_checked(
     args: &[&str],
 ) -> io::Result<()> {
     crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_mix(beam_obj, cwd, scratch, offline, args)?;
+    let out = run_mix(store, beam_obj, cwd, scratch, offline, args)?;
     if crate::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -916,6 +1001,7 @@ pub(crate) fn run_checked(
 }
 
 fn run_mix(
+    store: &Store,
     beam_obj: &Path,
     cwd: &Path,
     scratch: &Path,
@@ -933,7 +1019,7 @@ fn run_mix(
     }
     force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
     cmd.stdin(std::process::Stdio::null());
-    cmd.output()
+    crate::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
 }
 
@@ -1086,7 +1172,14 @@ pub fn plan_elixir(
     let scratch = store.stage()?;
     if !lock_path.is_file() {
         eprintln!("blanket: no mix.lock; resolving with the store mix (network, unsandboxed)...");
-        let out = run_mix(beam_obj, project_dir, &scratch, false, &["mix", "deps.get"])?;
+        let out = run_mix(
+            store,
+            beam_obj,
+            project_dir,
+            &scratch,
+            false,
+            &["mix", "deps.get"],
+        )?;
         if !out.status.success() {
             let _ = crate::store::remove_tree(&scratch);
             return Err(err(format!(
@@ -1102,6 +1195,7 @@ pub fn plan_elixir(
         let planner_home = store.root.join("planner-hexhome");
         fs::create_dir_all(&planner_home)?;
         let out = run_mix(
+            store,
             beam_obj,
             project_dir,
             &planner_home,
@@ -1121,6 +1215,7 @@ pub fn plan_elixir(
     let helper = scratch.join("helper.exs");
     fs::write(&helper, HELPER)?;
     let out = run_mix(
+        store,
         beam_obj,
         project_dir,
         &scratch,
@@ -1206,6 +1301,7 @@ pub fn realize_deps(
     beam_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, "Hex dependencies", "stage 4")?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let _ = otp_pin(platform)?;
     validate_plan(plan)?;
     let mut inputs = BTreeMap::from([
@@ -1236,15 +1332,15 @@ pub fn realize_deps(
         inputs,
     };
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(&activity)?;
     let helper = scratch.join("helper.exs");
     fs::write(&helper, HELPER)?;
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(&activity)?;
     for d in &plan.deps {
         let url = format!(
             "https://repo.hex.pm/tarballs/{}-{}.tar",
@@ -1256,12 +1352,9 @@ pub fn realize_deps(
         // CHECKSUM) into scratch.
         let outer_dir = scratch.join(format!("outer-{}", d.app));
         fs::create_dir_all(&outer_dir)?;
-        let st = Command::new("/usr/bin/tar")
-            .args(["-xf"])
-            .arg(&tar)
-            .args(["-C"])
-            .arg(&outer_dir)
-            .status()?;
+        let mut command = Command::new("/usr/bin/tar");
+        command.args(["-xf"]).arg(&tar).args(["-C"]).arg(&outer_dir);
+        let st = crate::supervise::status_owned(&mut command, store)?;
         if !st.success() {
             return Err(err(format!("{}: outer tar extraction failed", d.app)));
         }
@@ -1301,12 +1394,13 @@ pub fn realize_deps(
         // Layout keyed by the lock APP name (may differ from package).
         let dep_dir = staged.join(&d.app);
         fs::create_dir_all(&dep_dir)?;
-        let st = Command::new("/usr/bin/tar")
+        let mut command = Command::new("/usr/bin/tar");
+        command
             .args(["-xzf"])
             .arg(outer_dir.join("contents.tar.gz"))
             .args(["-C"])
-            .arg(&dep_dir)
-            .status()?;
+            .arg(&dep_dir);
+        let st = crate::supervise::status_owned(&mut command, store)?;
         if !st.success() {
             return Err(err(format!("{}: contents extraction failed", d.app)));
         }
@@ -1338,6 +1432,7 @@ pub fn realize_deps(
         )?;
         // .hex marker via the pinned toolchain (ETF binary).
         let out = run_mix(
+            store,
             beam_obj,
             &scratch,
             &scratch,
@@ -1490,16 +1585,17 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: beam_path(&beam_obj),
     };
-    let result = crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "mix compile failed: {e}\n(network is denied during builds; deps \
+    let result =
+        crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "mix compile failed: {e}\n(network is denied during builds; deps \
              needing network at compile time or absent host libraries are \
              unsupported in v0)"
-            ),
-        )
-    });
+                ),
+            )
+        });
     let _ = crate::store::remove_tree(&scratch);
     result
 }

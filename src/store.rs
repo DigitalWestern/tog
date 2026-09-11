@@ -1,3 +1,4 @@
+use crate::activity::{ActivityMode, StoreActivity};
 use crate::policy::Exception;
 use crate::types::Identity;
 use std::collections::BTreeSet;
@@ -60,10 +61,65 @@ impl Store {
         self.root.join("objects").join(id)
     }
 
+    /// Acquire operation-level protection for this store. The root is
+    /// canonicalized before the lease is created so aliases cannot bypass
+    /// the in-process coordinator or the on-disk lock.
+    pub fn activity(&self, mode: ActivityMode) -> io::Result<StoreActivity> {
+        StoreActivity::acquire(&self.root, mode)
+    }
+
+    /// Try to acquire exclusive activity without waiting. Maintenance and GC
+    /// use this form so a running job can be reported as busy instead of
+    /// making cleanup contend with an unbounded command.
+    pub fn try_activity_exclusive(&self) -> io::Result<Option<StoreActivity>> {
+        StoreActivity::try_exclusive(&self.root)
+    }
+
+    /// Verify that a caller is still holding an operation-owned lease for
+    /// this exact store. An exclusive lease also satisfies a shared read.
+    pub(crate) fn require_activity(&self, activity: &StoreActivity, what: &str) -> io::Result<()> {
+        let expected = self.root.canonicalize()?;
+        if activity.root() != expected || !activity.mode().satisfies(ActivityMode::Shared) {
+            return Err(io::Error::other(format!(
+                "{what} requires an active shared lease for store {}; the supplied lease belongs to {}",
+                expected.display(),
+                activity.root().display()
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_exclusive_activity(
+        &self,
+        activity: &StoreActivity,
+        what: &str,
+    ) -> io::Result<()> {
+        let expected = self.root.canonicalize()?;
+        if activity.root() != expected || activity.mode() != ActivityMode::Exclusive {
+            return Err(io::Error::other(format!(
+                "{what} requires an active exclusive lease for store {}",
+                expected.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Register a project whose closure was just written. Registry entries
     /// are keyed by the canonical project path, so moving a project creates a
     /// new root instead of accidentally retaining the old location.
     pub fn register_root(&self, project_dir: &Path) -> io::Result<RootEntry> {
+        let activity = self.activity(ActivityMode::Exclusive)?;
+        self.register_root_with_activity(&activity, project_dir)
+    }
+
+    /// Compatibility pathname-only registration under an already-held
+    /// operation lease.
+    pub(crate) fn register_root_with_activity(
+        &self,
+        activity: &StoreActivity,
+        project_dir: &Path,
+    ) -> io::Result<RootEntry> {
+        self.require_activity(activity, "legacy root registration")?;
         let project_dir = project_dir.canonicalize()?;
         let key = root_key(&project_dir);
         let roots = self.root.join("roots");
@@ -134,6 +190,18 @@ impl Store {
     }
 
     pub fn remove_root_entry(&self, entry: &RootEntry) -> io::Result<()> {
+        let activity = self.activity(ActivityMode::Exclusive)?;
+        self.remove_root_entry_with_activity(&activity, entry)
+    }
+
+    /// Exact-key registry removal under an already-held exclusive operation
+    /// lease.
+    pub(crate) fn remove_root_entry_with_activity(
+        &self,
+        activity: &StoreActivity,
+        entry: &RootEntry,
+    ) -> io::Result<()> {
+        self.require_exclusive_activity(activity, "root removal")?;
         match fs::remove_file(&entry.registry_path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -165,8 +233,18 @@ impl Store {
     /// the project loses protection by explicit choice. Returns the removed
     /// entry.
     pub fn forget_root(&self, key: &str) -> io::Result<RootEntry> {
+        let activity = self.activity(ActivityMode::Exclusive)?;
+        self.forget_root_with_activity(&activity, key)
+    }
+
+    pub fn forget_root_with_activity(
+        &self,
+        activity: &StoreActivity,
+        key: &str,
+    ) -> io::Result<RootEntry> {
+        self.require_exclusive_activity(activity, "root forgetting")?;
         let entry = self.lookup_root(key)?;
-        self.remove_root_entry(&entry)?;
+        self.remove_root_entry_with_activity(activity, &entry)?;
         Ok(entry)
     }
 
@@ -232,31 +310,37 @@ impl Store {
     /// crash mid-publication leaves an invalid object, which is swept and
     /// rebuilt instead of trusted.
     pub fn has(&self, id: &str) -> bool {
-        let Ok(_lock) = self.publish_lock() else {
-            return false;
-        };
+        match self.activity(ActivityMode::Shared) {
+            Ok(activity) => self.has_with_activity(&activity, id).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Activity-aware form used by long-lived operations. The compatibility
+    /// `has` wrapper above is intentionally fallible too, so a lock failure
+    /// cannot be mistaken for a cache miss.
+    pub fn has_with_activity(&self, activity: &StoreActivity, id: &str) -> io::Result<bool> {
+        self.require_activity(activity, "store object lookup")?;
+        let _lock = self.publish_lock()?;
         match self.is_complete(id) {
-            None => false,
+            None => Ok(false),
             Some(true) => {
                 // A cache hit is still active use. GC holds this same lock
                 // while sweeping, so the touch and the sweep cannot cross.
                 let _ = touch_path(&self.object_path(id));
-                true
+                Ok(true)
             }
             Some(false) => {
-                // Looks like a crashed publication — but a CONCURRENT commit
-                // may be in its rename->chmod->meta window. We already hold
-                // the lock, so sweep only what is still incomplete now.
                 match self.is_complete(id) {
                     Some(true) => {
                         let _ = touch_path(&self.object_path(id));
-                        true
+                        Ok(true)
                     }
                     Some(false) => {
                         let _ = remove_tree(&self.object_path(id));
-                        false
+                        Ok(false)
                     }
-                    None => false,
+                    None => Ok(false),
                 }
             }
         }
@@ -267,6 +351,12 @@ impl Store {
     /// threads can draw the same timestamp — create_dir (not _all) makes a
     /// collision an AlreadyExists we retry with a sequence number.
     pub fn stage(&self) -> io::Result<PathBuf> {
+        let activity = self.activity(ActivityMode::Shared)?;
+        self.stage_with_activity(&activity)
+    }
+
+    pub fn stage_with_activity(&self, activity: &StoreActivity) -> io::Result<PathBuf> {
+        self.require_activity(activity, "store staging")?;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         loop {
@@ -294,6 +384,8 @@ impl Store {
         staged: &Path,
         exceptions: &[Exception],
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
+        let activity = self.activity(ActivityMode::Shared)?;
+        self.require_activity(&activity, "store publication")?;
         let id = identity.object_id();
         let dest = self.object_path(&id);
         if self.has(&id) {
@@ -860,6 +952,74 @@ mod tests {
             child.status.success(),
             "strict child failed: {}",
             String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// A lease is bound to the store that issued it. Presenting one store's
+    /// token to another store's primitive must fail, and a shared token must
+    /// not satisfy a check that requires exclusive protection.
+    #[test]
+    fn a_lease_only_authorizes_the_store_and_mode_it_was_taken_for() {
+        let first = TempDir::new();
+        let second = TempDir::new();
+        let one = Store {
+            root: first.0.canonicalize().unwrap(),
+        };
+        let two = Store {
+            root: second.0.canonicalize().unwrap(),
+        };
+        let foreign = two.activity(ActivityMode::Shared).unwrap();
+        let error = one
+            .require_activity(&foreign, "store object lookup")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("the supplied lease belongs to"),
+            "a foreign lease was accepted: {error}"
+        );
+        assert!(one.require_exclusive_activity(&foreign, "sweep").is_err());
+        drop(foreign);
+
+        let shared = one.activity(ActivityMode::Shared).unwrap();
+        one.require_activity(&shared, "store object lookup")
+            .unwrap();
+        let error = one
+            .require_exclusive_activity(&shared, "garbage collection")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires an active exclusive lease"),
+            "a shared lease satisfied an exclusive check: {error}"
+        );
+        drop(shared);
+
+        // Exclusive stands in for shared, never the reverse.
+        let exclusive = one.activity(ActivityMode::Exclusive).unwrap();
+        one.require_activity(&exclusive, "store object lookup")
+            .unwrap();
+        one.require_exclusive_activity(&exclusive, "garbage collection")
+            .unwrap();
+    }
+
+    /// The wrong-store case reaches a real protected primitive, not just the
+    /// checker: `has_with_activity` must refuse rather than answer.
+    #[test]
+    fn a_foreign_lease_cannot_drive_a_store_lookup() {
+        let first = TempDir::new();
+        let second = TempDir::new();
+        let one = Store {
+            root: first.0.canonicalize().unwrap(),
+        };
+        let two = Store {
+            root: second.0.canonicalize().unwrap(),
+        };
+        let foreign = two.activity(ActivityMode::Shared).unwrap();
+        let error = one
+            .has_with_activity(&foreign, "0000000000000000000000000000000000000000-thing-1")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("store object lookup requires"),
+            "{error}"
         );
     }
 }

@@ -230,13 +230,14 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     // Tarball root is platform-specific; strip it.
-    let status = Command::new("/usr/bin/tar")
+    let mut command = Command::new("/usr/bin/tar");
+    command
         .args(["-xzf"])
         .arg(&tarball)
         .args(["-C"])
         .arg(&staged)
-        .args(["--strip-components", "1"])
-        .status()?;
+        .args(["--strip-components", "1"]);
+    let status = crate::supervise::status_owned(&mut command, store)?;
     if !status.success() || !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
@@ -276,13 +277,14 @@ pub(crate) fn ensure_python_for(
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
-    let status = Command::new("/usr/bin/tar")
+    let mut command = Command::new("/usr/bin/tar");
+    command
         .args(["-xzf"])
         .arg(&tarball)
         .args(["-C"])
         .arg(&staged)
-        .args(["--strip-components", "1"])
-        .status()?;
+        .args(["--strip-components", "1"]);
+    let status = crate::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,

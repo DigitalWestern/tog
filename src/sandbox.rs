@@ -11,7 +11,9 @@
 //! scanned: sockets there remain an accepted cooperative-hermeticity gap,
 //! and should also be documented in LIMITATIONS.md.
 
+use crate::activity::StoreActivity;
 use crate::platform::Platform;
+use crate::store::Store;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -92,6 +94,32 @@ pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Res
     ))
 }
 
+/// Store-consuming counterpart to `run_build_spec_on`. The activity lease is
+/// held through sandbox setup, the child, and its reap.
+pub(crate) fn run_build_spec_on_for_store(
+    platform: Platform,
+    spec: &BuildSpec,
+    store: &Store,
+) -> io::Result<()> {
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    run_build_spec_on_with_activity(platform, spec, &activity)
+}
+
+pub(crate) fn run_build_spec_on_with_activity(
+    platform: Platform,
+    spec: &BuildSpec,
+    activity: &StoreActivity,
+) -> io::Result<()> {
+    let status = run_build_spec_status_on_with_activity(platform, spec, activity)?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("sandboxed command failed ({status}): {:?}", spec.argv),
+    ))
+}
+
 /// Run a build specification and return the child status. Sandbox setup
 /// failures remain errors, while a command's ordinary non-zero status is
 /// returned to callers that must preserve tool exit semantics (for example
@@ -114,6 +142,38 @@ pub(crate) fn run_build_spec_status_on(
         &spec.scratch,
         &spec.cwd,
         &spec.env,
+    )
+}
+
+pub(crate) fn run_build_spec_status_on_for_store(
+    platform: Platform,
+    spec: &BuildSpec,
+    store: &Store,
+) -> io::Result<std::process::ExitStatus> {
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    run_build_spec_status_on_with_activity(platform, spec, &activity)
+}
+
+pub(crate) fn run_build_spec_status_on_with_activity(
+    platform: Platform,
+    spec: &BuildSpec,
+    activity: &StoreActivity,
+) -> io::Result<std::process::ExitStatus> {
+    let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
+    let mut write: Vec<&Path> = spec.write.iter().map(PathBuf::as_path).collect();
+    write.push(&spec.scratch);
+    let sandbox = Sandbox {
+        read: spec.read.iter().map(PathBuf::as_path).collect(),
+        write,
+    };
+    sandbox.run_in_status_on_with_activity(
+        platform,
+        &argv,
+        &spec.path,
+        &spec.scratch,
+        &spec.cwd,
+        &spec.env,
+        activity,
     )
 }
 
@@ -204,6 +264,27 @@ impl Sandbox<'_> {
         ))
     }
 
+    pub(crate) fn run_in_on_with_activity(
+        &self,
+        platform: Platform,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+        activity: &StoreActivity,
+    ) -> io::Result<()> {
+        let status =
+            self.run_in_status_on_with_activity(platform, cmd, env_path, tmp, cwd, envs, activity)?;
+        if status.success() {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("sandboxed command failed ({status}): {cmd:?}"),
+        ))
+    }
+
     fn run_in_status_on(
         &self,
         platform: Platform,
@@ -216,6 +297,26 @@ impl Sandbox<'_> {
         match platform {
             Platform::Aarch64AppleDarwin => self.run_seatbelt_status(cmd, env_path, tmp, cwd, envs),
             Platform::X86_64UnknownLinuxGnu => self.run_bwrap_status(cmd, env_path, tmp, cwd, envs),
+        }
+    }
+
+    fn run_in_status_on_with_activity(
+        &self,
+        platform: Platform,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+        activity: &StoreActivity,
+    ) -> io::Result<std::process::ExitStatus> {
+        match platform {
+            Platform::Aarch64AppleDarwin => {
+                self.run_seatbelt_status_with_activity(cmd, env_path, tmp, cwd, envs, activity)
+            }
+            Platform::X86_64UnknownLinuxGnu => {
+                self.run_bwrap_status_with_activity(cmd, env_path, tmp, cwd, envs, activity)
+            }
         }
     }
 
@@ -243,7 +344,9 @@ impl Sandbox<'_> {
         for (k, v) in envs {
             command.env(k, v);
         }
-        // Installers must fail, never hang on a prompt (Sol review 5).
+        // Keep the historical unmanaged entry point available to tests and
+        // callers that do not consume a store. Production store callers use
+        // the activity-aware sibling below.
         command.stdin(std::process::Stdio::null());
         command.stdout(std::process::Stdio::inherit());
         command.stderr(std::process::Stdio::piped());
@@ -262,6 +365,43 @@ impl Sandbox<'_> {
         Ok(output.status)
     }
 
+    fn run_seatbelt_status_with_activity(
+        &self,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+        activity: &StoreActivity,
+    ) -> io::Result<std::process::ExitStatus> {
+        let profile = self.profile();
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-p")
+            .arg(&profile)
+            .args(cmd)
+            .current_dir(cwd) // cwd must be readable in-sandbox (getcwd)
+            .env_clear()
+            .env("PATH", env_path)
+            .env("HOME", tmp)
+            .env("TMPDIR", tmp)
+            .env("LANG", "en_US.UTF-8")
+            .env("SOURCE_DATE_EPOCH", "315532800"); // reproducibility nudge
+        for (k, v) in envs {
+            command.env(k, v);
+        }
+        let (status, stderr) = crate::supervise::status_with_stderr(&mut command, activity)?;
+        if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
+            return Err(sandbox_failure_error(
+                SandboxFailureKind::Setup,
+                &status,
+                &stderr,
+                cmd,
+            ));
+        }
+        Ok(status)
+    }
+
     fn run_bwrap_status(
         &self,
         cmd: &[&str],
@@ -270,6 +410,51 @@ impl Sandbox<'_> {
         cwd: &Path,
         envs: &[(String, String)],
     ) -> io::Result<std::process::ExitStatus> {
+        self.run_bwrap_status_inner(cmd, env_path, tmp, cwd, envs, None)
+    }
+
+    fn run_bwrap_status_with_activity(
+        &self,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+        activity: &StoreActivity,
+    ) -> io::Result<std::process::ExitStatus> {
+        self.run_bwrap_status_inner(cmd, env_path, tmp, cwd, envs, Some(activity))
+    }
+
+    fn run_bwrap_status_inner(
+        &self,
+        cmd: &[&str],
+        env_path: &str,
+        tmp: &Path,
+        cwd: &Path,
+        envs: &[(String, String)],
+        activity: Option<&StoreActivity>,
+    ) -> io::Result<std::process::ExitStatus> {
+        if let Some(activity) = activity {
+            self.reject_host_sockets(cwd, tmp)?;
+            let bwrap = bwrap_preflight_with_activity(Some(activity))?;
+            let args = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
+            let mut command = bwrap_command(bwrap)?;
+            command
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::piped());
+            let (status, stderr) = crate::supervise::status_with_stderr(&mut command, activity)?;
+            if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
+                return Err(sandbox_failure_error(
+                    SandboxFailureKind::Setup,
+                    &status,
+                    &stderr,
+                    cmd,
+                ));
+            }
+            return Ok(status);
+        }
         let output = self.run_bwrap_with_stdout(
             cmd,
             env_path,
@@ -690,19 +875,27 @@ pub fn probe(platform: Platform) -> io::Result<String> {
 }
 
 fn bwrap_preflight() -> io::Result<&'static Path> {
+    bwrap_preflight_with_activity(None)
+}
+
+fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     match PREFLIGHT.get_or_init(|| {
         let Some(path) = find_bwrap() else {
             return Err(BWRAP_UNAVAILABLE.to_string());
         };
         let mut version_command = bwrap_command(&path).map_err(|error| error.to_string())?;
-        let version_ok = version_command
+        version_command
             .arg("--version")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+            .stderr(std::process::Stdio::null());
+        let version_ok = match activity {
+            Some(activity) => supervise_output_status(&mut version_command, activity),
+            None => version_command
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false),
+        };
         if !version_ok {
             return Err(BWRAP_UNAVAILABLE.to_string());
         }
@@ -734,16 +927,25 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
             "/usr/bin/true",
         ];
         let mut probe_command = bwrap_command(&path).map_err(|error| error.to_string())?;
-        let probe_output = probe_command
+        probe_command
             .args(probe_args)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|error| error.to_string())?;
-        if probe_output.status.success() {
+            .stderr(std::process::Stdio::piped());
+        let probe_output = match activity {
+            Some(activity) => {
+                let output = crate::supervise::output(&mut probe_command, activity)
+                    .map_err(|error| error.to_string())?;
+                (output.status, output.stderr)
+            }
+            None => {
+                let output = probe_command.output().map_err(|error| error.to_string())?;
+                (output.status, output.stderr)
+            }
+        };
+        if probe_output.0.success() {
             Ok(path)
-        } else if probe_output.stderr.starts_with(b"bwrap:") {
-            Err(String::from_utf8_lossy(&probe_output.stderr)
+        } else if probe_output.1.starts_with(b"bwrap:") {
+            Err(String::from_utf8_lossy(&probe_output.1)
                 .trim_end()
                 .to_string())
         } else {
@@ -753,6 +955,12 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
         Ok(path) => Ok(path.as_path()),
         Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
     }
+}
+
+fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> bool {
+    crate::supervise::output(command, activity)
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn find_bwrap() -> Option<PathBuf> {

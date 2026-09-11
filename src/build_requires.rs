@@ -10,7 +10,7 @@ use crate::types::Plan;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Output};
 use zip::ZipArchive;
 
 const DEFAULT_REQUIRES: &[&str] = &["setuptools>=40.8.0", "wheel"];
@@ -106,11 +106,24 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     }
 }
 
-fn tar_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
-    let output = Command::new("/usr/bin/tar")
-        .args(["-tzf"])
-        .arg(path)
-        .output()
+fn status_for(command: &mut Command, store: Option<&Store>) -> io::Result<ExitStatus> {
+    match store {
+        Some(store) => crate::supervise::status_owned(command, store),
+        None => command.status(),
+    }
+}
+
+fn output_for(command: &mut Command, store: Option<&Store>) -> io::Result<Output> {
+    match store {
+        Some(store) => crate::supervise::output_owned(command, store),
+        None => command.output(),
+    }
+}
+
+fn tar_entries(path: &Path, store: Option<&Store>) -> io::Result<Vec<ArchiveEntry>> {
+    let mut command = Command::new("/usr/bin/tar");
+    command.args(["-tzf"]).arg(path);
+    let output = output_for(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
     if !output.status.success() {
         return Err(invalid(format!(
@@ -154,9 +167,9 @@ fn zip_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
     Ok(entries)
 }
 
-fn entries(path: &Path, kind: ArchiveKind) -> io::Result<Vec<ArchiveEntry>> {
+fn entries(path: &Path, kind: ArchiveKind, store: Option<&Store>) -> io::Result<Vec<ArchiveEntry>> {
     match kind {
-        ArchiveKind::TarGz => tar_entries(path),
+        ArchiveKind::TarGz => tar_entries(path, store),
         ArchiveKind::Zip => zip_entries(path),
     }
 }
@@ -197,15 +210,17 @@ fn root_relative(entry: &str, root: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<u8>> {
+fn archive_file(
+    path: &Path,
+    kind: ArchiveKind,
+    member: &str,
+    store: Option<&Store>,
+) -> io::Result<Vec<u8>> {
     match kind {
         ArchiveKind::TarGz => {
-            let output = Command::new("/usr/bin/tar")
-                .args(["-xOzf"])
-                .arg(path)
-                .arg("--")
-                .arg(member)
-                .output()
+            let mut command = Command::new("/usr/bin/tar");
+            command.args(["-xOzf"]).arg(path).arg("--").arg(member);
+            let output = output_for(&mut command, store)
                 .map_err(|e| io::Error::new(e.kind(), format!("read {member} from sdist: {e}")))?;
             if !output.status.success() {
                 return Err(invalid(format!(
@@ -421,9 +436,18 @@ fn requires_resolution_text(requires: &[String]) -> String {
     requested.join("\n") + "\n"
 }
 
+#[cfg(test)]
 pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
+    inspect_sdist_inner(path, None)
+}
+
+pub(crate) fn inspect_sdist_for(store: &Store, path: &Path) -> io::Result<ArchiveInfo> {
+    inspect_sdist_inner(path, Some(store))
+}
+
+fn inspect_sdist_inner(path: &Path, store: Option<&Store>) -> io::Result<ArchiveInfo> {
     let kind = archive_kind(path)?;
-    let entries = entries(path, kind)?;
+    let entries = entries(path, kind, store)?;
     let root = archive_root(&entries, path)?;
     let pyproject_member = format!("{root}/pyproject.toml");
     let pyproject_entry = entries
@@ -431,7 +455,7 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
         .find(|entry| entry.normalized == pyproject_member);
     let (requires, backend, explicit_manifest) = if let Some(entry) = pyproject_entry {
         parse_pyproject(
-            &archive_file(path, kind, &entry.original)?,
+            &archive_file(path, kind, &entry.original, store)?,
             &pyproject_member,
         )?
     } else {
@@ -496,10 +520,29 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn extract_sdist(
     path: &Path,
     destination: &Path,
     info: &ArchiveInfo,
+) -> io::Result<PathBuf> {
+    extract_sdist_inner(path, destination, info, None)
+}
+
+pub(crate) fn extract_sdist_for(
+    store: &Store,
+    path: &Path,
+    destination: &Path,
+    info: &ArchiveInfo,
+) -> io::Result<PathBuf> {
+    extract_sdist_inner(path, destination, info, Some(store))
+}
+
+fn extract_sdist_inner(
+    path: &Path,
+    destination: &Path,
+    info: &ArchiveInfo,
+    store: Option<&Store>,
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(destination)?;
     match archive_kind(path)? {
@@ -508,8 +551,8 @@ pub(crate) fn extract_sdist(
             // materialize anything.  The same check is performed by
             // inspect_sdist, but extract_sdist is also used directly in the
             // Rust planning path.
-            let _ = entries(path, ArchiveKind::TarGz)?;
-            let status = Command::new("/usr/bin/tar")
+            let mut command = Command::new("/usr/bin/tar");
+            command
                 .args(["-xzf"])
                 .arg(path)
                 .args(["-C"])
@@ -519,11 +562,11 @@ pub(crate) fn extract_sdist(
                     "1",
                     "--no-same-owner",
                     "--no-same-permissions",
-                ])
-                .status()
-                .map_err(|e| {
-                    io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
-                })?;
+                ]);
+            let _ = entries(path, ArchiveKind::TarGz, store)?;
+            let status = status_for(&mut command, store).map_err(|e| {
+                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+            })?;
             if !status.success() {
                 return Err(invalid(format!("extract {} failed", path.display())));
             }

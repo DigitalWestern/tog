@@ -199,10 +199,26 @@ fn validate_ruby_layout(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn extract_ruby_bottle(tarball: &Path, staged: &Path) -> io::Result<()> {
+fn extract_ruby_bottle(store: &Store, tarball: &Path, staged: &Path) -> io::Result<()> {
     // The verified Linux and Darwin bottles both use
     // portable-ruby/<version>/<tree>; this is deliberately not Node's
     // strip count. The archive remains unchanged in the verified cache.
+    let mut command = Command::new("/usr/bin/tar");
+    command
+        .args(["-xzf"])
+        .arg(tarball)
+        .args(["-C"])
+        .arg(staged)
+        .args(["--strip-components", "2"]);
+    let status = crate::supervise::status_owned(&mut command, store)?;
+    if !status.success() {
+        return Err(err("portable-ruby extraction failed"));
+    }
+    validate_ruby_layout(staged)
+}
+
+#[cfg(test)]
+fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()> {
     let status = Command::new("/usr/bin/tar")
         .args(["-xzf"])
         .arg(tarball)
@@ -232,7 +248,7 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    if let Err(error) = extract_ruby_bottle(&tarball, &staged) {
+    if let Err(error) = extract_ruby_bottle(store, &tarball, &staged) {
         let _ = crate::store::remove_tree(&staged);
         return Err(error);
     }
@@ -288,13 +304,14 @@ pub fn run_env(
 /// Run a store Ruby tool for a delegated edit (`blanket add` and friends):
 /// same environment as planning, failure carries the tool's stderr.
 pub(crate) fn run_checked(
+    store: &Store,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<()> {
     crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_ruby_edit(ruby_obj, cwd, gem_home, args)?;
+    let out = run_ruby_edit(store, ruby_obj, cwd, gem_home, args)?;
     if crate::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -309,15 +326,17 @@ pub(crate) fn run_checked(
 }
 
 fn run_ruby(
+    store: &Store,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
-    run_ruby_with_env(ruby_obj, cwd, args, forced_env(cwd, gem_home))
+    run_ruby_with_env(store, ruby_obj, cwd, args, forced_env(cwd, gem_home))
 }
 
 fn run_ruby_edit(
+    store: &Store,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
@@ -327,10 +346,11 @@ fn run_ruby_edit(
     if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "BUNDLE_FROZEN") {
         *value = "false".to_string();
     }
-    run_ruby_with_env(ruby_obj, cwd, args, env)
+    run_ruby_with_env(store, ruby_obj, cwd, args, env)
 }
 
 fn run_ruby_with_env(
+    store: &Store,
     ruby_obj: &Path,
     cwd: &Path,
     args: &[&str],
@@ -347,7 +367,7 @@ fn run_ruby_with_env(
     cmd.env("PATH", path);
     force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &environment);
     cmd.stdin(std::process::Stdio::null());
-    cmd.output()
+    crate::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
 }
 
@@ -557,7 +577,7 @@ pub fn plan_ruby(
     if !lock_path.is_file() {
         eprintln!("blanket: no Gemfile.lock; resolving with the store bundler...");
         let scratch = store.stage()?;
-        let out = run_ruby(ruby_obj, project_dir, &scratch, &["bundle", "lock"])?;
+        let out = run_ruby(store, ruby_obj, project_dir, &scratch, &["bundle", "lock"])?;
         let _ = crate::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
@@ -580,6 +600,7 @@ pub fn plan_ruby(
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
     let out = run_ruby(
+        store,
         ruby_obj,
         project_dir,
         &scratch,
@@ -603,6 +624,7 @@ pub fn plan_ruby(
     }
     // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
     let out = run_ruby(
+        store,
         ruby_obj,
         project_dir,
         &scratch,
@@ -727,6 +749,7 @@ pub fn realize_gems(
             let file = download_verified_held(store, &url, &g.sha256)
                 .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
             let out = run_ruby(
+                store,
                 ruby_obj,
                 &scratch,
                 &scratch,
@@ -818,7 +841,7 @@ pub fn realize_gems(
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
         };
-        crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+        crate::sandbox::run_build_spec_on_for_store(platform, &spec, store).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -991,7 +1014,7 @@ mod tests {
 
         let staged = temp.0.join("staged");
         fs::create_dir(&staged).unwrap();
-        extract_ruby_bottle(&archive, &staged).unwrap();
+        extract_ruby_bottle_for_test(&archive, &staged).unwrap();
         assert!(staged.join("bin/ruby").is_file());
         assert!(staged.join("bin/gem").is_symlink());
         assert!(!staged.join("portable-ruby").exists());

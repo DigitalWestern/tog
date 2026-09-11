@@ -1071,10 +1071,9 @@ fn uv_command(
     Ok((command, selection.pin.version))
 }
 
-fn run_inherited(mut command: Command, what: &str) -> io::Result<()> {
+fn run_inherited(store: &Store, mut command: Command, what: &str) -> io::Result<()> {
     ui::trace_command(&command);
-    let status = command
-        .status()
+    let status = crate::supervise::status_owned(&mut command, store)
         .map_err(|error| io::Error::new(error.kind(), format!("run {what}: {error}")))?;
     if !status.success() {
         return Err(other(format!(
@@ -1106,7 +1105,7 @@ fn uv_compile(
         .arg("-o")
         .arg(output)
         .args(extra);
-    run_inherited(command, "store uv pip compile")
+    run_inherited(store, command, "store uv pip compile")
 }
 
 fn python_uv(
@@ -1148,7 +1147,7 @@ fn python_uv(
             }
         }
     }
-    run_inherited(command, "store uv")?;
+    run_inherited(store, command, "store uv")?;
     Ok(vec!["pyproject.toml".to_string(), "uv.lock".to_string()])
 }
 
@@ -1650,7 +1649,7 @@ fn node(
                 std::env::var("PATH").unwrap_or_default()
             ),
         );
-        run_inherited(command, "store npm")?;
+        run_inherited(store, command, "store npm")?;
         return Ok(NodeEdit {
             files: vec!["package.json".into(), "package-lock.json".into()],
             sync_project: project.to_path_buf(),
@@ -1736,7 +1735,7 @@ fn node(
                 ("npm_config_ignore_scripts".into(), "true".into()),
             ],
         );
-        run_inherited(command, &format!("store {}", manager.name()))?;
+        run_inherited(store, command, &format!("store {}", manager.name()))?;
         Ok(())
     })();
     let _ = crate::store::remove_tree(&stage);
@@ -1798,7 +1797,7 @@ fn cargo_delegate(
         .env("CARGO_NET_OFFLINE", "false")
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
-    run_inherited(command, "store cargo")?;
+    run_inherited(store, command, "store cargo")?;
     Ok(vec!["Cargo.toml".to_string(), "Cargo.lock".to_string()])
 }
 
@@ -1839,7 +1838,7 @@ fn go_delegate(
         }
     };
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = golang::run_checked(&go_obj, project, &scratch, false, &refs);
+    let result = golang::run_checked(store, &go_obj, project, &scratch, false, &refs);
     let _ = crate::store::remove_tree(&scratch);
     result?;
     Ok(vec!["go.mod".to_string(), "go.sum".to_string()])
@@ -1871,14 +1870,14 @@ fn ruby_delegate(
                     if dev {
                         args.extend(["--group", "development"]);
                     }
-                    ruby::run_checked(&ruby_obj, project, &scratch, &args)?;
+                    ruby::run_checked(store, &ruby_obj, project, &scratch, &args)?;
                 }
                 Ok(())
             }
             Verb::Remove => {
                 let mut args = vec!["bundle", "remove"];
                 args.extend(texts.iter().map(String::as_str));
-                ruby::run_checked(&ruby_obj, project, &scratch, &args)
+                ruby::run_checked(store, &ruby_obj, project, &scratch, &args)
             }
             Verb::Update => {
                 let mut args = vec!["bundle", "update"];
@@ -1886,7 +1885,7 @@ fn ruby_delegate(
                     args.push("--all");
                 }
                 args.extend(texts.iter().map(String::as_str));
-                ruby::run_checked(&ruby_obj, project, &scratch, &args)
+                ruby::run_checked(store, &ruby_obj, project, &scratch, &args)
             }
         }
     })();
@@ -1936,7 +1935,7 @@ fn elixir_delegate(
                 args.push("--all");
             }
             args.extend(texts.iter().map(String::as_str));
-            let result = elixir::run_checked(&beam, project, &scratch, false, &args);
+            let result = elixir::run_checked(store, &beam, project, &scratch, false, &args);
             let _ = crate::store::remove_tree(&scratch);
             result?;
             Ok(vec!["mix.lock".to_string()])

@@ -798,14 +798,12 @@ pub(crate) fn lock_requirement_text_with_uv(
                 })?,
             ]);
         }
-        let uv_output = command
-            .arg(&input)
-            .args(["-o"])
-            .arg(&output)
-            .output()
-            .map_err(|e| {
+        let uv_output = {
+            command.arg(&input).args(["-o"]).arg(&output);
+            crate::supervise::output_owned(&mut command, store).map_err(|e| {
                 io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
-            })?;
+            })?
+        };
         if !uv_output.status.success() {
             let names = requirements_text
                 .lines()

@@ -477,10 +477,6 @@ fn lock_x_root(root: &Path, exclusive: bool, nonblocking: bool) -> io::Result<Op
     )))
 }
 
-fn make_lock_inheritable(lock: &fs::File) -> io::Result<()> {
-    fd_set_cloexec(lock.as_raw_fd(), false)
-}
-
 fn acquire_x_root(root: &Path) -> io::Result<fs::File> {
     let lock =
         lock_x_root(root, false, false)?.expect("blocking shared x lock always returns a file");
@@ -1456,7 +1452,12 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
     Ok(())
 }
 
-pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
+pub fn run(
+    platform: Platform,
+    cwd: &Path,
+    request: Request,
+    activity: &crate::activity::StoreActivity,
+) -> io::Result<i32> {
     let ecosystem = choose_ecosystem(&request, cwd)?;
     let (tool, tool_version) = split_version(&request.tool);
     let (package, from_version) = request.from.as_deref().map_or((tool, None), split_version);
@@ -1487,10 +1488,11 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
     }
     let x_home = home()?;
     let store = Store::open()?;
+    store.require_activity(activity, "x")?;
     let root = x_home
         .join(".blanket/x")
         .join(x_root_name(&store, platform, ecosystem, package, version));
-    let x_lock = acquire_x_root(&root)?;
+    let _x_lock = acquire_x_root(&root)?;
     let (executable, path_prefix, env): (PathBuf, Vec<PathBuf>, Vec<(String, PathBuf)>) =
         match ecosystem {
             "python" => {
@@ -1502,7 +1504,7 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                 let ready = x_request_is_ready(&store, &root, "python", &executable)?;
                 if !ready {
                     write_x_request(&root, ecosystem, package, version, "realizing")?;
-                    realize_python(&store, platform, &root, package, version)?;
+                    realize_python(&store, activity, platform, &root, package, version)?;
                     write_x_request(&root, ecosystem, package, version, "ready")?;
                 } else {
                     // `x_request_is_ready` already validated this projection
@@ -1530,7 +1532,7 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
                 let ready = x_request_is_ready(&store, &root, "node", &executable)?;
                 if !ready {
                     write_x_request(&root, ecosystem, package, version, "realizing")?;
-                    realize_node(&store, platform, &root, package, version)?;
+                    realize_node(&store, activity, platform, &root, package, version)?;
                     write_x_request(&root, ecosystem, package, version, "ready")?;
                 } else {
                     // Already validated by `x_request_is_ready`; see above.
@@ -1565,10 +1567,12 @@ pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<()> {
         command.env("PYTHONDONTWRITEBYTECODE", "1");
     }
     ui::trace_command(&command);
-    // Keep the shared lock private during all realization work. This is the
-    // only point where it becomes inheritable by the tool being exec'd.
-    make_lock_inheritable(&x_lock)?;
-    Err(command.exec())
+    let status = crate::supervise::status(&mut command, activity)?;
+    use std::os::unix::process::ExitStatusExt;
+    Ok(status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1))
 }
 
 fn node_cache_root(
@@ -1658,6 +1662,7 @@ pub(crate) fn realize_node_tool(
     corepack_hash: Option<&CorepackHash>,
 ) -> io::Result<(PathBuf, fs::File)> {
     validate_exact_version(version)?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let root = node_cache_root(store, platform, package, Some(version))?;
     // Take the same shared lifecycle lock `blanket x` takes, and hand it back
     // to the caller. `blanket x --clean` removes a cached root under an
@@ -1673,7 +1678,7 @@ pub(crate) fn realize_node_tool(
         }
         return Ok((root, x_lock));
     }
-    realize_node(store, platform, &root, package, Some(version))?;
+    realize_node(store, &activity, platform, &root, package, Some(version))?;
     if !executable.is_file() {
         return Err(other(format!(
             "'{package}@{version}' installed but provides no '{package}' executable"
@@ -1745,6 +1750,7 @@ fn verify_corepack_hash(
 
 fn realize_python(
     store: &Store,
+    activity: &crate::activity::StoreActivity,
     platform: Platform,
     root: &Path,
     package: &str,
@@ -1784,7 +1790,7 @@ fn realize_python(
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
     ui::trace_command(&command);
-    let status = command.status()?;
+    let status = crate::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(other(format!(
             "could not resolve '{}' from PyPI (uv pip compile exit {status})",
@@ -1801,6 +1807,7 @@ fn realize_python(
 
 fn realize_node(
     store: &Store,
+    activity: &crate::activity::StoreActivity,
     platform: Platform,
     root: &Path,
     package: &str,
@@ -1839,7 +1846,7 @@ fn realize_node(
         ),
     );
     ui::trace_command(&command);
-    let status = command.status()?;
+    let status = crate::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(other(format!(
             "could not resolve '{package}' from npm (npm exit {status})"
@@ -1909,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_x_lock_blocks_nonblocking_cleanup_until_exec() {
+    fn shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit() {
         let base = std::env::temp_dir().join(format!(
             "blanket-x-lock-{}-{}",
             std::process::id(),
@@ -1927,9 +1934,6 @@ mod tests {
         assert!(flags >= 0);
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
         assert!(lock_x_root(&root, true, true).unwrap().is_none());
-        make_lock_inheritable(&shared).unwrap();
-        let flags = unsafe { libc::fcntl(shared.as_raw_fd(), libc::F_GETFD) };
-        assert_eq!(flags & libc::FD_CLOEXEC, 0);
         drop(shared);
         assert!(lock_x_root(&root, true, true).unwrap().is_some());
         fs::remove_dir_all(base).unwrap();

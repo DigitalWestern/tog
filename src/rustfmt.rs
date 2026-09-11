@@ -120,7 +120,7 @@ pub fn ensure_rustfmt(
     }
     let archive = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    if let Err(error) = stage_rustfmt(&staged, platform, archive.as_ref(), &rust_object) {
+    if let Err(error) = stage_rustfmt(store, &staged, platform, archive.as_ref(), &rust_object) {
         let _ = crate::store::remove_tree(&staged);
         return Err(error);
     }
@@ -142,7 +142,7 @@ pub fn ensure_rustfmt(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", staged.join("bin").display()),
     };
-    let probe_result = crate::sandbox::run_build_spec_on(platform, &probe);
+    let probe_result = crate::sandbox::run_build_spec_on_for_store(platform, &probe, store);
     let _ = crate::store::remove_tree(&scratch);
     if let Err(error) = probe_result {
         let _ = crate::store::remove_tree(&staged);
@@ -179,6 +179,7 @@ pub fn run_sandboxed(
     workspace_root: &Path,
     rust_object: &Path,
     rustfmt_object: &Path,
+    store: &Store,
     check: bool,
     args: &[String],
 ) -> io::Result<std::process::ExitStatus> {
@@ -223,19 +224,20 @@ pub fn run_sandboxed(
             rust_object.join("bin").display()
         ),
     };
-    let result = crate::sandbox::run_build_spec_status_on(platform, &spec);
+    let result = crate::sandbox::run_build_spec_status_on_for_store(platform, &spec, store);
     let _ = crate::store::remove_tree(&scratch);
     result
 }
 
 fn stage_rustfmt(
+    store: &Store,
     staged: &Path,
     platform: Platform,
     archive: &Path,
     rust_object: &Path,
 ) -> io::Result<()> {
     let root = format!("rustfmt-{RUSTFMT_VERSION}-{}", platform.triple());
-    let entries = archive_entries(archive)?;
+    let entries = archive_entries(store, archive)?;
     let allowed: BTreeSet<String> = allowed_entries(&root).into_iter().collect();
     for entry in entries {
         if !allowed.contains(&entry) {
@@ -247,15 +249,16 @@ fn stage_rustfmt(
     }
     let cargo_fmt = format!("{root}/rustfmt-preview/bin/cargo-fmt");
     let rustfmt = format!("{root}/rustfmt-preview/bin/rustfmt");
-    let status = Command::new("/usr/bin/tar")
+    let mut command = Command::new("/usr/bin/tar");
+    command
         .args(["-xJf"])
         .arg(archive)
         .args(["-C"])
         .arg(staged)
         .args(["--strip-components", "2"])
         .arg(&cargo_fmt)
-        .arg(&rustfmt)
-        .status()
+        .arg(&rustfmt);
+    let status = crate::supervise::status_owned(&mut command, store)
         .map_err(|error| io::Error::new(error.kind(), format!("spawn tar for rustfmt: {error}")))?;
     if !status.success() {
         return Err(io::Error::other("rustfmt archive extraction failed"));
@@ -299,11 +302,10 @@ fn rust_object_lib_link(rust_object: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(format!("../{rust_object_id}/lib")))
 }
 
-fn archive_entries(archive: &Path) -> io::Result<Vec<String>> {
-    let output = Command::new("/usr/bin/tar")
-        .args(["-tJf"])
-        .arg(archive)
-        .output()
+fn archive_entries(store: &Store, archive: &Path) -> io::Result<Vec<String>> {
+    let mut command = Command::new("/usr/bin/tar");
+    command.args(["-tJf"]).arg(archive);
+    let output = crate::supervise::output_owned(&mut command, store)
         .map_err(|error| io::Error::new(error.kind(), format!("list rustfmt archive: {error}")))?;
     if !output.status.success() {
         return Err(io::Error::other(format!(

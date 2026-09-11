@@ -228,7 +228,7 @@ pub(crate) fn plan_sdist_identity_input(
     let pin = crate::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
-    let info = build_requires::inspect_sdist(&sdist)?;
+    let info = build_requires::inspect_sdist_for(store, &sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
     let fast_sdist = fast_requirements
         && !info.rust_build
@@ -261,7 +261,8 @@ pub(crate) fn plan_sdist_identity_input(
         let work = store.stage()?;
         let result: io::Result<Identity> = (|| {
             let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
-            let source = build_requires::extract_sdist(&sdist, &work.join("source"), &info)?;
+            let source =
+                build_requires::extract_sdist_for(store, &sdist, &work.join("source"), &info)?;
             drop(sdist);
             let rust = rust_plan_inputs(store, platform, &pkg.sha256, &source, &info, &work)?;
             Ok(isolated_sdist_identity_from_ids(
@@ -334,6 +335,7 @@ fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
 }
 
 fn generate_cargo_lock(
+    store: &Store,
     rust_obj: &Path,
     manifest: &Path,
     source: &Path,
@@ -342,21 +344,21 @@ fn generate_cargo_lock(
     fs::create_dir_all(cargo_home)?;
     let cargo = rust_obj.join("bin/cargo");
     let path_var = format!("{}:/usr/bin:/bin", rust_obj.join("bin").display());
-    let status = Command::new(&cargo)
+    let mut command = Command::new(&cargo);
+    command
         .args(["generate-lockfile", "--manifest-path"])
         .arg(manifest)
         .current_dir(source)
         .env("CARGO_HOME", cargo_home)
         .env("PATH", path_var)
         .env_remove("RUSTUP_HOME")
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .status()
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("run store cargo to generate Cargo.lock: {e}"),
-            )
-        })?;
+        .env_remove("RUSTUP_TOOLCHAIN");
+    let status = crate::supervise::status_owned(&mut command, store).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("run store cargo to generate Cargo.lock: {e}"),
+        )
+    })?;
     if !status.success() {
         return Err(io::Error::other(
             "store cargo generate-lockfile failed for the sdist",
@@ -423,7 +425,7 @@ fn rust_plan_inputs(
         // before any later wheel-cache lookup so warm rebuilds stay offline.
         let rust_obj = crate::cargo::ensure_rust_for(store, platform, &rust_version)?;
         let plan_home = work.join("cargo-plan-home");
-        let lock = generate_cargo_lock(&rust_obj, &manifest, source, &plan_home)?;
+        let lock = generate_cargo_lock(store, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
         fs::create_dir_all(generated_path.parent().expect("cache parent"))?;
         fs::write(&generated_path, &text)?;
@@ -470,6 +472,7 @@ fn prepare_rust(
 }
 
 fn run_sdist_build(
+    store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
     build_env: &Path,
@@ -532,8 +535,8 @@ fn run_sdist_build(
     let path = envs
         .iter()
         .find(|(key, _)| key == "PATH")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("/usr/bin:/bin");
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| "/usr/bin:/bin".to_string());
     let sb = Sandbox {
         read: vec![build_env, cpython_obj]
             .into_iter()
@@ -543,9 +546,20 @@ fn run_sdist_build(
             .collect(),
         write: vec![work],
     };
-    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    sb.run_in_on(platform, &refs, &path, work, work, &envs)
-        .map_err(|error| wrap_sandbox_build_error_with_tail(pkg, error, stderr_tail(&log)))
+    crate::sandbox::run_build_spec_on_for_store(
+        platform,
+        &crate::sandbox::BuildSpec {
+            argv,
+            cwd: work.to_path_buf(),
+            env: envs,
+            read: sb.read.iter().map(|path| path.to_path_buf()).collect(),
+            write: sb.write.iter().map(|path| path.to_path_buf()).collect(),
+            scratch: work.to_path_buf(),
+            path,
+        },
+        store,
+    )
+    .map_err(|error| wrap_sandbox_build_error_with_tail(pkg, error, stderr_tail(&log)))
 }
 
 /// Build the wheel for an sdist without a runtime numpy constraint. Normal
@@ -653,7 +667,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
 
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
-    let info = build_requires::inspect_sdist(&sdist)?;
+    let info = build_requires::inspect_sdist_for(store, &sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
     let fast_requirements = build_requires::fast_path(&info.build_requires);
@@ -708,7 +722,8 @@ pub(crate) fn build_sdist_wheel_at_depth(
     fs::copy(&sdist, &sdist_named)?;
 
     let source = if info.rust_build {
-        Some(build_requires::extract_sdist(
+        Some(build_requires::extract_sdist_for(
+            store,
             &sdist,
             &work.join("source"),
             &info,
@@ -791,6 +806,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let cpython_obj = crate::python::ensure_python_for(store, pin, platform)?;
     let input = source.as_deref().unwrap_or(&sdist_named);
     run_sdist_build(
+        store,
         platform,
         pkg,
         &build_env,
@@ -906,6 +922,9 @@ mod tests {
 
     #[test]
     fn darwin_sdist_identity_unchanged() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "docopt".into(),
             version: "0.6.2".into(),
@@ -925,6 +944,9 @@ mod tests {
 
     #[test]
     fn darwin_native_sdist_identity_does_not_realize_native_libs() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let store = test_store("darwin-native");
         let pkg = local_native_sdist(&store, "darwin-native");
         let planned =
@@ -945,6 +967,9 @@ mod tests {
 
     #[test]
     fn isolated_identity_has_schema_three_and_build_env() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),
@@ -974,6 +999,9 @@ mod tests {
 
     #[test]
     fn native_sdist_identity_records_linker_configuration() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),
@@ -999,6 +1027,9 @@ mod tests {
 
     #[test]
     fn recursion_cap_is_loud() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),
@@ -1024,6 +1055,9 @@ mod tests {
 
     #[test]
     fn build_sdist_preserves_unsupported_kind() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
             name: "example".into(),
             version: "1.0".into(),
@@ -1043,6 +1077,9 @@ mod tests {
 
     #[test]
     fn linux_sdist_build_uses_host_compilers() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert_eq!(
             sdist_build_env(Platform::X86_64UnknownLinuxGnu),
             vec![

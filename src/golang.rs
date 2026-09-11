@@ -106,11 +106,38 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// Extract a provider Go archive into its store staging directory. Go's
 /// release archives have exactly one `go/` root; strip that one level while
 /// retaining the complete toolchain tree below it.
+#[cfg(test)]
 fn extract_go_toolchain(platform: Platform, archive: &Path, staged: &Path) -> io::Result<()> {
+    extract_go_toolchain_inner(platform, archive, staged, None)
+}
+
+fn extract_go_toolchain_for(
+    store: &Store,
+    platform: Platform,
+    archive: &Path,
+    staged: &Path,
+) -> io::Result<()> {
+    extract_go_toolchain_inner(platform, archive, staged, Some(store))
+}
+
+fn extract_go_toolchain_inner(
+    platform: Platform,
+    archive: &Path,
+    staged: &Path,
+    store: Option<&Store>,
+) -> io::Result<()> {
     // List first (src/archive.rs): the layout check below and the
     // containment rules both run before tar writes anything.
-    let entries = crate::archive::list(archive_platform(platform), archive, Compression::Gzip)
-        .map_err(|e| err(format!("could not inspect Go archive layout: {e}")))?;
+    let entries = match store {
+        Some(store) => crate::archive::list_for_store(
+            store,
+            archive_platform(platform),
+            archive,
+            Compression::Gzip,
+        ),
+        None => crate::archive::list(archive_platform(platform), archive, Compression::Gzip),
+    }
+    .map_err(|e| err(format!("could not inspect Go archive layout: {e}")))?;
     let mut saw_entry = false;
     for entry in &entries {
         let raw = entry.name.as_str();
@@ -133,14 +160,25 @@ fn extract_go_toolchain(platform: Platform, archive: &Path, staged: &Path) -> io
         return Err(err("go archive has unexpected empty layout"));
     }
 
-    crate::archive::extract_validated(
-        archive_platform(platform),
-        archive,
-        staged,
-        1,
-        Compression::Gzip,
-        &entries,
-    )?;
+    match store {
+        Some(store) => crate::archive::extract_validated_for_store(
+            store,
+            archive_platform(platform),
+            archive,
+            staged,
+            1,
+            Compression::Gzip,
+            &entries,
+        )?,
+        None => crate::archive::extract_validated(
+            archive_platform(platform),
+            archive,
+            staged,
+            1,
+            Compression::Gzip,
+            &entries,
+        )?,
+    }
     if !staged.join("bin/go").is_file() {
         return Err(err("go tarball extraction failed or has unexpected layout"));
     }
@@ -172,7 +210,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    extract_go_toolchain(platform, &tarball, &staged)?;
+    extract_go_toolchain_for(store, platform, &tarball, &staged)?;
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
@@ -214,6 +252,7 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
 
 /// Run the store Go for a delegated edit (`blanket add` and friends).
 pub(crate) fn run_checked(
+    store: &Store,
     go_obj: &Path,
     cwd: &Path,
     modcache: &Path,
@@ -225,7 +264,7 @@ pub(crate) fn run_checked(
         args.join(" "),
         cwd.display()
     ));
-    let out = run_go(go_obj, cwd, modcache, offline, args)?;
+    let out = run_go(store, go_obj, cwd, modcache, offline, args)?;
     if crate::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -240,6 +279,7 @@ pub(crate) fn run_checked(
 }
 
 fn run_go(
+    store: &Store,
     go_obj: &Path,
     cwd: &Path,
     modcache: &Path,
@@ -255,7 +295,7 @@ fn run_go(
             cmd.env(&k, &v);
         }
     }
-    cmd.output()
+    crate::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
 }
 
@@ -523,6 +563,7 @@ pub fn plan_go(
     let gate_cache = store.root.join("planner-modcache");
     fs::create_dir_all(&gate_cache)?;
     let out = run_go(
+        store,
         go_obj,
         project_dir,
         &gate_cache,
@@ -535,7 +576,14 @@ pub fn plan_go(
         // Out-of-sync manifest: run the ecosystem's resolver, the same
         // delegated mutation as uv pip compile / cargo generate-lockfile.
         eprintln!("blanket: go.mod/go.sum need updating; resolving with the store go mod tidy...");
-        let out = run_go(go_obj, project_dir, &gate_cache, false, &["mod", "tidy"])?;
+        let out = run_go(
+            store,
+            go_obj,
+            project_dir,
+            &gate_cache,
+            false,
+            &["mod", "tidy"],
+        )?;
         if !out.status.success() {
             let _ = crate::store::remove_tree(&scratch);
             return Err(err(format!(
@@ -571,6 +619,7 @@ pub fn plan_go(
     }
     eprintln!("blanket: computing Go module closure with the store toolchain...");
     let out = run_go(
+        store,
         go_obj,
         &work,
         &gate_cache,
@@ -904,7 +953,7 @@ pub fn realize_modcache(
                 .map(|m| format!("{}@{}", m.path, m.version)),
         );
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = run_go(go_obj, &scratch, &staged, true, &arg_refs)?;
+        let out = run_go(store, go_obj, &scratch, &staged, true, &arg_refs)?;
         let _ = crate::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
@@ -1026,15 +1075,16 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", go_obj.join("bin").display()),
     };
-    let result = crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "go build failed: {e}; network is denied during builds (local \
+    let result =
+        crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "go build failed: {e}; network is denied during builds (local \
              replace directives and network-dependent tooling are unsupported)"
-            ),
-        )
-    });
+                ),
+            )
+        });
     let moved: io::Result<()> = result.and_then(|_| {
         for entry in fs::read_dir(&outdir)? {
             let entry = entry?;

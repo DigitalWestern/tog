@@ -167,6 +167,13 @@ pub fn object_id(source: &GitSource) -> String {
 
 fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
+    configure_git(&mut command, args, cwd);
+    command
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
+}
+
+fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
     let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK");
     // Git reads a surprisingly large ambient surface: global/system config,
     // helper commands, hooks, filters, alternate object stores, and worktree
@@ -190,13 +197,40 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output
     // A prompt would hang a background sync forever.
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env("GIT_ASKPASS", "/bin/true");
-    command
-        .output()
+}
+
+fn run_git_with_activity(
+    args: &[&str],
+    cwd: Option<&Path>,
+    activity: &crate::activity::StoreActivity,
+) -> io::Result<std::process::Output> {
+    let mut command = Command::new(GIT);
+    configure_git(&mut command, args, cwd);
+    crate::supervise::output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
 }
 
 fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
     let output = run_git(args, cwd)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+        return Err(err(format!(
+            "{what} failed ({}): {}",
+            output.status,
+            tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_ok_with_activity(
+    args: &[&str],
+    cwd: Option<&Path>,
+    what: &str,
+    activity: &crate::activity::StoreActivity,
+) -> io::Result<String> {
+    let output = run_git_with_activity(args, cwd, activity)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
@@ -373,19 +407,23 @@ fn resolve_target_components(
     Ok(current)
 }
 
-/// Ensure checkout materialization did not apply `.gitattributes` conversion
-/// or another filter. Git's index stores the raw blob hash; comparing raw
-/// bytes after checkout keeps the commit fingerprint tied to that tree.
-fn validate_checkout_tree(root: &Path) -> io::Result<()> {
-    validate_checkout_tree_at(root, 0)
+fn validate_checkout_tree_with_activity(
+    root: &Path,
+    activity: &crate::activity::StoreActivity,
+) -> io::Result<()> {
+    validate_checkout_tree_at_with_activity(root, 0, activity)
 }
 
-fn validate_checkout_tree_at(root: &Path, depth: usize) -> io::Result<()> {
+fn validate_checkout_tree_at_with_activity(
+    root: &Path,
+    depth: usize,
+    activity: &crate::activity::StoreActivity,
+) -> io::Result<()> {
     if depth > 32 {
         return Err(err("git submodule nesting exceeds 32 levels"));
     }
     use std::os::unix::ffi::OsStringExt;
-    let output = run_git(&["ls-files", "-s", "-z"], Some(root))?;
+    let output = run_git_with_activity(&["ls-files", "-s", "-z"], Some(root), activity)?;
     if !output.status.success() {
         return Err(err("git ls-files failed while validating the checkout"));
     }
@@ -413,10 +451,11 @@ fn validate_checkout_tree_at(root: &Path, depth: usize) -> io::Result<()> {
             let path_text = path
                 .to_str()
                 .ok_or_else(|| err("git submodule path is not UTF-8"))?;
-            let actual = git_ok(
+            let actual = git_ok_with_activity(
                 &["-C", path_text, "rev-parse", "HEAD"],
                 Some(root),
                 "git submodule rev-parse",
+                activity,
             )?;
             if actual.to_ascii_lowercase() != expected {
                 return Err(err(format!(
@@ -424,7 +463,7 @@ fn validate_checkout_tree_at(root: &Path, depth: usize) -> io::Result<()> {
                     path.display()
                 )));
             }
-            validate_checkout_tree_at(&path, depth + 1)?;
+            validate_checkout_tree_at_with_activity(&path, depth + 1, activity)?;
             continue;
         }
         let bytes = if mode == "120000" {
@@ -451,27 +490,34 @@ fn validate_checkout_tree_at(root: &Path, depth: usize) -> io::Result<()> {
 /// Realize a git source in the store and return its object path.
 pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBuf> {
     validate_source(source)?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let identity = identity(source);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
-    let work = store.stage()?;
+    let work = store.stage_with_activity(&activity)?;
     let result = (|| -> io::Result<()> {
-        git_ok(&["init", "-q", "--template="], Some(&work), "git init")?;
+        git_ok_with_activity(
+            &["init", "-q", "--template="],
+            Some(&work),
+            "git init",
+            &activity,
+        )?;
         // Besides naming the fetched repository, origin is what Git uses to
         // resolve relative URLs in .gitmodules. Without it, a submodule such
         // as `../shared.git` is resolved against the temporary worktree.
-        git_ok(
+        git_ok_with_activity(
             &["remote", "add", "origin", &source.url],
             Some(&work),
             "git remote add origin",
+            &activity,
         )?;
         // A reachable-sha fetch is the cheap path; servers that refuse it
         // (uploadpack.allowReachableSHA1InWant off) need the full history.
-        let shallow = run_git(
+        let shallow = run_git_with_activity(
             &[
                 "fetch",
                 "--depth",
@@ -481,9 +527,10 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                 &source.commit,
             ],
             Some(&work),
+            &activity,
         )?;
         if !shallow.status.success() {
-            git_ok(
+            git_ok_with_activity(
                 &[
                     "fetch",
                     "--quiet",
@@ -493,14 +540,21 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                 ],
                 Some(&work),
                 &format!("git fetch {}", source.url),
+                &activity,
             )?;
         }
-        git_ok(
+        git_ok_with_activity(
             &["checkout", "-q", "--detach", &source.commit],
             Some(&work),
             &format!("git checkout {}", source.commit),
+            &activity,
         )?;
-        let head = git_ok(&["rev-parse", "HEAD"], Some(&work), "git rev-parse HEAD")?;
+        let head = git_ok_with_activity(
+            &["rev-parse", "HEAD"],
+            Some(&work),
+            "git rev-parse HEAD",
+            &activity,
+        )?;
         if head.to_ascii_lowercase() != source.commit.to_ascii_lowercase() {
             return Err(err(format!(
                 "{}: checked out {head}, expected {}",
@@ -533,9 +587,14 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                     "1",
                 ]
             };
-            git_ok(submodule_args, Some(&work), "git submodule update")?;
+            git_ok_with_activity(
+                submodule_args,
+                Some(&work),
+                "git submodule update",
+                &activity,
+            )?;
         }
-        validate_checkout_tree(&work)?;
+        validate_checkout_tree_with_activity(&work, &activity)?;
         remove_git_dirs(&work)?;
         validate_symlinks(&work)
     })();
@@ -710,6 +769,9 @@ mod realization_tests {
 
     #[test]
     fn realizes_a_commit_and_strips_git_metadata() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = temp("realize");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
@@ -738,6 +800,9 @@ mod realization_tests {
 
     #[test]
     fn a_wrong_commit_is_refused() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = temp("wrong");
         let (url, _) = fixture_repo(&root.0);
         let store = store_at(&root.0);
@@ -755,6 +820,9 @@ mod realization_tests {
 
     #[test]
     fn an_unpinned_ref_is_refused_and_resolve_ref_pins_it() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = temp("ref");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
@@ -773,6 +841,9 @@ mod realization_tests {
 
     #[test]
     fn checkout_rejects_attribute_transformed_content() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = temp("attributes");
         let repo = root.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -802,6 +873,9 @@ mod realization_tests {
 
     #[test]
     fn pack_keeps_safe_links_empty_dirs_and_verbatim_names() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = temp("pack");
         let checkout = root.0.join("checkout");
         fs::create_dir_all(checkout.join("empty")).unwrap();
@@ -872,6 +946,9 @@ mod realization_tests {
 
     #[test]
     fn pack_rejects_paths_and_links_that_no_ustar_header_can_hold() {
+        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let platform = crate::platform::Platform::host().unwrap();
 
         // bsdtar drops an overlong path and still exits 0, so relying on the
@@ -933,7 +1010,8 @@ pub fn pack_checkout(
             "refusing to pack {name:?}-{version:?}: names and versions must be [A-Za-z0-9._+-]"
         )));
     }
-    let work = store.stage()?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let work = store.stage_with_activity(&activity)?;
     let _cleanup = StageGuard(work.clone());
     let prefix = format!("{name}-{version}");
     let filename = format!("{prefix}.tar.gz");
@@ -941,7 +1019,7 @@ pub fn pack_checkout(
     // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
     // would take a rewrite expression built from these strings.
     let staged = work.join(&prefix);
-    crate::project::clone_tree(source_root, &staged)?;
+    crate::project::clone_tree_for_store(store, source_root, &staged, platform)?;
     validate_symlinks(&staged)?;
     normalize_for_packing(&staged)?;
 
@@ -986,6 +1064,7 @@ pub fn pack_checkout(
     }
 
     let archive = work.join(&filename);
+    let uncompressed = work.join(format!("{prefix}.tar"));
     let owner_flags: &[&str] = if platform.is_macos() {
         // bsdtar
         &["--uid", "0", "--gid", "0", "--numeric-owner"]
@@ -1000,48 +1079,36 @@ pub fn pack_checkout(
     } else {
         &["--null", "--verbatim-files-from"]
     };
-    let tar_error_path = work.join(".blanket-tar-stderr");
-    let tar_error_file = fs::File::create(&tar_error_path)?;
-    let mut tar = Command::new("/usr/bin/tar")
-        .args(["-cf", "-", "--format=ustar", "--no-recursion"])
+    let mut tar = Command::new("/usr/bin/tar");
+    tar.args(["-cf"])
+        .arg(&uncompressed)
+        .args(["--format=ustar", "--no-recursion"])
         .args(owner_flags)
         .args(list_flags)
         .arg("-C")
         .arg(&work)
         .arg("-T")
-        .arg(&list)
-        .stdout(std::process::Stdio::piped())
-        // Do not pipe this stream: tar can emit unbounded diagnostics for a
-        // hostile list, and waiting for gzip before draining it would deadlock
-        // both children once the pipe buffer fills.
-        .stderr(std::process::Stdio::from(tar_error_file))
-        .spawn()?;
-    let tar_stdout = tar
-        .stdout
-        .take()
-        .ok_or_else(|| err("tar produced no output"))?;
-    let gzip = Command::new("/usr/bin/gzip")
-        .args(["-n", "-9", "-c"])
-        .stdin(tar_stdout)
-        .stdout(fs::File::create(&archive)?)
-        .spawn()?;
-    let gzip_output = gzip.wait_with_output()?;
-    let tar_status = tar.wait()?;
-    let tar_error = fs::read(&tar_error_path).unwrap_or_default();
-    if !tar_status.success() || !gzip_output.status.success() {
+        .arg(&list);
+    let tar_status = crate::supervise::status(&mut tar, &activity)?;
+    if !tar_status.success() {
+        let _ = fs::remove_file(&uncompressed);
         return Err(err(format!(
-            "packing {} failed (tar {}, gzip {}): {}",
+            "packing {} failed (tar {tar_status})",
+            source_root.display()
+        )));
+    }
+    let mut gzip = Command::new("/usr/bin/gzip");
+    gzip.args(["-n", "-9", "-c"])
+        .arg(&uncompressed)
+        .stdout(fs::File::create(&archive)?);
+    let gzip_status = crate::supervise::status(&mut gzip, &activity)?;
+    let _ = fs::remove_file(&uncompressed);
+    if !gzip_status.success() {
+        return Err(err(format!(
+            "packing {} failed (tar {}, gzip {})",
             source_root.display(),
             tar_status,
-            gzip_output.status,
-            String::from_utf8_lossy(if tar_error.is_empty() {
-                &gzip_output.stderr
-            } else {
-                &tar_error
-            })
-            .lines()
-            .next()
-            .unwrap_or("")
+            gzip_status,
         )));
     }
     let (sha256, _) = crate::fetch::cache_insert(store, &archive)?;

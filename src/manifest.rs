@@ -175,7 +175,7 @@ impl Manifest {
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", build_env.join("bin").display()),
         };
-        let result = crate::sandbox::run_build_spec(&spec);
+        let result = crate::sandbox::run_build_spec_on_for_store(platform, &spec, store);
         if let Err(error) = result {
             let tail = read_tail(&log, 20);
             let _ = fs::remove_dir_all(&scratch);

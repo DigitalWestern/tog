@@ -85,16 +85,17 @@ pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, ".NET SDK", "stage 4")?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let pin = sdk_pin(platform)?;
     let identity = sdk_identity(pin);
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_digest_held(store, pin.url, &Digest::sha512(pin.sha512)?)?;
-    let staged = store.stage()?;
-    extract_sdk_archive(&tarball, &staged)?;
+    let staged = store.stage_with_activity(&activity)?;
+    extract_sdk_archive_for(store, &tarball, &staged)?;
     store.commit(&identity, &staged, &[]).map(|(path, _)| path)
 }
 
@@ -106,6 +107,16 @@ fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
         .arg(&staged)
         .status()?;
     if !st.success() || !staged.join("dotnet").is_file() {
+        return Err(err("dotnet SDK extraction failed or has unexpected layout"));
+    }
+    Ok(())
+}
+
+fn extract_sdk_archive_for(store: &Store, tarball: &Path, staged: &Path) -> io::Result<()> {
+    let mut command = Command::new("/usr/bin/tar");
+    command.args(["-xzf"]).arg(tarball).args(["-C"]).arg(staged);
+    let status = crate::supervise::status_owned(&mut command, store)?;
+    if !status.success() || !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
     Ok(())
@@ -643,6 +654,7 @@ pub fn plan_dotnet(
         let config = config.canonicalize()?;
         let config_arg = config.to_string_lossy().into_owned();
         let out = run_dotnet(
+            store,
             sdk_obj,
             project_dir,
             &scratch.join("pkgs"),
@@ -737,6 +749,7 @@ pub fn plan_dotnet(
 }
 
 fn run_dotnet(
+    store: &Store,
     sdk_obj: &Path,
     cwd: &Path,
     packages: &Path,
@@ -760,7 +773,7 @@ fn run_dotnet(
         &forced_env(sdk_obj, packages, scratch),
     );
     cmd.stdin(std::process::Stdio::null());
-    cmd.output()
+    crate::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store dotnet {args:?}: {e}")))
 }
 
@@ -853,6 +866,7 @@ pub fn realize_packages(
     project_dir: &Path,
 ) -> io::Result<PathBuf> {
     crate::platform::require_host(platform, ".NET packages", "stage 4")?;
+    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
     let _ = sdk_pin(platform)?;
     let _ = preflight(project_dir)?;
     validate_plan(plan)?;
@@ -860,7 +874,7 @@ pub fn realize_packages(
     // Fetch every nupkg (nuget.org flatcontainer only in v0). No upfront
     // per-file hash exists (contentHash is semantic): download to tmp,
     // record raw sha256 via cache_insert, verify semantically below.
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(&activity)?;
     let feed = scratch.join("feed");
     fs::create_dir_all(&feed)?;
     let mut raw_hashes = BTreeMap::new();
@@ -911,7 +925,7 @@ pub fn realize_packages(
         inputs,
     };
     let id = identity.object_id();
-    if store.has(&id) {
+    if store.has_with_activity(&activity, &id)? {
         crate::policy::check_cached(store, &id)?;
         let _ = crate::store::remove_tree(&scratch);
         return Ok(store.object_path(&id));
@@ -919,7 +933,7 @@ pub fn realize_packages(
 
     // Locked-mode restore from a synthetic project into the staged folder:
     // the user's project and global.json are never evaluated in realization.
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(&activity)?;
     let verifier = scratch.join("verifier");
     fs::create_dir_all(&verifier)?;
     prepare_scratch(&scratch)?;
@@ -949,7 +963,7 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::sandbox::run_build_spec_on(
+    let result = crate::sandbox::run_build_spec_on_for_store(
         platform,
         &BuildSpec {
             argv: vec![
@@ -969,6 +983,7 @@ pub fn realize_packages(
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
         },
+        &store,
     );
     if let Err(e) = result {
         let _ = crate::store::remove_tree(&scratch);
@@ -1208,6 +1223,7 @@ fn publish_output(
     project_dir: &Path,
     platform: Platform,
     fingerprint: &str,
+    store: Option<&Store>,
 ) -> io::Result<PathBuf> {
     let output = checked_output_dir(project_dir, fingerprint)?;
     let bin = output
@@ -1226,7 +1242,11 @@ fn publish_output(
     match fs::rename(staged, &new) {
         Ok(()) => {}
         Err(e) if e.raw_os_error() == Some(18) => {
-            if let Err(clone_error) = crate::project::clone_tree_for(staged, &new, platform) {
+            let cloned = match store {
+                Some(store) => crate::project::clone_tree_for_store(store, staged, &new, platform),
+                None => crate::project::clone_tree_for(staged, &new, platform),
+            };
+            if let Err(clone_error) = cloned {
                 let _ = crate::store::remove_tree(&new);
                 return Err(io::Error::new(
                     clone_error.kind(),
@@ -1342,7 +1362,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    crate::sandbox::run_build_spec_on(platform, &spec).map_err(|e| {
+    crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -1379,7 +1399,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    if let Err(e) = crate::sandbox::run_build_spec_on(platform, &spec) {
+    if let Err(e) = crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store) {
         let _ = crate::store::remove_tree(&scratch);
         return Err(io::Error::new(
             e.kind(),
@@ -1398,6 +1418,7 @@ pub fn build_sandboxed(
         &project_dir,
         platform,
         &sdk_fingerprint(platform)?,
+        Some(&store),
     ) {
         Ok(output) => output,
         Err(e) => {
@@ -1927,6 +1948,7 @@ mod tests {
             &publish_project,
             Platform::Aarch64AppleDarwin,
             "fp",
+            None,
         )
         .unwrap();
         assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "old");
@@ -1939,6 +1961,7 @@ mod tests {
             &publish_project,
             Platform::Aarch64AppleDarwin,
             "fp",
+            None,
         )
         .unwrap();
         assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "new");
