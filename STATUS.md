@@ -20,7 +20,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 | macOS arm64 | Shipped through 2026-09-05 (`dbf7ac4`); **nothing since then is Mac-validated**, including all GC-safety work |
 | Python + npm on real projects | Proven (Next.js, vite, prisma, native addons, FastAPI) |
 | Other ecosystems | Fixture-proven only (`tests/`) |
-| Store GC (root protection, metadata migration, fail-closed sweep) | Shipped 2026-09-10, branch `wp-gc-safety`; independently reviewed and mutation-tested on Linux |
+| Store GC (root protection, metadata migration, fail-closed sweep) | Shipped and merged to `main` 2026-09-10; independently reviewed and mutation-tested on Linux. **Mac gate (see below) has not run — owner waived it for the merge** |
 | Toolchain lock design (WP2) | Designed, not implemented |
 | Security/policy work (WP3), WP5 | Designed in the archived plan, not started |
 
@@ -32,19 +32,18 @@ committed as a clean series on `wp-gc-safety` (see `git log` and
 ## What is next (in order)
 
 1. **macOS gate** — `cargo test` and
-   `cargo test --test gc -- --ignored` on the Mac. Until this passes, the
-   GC-safety work is Linux-proven only. No other work should merge past it.
-2. **Merge `wp-gc-safety` into `main`** (after the Mac gate, or with the
-   owner's explicit waiver).
-3. **Follow-up PRs** — see [FOLLOW-UPS.md](FOLLOW-UPS.md) for the list:
+   `cargo test --test gc -- --ignored` on the Mac. The GC-safety work was
+   merged with the owner's waiver; until this gate runs, treat GC behavior
+   on the Mac as unverified. Run it before relying on GC on a Mac.
+2. **Follow-up PRs** — see [FOLLOW-UPS.md](FOLLOW-UPS.md) for the list:
    C.10 test matrix (20 missing tests), B.5 lease threading, `fsroot.rs`,
    `Store::has` lock order, M05 mutation survivor.
-4. **Supervision redesign** (FOLLOW-UPS.md Flag 1) — make the signal
+3. **Supervision redesign** (FOLLOW-UPS.md Flag 1) — make the signal
    session per-operation so independent operations can supervise
    concurrently. Design change, needs its own review round.
-5. **WP2 toolchain lock** — the next big feature: a committed lock naming
+4. **WP2 toolchain lock** — the next big feature: a committed lock naming
    exact toolchain versions per project. Design at
-   `docs/agent/PLAN-2026-09-09.md` §7 (WP2 sections).
+   `docs/agent/PLAN-2026-09-09.md` (WP2 sections).
 
 ## How work happens here
 
