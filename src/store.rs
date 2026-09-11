@@ -170,35 +170,30 @@ impl Store {
     /// it. The key must match a record this store holds; the project itself
     /// is never touched, so lookups work while the project is unavailable.
     ///
-    /// Exactly one record is read: the requested one. Resolving the key
-    /// through the whole registry would let any other record's corruption
-    /// block this lookup — and `--forget` is the escape hatch every refusal
-    /// points at, so it has to work when the registry is at its worst,
-    /// including on the corrupt record itself.
+    /// Resolution goes through `roots()`, which reads every record but
+    /// reports an unusable one instead of failing on it — so no other
+    /// record's corruption can block this lookup, and `--forget` stays the
+    /// escape hatch every refusal points at even when the registry is at
+    /// its worst. (An earlier direct directory-entry scan claiming to read
+    /// exactly one record was removed: its stated property had no test
+    /// that could tell the two implementations apart — see REVIEW-GC-A,
+    /// A-R6 follow-up.)
     pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
         Self::validate_root_key(key)?;
-        let roots = self.root.join("roots");
-        fs::create_dir_all(&roots)?;
-        // Match the directory entry by name rather than opening the joined
-        // path: a case-insensitive filesystem would otherwise answer with a
-        // neighbouring spelling's record, which is the wrong record.
-        let mut present = false;
-        for entry in fs::read_dir(&roots)? {
-            if entry?.file_name().as_os_str().as_bytes() == key.as_bytes() {
-                present = true;
-                break;
-            }
-        }
-        if !present {
-            return Err(io::Error::new(
+        let entry = self
+            .roots()?
+            .into_iter()
+            .find(|entry| entry.key.as_bytes() == key.as_bytes());
+        match entry {
+            Some(entry) => Ok(entry),
+            None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
                     "unknown root key {key}; `blanket store roots` lists the keys this store \
                      holds"
                 ),
-            ));
+            )),
         }
-        Ok(root_entry(key, roots.join(key)))
     }
 
     /// Remove one project's protection record by its exact registry key.
