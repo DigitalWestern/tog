@@ -612,6 +612,67 @@ fn x_needs_a_registry_outside_a_project() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A pre-object-meta/2 record is upgraded by the automatic maintenance any
+/// writable command runs at dispatch — not only by explicit
+/// `gc --migrate-metadata`. Removing the automatic maintenance calls from
+/// main must fail this test, because the record would stay legacy and the
+/// next sweep would refuse it.
+#[test]
+fn command_dispatch_runs_automatic_metadata_maintenance() {
+    let home = TempDir::new("x-maintenance");
+    let store_root = home.0.join("store");
+    let identity = blanket::types::Identity {
+        kind: "cpython".into(),
+        name: "cpython".into(),
+        version: "3.11.9".into(),
+        inputs: [
+            ("artifact_sha256".to_string(), "1".repeat(64)),
+            (
+                "platform".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let id = identity.object_id();
+    let object = store_root.join("objects").join(&id);
+    std::fs::create_dir_all(&object).unwrap();
+    std::fs::write(object.join("payload"), "cpython").unwrap();
+    let mut perms = std::fs::metadata(&object).unwrap().permissions();
+    perms.set_mode(perms.mode() & !0o222);
+    std::fs::set_permissions(&object, perms).unwrap();
+    std::fs::create_dir_all(store_root.join("meta")).unwrap();
+    let meta_path = store_root.join("meta").join(format!("{id}.json"));
+    std::fs::write(
+        &meta_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": id,
+            "identity": identity,
+            "created": 1,
+            "exceptions": [],
+            "refs": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // An ordinary writable command in the maintenance set: it fails offline
+    // (no x registry), but its dispatch already ran maintenance over the
+    // store.
+    let out = blanket(&home.0, &home.0, &["x", "ruff", "--version"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    assert_eq!(
+        record["evidence"], "adapted:cpython@1",
+        "an ordinary writable command did not run automatic metadata maintenance: {}",
+        record
+    );
+    assert!(record["schema"] == "object-meta/2", "{record}");
+}
+
 #[test]
 fn x_clean_is_offline_and_strict_about_trailing_arguments() {
     let home = TempDir::new("x-clean");

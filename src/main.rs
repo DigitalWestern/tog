@@ -233,6 +233,21 @@ fn dispatch(command: cli::Command) -> io::Result<i32> {
     // compatibility lease when called directly; this long-lived lease is
     // what prevents GC from racing a CLI job.
     let store = store::Store::open()?;
+    let needs_maintenance = matches!(
+        &command,
+        Sync { .. }
+            | Plan
+            | Build { .. }
+            | Run { .. }
+            | Add { .. }
+            | Remove { .. }
+            | Update { .. }
+            | X { .. }
+    );
+    if needs_maintenance {
+        let mut stderr = io::stderr().lock();
+        gc::automatic_maintenance(&store, &mut stderr)?;
+    }
     let _activity = store.activity(ActivityMode::Shared)?;
     match command {
         Sync { fresh, strict } => run_sync(platform, fresh, strict).map(|_| 0),
@@ -383,9 +398,38 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
     let store = store::Store::open()?;
     let mut stdout = io::stdout().lock();
     let Some(activity) = store.try_activity_exclusive()? else {
+        // An explicitly requested mutation fails loudly; an opportunistic
+        // sweep skips quietly. Migration is a requested mutation: a script
+        // must be able to tell "migrated" from "never ran".
+        if !args.forget.is_empty() || args.migrate_metadata {
+            return Err(io::Error::other(
+                "a Blanket job is using this store; retry when it finishes",
+            ));
+        }
         writeln!(stdout, "cleanup skipped: a Blanket job is using this store")?;
         return Ok(());
     };
+    if args.migrate_metadata {
+        if args.project
+            || args.collect_legacy
+            || !args.register.is_empty()
+            || !args.forget.is_empty()
+            || args.keep_days.is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--migrate-metadata cannot be combined with registry or collection options",
+            ));
+        }
+        let report = gc::migrate_metadata(&store, &activity, args.dry_run, &mut stdout)?;
+        if report.unresolved != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "metadata migration left unresolved records; no sweep was started",
+            ));
+        }
+        return Ok(());
+    }
     // Registering and forgetting the same root in one invocation is
     // ambiguous; compare the keys before either side touches the registry.
     for project in &args.register {
@@ -444,7 +488,7 @@ fn run_gc(args: &cli::GcArgs) -> io::Result<()> {
         return Ok(());
     }
     let dry_run = options.dry_run;
-    let report = gc::collect(&store, options, &mut stdout)?;
+    let report = gc::collect_with_activity(&store, &activity, options, &mut stdout)?;
     let verb = if dry_run { "would free" } else { "freed" };
     writeln!(
         stdout,
@@ -1457,6 +1501,16 @@ fn run_fmt(
                 }
                 command.extend(args.iter().cloned());
                 let store = store::Store::open()?;
+                // Scope the handle to the one call that narrates. Holding it
+                // any longer serialises every other thread's stderr for the
+                // rest of the command: `sandbox::relay_stderr` drains a
+                // child's stderr from its own thread through `io::stderr()`,
+                // so an outer lock held across a child is a pipe that stops
+                // being drained.
+                {
+                    let mut stderr = io::stderr().lock();
+                    gc::automatic_maintenance(&store, &mut stderr)?;
+                }
                 let activity = store.activity(ActivityMode::Shared)?;
                 return run_run(platform, &command, &store, &activity);
             }
@@ -1488,6 +1542,13 @@ fn run_fmt(
     }
 
     let store = store::Store::open()?;
+    // Same scoping as the delegated branch above: the maintenance narration
+    // is the only thing that needs the handle, and the toolchain
+    // provisioning and formatter children below all run outside it.
+    {
+        let mut stderr = io::stderr().lock();
+        gc::automatic_maintenance(&store, &mut stderr)?;
+    }
     let activity = store.activity(ActivityMode::Shared)?;
     let rust_version = cargo::resolve_toolchain(platform, &cwd)?.to_string();
     let rust_object = cargo::ensure_rust_for(&store, platform, &rust_version)?;

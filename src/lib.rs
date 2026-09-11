@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod nativelibs;
 pub mod npm;
 pub mod npm_lock_import;
+pub mod objmeta;
 pub mod pep440;
 pub mod platform;
 pub mod policy;

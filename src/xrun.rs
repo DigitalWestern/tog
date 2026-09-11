@@ -199,8 +199,12 @@ fn fd_identity(file: &fs::File) -> io::Result<(u64, u64)> {
 }
 
 fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
-    let name = CString::new(name)
-        .map_err(|_| other("x: directory entry contains NUL; refusing to clean"))?;
+    let name = CString::new(name).map_err(|_| {
+        other(
+            "x: directory entry contains NUL; refusing to clean; \
+             remove the offending entry from ~/.blanket/x by hand",
+        )
+    })?;
     // SAFETY: stat is initialized by fstatat before it is read, and name is
     // NUL-terminated for the duration of the call.
     let mut stat = unsafe { std::mem::zeroed() };
@@ -220,8 +224,12 @@ fn stat_is_real_directory(stat: &libc::stat) -> bool {
 }
 
 fn open_directory_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
-    let name = CString::new(name)
-        .map_err(|_| other("x: directory entry contains NUL; refusing to clean"))?;
+    let name = CString::new(name).map_err(|_| {
+        other(
+            "x: directory entry contains NUL; refusing to clean; \
+             remove the offending entry from ~/.blanket/x by hand",
+        )
+    })?;
     // SAFETY: name is NUL-terminated for this call and dirfd is borrowed.
     let fd = unsafe {
         libc::openat(
@@ -1159,6 +1167,20 @@ struct LegacyPackage {
     version: Option<String>,
 }
 
+/// Ecosystem recovered from a legacy generated manifest, for a root that
+/// carries no recorded request. The matcher and the summary must read this
+/// the same way: a legacy root that parses as both would otherwise be matched
+/// for deletion as one ecosystem and reported to the user as the other.
+fn recovered_legacy_ecosystem(path: &Path) -> Option<&'static str> {
+    if legacy_packages(path, "python").is_some() {
+        Some("python")
+    } else if legacy_packages(path, "node").is_some() {
+        Some("node")
+    } else {
+        None
+    }
+}
+
 fn legacy_packages(path: &Path, ecosystem: &str) -> Option<Vec<LegacyPackage>> {
     match ecosystem {
         "python" => {
@@ -1217,13 +1239,7 @@ fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
                     None
                 }
             });
-        let recovered_ecosystem = if legacy_packages(path, "python").is_some() {
-            Some("python")
-        } else if legacy_packages(path, "node").is_some() {
-            Some("node")
-        } else {
-            name_ecosystem
-        };
+        let recovered_ecosystem = recovered_legacy_ecosystem(path).or(name_ecosystem);
         return match recovered_ecosystem {
             Some(recovered) if recovered == ecosystem => CandidateMatch::Match,
             Some(_) => CandidateMatch::NoMatch,
@@ -1283,11 +1299,8 @@ fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
             _ => None,
         };
     }
-    if legacy_packages(path, "node").is_some() {
-        return Some("node");
-    }
-    if legacy_packages(path, "python").is_some() {
-        return Some("python");
+    if let Some(recovered) = recovered_legacy_ecosystem(path) {
+        return Some(recovered);
     }
     let name = path.file_name().and_then(|name| name.to_str())?;
     if name.starts_with("npm-") {

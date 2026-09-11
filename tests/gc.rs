@@ -159,22 +159,32 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         }
     }
 
-    // A deleted project stops the sweep instead of losing its record: with
-    // only a pathname record, GC cannot know what the project protected.
-    let blocked = blanket(
+    // A root/2 record carries its own object set, so a deleted project no
+    // longer blocks collection and its tools remain protected.
+    let retained = blanket(
         &bin,
         &python,
         &store,
         &["gc", "--dry-run", "--keep-days", "0"],
     );
     assert!(
-        !blocked.status.success(),
-        "gc silently swept a deleted project's store"
+        retained.status.success(),
+        "gc refused a self-sufficient root record: stdout={} stderr={}",
+        String::from_utf8_lossy(&retained.stdout),
+        String::from_utf8_lossy(&retained.stderr)
     );
-    let stderr = String::from_utf8_lossy(&blocked.stderr);
     assert!(
-        stderr.contains("refusing to sweep") && stderr.contains("--forget"),
-        "unexpected refusal: {stderr}"
+        fs::read_dir(store.join("objects")).unwrap().any(|entry| {
+            let entry = entry.unwrap();
+            fs::read_to_string(
+                store
+                    .join("meta")
+                    .join(format!("{}.json", entry.file_name().to_string_lossy())),
+            )
+            .unwrap()
+            .contains(r#""kind": "node-env""#)
+        }),
+        "gc swept a deleted project's rooted node object"
     );
 
     let keys = roots_listing(&ok(
@@ -321,20 +331,26 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
     );
     assert!(object.is_dir(), "default upgrade GC deleted the old object");
 
-    ok(
-        blanket(
-            &bin,
-            &project,
-            &store,
-            &[
-                "gc",
-                "--register",
-                project.to_str().unwrap(),
-                "--keep-days",
-                "0",
-            ],
-        ),
-        "register existing project",
+    let registered = blanket(
+        &bin,
+        &project,
+        &store,
+        &["gc", "--register", project.to_str().unwrap()],
+    );
+    assert!(
+        !registered.status.success(),
+        "registration unexpectedly started a sweep with uncertified metadata"
+    );
+    assert!(
+        String::from_utf8_lossy(&registered.stderr).contains("--migrate-metadata"),
+        "unresolved metadata recovery hint missing: {}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    assert!(
+        fs::read_dir(store.join("roots"))
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() != ".initialized"),
+        "explicit root registration was not durable before migration refusal"
     );
     assert!(object.is_dir(), "registered legacy object was collected");
 }

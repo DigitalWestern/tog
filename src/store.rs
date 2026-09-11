@@ -1105,25 +1105,6 @@ impl Store {
     /// an inferred set is a guess, and `commit_internal_impl` stamps what it
     /// is given as `evidence: "explicit"`. Certifying a guess as explicit is
     /// exactly the defect the 2026-09-09 review rejected Package D for.
-    /// Compatibility publication entry point for callers that have not yet
-    /// adopted explicit dependency evidence (the pre-rewrite `gc` tests).
-    /// Publishes with an empty dependency set.
-    pub fn commit(
-        &self,
-        identity: &Identity,
-        staged: &Path,
-        exceptions: &[Exception],
-    ) -> io::Result<(PathBuf, Vec<Exception>)> {
-        let activity = self.activity(ActivityMode::Shared)?;
-        self.commit_with_activity_and_deps(
-            &activity,
-            identity,
-            staged,
-            exceptions,
-            &ObjectDeps::new(),
-        )
-    }
-
     pub fn commit_with_deps(
         &self,
         identity: &Identity,

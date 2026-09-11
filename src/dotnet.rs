@@ -1458,6 +1458,36 @@ pub fn build_sandboxed(
 
 #[cfg(test)]
 mod tests {
+
+    /// Drift check: the legacy adapter must reconstruct exactly what this
+    /// producer supplies at commit, or a migrated record stops matching what
+    /// a re-sync publishes and every later cache hit becomes a hard error.
+    #[test]
+    fn legacy_adapter_recovers_the_pinned_sdk_artifact() {
+        for platform in Platform::ALL {
+            let pin = sdk_pin(*platform).unwrap();
+            assert_eq!(
+                recovered_cache(sdk_identity(pin)),
+                vec![format!("sha512:{}", pin.sha512)]
+            );
+        }
+    }
+
+    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
+        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::objmeta::Adaptation::Proven(deps) => {
+                assert!(
+                    deps.objects.is_empty(),
+                    "a pinned artifact has no object deps"
+                );
+                deps.cache
+                    .iter()
+                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+                    .collect()
+            }
+            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+        }
+    }
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
 

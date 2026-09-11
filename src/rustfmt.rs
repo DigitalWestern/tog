@@ -392,6 +392,43 @@ fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Drift check: the legacy adapter must reconstruct exactly what this
+    /// producer supplies at commit, or a migrated record stops matching what
+    /// a re-sync publishes and every later cache hit becomes a hard error.
+    #[test]
+    fn legacy_adapter_recovers_the_paired_rust_object_and_component() {
+        for platform in Platform::ALL {
+            let pin = component(*platform).unwrap();
+            let rust_object = format!("{}-rust-{RUSTFMT_VERSION}", "b".repeat(40));
+            let identity =
+                rustfmt_identity(*platform, RUSTFMT_VERSION, Path::new(&rust_object)).unwrap();
+            let stub = crate::objmeta::legacy_record(crate::types::Identity {
+                kind: "rust".into(),
+                name: "rust".into(),
+                version: RUSTFMT_VERSION.into(),
+                inputs: std::collections::BTreeMap::new(),
+            });
+            let mut stub = stub;
+            stub.id = rust_object.clone();
+            match crate::objmeta::adapt_identity_for_test(identity, vec![stub]) {
+                crate::objmeta::Adaptation::Proven(deps) => {
+                    assert_eq!(
+                        deps.objects.iter().cloned().collect::<Vec<_>>(),
+                        vec![rust_object]
+                    );
+                    assert_eq!(
+                        deps.cache
+                            .iter()
+                            .map(|d| format!("{}:{}", d.algo(), d.hex()))
+                            .collect::<Vec<_>>(),
+                        vec![format!("sha256:{}", pin.sha256)]
+                    );
+                }
+                crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            }
+        }
+    }
     use super::*;
 
     #[test]

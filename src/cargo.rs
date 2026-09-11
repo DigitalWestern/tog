@@ -571,6 +571,21 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 }
 
 /// Realize the registry closure as a Cargo directory source.
+///
+/// The Rust toolchain is deliberately **not** a dependency of the result.
+/// `realize_vendor_inner` runs `/usr/bin/tar` and nothing else — no part of
+/// the toolchain is a build input — and `vendor_identity` does not commit to
+/// one, so recording it would let the same identity be published with two
+/// different dependency sets. That divergence is unrecoverable: the second
+/// publication is a cache hit, and `validate_cached_dependency_evidence`
+/// makes a cache hit with different evidence a hard error, so the store
+/// stops being syncable. The toolchain object is retained by the project's
+/// own `root/2` closure, which records `rust_object` directly.
+///
+/// This replaces the earlier `realize_vendor_with_rust`. The plan's D.2
+/// table lists a rust object for row 6; the call-site audit it asks for
+/// showed the pairing is not a realized build input. See the deviation note
+/// in the ARCHITECTURE.md coverage matrix.
 pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     preflight_platform(Platform::host()?)?;
     realize_vendor_inner(store, plan)
@@ -1373,6 +1388,42 @@ fn shell_double_quote(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Drift check: the legacy adapter must reconstruct exactly what this
+    /// producer supplies at commit, or a migrated record stops matching what
+    /// a re-sync publishes and every later cache hit becomes a hard error.
+    #[test]
+    fn legacy_adapter_recovers_the_pinned_rust_components() {
+        for platform in Platform::ALL {
+            let components = rust_components(*platform).unwrap();
+            let mut expected: Vec<String> = components
+                .iter()
+                .map(|component| format!("sha256:{}", component.sha256))
+                .collect();
+            expected.sort();
+            expected.dedup();
+            assert_eq!(
+                recovered_cache(rust_identity(*platform, &components)),
+                expected
+            );
+        }
+    }
+
+    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
+        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::objmeta::Adaptation::Proven(deps) => {
+                assert!(
+                    deps.objects.is_empty(),
+                    "a pinned artifact has no object deps"
+                );
+                deps.cache
+                    .iter()
+                    .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+                    .collect()
+            }
+            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+        }
+    }
     use super::*;
     use std::collections::BTreeSet;
 

@@ -531,6 +531,19 @@ pub fn packages(platform: Platform) -> io::Result<&'static [NativePackage]> {
     }
 }
 
+/// The sha256 of every pinned library archive for `platform`, in table order.
+///
+/// The legacy-metadata adapter uses this after proving that the pinned table
+/// still hashes to the `manifest_sha256` the record committed to: the object's
+/// identity names the manifest digest, never the individual archives, so a
+/// verified manifest match is the only sound way back to them.
+pub(crate) fn pinned_package_digests(platform: Platform) -> io::Result<Vec<String>> {
+    Ok(packages(platform)?
+        .iter()
+        .map(|package| package.sha256.to_string())
+        .collect())
+}
+
 pub fn manifest_sha256(platform: Platform) -> io::Result<String> {
     let mut manifest = String::new();
     for p in packages(platform)? {
@@ -1465,6 +1478,75 @@ pub fn size_bytes(path: &Path) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Drift check: the legacy adapter must reconstruct exactly what this
+    /// producer supplies at commit, or a migrated record stops matching what
+    /// a re-sync publishes and every later cache hit becomes a hard error.
+    ///
+    /// The identity comes from the real producer identity function, not a
+    /// hand-built copy: renaming or dropping an input here must fail this
+    /// test, because the adapter would refuse (or diverge) on what the
+    /// producer actually writes.
+    #[test]
+    fn legacy_adapter_recovers_every_pinned_library_and_invents_none() {
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let store_root = temp_dir("adapter-identity");
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let identity = identity(&store, platform).unwrap();
+        assert_eq!(identity.kind, "native-libs");
+        assert!(identity.inputs.contains_key("manifest_sha256"));
+        let deps = match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::objmeta::Adaptation::Proven(deps) => deps,
+            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+        };
+        let recovered: std::collections::BTreeSet<String> =
+            deps.cache.iter().map(|d| d.hex().to_string()).collect();
+        let pinned: std::collections::BTreeSet<String> = packages(platform)
+            .unwrap()
+            .iter()
+            .map(|package| package.sha256.to_string())
+            .collect();
+        assert_eq!(recovered, pinned);
+        assert!(
+            !recovered.contains(&manifest_sha256(platform).unwrap()),
+            "the manifest digest was fabricated as a cached artifact"
+        );
+        let _ = crate::store::remove_tree(&store.root);
+    }
+
+    /// The manifest hash is a digest over the pinned rows, including each
+    /// row's archive sha256. Recompute the producer's manifest format here,
+    /// independently, and require it to match: dropping any field — notably
+    /// the digests — from the producer's hash changes this value and fails
+    /// the test, so a weakened manifest cannot be certified by drift.
+    #[test]
+    fn manifest_hash_covers_every_pinned_archive_digest() {
+        use sha2::Digest as _;
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let mut manifest = String::new();
+        for p in packages(platform).unwrap() {
+            manifest.push_str(p.name);
+            manifest.push('\t');
+            manifest.push_str(p.version);
+            manifest.push('\t');
+            manifest.push_str(p.build);
+            manifest.push('\t');
+            manifest.push_str(p.subdir);
+            manifest.push('\t');
+            manifest.push_str(p.filename);
+            manifest.push('\t');
+            manifest.push_str(p.sha256);
+            manifest.push('\n');
+        }
+        let recomputed = hex::encode(Sha256::digest(manifest.as_bytes()));
+        assert_eq!(
+            manifest_sha256(platform).unwrap(),
+            recomputed,
+            "the producer's manifest hash no longer covers the pinned rows"
+        );
+    }
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 

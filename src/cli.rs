@@ -107,6 +107,7 @@ pub struct GcArgs {
     pub keep_days: Option<u64>,
     pub project: bool,
     pub collect_legacy: bool,
+    pub migrate_metadata: bool,
     pub register: Vec<PathBuf>,
     pub forget: Vec<String>,
 }
@@ -458,23 +459,32 @@ line is ok, warn, or fail with the fix; exit status 1 on any fail.",
         name: "gc",
         group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
-        usage: "blanket gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--register <dir>...] [--forget <key>...]",
+        usage: "blanket gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--migrate-metadata] [--register <dir>...] [--forget <key>...]",
         description: "\
 Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
 cleans stale staging directories. Objects touched in the last ten minutes
 are always kept so a concurrent sync cannot lose one. Ordinary gc never
 deletes inside project projections; --project collects old unused forests
-and backups. A registered project that has become unavailable stops the
-sweep instead of losing its record; make it available again or forget it
-with --forget. Usable on a copied store from any host.",
+and backups. A record that says for itself what it needs keeps protecting
+it even when the project directory is gone; an older pathname-only record
+that has become unavailable stops the sweep instead of losing its record,
+so make it available again or forget it with --forget. Cleanup is skipped
+while another Blanket job is using this store, and any object whose
+recorded evidence cannot be certified stops the sweep rather than being
+guessed at. Usable on a copied store from any host.",
         options: &[
             ("--dry-run", "report what would be removed without removing it"),
             ("--keep-days <n>", "retain cached artifacts used within <n> days"),
             ("--project", "also collect old unused project forests and backups"),
             (
                 "--collect-legacy",
-                "also collect objects written before the roots registry existed",
+                "also collect objects written before the roots registry existed; \
+                 never a licence to delete through evidence that is missing",
+            ),
+            (
+                "--migrate-metadata",
+                "upgrade provable legacy object metadata without collecting",
             ),
             (
                 "--register <dir>...",
@@ -1201,6 +1211,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--dry-run" => gc.dry_run = true,
             "--project" => gc.project = true,
             "--collect-legacy" => gc.collect_legacy = true,
+            "--migrate-metadata" => gc.migrate_metadata = true,
             "--register" => {
                 index += 1;
                 let first = index;
@@ -2200,6 +2211,7 @@ mod tests {
                 keep_days: Some(7),
                 project: true,
                 collect_legacy: true,
+                migrate_metadata: false,
                 register: vec!["/a".into(), "/b".into(), "/c".into()],
                 forget: Vec::new(),
             })
