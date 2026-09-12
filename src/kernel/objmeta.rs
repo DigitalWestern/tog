@@ -176,7 +176,7 @@ impl MetaIndex {
     /// Zero matches and more than one match are both errors: an adapter may
     /// not pick a winner, because picking the wrong one certifies a
     /// dependency set that would let GC delete the object actually in use.
-    fn unique(
+    pub(crate) fn unique(
         &self,
         kind: &str,
         what: &str,
@@ -373,7 +373,7 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
     })
 }
 
-fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
+pub(crate) fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
     let digest = match algo {
         "sha1" => Digest::sha1(hex),
         "sha256" => Digest::sha256(hex),
@@ -427,13 +427,54 @@ pub fn adapt(record: &Record, index: &MetaIndex) -> Adaptation {
 /// is refused — the same conservative principle as the containment guard,
 /// applied per field: never certify less than the producer demonstrably
 /// wrote.
-struct Grammar {
-    required: &'static [&'static str],
-    optional: &'static [&'static str],
+#[derive(Clone, Copy)]
+pub struct Grammar {
+    pub required: &'static [&'static str],
+    pub optional: &'static [&'static str],
     /// Recognized dynamic key prefixes. Each entry may demand sibling
     /// prefixes for the same suffix (`("raw:", Some(&["pkg:"]))` means every
     /// `raw:<name>` input requires a `pkg:<name>` input and vice versa).
-    groups: &'static [(&'static str, Option<&'static [&'static str]>)],
+    pub groups: &'static [(&'static str, Option<&'static [&'static str]>)],
+}
+
+/// One (kind, schema) pair a producer writes: its grammar and the function
+/// that recovers a legacy record's dependency set. Tailors own their rows
+/// (`Tailor::object_kinds`); the kernel owns `git-source`.
+pub struct KindAdapter {
+    pub kind: &'static str,
+    pub schema: Option<&'static str>,
+    pub grammar: Grammar,
+    pub adapt: fn(&Record, &MetaIndex) -> Result<ObjectDeps, String>,
+}
+
+/// The kernel's own kinds: sources realized by the kernel, not a tailor.
+static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
+    kind: "git-source",
+    schema: Some("git-source/2"),
+    grammar: Grammar {
+        required: &["schema", "url", "commit"],
+        optional: &[],
+        groups: &[],
+    },
+    adapt: no_dependencies,
+}];
+
+fn no_dependencies(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    Ok(ObjectDeps::new())
+}
+
+/// The adapter for a (kind, schema) pair. Kinds whose producer never wrote a
+/// `schema` input match only `None`, so a record that carries an unexpected
+/// schema value can never share a path with one that does not.
+///
+/// This is the one place the kernel reaches into `tailors`: it asks the
+/// registry for rows, never a tailor by name. A future crate split replaces
+/// the call with a table installed at startup.
+fn adapter_for(kind: &str, schema: Option<&str>) -> Option<&'static KindAdapter> {
+    KERNEL_KINDS
+        .iter()
+        .chain(crate::tailors::kind_adapters())
+        .find(|adapter| adapter.kind == kind && adapter.schema == schema)
 }
 
 fn no_adapter_reason(kind: &str, schema: Option<&str>) -> String {
@@ -447,117 +488,6 @@ fn no_adapter_reason(kind: &str, schema: Option<&str>) -> String {
              reconstructed"
         ),
     }
-}
-
-/// The grammar table for all supported (kind, schema) pairs, derived from the
-/// producers' identity functions. A pair missing here is refused by
-/// `no_adapter_reason`, never adapted.
-fn grammar_for(kind: &str, schema: Option<&str>) -> Option<Grammar> {
-    let platform = &["platform"][..];
-    let grammar = match (kind, schema) {
-        ("cpython", None) | ("uv", None) | ("nodejs", None) => Grammar {
-            required: &["artifact_sha256"],
-            optional: platform,
-            groups: &[],
-        },
-        ("go", Some("go-toolchain/1")) | ("ruby", Some("ruby-toolchain/1")) => Grammar {
-            required: &["schema", "artifact_sha256"],
-            optional: platform,
-            groups: &[],
-        },
-        ("dotnet-sdk", Some("dotnet-sdk/1")) => Grammar {
-            required: &["schema", "artifact_sha512"],
-            optional: platform,
-            groups: &[],
-        },
-        ("rust", Some("rust-toolchain/1")) => Grammar {
-            required: &["schema", "cargo_sha256", "rust_std_sha256", "rustc_sha256"],
-            optional: platform,
-            groups: &[],
-        },
-        ("beam", Some("beam-toolchain/1")) => Grammar {
-            required: &[
-                "schema",
-                "otp_sha256",
-                "elixir_sha256",
-                "hex_sha512",
-                "rebar3_sha512",
-            ],
-            optional: &["platform", "versions", "relocation_schema", "store_root"],
-            groups: &[],
-        },
-        ("git-source", Some("git-source/2")) => Grammar {
-            required: &["schema", "url", "commit"],
-            optional: &[],
-            groups: &[],
-        },
-        ("native-libs", None) => Grammar {
-            required: &["platform", "manifest_sha256"],
-            optional: &["store_root"],
-            groups: &[],
-        },
-        ("rustfmt", Some("rustfmt/1")) => Grammar {
-            required: &["schema", "rust_object", "rustfmt_sha256"],
-            optional: platform,
-            groups: &[],
-        },
-        ("cargo-vendor", Some("cargo-vendor/1")) => Grammar {
-            required: &["schema"],
-            optional: &[],
-            groups: &[("crate:", None)],
-        },
-        ("go-modcache", Some("go-modcache/1")) => Grammar {
-            required: &["schema", "extractor"],
-            optional: &[],
-            // The producer writes the mod/modfile/info triplet for every
-            // module; a record carrying only part of a triplet is truncated.
-            groups: &[
-                ("mod:", Some(&["modfile:", "info:"])),
-                ("modfile:", Some(&["mod:", "info:"])),
-                ("info:", Some(&["mod:", "modfile:"])),
-            ],
-        },
-        ("ruby-gems", Some("ruby-gems/1")) => Grammar {
-            required: &["schema", "installer"],
-            optional: &["ruby_platform"],
-            groups: &[("gem:", None)],
-        },
-        ("hex-deps", Some("hex-deps/1")) => Grammar {
-            required: &["schema", "beam"],
-            optional: &[],
-            groups: &[("dep:", None)],
-        },
-        ("nuget-packages", Some("nuget-packages/1")) => Grammar {
-            required: &["schema", "extractor"],
-            optional: &[],
-            // NuGet always writes the pkg/raw pair per package; `pkg:` is
-            // NuGet's own content hash (not a cache address) and `raw:` is
-            // the cached `.nupkg` digest. Either alone is a truncated record.
-            groups: &[("raw:", Some(&["pkg:"])), ("pkg:", Some(&["raw:"]))],
-        },
-        ("node-env", Some("node-env/3")) => Grammar {
-            required: &["schema", "nodejs"],
-            optional: &["store_root", "layout", "workspaces", "native_libs"],
-            groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
-        },
-        ("python-env", Some("python-env/2")) => Grammar {
-            required: &["schema", "cpython"],
-            optional: &["store_root", "native_libs"],
-            groups: &[("pkg:", None)],
-        },
-        ("sdist-build", Some("sdist-build/2")) => Grammar {
-            required: &["schema", "sdist_sha256", "python", "platform", "toolchain"],
-            optional: &[],
-            groups: &[],
-        },
-        ("sdist-build", Some("sdist-build/3")) => Grammar {
-            required: &["schema", "sdist_sha256", "python", "platform", "build_env"],
-            optional: &["rust", "vendor", "native_libs", "native_linker"],
-            groups: &[],
-        },
-        _ => return None,
-    };
-    Some(grammar)
 }
 
 /// Enforce `grammar` mechanically: every required input present, no
@@ -615,49 +545,13 @@ fn adapt_inner(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
     // Fail closed before any derivation: a record that does not match its
     // producer's full grammar is incomplete evidence, and an adapter must
     // never certify a partial set.
-    let grammar = grammar_for(kind, schema).ok_or_else(|| no_adapter_reason(kind, schema))?;
-    enforce_grammar(&record.identity.inputs, &grammar)?;
-    // Dispatch on the (kind, schema) pair. Kinds whose producer never wrote a
-    // `schema` input match only `None`, so a record that carries an
-    // unexpected schema value can never share a path with one that does not.
-    match (kind, record.schema_input()) {
-        ("cpython", None) | ("uv", None) | ("nodejs", None) => {
-            artifact_only(record, "artifact_sha256", Algo::Sha256)
-        }
-        ("rust", Some("rust-toolchain/1")) => rust_toolchain(record),
-        ("go", Some("go-toolchain/1")) => artifact_only(record, "artifact_sha256", Algo::Sha256),
-        ("ruby", Some("ruby-toolchain/1")) => {
-            artifact_only(record, "artifact_sha256", Algo::Sha256)
-        }
-        ("dotnet-sdk", Some("dotnet-sdk/1")) => {
-            artifact_only(record, "artifact_sha512", Algo::Sha512)
-        }
-        ("beam", Some("beam-toolchain/1")) => beam_toolchain(record),
-        ("git-source", Some("git-source/2")) => Ok(ObjectDeps::new()),
-        ("native-libs", None) => native_libs(record),
-        ("rustfmt", Some("rustfmt/1")) => rustfmt(record, index),
-        ("cargo-vendor", Some("cargo-vendor/1")) => cargo_vendor(record, index),
-        ("go-modcache", Some("go-modcache/1")) => go_modcache(record, index),
-        ("ruby-gems", Some("ruby-gems/1")) => ruby_gems(record, index),
-        ("hex-deps", Some("hex-deps/1")) => hex_deps(record, index),
-        ("nuget-packages", Some("nuget-packages/1")) => nuget_packages(record, index),
-        ("node-env", Some("node-env/3")) => node_env_v3(record, index),
-        ("python-env", Some("python-env/2")) => python_env_v2(record, index),
-        ("sdist-build", Some("sdist-build/2")) => sdist_build_v2(record, index),
-        ("sdist-build", Some("sdist-build/3")) => sdist_build_v3(record, index),
-        (kind, Some(schema)) => Err(format!(
-            "no adapter covers schema {schema} of kind {kind}; this layout was never shipped by a \
-             known producer, so its dependency set cannot be reconstructed"
-        )),
-        (kind, None) => Err(format!(
-            "no adapter covers kind {kind} without a schema input; its dependency set cannot be \
-             reconstructed"
-        )),
-    }
+    let adapter = adapter_for(kind, schema).ok_or_else(|| no_adapter_reason(kind, schema))?;
+    enforce_grammar(&record.identity.inputs, &adapter.grammar)?;
+    (adapter.adapt)(record, index)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Algo {
+pub enum Algo {
     Sha256,
     Sha512,
 }
@@ -671,7 +565,7 @@ impl Algo {
     }
 }
 
-fn input<'a>(record: &'a Record, key: &str) -> Result<&'a str, String> {
+pub(crate) fn input<'a>(record: &'a Record, key: &str) -> Result<&'a str, String> {
     record
         .identity
         .inputs
@@ -680,7 +574,12 @@ fn input<'a>(record: &'a Record, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("identity has no {key} input"))
 }
 
-fn add_digest(deps: &mut ObjectDeps, algo: Algo, hex: &str, what: &str) -> Result<(), String> {
+pub(crate) fn add_digest(
+    deps: &mut ObjectDeps,
+    algo: Algo,
+    hex: &str,
+    what: &str,
+) -> Result<(), String> {
     let digest = parse_digest(algo.name(), hex).map_err(|reason| format!("{what}: {reason}"))?;
     deps.cache_digest(digest);
     Ok(())
@@ -691,7 +590,7 @@ fn add_digest(deps: &mut ObjectDeps, algo: Algo, hex: &str, what: &str) -> Resul
 /// A reference to an object this store no longer holds is *not* a downgrade
 /// opportunity: the historical build input was collected by an older sweep,
 /// so the evidence needed to certify this record is simply gone.
-fn add_object(
+pub(crate) fn add_object(
     deps: &mut ObjectDeps,
     id: &str,
     index: &MetaIndex,
@@ -712,558 +611,25 @@ fn add_object(
 
 /// A pinned artifact realized on its own: no object dependencies, one
 /// algorithm-qualified digest named directly by the identity.
-fn artifact_only(record: &Record, key: &str, algo: Algo) -> Result<ObjectDeps, String> {
+pub(crate) fn artifact_only(record: &Record, key: &str, algo: Algo) -> Result<ObjectDeps, String> {
     let mut deps = ObjectDeps::new();
     add_digest(&mut deps, algo, input(record, key)?, key)?;
     Ok(deps)
 }
 
-/// `rust-toolchain/1`: the three components the producer merges, each named
-/// by its own identity input. `cargo::rust_components` requires exactly
-/// cargo + rust-std + rustc, which is what the identity commits to.
-fn rust_toolchain(record: &Record) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    for key in ["cargo_sha256", "rust_std_sha256", "rustc_sha256"] {
-        add_digest(&mut deps, Algo::Sha256, input(record, key)?, key)?;
-    }
-    Ok(deps)
+/// The one-artifact rows every toolchain tailor shares.
+pub(crate) fn artifact_sha256(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    artifact_only(record, "artifact_sha256", Algo::Sha256)
 }
 
-/// `beam-toolchain/1`: OTP and Elixir by sha256, Hex and rebar3 by sha512.
-/// All four are direct identity inputs; the `versions` and relocation inputs
-/// are not artifacts.
-fn beam_toolchain(record: &Record) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    for (key, algo) in [
-        ("otp_sha256", Algo::Sha256),
-        ("elixir_sha256", Algo::Sha256),
-        ("hex_sha512", Algo::Sha512),
-        ("rebar3_sha512", Algo::Sha512),
-    ] {
-        add_digest(&mut deps, algo, input(record, key)?, key)?;
-    }
-    Ok(deps)
-}
-
-/// `native-libs`: the identity commits to a *digest of the package manifest*,
-/// never to the individual library digests, so they cannot be read out of the
-/// record. They are recovered only when the pinned table still hashes to the
-/// recorded manifest digest — that is a verified match against the record's
-/// own evidence, not a current-default guess. A libset from a different pin
-/// set is unresolved.
-///
-/// The rejected first implementation instead matched the key name
-/// `manifest_sha256` and emitted the manifest hash itself as a cache digest,
-/// fabricating a digest for a file that never existed in the cache.
-fn native_libs(record: &Record) -> Result<ObjectDeps, String> {
-    if record.identity.version != crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION {
-        return Err(format!(
-            "libset version {} predates the pinned manifest this build knows (v{}); its library \
-             digests are not recoverable from metadata",
-            record.identity.version,
-            crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION
-        ));
-    }
-    let recorded = input(record, "manifest_sha256")?;
-    let platform_input = input(record, "platform")?;
-    let platform = crate::kernel::platform::Platform::ALL
-        .iter()
-        .find(|platform| platform.triple() == platform_input)
-        .ok_or_else(|| format!("unknown platform {platform_input}"))?;
-    let manifest = crate::tailors::python::nativelibs::manifest_sha256(*platform)
-        .map_err(|error| format!("no pinned library manifest for {platform_input}: {error}"))?;
-    if manifest != recorded {
-        return Err(format!(
-            "the pinned library manifest for {platform_input} hashes to {manifest}, not the \
-             recorded {recorded}; the library digests for this object are not recoverable"
-        ));
-    }
-    let mut deps = ObjectDeps::new();
-    for sha256 in crate::tailors::python::nativelibs::pinned_package_digests(*platform)
-        .map_err(|error| format!("pinned library set: {error}"))?
-    {
-        add_digest(&mut deps, Algo::Sha256, &sha256, "pinned library")?;
-    }
-    Ok(deps)
-}
-
-/// `rustfmt/1`: the paired Rust object is a direct identity input, and the
-/// component tarball is its own sha256. `rustfmt/1` symlinks `lib` into the
-/// Rust object, so the pairing is a real filesystem dependency.
-fn rustfmt(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    add_object(
-        &mut deps,
-        input(record, "rust_object")?,
-        index,
-        "rust_object",
-    )?;
-    add_digest(
-        &mut deps,
-        Algo::Sha256,
-        input(record, "rustfmt_sha256")?,
-        "rustfmt_sha256",
-    )?;
-    Ok(deps)
-}
-
-/// `cargo-vendor/1`: one entry per crate. A registry crate contributes its
-/// `.crate` sha256; a git crate contributes the realized `git-source` object.
-///
-/// The Rust toolchain is deliberately **not** a dependency of a vendor tree.
-/// `cargo::realize_vendor_inner` runs only `tar`; no part of the toolchain is
-/// a build input, and the vendor identity does not commit to one — so
-/// recording it would make the same identity publishable with two different
-/// dependency sets. See the deviation note in the ARCHITECTURE.md matrix.
-fn cargo_vendor(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    for (key, value) in &record.identity.inputs {
-        let Some(krate) = key.strip_prefix("crate:") else {
-            if key == "schema" {
-                continue;
-            }
-            return Err(format!("unexpected identity input {key}"));
-        };
-        match value.strip_prefix("git:") {
-            Some(id) => add_object(&mut deps, id, index, &format!("crate {krate}"))?,
-            None => add_digest(&mut deps, Algo::Sha256, value, &format!("crate {krate}"))?,
-        }
-    }
-    Ok(deps)
-}
-
-/// `go-modcache/1`: the extractor is a `go<version>:<sha256>` fingerprint, so
-/// the Go toolchain object is found by matching the one `go` record with that
-/// version and artifact digest. Each module contributes three cached files.
-fn go_modcache(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let extractor = input(record, "extractor")?;
-    let (version, sha256) = extractor
-        .strip_prefix("go")
-        .and_then(|rest| rest.split_once(':'))
-        .ok_or_else(|| {
-            format!("extractor {extractor:?} is not a go<version>:<sha256> reference")
-        })?;
-    let go = index.unique(
-        "go",
-        &format!("Go {version} built from artifact {sha256}"),
-        |candidate| {
-            candidate.identity.version == version
-                && candidate
-                    .identity
-                    .inputs
-                    .get("artifact_sha256")
-                    .map(String::as_str)
-                    == Some(sha256)
-        },
-    )?;
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, &go, index, "extractor")?;
-    for (key, value) in &record.identity.inputs {
-        if let Some(module) = key.strip_prefix("mod:") {
-            // "<h1 hash>:<zip sha256>"; the h1 hash itself contains a colon.
-            let (_, zip) = value
-                .rsplit_once(':')
-                .ok_or_else(|| format!("module {module} entry {value:?} has no zip digest"))?;
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                zip,
-                &format!("module {module} zip"),
-            )?;
-        } else if let Some(module) = key.strip_prefix("modfile:") {
-            let (_, modfile) = value
-                .rsplit_once(':')
-                .ok_or_else(|| format!("module {module} go.mod entry {value:?} has no digest"))?;
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                modfile,
-                &format!("module {module} go.mod"),
-            )?;
-        } else if let Some(module) = key.strip_prefix("info:") {
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                value,
-                &format!("module {module} info"),
-            )?;
-        } else if key != "schema" && key != "extractor" {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// `ruby-gems/1`: the installer is a `ruby<version>:<sha256>` fingerprint;
-/// each gem contributes its `.gem` sha256.
-fn ruby_gems(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let installer = input(record, "installer")?;
-    let (version, sha256) = installer
-        .strip_prefix("ruby")
-        .and_then(|rest| rest.split_once(':'))
-        .ok_or_else(|| {
-            format!("installer {installer:?} is not a ruby<version>:<sha256> reference")
-        })?;
-    let ruby = index.unique(
-        "ruby",
-        &format!("Ruby {version} built from artifact {sha256}"),
-        |candidate| {
-            candidate.identity.version == version
-                && candidate
-                    .identity
-                    .inputs
-                    .get("artifact_sha256")
-                    .map(String::as_str)
-                    == Some(sha256)
-        },
-    )?;
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, &ruby, index, "installer")?;
-    for (key, value) in &record.identity.inputs {
-        if let Some(gem) = key.strip_prefix("gem:") {
-            add_digest(&mut deps, Algo::Sha256, value, &format!("gem {gem}"))?;
-        } else if key != "schema" && key != "installer" && key != "ruby_platform" {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// `hex-deps/1`: the BEAM reference is a truncated digest over the toolchain
-/// artifact hashes, so the object is found by recomputing that fingerprint
-/// from each candidate `beam` record's *own* inputs — never from this
-/// build's pins. Each dependency contributes its outer tarball sha256; the
-/// inner checksum is a content hash of the unpacked tarball and was never a
-/// cache key, so it is not an artifact dependency.
-fn hex_deps(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let fingerprint = input(record, "beam")?;
-    let beam = index.unique(
-        "beam",
-        &format!("BEAM toolchain fingerprint {fingerprint}"),
-        |candidate| beam_fingerprint_of(candidate).as_deref() == Some(fingerprint),
-    )?;
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, &beam, index, "beam")?;
-    for (key, value) in &record.identity.inputs {
-        if let Some(app) = key.strip_prefix("dep:") {
-            // "<package>@<version>:<outer>:<inner>:<managers>"
-            let mut fields = value.splitn(4, ':');
-            let _package = fields.next();
-            let outer = fields.next().ok_or_else(|| {
-                format!("dependency {app} entry {value:?} has no outer tarball digest")
-            })?;
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                outer,
-                &format!("hex package {app}"),
-            )?;
-        } else if key != "schema" && key != "beam" {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// Recompute `elixir::beam_fingerprint` from a candidate BEAM record's own
-/// identity inputs. Darwin and Linux use different formulas, and the Linux
-/// one includes the relocation schema, so both are reproduced exactly.
-fn beam_fingerprint_of(record: &Record) -> Option<String> {
-    if record.identity.kind != "beam" || record.schema_input() != Some("beam-toolchain/1") {
-        return None;
-    }
-    let inputs = &record.identity.inputs;
-    let otp = inputs.get("otp_sha256")?;
-    let elixir = inputs.get("elixir_sha256")?;
-    let hex = inputs.get("hex_sha512")?;
-    let rebar3 = inputs.get("rebar3_sha512")?;
-    let joined = match inputs.get("relocation_schema") {
-        Some(relocation) => format!("{otp}:{elixir}:{hex}:{rebar3}:{relocation}"),
-        None => format!("{otp}:{elixir}:{hex}:{rebar3}"),
-    };
-    Some(crate::tailors::elixir::fingerprint_of_joined(&joined))
-}
-
-/// `nuget-packages/1`: the extractor is the SDK object id itself. `pkg:` holds
-/// NuGet's own base64 content hash, which is not a cache address; `raw:` holds
-/// the sha256 of the cached `.nupkg`, which is.
-fn nuget_packages(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, input(record, "extractor")?, index, "extractor")?;
-    for (key, value) in &record.identity.inputs {
-        if let Some(package) = key.strip_prefix("raw:") {
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                value,
-                &format!("package {package}"),
-            )?;
-        } else if !key.starts_with("pkg:") && key != "schema" && key != "extractor" {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// `node-env/3`: Node and the native library set are direct object ids; a
-/// registry package contributes the SRI digest embedded in its `pkg:` entry
-/// (in the algorithm npm published, which may be sha1, sha256 or sha512); a
-/// git package contributes its realized `git-source` object.
-fn node_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, input(record, "nodejs")?, index, "nodejs")?;
-    if let Some(native_libs) = record.identity.inputs.get("native_libs") {
-        add_object(&mut deps, native_libs, index, "native_libs")?;
-    }
-    for (key, value) in &record.identity.inputs {
-        if let Some(path) = key.strip_prefix("pkg:") {
-            match value.strip_prefix("git:") {
-                Some(rest) => {
-                    let (id, _) = rest.split_once(':').ok_or_else(|| {
-                        format!("package {path} git entry {value:?} has no name field")
-                    })?;
-                    add_object(&mut deps, id, index, &format!("package {path}"))?;
-                }
-                None => {
-                    // "<algo>:<hex>:<name>@<version>:patch[..]:bin[..]"
-                    let (algo, rest) = value.split_once(':').ok_or_else(|| {
-                        format!("package {path} entry {value:?} has no integrity algorithm")
-                    })?;
-                    let (hex, _) = rest.split_once(':').ok_or_else(|| {
-                        format!("package {path} entry {value:?} has no integrity digest")
-                    })?;
-                    let digest = parse_digest(algo, hex)
-                        .map_err(|reason| format!("package {path}: {reason}"))?;
-                    deps.cache_digest(digest);
-                }
-            }
-        } else if let Some(path) = key.strip_prefix("provisioned:") {
-            let (_, sha256) = value.rsplit_once(':').ok_or_else(|| {
-                format!("provisioned artifact {path} entry {value:?} has no sha256")
-            })?;
-            add_digest(
-                &mut deps,
-                Algo::Sha256,
-                sha256,
-                &format!("provisioned {path}"),
-            )?;
-        } else if let Some(path) = key.strip_prefix("artifact:") {
-            add_digest(&mut deps, Algo::Sha256, value, &format!("artifact {path}"))?;
-        } else if !matches!(
-            key.as_str(),
-            "schema" | "store_root" | "nodejs" | "layout" | "workspaces" | "native_libs"
-        ) {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// `python-env/2`: CPython and the native library set are direct object ids.
-/// A wheel contributes its sha256. An sdist contributes the **built wheel's
-/// object**, which the entry names in one of two shipped spellings:
-/// `Sdist:<sha256>:<object id>` for an isolated (`sdist-build/3`) build, and
-/// `Sdist:<sha256>:sdist-build/2;toolchain:<digests>` for the historical
-/// fast path, whose derivation fingerprint is not an object id and must be
-/// matched against the `sdist-build/2` records in the store.
-fn python_env_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let cpython = input(record, "cpython")?;
-    let mut deps = ObjectDeps::new();
-    add_object(&mut deps, cpython, index, "cpython")?;
-    if let Some(native_libs) = record.identity.inputs.get("native_libs") {
-        add_object(&mut deps, native_libs, index, "native_libs")?;
-    }
-    let cpython_record = index
-        .get(cpython)
-        .ok_or_else(|| format!("cpython names object {cpython}, which has no metadata"))?;
-    let cpython_reference = format!(
-        "{}:{}",
-        cpython_record.identity.version,
-        cpython_record
-            .identity
-            .inputs
-            .get("artifact_sha256")
-            .map(String::as_str)
-            .unwrap_or_default()
-    );
-    let platform = cpython_record
-        .identity
-        .inputs
-        .get("platform")
-        .map(String::as_str)
-        .unwrap_or_default();
-    for (key, value) in &record.identity.inputs {
-        let Some(name) = key.strip_prefix("pkg:") else {
-            if !matches!(
-                key.as_str(),
-                "schema" | "store_root" | "cpython" | "native_libs"
-            ) {
-                return Err(format!("unexpected identity input {key}"));
-            }
-            continue;
-        };
-        if let Some(sha256) = value.strip_prefix("Wheel:") {
-            add_digest(&mut deps, Algo::Sha256, sha256, &format!("wheel {name}"))?;
-            continue;
-        }
-        let rest = value
-            .strip_prefix("Sdist:")
-            .ok_or_else(|| format!("package {name} entry {value:?} is neither Wheel nor Sdist"))?;
-        let (sdist_sha256, derivation) = rest
-            .split_once(':')
-            .ok_or_else(|| format!("package {name} entry {value:?} has no derivation field"))?;
-        if store::is_object_id(derivation) {
-            add_object(&mut deps, derivation, index, &format!("sdist build {name}"))?;
-            continue;
-        }
-        let toolchain = derivation
-            .strip_prefix("sdist-build/2;toolchain:")
-            .ok_or_else(|| {
-                format!(
-                    "package {name} names derivation {derivation:?}, which is neither an object id \
-                     nor a known sdist-build fingerprint"
-                )
-            })?;
-        // The fast-path fingerprint omits the package version, so the object
-        // is found by matching every part the fingerprint does commit to.
-        let built = index.unique(
-            "sdist-build",
-            &format!(
-                "sdist-build/2 of {name} from sdist {sdist_sha256} with toolchain {toolchain}"
-            ),
-            |candidate| {
-                candidate.schema_input() == Some("sdist-build/2")
-                    && candidate.identity.name == name
-                    && candidate
-                        .identity
-                        .inputs
-                        .get("sdist_sha256")
-                        .map(String::as_str)
-                        == Some(sdist_sha256)
-                    && candidate
-                        .identity
-                        .inputs
-                        .get("toolchain")
-                        .map(String::as_str)
-                        == Some(toolchain)
-                    && candidate.identity.inputs.get("python").map(String::as_str)
-                        == Some(cpython_reference.as_str())
-                    && candidate
-                        .identity
-                        .inputs
-                        .get("platform")
-                        .map(String::as_str)
-                        == Some(platform)
-            },
-        )?;
-        add_object(&mut deps, &built, index, &format!("sdist build {name}"))?;
-    }
-    Ok(deps)
-}
-
-/// The interpreter object named by an sdist build's `python` input, which is
-/// a `<version>:<artifact sha256>` fingerprint rather than an object id.
-fn cpython_for_sdist(record: &Record, index: &MetaIndex) -> Result<String, String> {
-    let reference = input(record, "python")?;
-    let (version, sha256) = reference
-        .split_once(':')
-        .ok_or_else(|| format!("python {reference:?} is not a <version>:<sha256> reference"))?;
-    let platform = input(record, "platform")?;
-    index.unique(
-        "cpython",
-        &format!("CPython {version} for {platform} built from artifact {sha256}"),
-        |candidate| {
-            candidate.schema_input().is_none()
-                && candidate.identity.version == version
-                && candidate
-                    .identity
-                    .inputs
-                    .get("artifact_sha256")
-                    .map(String::as_str)
-                    == Some(sha256)
-                && candidate
-                    .identity
-                    .inputs
-                    .get("platform")
-                    .map(String::as_str)
-                    == Some(platform)
-        },
-    )
-}
-
-/// `sdist-build/2`: the historical non-isolated build. Its build environment
-/// was never a separate object, so the toolchain wheels it installed are
-/// named directly by the `toolchain` fingerprint — a comma-joined list of
-/// their sha256s (`build::build_toolchain_fingerprint`).
-fn sdist_build_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    let cpython = cpython_for_sdist(record, index)?;
-    add_object(&mut deps, &cpython, index, "python")?;
-    add_digest(
-        &mut deps,
-        Algo::Sha256,
-        input(record, "sdist_sha256")?,
-        "sdist_sha256",
-    )?;
-    let toolchain = input(record, "toolchain")?;
-    if toolchain.is_empty() {
-        return Err("toolchain fingerprint is empty".to_string());
-    }
-    for sha256 in toolchain.split(',') {
-        add_digest(&mut deps, Algo::Sha256, sha256, "build toolchain wheel")?;
-    }
-    for key in record.identity.inputs.keys() {
-        if !matches!(
-            key.as_str(),
-            "schema" | "sdist_sha256" | "python" | "platform" | "toolchain"
-        ) {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
-}
-
-/// `sdist-build/3`: the isolated build. The build environment, and any Rust
-/// toolchain, vendor tree and native library set, are direct object ids; the
-/// interpreter is a fingerprint; the sdist tarball is the one cached artifact.
-fn sdist_build_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    let mut deps = ObjectDeps::new();
-    let cpython = cpython_for_sdist(record, index)?;
-    add_object(&mut deps, &cpython, index, "python")?;
-    add_object(&mut deps, input(record, "build_env")?, index, "build_env")?;
-    add_digest(
-        &mut deps,
-        Algo::Sha256,
-        input(record, "sdist_sha256")?,
-        "sdist_sha256",
-    )?;
-    for key in ["rust", "vendor", "native_libs"] {
-        if let Some(id) = record.identity.inputs.get(key) {
-            add_object(&mut deps, id, index, key)?;
-        }
-    }
-    for key in record.identity.inputs.keys() {
-        if !matches!(
-            key.as_str(),
-            "schema"
-                | "sdist_sha256"
-                | "python"
-                | "platform"
-                | "build_env"
-                | "rust"
-                | "vendor"
-                | "native_libs"
-                | "native_linker"
-        ) {
-            return Err(format!("unexpected identity input {key}"));
-        }
-    }
-    Ok(deps)
+pub(crate) fn artifact_sha512(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    artifact_only(record, "artifact_sha512", Algo::Sha512)
 }
 
 /// Build an index from records the caller constructed, for adapter fixtures
 /// and for the drift checks each producer module keeps next to its own
 /// identity function.
+
 #[cfg(test)]
 pub(crate) fn index_of(records: Vec<Record>) -> MetaIndex {
     let mut entries = BTreeMap::new();
@@ -2513,7 +1879,9 @@ mod tests {
             ),
             // hex-deps/1
             (
-                legacy_record(hex_deps_row_identity(&beam_fingerprint_of(&beam).unwrap())),
+                legacy_record(hex_deps_row_identity(
+                    &crate::tailors::elixir::objects::beam_fingerprint_of(&beam).unwrap(),
+                )),
                 vec![beam],
                 vec!["schema", "beam"],
             ),

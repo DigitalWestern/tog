@@ -558,3 +558,54 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   `CARGO_TARGET_DIR`: passed. Stage 1 heavy gate is therefore 40 of 41,
   the one failure pre-existing. Lesson for future gates: pass the target
   dir as a flag; the e2e tests spawn cargo themselves.
+
+### 2026-09-12 — Stage 3 landed: `Tailor` trait and registry
+
+- `src/tailors/mod.rs` defines `Tailor` and `REGISTRY` (seven entries, in
+  display order: python, node, cargo, go, ruby, elixir, dotnet). Every
+  command iterates `tailors::registry()` / `tailors::detected(dir)` /
+  `tailors::for_closure(name)`; `sync`, `plan`, `build`, `run`, `fmt`,
+  `status`, `ls`, `doctor`, and `sbom` no longer name an ecosystem.
+- Design decisions taken (the §4 Stage 3 questions):
+  - Plan representation: each tailor's `plan` returns the pretty-printed
+    JSON text its own type serializes, so key order is byte-identical to
+    before; `sync` returns whether it synced anything so the "nothing to
+    sync here" refusal is unchanged.
+  - Dispatch: `&'static [&'static dyn Tailor]`, static.
+  - `Context` lives in the kernel (`kernel/context.rs`, not
+    `commands/context.rs` as §3 sketched) so a tailor can take `&Context`
+    without an upward edge.
+  - Every tailor's per-verb branch moved verbatim into
+    `tailors/<eco>/tailor.rs`; the projection-state helpers `status` needs
+    moved to `comforter/status.rs`, the CycloneDX builders `sbom` needs to
+    `kernel/cyclonedx.rs`.
+  - Object-kind adapters are tailor-owned: `tailors/<eco>/objects.rs`
+    holds `KINDS` (grammar row + recovery function per (kind, schema));
+    `objmeta` keeps the kernel's `git-source` row and reads the rest
+    through `tailors::kind_adapters()`. That call is the kernel's one
+    seam into the tailor layer, documented at `objmeta::adapter_for`; a
+    crate split would replace it with a table installed at startup. The
+    metadata goldens are unchanged and green. `elixir↔objmeta` and
+    `nativelibs↔objmeta` are gone from non-test code.
+  - `fmt` is three trait methods (`fmt_ecosystem`, `fmt_preflight`,
+    `fmt_check_project`) plus `fmt`; the cargo tailor implements them.
+- Deliberate deviations from the definition of done, recorded rather than
+  hidden:
+  - Two intentional ordering changes. `sync` now realizes ecosystems in
+    registry order, so a polyglot project with Cargo syncs cargo third
+    instead of last; `sync`'s preflight checks python before node instead
+    of after. Only stderr line order and which of several preflight errors
+    is reported first can differ. No test depends on either.
+  - `commands/deps.rs` and `commands/x.rs` still name the python and node
+    tailors: `add`/`remove`/`update` and `blanket x` are features only
+    those two ecosystems have, and §6 already defers `Tailor::edit_manifest`
+    to a later review. FOLLOW-UPS.md item 10.
+  - `commands/run.rs` and `commands/fmt.rs` call `tailors::node` for the
+    package.json script protocol (`npm_*` variables, lifecycle events):
+    that decides *how* a command runs, not what it sees, and it is the one
+    piece of `run` the trait does not cover.
+  - `cli/spec.rs` (`LS_WORDS`, `BUILD_WORDS`), `inspect::ECOSYSTEMS`, and
+    `deps::Eco` still list ecosystems by hand; ADDING-A-TAILOR.md §3 says so.
+- Gate: `cargo fmt --check`, `cargo build`, `cargo test --no-fail-fast`
+  (614 passed, same set as baseline). Heavy gate recorded in the next
+  entry. `docs/human/ADDING-A-TAILOR.md` written.

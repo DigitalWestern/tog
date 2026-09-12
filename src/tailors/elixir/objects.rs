@@ -1,0 +1,109 @@
+//! Object kinds the Elixir tailor produces, with the identity grammar each
+//! producer writes and how a legacy record's dependencies are recovered from
+//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
+//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+
+use crate::kernel::objmeta::{
+    add_digest, add_object, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
+};
+use crate::kernel::store::ObjectDeps;
+
+pub static KINDS: &[KindAdapter] = &[
+    KindAdapter {
+        kind: "beam",
+        schema: Some("beam-toolchain/1"),
+        grammar: Grammar {
+            required: &[
+                "schema",
+                "otp_sha256",
+                "elixir_sha256",
+                "hex_sha512",
+                "rebar3_sha512",
+            ],
+            optional: &["platform", "versions", "relocation_schema", "store_root"],
+            groups: &[],
+        },
+        adapt: beam_toolchain,
+    },
+    KindAdapter {
+        kind: "hex-deps",
+        schema: Some("hex-deps/1"),
+        grammar: Grammar {
+            required: &["schema", "beam"],
+            optional: &[],
+            groups: &[("dep:", None)],
+        },
+        adapt: hex_deps,
+    },
+];
+
+/// `beam-toolchain/1`: OTP and Elixir by sha256, Hex and rebar3 by sha512.
+/// All four are direct identity inputs; the `versions` and relocation inputs
+/// are not artifacts.
+fn beam_toolchain(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
+    let mut deps = ObjectDeps::new();
+    for (key, algo) in [
+        ("otp_sha256", Algo::Sha256),
+        ("elixir_sha256", Algo::Sha256),
+        ("hex_sha512", Algo::Sha512),
+        ("rebar3_sha512", Algo::Sha512),
+    ] {
+        add_digest(&mut deps, algo, input(record, key)?, key)?;
+    }
+    Ok(deps)
+}
+
+/// `hex-deps/1`: the BEAM reference is a truncated digest over the toolchain
+/// artifact hashes, so the object is found by recomputing that fingerprint
+/// from each candidate `beam` record's *own* inputs — never from this
+/// build's pins. Each dependency contributes its outer tarball sha256; the
+/// inner checksum is a content hash of the unpacked tarball and was never a
+/// cache key, so it is not an artifact dependency.
+fn hex_deps(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    let fingerprint = input(record, "beam")?;
+    let beam = index.unique(
+        "beam",
+        &format!("BEAM toolchain fingerprint {fingerprint}"),
+        |candidate| beam_fingerprint_of(candidate).as_deref() == Some(fingerprint),
+    )?;
+    let mut deps = ObjectDeps::new();
+    add_object(&mut deps, &beam, index, "beam")?;
+    for (key, value) in &record.identity.inputs {
+        if let Some(app) = key.strip_prefix("dep:") {
+            // "<package>@<version>:<outer>:<inner>:<managers>"
+            let mut fields = value.splitn(4, ':');
+            let _package = fields.next();
+            let outer = fields.next().ok_or_else(|| {
+                format!("dependency {app} entry {value:?} has no outer tarball digest")
+            })?;
+            add_digest(
+                &mut deps,
+                Algo::Sha256,
+                outer,
+                &format!("hex package {app}"),
+            )?;
+        } else if key != "schema" && key != "beam" {
+            return Err(format!("unexpected identity input {key}"));
+        }
+    }
+    Ok(deps)
+}
+
+/// Recompute `elixir::beam_fingerprint` from a candidate BEAM record's own
+/// identity inputs. Darwin and Linux use different formulas, and the Linux
+/// one includes the relocation schema, so both are reproduced exactly.
+pub fn beam_fingerprint_of(record: &Record) -> Option<String> {
+    if record.identity.kind != "beam" || record.schema_input() != Some("beam-toolchain/1") {
+        return None;
+    }
+    let inputs = &record.identity.inputs;
+    let otp = inputs.get("otp_sha256")?;
+    let elixir = inputs.get("elixir_sha256")?;
+    let hex = inputs.get("hex_sha512")?;
+    let rebar3 = inputs.get("rebar3_sha512")?;
+    let joined = match inputs.get("relocation_schema") {
+        Some(relocation) => format!("{otp}:{elixir}:{hex}:{rebar3}:{relocation}"),
+        None => format!("{otp}:{elixir}:{hex}:{rebar3}"),
+    };
+    Some(crate::tailors::elixir::fingerprint_of_joined(&joined))
+}

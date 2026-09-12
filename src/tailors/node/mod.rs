@@ -18,6 +18,8 @@
 
 pub mod inputs;
 pub mod lock_import;
+pub mod objects;
+pub mod tailor;
 
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};

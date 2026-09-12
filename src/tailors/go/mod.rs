@@ -8,6 +8,8 @@
 //! the store — delegation computes, the kernel verifies.
 
 pub mod inputs;
+pub mod objects;
+pub mod tailor;
 
 use crate::kernel::archive::Compression;
 use crate::kernel::dirhash;

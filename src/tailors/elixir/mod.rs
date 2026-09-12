@@ -10,6 +10,9 @@
 //! native deps (make/rebar3 ports) write INTO their source trees, so the
 //! deps projection is a writable clonefile copy, recorded unattested.
 
+pub mod objects;
+pub mod tailor;
+
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};

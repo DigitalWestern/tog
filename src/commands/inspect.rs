@@ -11,49 +11,23 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub use crate::comforter::status::{sha256_file, string, State};
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
 use crate::kernel::store::Store;
-use crate::tailors::dotnet;
-use crate::tailors::go;
-use crate::tailors::python::manifest;
+use crate::tailors;
+pub use crate::tailors::PackageRow;
 
 /// Display order; also the `ls <ecosystem>` vocabulary.
 pub const ECOSYSTEMS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
 
-const NODE_INPUTS: &[&str] = &[
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-];
-
 /// The ecosystems whose inputs are present in `dir` itself (the same tests
 /// `sync` uses to decide what to realize).
 pub fn detected(dir: &Path) -> io::Result<Vec<&'static str>> {
-    let mut found = Vec::new();
-    if manifest::has_manifest(dir)? {
-        found.push("python");
-    }
-    if NODE_INPUTS.iter().any(|name| dir.join(name).is_file()) {
-        found.push("node");
-    }
-    if dir.join("Cargo.toml").is_file() || dir.join("Cargo.lock").is_file() {
-        found.push("cargo");
-    }
-    if dir.join("go.mod").is_file() {
-        found.push("go");
-    }
-    if dir.join("Gemfile").is_file() {
-        found.push("ruby");
-    }
-    if dir.join("mix.exs").is_file() {
-        found.push("elixir");
-    }
-    if dir.is_dir() && dotnet::has_marker(dir)? {
-        found.push("dotnet");
-    }
-    Ok(found)
+    Ok(tailors::detected(dir)?
+        .into_iter()
+        .map(|tailor| tailor.id())
+        .collect())
 }
 
 /// One `.blanket/closures/<ecosystem>.json`, envelope fields lifted out.
@@ -119,14 +93,6 @@ fn rank(ecosystem: &str) -> usize {
 // ---------------------------------------------------------------------------
 // ls
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageRow {
-    pub name: String,
-    pub version: String,
-    /// Artifact file, lockfile path, or content hash: shown under -v.
-    pub detail: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct Listing {
     pub ecosystem: String,
@@ -135,111 +101,19 @@ pub struct Listing {
     pub packages: Vec<PackageRow>,
 }
 
-fn string(value: &Value) -> String {
-    value.as_str().unwrap_or_default().to_string()
-}
-
 pub fn listing(closure: &ClosureFile) -> Listing {
-    let body = &closure.body;
-    let plan = &body["plan"];
-    let mut toolchain = Vec::new();
-    let mut packages = Vec::new();
-    let empty = Vec::new();
-    match closure.ecosystem.as_str() {
-        "python" => {
-            let version = body["python"]["version"]
-                .as_str()
-                .or_else(|| plan["python_version"].as_str())
-                .unwrap_or_default();
-            toolchain.push(("cpython".into(), version.into()));
-            for package in plan["packages"].as_array().unwrap_or(&empty) {
-                packages.push(PackageRow {
-                    name: string(&package["name"]),
-                    version: string(&package["version"]),
-                    detail: string(&package["filename"]),
-                });
-            }
-        }
-        "node" => {
-            toolchain.push(("node".into(), string(&body["node_version"])));
-            for package in body["packages"].as_array().unwrap_or(&empty) {
-                let path = string(&package["path"]);
-                let name = path
-                    .rsplit_once("node_modules/")
-                    .map(|(_, name)| name.to_string())
-                    .unwrap_or_else(|| path.clone());
-                packages.push(PackageRow {
-                    name,
-                    version: string(&package["version"]),
-                    detail: path,
-                });
-            }
-        }
-        "cargo" => {
-            toolchain.push(("rust".into(), string(&plan["rust_version"])));
-            for package in plan["crates"].as_array().unwrap_or(&empty) {
-                packages.push(PackageRow {
-                    name: string(&package["name"]),
-                    version: string(&package["version"]),
-                    detail: string(&package["sha256"]),
-                });
-            }
-        }
-        "go" => {
-            toolchain.push(("go".into(), string(&plan["go_version"])));
-            for package in plan["modules"].as_array().unwrap_or(&empty) {
-                packages.push(PackageRow {
-                    name: string(&package["path"]),
-                    version: string(&package["version"]),
-                    detail: String::new(),
-                });
-            }
-        }
-        "ruby" => {
-            toolchain.push(("ruby".into(), string(&plan["ruby_version"])));
-            toolchain.push(("bundler".into(), string(&plan["bundler_version"])));
-            for package in plan["gems"].as_array().unwrap_or(&empty) {
-                packages.push(PackageRow {
-                    name: string(&package["name"]),
-                    version: string(&package["version"]),
-                    detail: string(&package["full_name"]),
-                });
-            }
-        }
-        "elixir" => {
-            toolchain.push(("elixir".into(), string(&plan["elixir_version"])));
-            toolchain.push(("otp".into(), string(&plan["otp_version"])));
-            for package in plan["deps"].as_array().unwrap_or(&empty) {
-                packages.push(PackageRow {
-                    name: string(&package["package"]),
-                    version: string(&package["version"]),
-                    detail: string(&package["app"]),
-                });
-            }
-        }
-        "dotnet" => {
-            toolchain.push(("dotnet-sdk".into(), string(&plan["sdk_version"])));
-            for package in plan["packages"].as_array().unwrap_or(&empty) {
-                packages.push(PackageRow {
-                    name: string(&package["id"]),
-                    version: string(&package["version"]),
-                    detail: string(&package["content_hash"]),
-                });
-            }
-        }
-        "rustfmt" => {
-            let version = string(&body["rust_version"]);
-            toolchain.push(("rustfmt".into(), version));
-        }
-        _ => {}
-    }
-    toolchain.retain(|(_, version)| !version.is_empty());
-    packages.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+    let mut listed = tailors::for_closure(&closure.ecosystem)
+        .map(|tailor| tailor.listing(&closure.ecosystem, &closure.body))
+        .unwrap_or_default();
+    listed.toolchain.retain(|(_, version)| !version.is_empty());
+    listed
+        .packages
+        .sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
     Listing {
         ecosystem: closure.ecosystem.clone(),
         platform: closure.platform.clone(),
-        toolchain,
-        packages,
+        toolchain: listed.toolchain,
+        packages: listed.packages,
     }
 }
 
@@ -318,18 +192,6 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
 // ---------------------------------------------------------------------------
 // status
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    Synced,
-    NotSynced,
-    /// Input files that differ from what the last sync consumed.
-    Changed(Vec<String>),
-    ProjectionMissing(String),
-    ForeignPlatform(String),
-    /// Synced, but this closure predates input recording.
-    Unchecked(String),
-}
-
 #[derive(Debug, Clone)]
 pub struct EcosystemStatus {
     pub ecosystem: String,
@@ -342,166 +204,6 @@ impl EcosystemStatus {
     pub fn is_synced(&self) -> bool {
         matches!(self.state, State::Synced | State::Unchecked(_))
     }
-}
-
-pub fn sha256_file(path: &Path) -> io::Result<String> {
-    Ok(hex::encode(Sha256::digest(fs::read(path)?)))
-}
-
-/// Compare recorded `inputs` (python, node) with the files on disk.
-fn changed_inputs(dir: &Path, inputs: &[Value]) -> io::Result<Vec<String>> {
-    let mut changed = Vec::new();
-    for input in inputs {
-        let path = string(&input["path"]);
-        let recorded = string(&input["sha256"]);
-        if path.is_empty() {
-            continue;
-        }
-        let file = dir.join(&path);
-        if !file.is_file() {
-            changed.push(format!("{path} (removed)"));
-        } else if sha256_file(&file)? != recorded {
-            changed.push(path);
-        }
-    }
-    Ok(changed)
-}
-
-/// Compare a single recorded lock hash with the file on disk.
-fn changed_lock(dir: &Path, lock: &str, recorded: &str) -> io::Result<Vec<String>> {
-    let file = dir.join(lock);
-    let current = if file.is_file() {
-        sha256_file(&file)?
-    } else {
-        // `go.sum` may be legitimately absent; main hashes the empty string.
-        hex::encode(Sha256::digest(b""))
-    };
-    Ok(if recorded.is_empty() {
-        Vec::new()
-    } else if current == recorded {
-        Vec::new()
-    } else if file.is_file() {
-        vec![lock.to_string()]
-    } else {
-        vec![format!("{lock} (removed)")]
-    })
-}
-
-fn symlink_target(path: &Path) -> Option<PathBuf> {
-    fs::read_link(path).ok()
-}
-
-fn canonical_symlink_target(path: &Path) -> Option<PathBuf> {
-    let target = symlink_target(path)?;
-    let target = if target.is_absolute() {
-        target
-    } else {
-        path.parent()?.join(target)
-    };
-    target.canonicalize().ok()
-}
-
-fn object_path_exists(body: &Value, fields: &[&str]) -> Option<String> {
-    for field in fields {
-        let Some(path) = body[*field]["path"].as_str() else {
-            continue;
-        };
-        if !Path::new(path).is_dir() {
-            return Some(format!("{field} object"));
-        }
-    }
-    None
-}
-
-fn object_liveness_state(body: &Value, fields: &[&str]) -> Option<State> {
-    object_path_exists(body, fields).map(State::ProjectionMissing)
-}
-
-fn store_home_from_object(path: &Path) -> Option<PathBuf> {
-    let objects = path.parent()?;
-    if objects.file_name()?.to_str()? != "objects" {
-        return None;
-    }
-    Some(objects.parent()?.parent()?.to_path_buf())
-}
-
-fn encoded_workspace(workspace: &str) -> Option<String> {
-    if workspace.is_empty()
-        || workspace
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return None;
-    }
-    Some(workspace.replace('%', "%25").replace('/', "%2F"))
-}
-
-fn node_projection_state(dir: &Path, body: &Value) -> State {
-    let node_modules = dir.join("node_modules");
-    let Some(env_text) = body["env_object"].as_str() else {
-        return if canonical_symlink_target(&node_modules).is_some() && node_modules.is_dir() {
-            State::Unchecked("node projection provenance was not recorded".into())
-        } else {
-            State::ProjectionMissing("node_modules".into())
-        };
-    };
-    let Some(projection_id) = body["projection_id"].as_str() else {
-        return State::ProjectionMissing("node_modules".into());
-    };
-    let expected_root = if let Some(path) = body["forest_path"].as_str() {
-        let path = PathBuf::from(path);
-        if path.file_name().and_then(|name| name.to_str()) != Some("node_modules") {
-            return State::ProjectionMissing("node_modules".into());
-        }
-        let Some(root) = path.parent().map(Path::to_path_buf) else {
-            return State::ProjectionMissing("node_modules".into());
-        };
-        root
-    } else {
-        let Some(home) = store_home_from_object(Path::new(env_text)) else {
-            return State::ProjectionMissing("node_modules".into());
-        };
-        let Ok(project_key) = dir
-            .canonicalize()
-            .map(|path| hex::encode(Sha256::digest(path.as_os_str().as_bytes()))[..32].to_string())
-        else {
-            return State::ProjectionMissing("node_modules".into());
-        };
-        home.join("forests").join(project_key).join(projection_id)
-    };
-    let Some(expected) = expected_root.join("node_modules").canonicalize().ok() else {
-        return State::ProjectionMissing("node_modules".into());
-    };
-    if canonical_symlink_target(&node_modules) != Some(expected) {
-        return State::ProjectionMissing("node_modules".into());
-    }
-    if !Path::new(env_text).is_dir() {
-        return State::ProjectionMissing("env object".into());
-    }
-    if let Some(workspaces) = body["workspaces"].as_array() {
-        for workspace in workspaces {
-            let Some(workspace) = workspace.as_str() else {
-                return State::ProjectionMissing("workspace node_modules".into());
-            };
-            let Some(encoded) = encoded_workspace(workspace) else {
-                return State::ProjectionMissing("workspace node_modules".into());
-            };
-            let Some(expected) = expected_root
-                .join("workspaces")
-                .join(encoded)
-                .join("node_modules")
-                .canonicalize()
-                .ok()
-            else {
-                return State::ProjectionMissing("workspace node_modules".into());
-            };
-            if canonical_symlink_target(&dir.join(workspace).join("node_modules")) != Some(expected)
-            {
-                return State::ProjectionMissing("workspace node_modules".into());
-            }
-        }
-    }
-    State::Synced
 }
 
 pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>> {
@@ -545,145 +247,16 @@ pub fn summary(closure: &ClosureFile) -> String {
     )
 }
 
-/// Whether one closure record still describes the project: recorded
-/// platform, projection, and inputs or lock hash, judged from that record's
-/// own body. `status` calls this for the closure of each detected ecosystem;
-/// `audit` calls it for every closure file, so two files claiming the same
-/// ecosystem are each judged on their own contents. Never `NotSynced`.
 pub fn closure_state(platform: Platform, dir: &Path, closure: &ClosureFile) -> io::Result<State> {
     if let Some(recorded) = &closure.platform {
         if recorded != platform.triple() {
             return Ok(State::ForeignPlatform(recorded.clone()));
         }
     }
-    let body = &closure.body;
-    let state = match closure.ecosystem.as_str() {
-        "python" => {
-            let venv = dir.join(".venv");
-            let env_object = string(&body["env_object"]);
-            let target = symlink_target(&venv);
-            if target.as_deref() != Some(Path::new(&env_object)) || !venv.join("bin").is_dir() {
-                State::ProjectionMissing(".venv".into())
-            } else {
-                recorded_inputs_state(dir, body)?
-            }
-        }
-        "node" => {
-            let projection = node_projection_state(dir, body);
-            if matches!(&projection, State::Synced | State::Unchecked(_)) {
-                match recorded_inputs_state(dir, body)? {
-                    State::Synced if matches!(projection, State::Unchecked(_)) => projection,
-                    State::Synced => State::Synced,
-                    other => other,
-                }
-            } else {
-                projection
-            }
-        }
-        "cargo" => {
-            if !dir.join(".blanket/cargo-home").is_dir() {
-                State::ProjectionMissing(".blanket/cargo-home".into())
-            } else {
-                lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
-            }
-        }
-        "go" => go_status(platform, dir, body)?,
-        "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(
-            lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?,
-        ),
-        "elixir" => object_liveness_state(body, &["beam_object", "deps_object"]).unwrap_or(
-            lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?,
-        ),
-        "dotnet" => {
-            object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(lock_state(
-                dir,
-                "packages.lock.json",
-                &string(&body["packages_lock_sha256"]),
-            )?)
-        }
-        _ => State::Unchecked("unknown ecosystem".into()),
-    };
-    Ok(state)
-}
-
-/// Compare the selected Go version in go.mod with the one recorded in the
-/// closure. This is read-only: status must never realize a toolchain or touch
-/// the network just to detect a stale selection.
-fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
-    if let Some(state) = object_liveness_state(body, &["go_object", "modcache_object"]) {
-        return Ok(state);
+    match tailors::for_closure(&closure.ecosystem) {
+        Some(tailor) => tailor.closure_state(platform, dir, &closure.ecosystem, &closure.body),
+        None => Ok(State::Unchecked("unknown ecosystem".into())),
     }
-
-    let mut changed = Vec::new();
-    let recorded_version = string(&body["plan"]["go_version"]);
-    if !recorded_version.is_empty() {
-        let go_mod = dir.join("go.mod");
-        match fs::read_to_string(&go_mod) {
-            Ok(text) => match go::resolve_toolchain(platform, &text) {
-                Ok(selected) if selected == recorded_version => {}
-                Ok(_) => changed.push("go.mod".to_string()),
-                Err(_) => changed.push("go.mod (Go toolchain selection unavailable)".to_string()),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                changed.push("go.mod (removed)".to_string())
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    let lock_state = lock_state(dir, "go.sum", &string(&body["go_sum_sha256"]))?;
-    match lock_state {
-        State::Changed(files) => changed.extend(files),
-        State::Unchecked(reason) if changed.is_empty() => {
-            if recorded_version.is_empty() {
-                return Ok(State::Unchecked(format!(
-                    "{reason}; recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
-                )));
-            }
-            return Ok(State::Unchecked(reason));
-        }
-        State::Synced | State::Unchecked(_) => {}
-        _ => unreachable!("go.sum lock_state has no projection or platform state"),
-    }
-    if !changed.is_empty() {
-        return Ok(State::Changed(changed));
-    }
-    if recorded_version.is_empty() {
-        return Ok(State::Unchecked(
-            "recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
-                .into(),
-        ));
-    }
-    Ok(State::Synced)
-}
-
-fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
-    match body["inputs"].as_array() {
-        Some(inputs) if !inputs.is_empty() => {
-            let changed = changed_inputs(dir, inputs)?;
-            Ok(if changed.is_empty() {
-                State::Synced
-            } else {
-                State::Changed(changed)
-            })
-        }
-        _ => Ok(State::Unchecked(
-            "inputs were not recorded by this sync; run 'blanket sync' once to enable checks"
-                .into(),
-        )),
-    }
-}
-
-fn lock_state(dir: &Path, lock: &str, recorded: &str) -> io::Result<State> {
-    if recorded.is_empty() {
-        return Ok(State::Unchecked(format!("{lock} hash not recorded")));
-    }
-    let changed = changed_lock(dir, lock, recorded)?;
-    Ok(if changed.is_empty() {
-        State::Synced
-    } else {
-        State::Changed(changed)
-    })
 }
 
 pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Result<String> {
@@ -770,7 +343,6 @@ fn on_path(program: &str) -> Option<PathBuf> {
 }
 
 fn free_bytes(path: &Path) -> io::Result<u64> {
-    use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
     // SAFETY: statvfs writes into a zeroed struct of the right type.
@@ -929,20 +501,10 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
     }
 
     if let Some(platform) = platform {
-        if dir.join("go.mod").is_file() {
-            match go::resolve_project_toolchain(platform, dir) {
-                Ok(version) => checks.push(check(
-                    "go-toolchain",
-                    Level::Ok,
-                    format!("{version} selected from go.mod"),
-                )),
-                Err(error) => checks.push(check(
-                    "go-toolchain",
-                    Level::Fail,
-                    format!(
-                        "cannot select a realizable Go toolchain: {error}; use a pinned version in go.mod"
-                    ),
-                )),
+        for tailor in tailors::registry() {
+            for probe in tailor.doctor(platform, dir) {
+                let level = if probe.ok { Level::Ok } else { Level::Fail };
+                checks.push(check(probe.name, level, probe.detail));
             }
         }
         match sandbox::probe(platform) {
@@ -1095,6 +657,16 @@ pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The display order lives here for the `ls` vocabulary and closure
+    /// ranking; the registry is the source of truth.
+    #[test]
+    fn ecosystems_match_the_tailor_registry() {
+        let ids: Vec<&str> = crate::tailors::registry()
+            .iter()
+            .map(|tailor| tailor.id())
+            .collect();
+        assert_eq!(ids, super::ECOSYSTEMS);
+    }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 

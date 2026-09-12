@@ -1,23 +1,18 @@
-//! `blanket fmt`: the pinned rustfmt over a Cargo workspace, or a delegated
-//! package.json `fmt` script. Needs the cargo tailor and its rustfmt component.
+//! `blanket fmt`: the pinned formatter of the one ecosystem that has one
+//! (Rust today), or a delegated package.json `fmt` script. The formatter
+//! itself is `Tailor::fmt`; this file only decides which of the two runs.
 
-use crate::comforter;
 use crate::commands::inspect;
 use crate::commands::run;
-use crate::commands::shared::{child_status_code, project_dir, projected_root};
+use crate::commands::shared::{project_dir, projected_root};
 use crate::kernel::context::Context;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::ui;
-use crate::tailors::cargo;
-use crate::tailors::cargo::inputs::locate_cargo_root;
-use crate::tailors::cargo::rustfmt;
 use crate::tailors::node;
+use crate::tailors::{self, Tailor};
 use std::io;
-use std::path::Path;
 
-/// `blanket fmt`: realize only the Rust toolchain and its paired rustfmt
-/// component, then format the Cargo workspace without resolving dependencies.
 pub fn run(
     platform: Platform,
     check: bool,
@@ -34,16 +29,22 @@ pub fn run(
     // Without it, a script named fmt wins over the named command, matching
     // `blanket run fmt`. Preserve the command's user arguments for the script;
     // `--eco` is never appended to a delegated command line.
-    match ecosystem {
-        Some("rust") => {}
-        Some(ecosystem) => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "fmt for {ecosystem} is not implemented yet; Rust is the only supported ecosystem"
-                ),
-            ));
-        }
+    let formatter: &dyn Tailor = match ecosystem {
+        Some(ecosystem) => match tailors::registry()
+            .iter()
+            .copied()
+            .find(|tailor| tailor.fmt_ecosystem() == Some(ecosystem))
+        {
+            Some(tailor) => tailor,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "fmt for {ecosystem} is not implemented yet; Rust is the only supported ecosystem"
+                    ),
+                ));
+            }
+        },
         None => {
             let script_root = projected_root(&cwd);
             let package_json = script_root.join("package.json");
@@ -78,13 +79,18 @@ pub fn run(
                 let ctx = Context::open(platform, true)?;
                 return run::run(&ctx, &command);
             }
+            tailors::registry()
+                .iter()
+                .copied()
+                .find(|tailor| tailor.fmt_ecosystem().is_some())
+                .expect("one ecosystem has a pinned formatter")
         }
-    }
-    // Top of the Rust path, and deliberately not above the `--eco` dispatch:
-    // a delegated package.json `fmt` script needs no rustfmt pin. A platform
-    // with no pinned component is refused here, before `Store::open` and
-    // before `ensure_rust_for` downloads ~105 MB of toolchain.
-    rustfmt::preflight_platform(platform)?;
+    };
+    // Top of the formatter path, and deliberately not above the `--eco`
+    // dispatch: a delegated package.json `fmt` script needs no formatter
+    // pin. The tailor refuses a host with no pinned component here, before
+    // the store is opened.
+    formatter.fmt_preflight(platform)?;
     let detected = inspect::detected(&cwd)?;
     if ecosystem.is_none() && detected.len() > 1 {
         return Err(io::Error::new(
@@ -95,64 +101,11 @@ pub fn run(
             ),
         ));
     }
-    if !cwd
-        .ancestors()
-        .any(|dir| dir.join("Cargo.toml").is_file() || dir.join("Cargo.lock").is_file())
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no Rust project here; run `blanket fmt` from a Cargo project",
-        ));
-    }
+    formatter.fmt_check_project(&cwd)?;
 
     // Same scoping as the delegated branch above: the maintenance narration
     // is the only thing that needs the handle, and the toolchain
     // provisioning and formatter children below all run outside it.
     let ctx = Context::open(platform, true)?;
-    let store = &ctx.store;
-    let activity = &ctx.activity;
-    let rust_version = cargo::resolve_toolchain(platform, &cwd)?.to_string();
-    let rust_object = cargo::ensure_rust_for(&store, platform, &rust_version)?;
-    let rustfmt_object = rustfmt::ensure_rustfmt(&store, platform, &rust_version, &rust_object)?;
-    let workspace_root = locate_cargo_root(&rust_object, &cwd, &store)?.canonicalize()?;
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "object path has no UTF-8 id")
-            })?;
-        Ok(serde_json::json!({
-            "path": path.display().to_string(),
-            "id": id,
-        }))
-    };
-    let mut refs = comforter::ClosureRefs::new();
-    refs.object_path(&store, &activity, &rust_object)?;
-    refs.object_path(&store, &activity, &rustfmt_object)?;
-    comforter::write_closure(
-        &workspace_root,
-        "rustfmt",
-        serde_json::json!({
-            "rust_object": object_ref(&rust_object)?,
-            "rustfmt_object": object_ref(&rustfmt_object)?,
-            "rust_version": rust_version,
-            "workspace_root": workspace_root.display().to_string(),
-        }),
-        &store,
-        &activity,
-        refs,
-    )?;
-    let invocation_dir = cwd.canonicalize()?;
-    let status = rustfmt::run_sandboxed(
-        platform,
-        &invocation_dir,
-        &workspace_root,
-        &rust_object,
-        &rustfmt_object,
-        &store,
-        check,
-        args,
-    )?;
-    Ok(child_status_code(&status))
+    formatter.fmt(&ctx, &cwd, check, args)
 }

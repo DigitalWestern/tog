@@ -103,6 +103,12 @@ F3 report accounting, F4 acceptance tests).
    store" half of the test is false. Either move the store open after the
    preflight (a behavior change: `sync` would preflight before the
    maintenance sweep) or relax the test. Not touched by the refactor.
+10. **`deps` and `x` as `Tailor` methods.** After REFACTOR.md Stage 3,
+   `commands/deps.rs` and `commands/x.rs` are the only command files that
+   still name a tailor (python and node). A `Tailor::edit_manifest` and a
+   `Tailor::registry_tool` method with "unsupported" defaults would make
+   both registry-driven; each is its own design review (deps edits user
+   manifests; x has its own cache and root registration).
 
 ## Flag 3 — `blanket audit`: three product decisions the reviewer asked the owner to make
 

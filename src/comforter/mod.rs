@@ -5,6 +5,8 @@
 //! projects with identical locks share one env object; different locks get
 //! different objects and coexist. Projection into a project is one symlink.
 
+pub mod status;
+
 use crate::kernel::fetch::download_verified_held;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};

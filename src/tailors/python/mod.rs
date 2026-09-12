@@ -8,9 +8,11 @@ pub(crate) mod build_requires;
 pub mod inputs;
 pub mod manifest;
 pub mod nativelibs;
+pub mod objects;
 pub mod pep440;
 pub mod pypi;
 pub mod pyselect;
+pub mod tailor;
 pub mod wheel;
 
 use crate::kernel::fetch::{download_verified_held, Digest};

@@ -33,9 +33,12 @@ committed as a clean series on `wp-gc-safety` (see `git log` and
 ## What is next (in order)
 
 A structural refactor is in progress alongside the items below; see
-[REFACTOR.md](REFACTOR.md) for the stages and the change log. Stages 1 and 2
+[REFACTOR.md](REFACTOR.md) for the stages and the change log. Stages 1 to 3
 (files moved into `kernel/`, `tailors/`, `comforter/`; the entry point split
-into `commands/` and `cli/`) landed 2026-09-12. Old `crate::<module>` paths
+into `commands/` and `cli/`; the `Tailor` trait and registry, so a new
+ecosystem is a folder plus one line, see
+[docs/human/ADDING-A-TAILOR.md](docs/human/ADDING-A-TAILOR.md)) landed
+2026-09-12. Old `crate::<module>` paths
 are gone, so an in-flight branch that touched a moved file rebases by
 re-pointing its imports at the folder paths in ARCHITECTURE.md's layout.
 

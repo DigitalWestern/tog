@@ -10,6 +10,9 @@
 //! lock (not project obj/) is the only durable authority: every sandboxed
 //! build re-restores offline into scratch and builds --no-restore.
 
+pub mod objects;
+pub mod tailor;
+
 use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};

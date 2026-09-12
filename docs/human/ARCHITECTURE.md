@@ -259,8 +259,7 @@ Commands (`src/commands/`, one file per verb; the only layer that knows
 every tailor and the kernel):
 
     mod.rs          resolve() for the implicit forms, dispatch(): one call per verb
-    context.rs      Context { platform, store, activity lease } for store-backed verbs
-    shared.rs       helpers two or more verbs share (input loaders, Python planning)
+    shared.rs       project-directory and exit-code helpers two or more verbs share
     sync.rs  plan.rs  build.rs  run.rs  fmt.rs  gc.rs  store.rs  completions.rs
     doctor.rs  ls.rs  status.rs   thin verbs over inspect.rs
     inspect.rs      status / ls / doctor: read-only views over closures + store
@@ -272,6 +271,8 @@ every tailor and the kernel):
 Kernel (`src/kernel/`, ecosystem-agnostic):
 
     types.rs        Identity, Plan, LockedPackage
+    context.rs      Context { platform, store, activity lease } for store-backed verbs
+    cyclonedx.rs    CycloneDX component builders every tailor's sbom uses
     store.rs        immutable store: stage/commit/cache, roots, BLANKET_STORE
     fetch.rs        verified downloads
     archive.rs      archive validation and delegated extraction
@@ -287,11 +288,19 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
     ui.rs           output conventions: quiet/verbose/color, error channel
 
 Comforter (`src/comforter/`): environment realization + projection into
-the project directory (`mod.rs`; today still Python-aware, see REFACTOR.md).
+the project directory (`mod.rs`; today still Python-aware, see REFACTOR.md)
+and `status.rs`, the projection-currency checks `blanket status` is built from.
 
-Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph):
+Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
+folder has `tailor.rs` (its `impl Tailor`, the one blueprint every
+ecosystem answers: detect, preflight, plan, sync, build, run_env, listing,
+closure_state, sbom_components, object_kinds) and `objects.rs` (the store
+object kinds it produces, with their identity grammar and legacy-metadata
+adapters); `src/tailors/mod.rs` holds the trait and the registry the
+commands iterate. See docs/human/ADDING-A-TAILOR.md.
 
     python/mod.rs          pinned CPython provisioning
+    python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)
     python/pypi.rs         Python planner (adapter)
     python/wheel.rs        PEP 427 wheel installer
     python/pyselect.rs     CPython constraint parsing and selection
@@ -302,10 +311,13 @@ Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph):
     python/nativelibs.rs   pinned, relocatable native libraries for Linux builds
     python/artifacts.rs    install-time artifact policy
     node/mod.rs            npm planner, projection, lifecycle scripts
+    node/inputs.rs         missing-lock generation, lockfile importers
     node/lock_import.rs    pnpm and Yarn classic lockfile importers
     cargo/mod.rs           Cargo.lock importer + registry vendor realization
+    cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
     cargo/rustfmt.rs       pinned formatter component for `blanket fmt`
     go/mod.rs              module closure via the pinned Go toolchain
+    go/inputs.rs           toolchain selection from go.mod, the GoPlan
     ruby/mod.rs            Bundler-delegated planning, blanket-verified gems
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     dotnet/mod.rs          NuGet packages.lock.json (blanket-mandatory)
