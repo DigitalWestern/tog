@@ -108,9 +108,14 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     // modules are ecosystem-neutral in practice and belong in a shared
     // toolchain provider (FOLLOW-UPS.md).
     (
-        "tailors/node/mod.rs",
+        "tailors/node/realize.rs",
         "tailors::python",
         "node-gyp install scripts",
+    ),
+    (
+        "tailors/node/project.rs",
+        "tailors::python",
+        "native-lib env references",
     ),
     // The dependency-spec validator lives with the command that owns the
     // spec grammar; cli calls it for argv validation only.
