@@ -527,6 +527,242 @@ pub fn module_path(gomod: &str) -> io::Result<String> {
     Err(err("go.mod has no module directive"))
 }
 
+/// Schema tag baked into the plan-cache key: a bump makes every existing
+/// `.blanket/go-plan.json` miss instead of being read under new rules.
+const PLANNER_SCHEMA: &str = "go-planner/2";
+
+/// The plan-cache key. The tidy gate's inputs are exactly go.mod + go.sum +
+/// the .go sources, so the key covers all three: a hit proves the last
+/// successful gate's inputs are unchanged, making a re-run redundant (Sol
+/// finding 7, solved by keying instead of re-running).
+fn plan_cache_key(go_version: &str, gomod: &str, gosum: &str, src_digest: &str) -> String {
+    hex::encode(Sha256::digest(
+        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}\x00{src_digest}")
+            .as_bytes(),
+    ))
+}
+
+/// Read the cached plan when its key matches. The cache file is
+/// attacker-editable project state, so a hit is validated before it is used;
+/// anything unreadable, unparsable, or stale is simply a miss.
+fn cached_plan(cache_path: &Path, input_hash: &str) -> io::Result<Option<GoPlan>> {
+    if let Ok(cached) = fs::read_to_string(cache_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
+            if v["input_hash"] == input_hash {
+                if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
+                    validate_plan(&plan)?;
+                    return Ok(Some(plan));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Consistency gate: tidy -diff is non-mutating (prints a diff, exit
+/// nonzero when go.mod/go.sum need changes). Needs the source tree, so
+/// it runs in the real project — but never writes. Its module cache is a
+/// persistent planner scratch (resolver-trust only; never feeds objects).
+/// Returns the final, possibly tidied, manifest pair.
+fn tidy_gate(
+    store: &Store,
+    go_obj: &Path,
+    project_dir: &Path,
+    gate_cache: &Path,
+    scratch: &Path,
+    gomod: String,
+    gosum: String,
+) -> io::Result<(String, String)> {
+    let out = run_go(
+        store,
+        go_obj,
+        project_dir,
+        gate_cache,
+        false,
+        &["mod", "tidy", "-diff"],
+    )?;
+    if out.status.success() {
+        return Ok((gomod, gosum));
+    }
+    // Out-of-sync manifest: run the ecosystem's resolver, the same
+    // delegated mutation as uv pip compile / cargo generate-lockfile.
+    eprintln!("blanket: go.mod/go.sum need updating; resolving with the store go mod tidy...");
+    let out = run_go(
+        store,
+        go_obj,
+        project_dir,
+        gate_cache,
+        false,
+        &["mod", "tidy"],
+    )?;
+    if !out.status.success() {
+        let _ = crate::kernel::store::remove_tree(scratch);
+        return Err(err(format!(
+            "store go mod tidy failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok((
+        fs::read_to_string(project_dir.join("go.mod"))?,
+        fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default(),
+    ))
+}
+
+/// Run the closure download in a DISPOSABLE copy of the manifest (go mod
+/// download may rewrite go.mod/go.sum). The module cache is the persistent
+/// planner scratch — warm downloads; trust is irrelevant because every
+/// artifact is re-verified by `closure_from_download`.
+fn download_closure(
+    store: &Store,
+    go_obj: &Path,
+    work: &Path,
+    gate_cache: &Path,
+    gomod: &str,
+    gosum: &str,
+) -> io::Result<std::process::Output> {
+    fs::create_dir_all(work)?;
+    fs::write(work.join("go.mod"), gomod)?;
+    if !gosum.is_empty() {
+        fs::write(work.join("go.sum"), gosum)?;
+    }
+    eprintln!("blanket: computing Go module closure with the store toolchain...");
+    run_go(
+        store,
+        go_obj,
+        work,
+        gate_cache,
+        false,
+        &["mod", "download", "-json", "all"],
+    )
+}
+
+/// Verify the JSON stream of `go mod download` into plan rows. Ledger
+/// anchor: h1 values must ALSO appear in the project's go.sum — never trust
+/// sums that exist only in the delegated tool's output. The stream (a
+/// sequence of concatenated objects) is parsed BEFORE the exit status is
+/// checked: per-module errors ride in the stream.
+fn closure_from_download(
+    store: &Store,
+    out: &std::process::Output,
+    gosum: &str,
+) -> io::Result<Vec<GoModule>> {
+    let ledger: std::collections::BTreeSet<String> =
+        gosum.lines().map(|l| l.trim().to_string()).collect();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut modules = Vec::new();
+    let mut de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
+    while let Some(entry) = de.next() {
+        let entry = entry.map_err(|e| err(format!("go mod download JSON: {e}")))?;
+        if let Some(module) = verified_module(store, entry, &ledger)? {
+            modules.push(module);
+        }
+    }
+    if !out.status.success() {
+        return Err(err(format!(
+            "go mod download failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(modules)
+}
+
+/// Blanket-owned verification of one download entry: recompute both
+/// dirhashes, check the .info's claim, and insert the bytes into the cache.
+/// `Ok(None)` means "outside the closure" — the main module (no artifacts)
+/// or a build-GRAPH-only module whose zip sum the tidied go.sum omits.
+fn verified_module(
+    store: &Store,
+    entry: DownloadEntry,
+    ledger: &std::collections::BTreeSet<String>,
+) -> io::Result<Option<GoModule>> {
+    if let Some(msg) = &entry.error {
+        return Err(err(format!(
+            "{}@{}: {msg} (a selected module failed to download; the \
+             closure would be incomplete)",
+            entry.path, entry.version
+        )));
+    }
+    // A version-to-version replace surfaces the replacement's
+    // artifacts on the outer entry; a local-path replace has no
+    // Version and no integrity — fail closed.
+    if let Some(rep) = &entry.replace {
+        if rep.version.is_empty() || rep.path.starts_with('.') || rep.path.starts_with('/') {
+            return Err(err(format!(
+                "{}: local-path replace directives are not supported \
+                 yet (no go.sum integrity); vendor a released version",
+                entry.path
+            )));
+        }
+    }
+    let (Some(zip), Some(gomod_file), Some(sum), Some(gomod_sum)) =
+        (&entry.zip, &entry.go_mod, &entry.sum, &entry.go_mod_sum)
+    else {
+        return Ok(None); // main module / no artifacts
+    };
+    // Ledger anchor: the tidied go.sum is the authority. Modules
+    // whose zip sums it omits are build-GRAPH-only (tidy records
+    // zip sums for exactly the modules whose packages a build can
+    // import) — exclude them from the closure rather than fail:
+    // an offline build never loads their sources, and if one were
+    // ever needed the readonly+GOPROXY=off build fails loudly.
+    if !ledger.contains(&format!("{} {} {}", entry.path, entry.version, sum)) {
+        return Ok(None);
+    }
+    if !ledger.contains(&format!(
+        "{} {}/go.mod {}",
+        entry.path, entry.version, gomod_sum
+    )) {
+        return Err(err(format!(
+            "{}@{}: go.mod sum is not in the project's go.sum \
+             ledger; refusing (run `blanket run go mod tidy`)",
+            entry.path, entry.version
+        )));
+    }
+    // Blanket-owned verification: recompute both dirhashes.
+    let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
+    if got_h1 != *sum {
+        return Err(err(format!(
+            "{}@{}: zip dirhash mismatch\n  expected {sum}\n  got      {got_h1}",
+            entry.path, entry.version
+        )));
+    }
+    let got_mod_h1 = dirhash::hash_gomod(Path::new(gomod_file))?;
+    if got_mod_h1 != *gomod_sum {
+        return Err(err(format!(
+            "{}@{}: go.mod dirhash mismatch\n  expected {gomod_sum}\n  got      {got_mod_h1}",
+            entry.path, entry.version
+        )));
+    }
+    let (zip_sha256, _) = cache_insert(store, Path::new(zip))?;
+    let (modfile_sha256, _) = cache_insert(store, Path::new(gomod_file))?;
+    let info = entry.info.as_deref().ok_or_else(|| {
+        err(format!(
+            "{}@{}: download entry has no Info file",
+            entry.path, entry.version
+        ))
+    })?;
+    // .info is proxy metadata: verify it says what the plan says
+    // before its bytes become an identity input.
+    let info_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(info)?)
+        .map_err(|e| err(format!("{}@{}: bad .info: {e}", entry.path, entry.version)))?;
+    if info_json["Version"].as_str() != Some(entry.version.as_str()) {
+        return Err(err(format!(
+            "{}@{}: .info Version {:?} does not match",
+            entry.path, entry.version, info_json["Version"]
+        )));
+    }
+    let (info_sha256, _) = cache_insert(store, Path::new(info))?;
+    Ok(Some(GoModule {
+        path: entry.path,
+        version: entry.version,
+        h1: sum.clone(),
+        zip_sha256,
+        modfile_h1: gomod_sum.clone(),
+        modfile_sha256,
+        info_sha256,
+    }))
+}
+
 /// Plan the module closure. Network-permitted delegation to the store Go in
 /// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
 /// by blanket-owned verification of every artifact. Cached in
@@ -544,210 +780,36 @@ pub fn plan_go(
     reject_local_replaces(&gomod)?;
     let go_version = resolve_toolchain(platform, &gomod)?;
 
-    // The tidy gate's inputs are exactly go.mod + go.sum + the .go sources,
-    // so the plan-cache key covers all three: a hit proves the last
-    // successful gate's inputs are unchanged, making a re-run redundant
-    // (Sol finding 7, solved by keying instead of re-running).
-    const PLANNER_SCHEMA: &str = "go-planner/2";
     let src_digest = source_digest(project_dir)?;
-    let input_hash = hex::encode(Sha256::digest(
-        format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}\x00{src_digest}")
-            .as_bytes(),
-    ));
+    let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
     let cache_path = project_dir.join(".blanket/go-plan.json");
-    if let Ok(cached) = fs::read_to_string(&cache_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
-            if v["input_hash"] == input_hash.as_str() {
-                if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
-                    // The cache file is attacker-editable project state.
-                    validate_plan(&plan)?;
-                    return Ok(plan);
-                }
-            }
-        }
+    if let Some(plan) = cached_plan(&cache_path, &input_hash)? {
+        return Ok(plan);
     }
 
-    // Consistency gate: tidy -diff is non-mutating (prints a diff, exit
-    // nonzero when go.mod/go.sum need changes). Needs the source tree, so
-    // it runs in the real project — but never writes. Its module cache is a
-    // persistent planner scratch (resolver-trust only; never feeds objects).
     let scratch = store.stage()?;
     let gate_cache = store.root.join("planner-modcache");
     fs::create_dir_all(&gate_cache)?;
-    let out = run_go(
+    let (gomod, gosum) = tidy_gate(
         store,
         go_obj,
         project_dir,
         &gate_cache,
-        false,
-        &["mod", "tidy", "-diff"],
+        &scratch,
+        gomod,
+        gosum,
     )?;
-    let (gomod, gosum) = if out.status.success() {
-        (gomod, gosum)
-    } else {
-        // Out-of-sync manifest: run the ecosystem's resolver, the same
-        // delegated mutation as uv pip compile / cargo generate-lockfile.
-        eprintln!("blanket: go.mod/go.sum need updating; resolving with the store go mod tidy...");
-        let out = run_go(
-            store,
-            go_obj,
-            project_dir,
-            &gate_cache,
-            false,
-            &["mod", "tidy"],
-        )?;
-        if !out.status.success() {
-            let _ = crate::kernel::store::remove_tree(&scratch);
-            return Err(err(format!(
-                "store go mod tidy failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        (
-            fs::read_to_string(project_dir.join("go.mod"))?,
-            fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default(),
-        )
-    };
     reject_local_replaces(&gomod)?;
     // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
     let go_version = resolve_toolchain(platform, &gomod)?;
     let module = module_path(&gomod)?;
-    let input_hash = hex::encode(Sha256::digest(
-        format!(
-            "{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}\x00{}",
-            source_digest(project_dir)?
-        )
-        .as_bytes(),
-    ));
+    let input_hash = plan_cache_key(go_version, &gomod, &gosum, &source_digest(project_dir)?);
 
-    // Disposable copy for download (it may rewrite go.mod/go.sum). The
-    // module cache is the persistent planner scratch — warm downloads;
-    // trust is irrelevant because every artifact is re-verified below.
     let work = scratch.join("plan");
-    fs::create_dir_all(&work)?;
-    fs::write(work.join("go.mod"), &gomod)?;
-    if !gosum.is_empty() {
-        fs::write(work.join("go.sum"), &gosum)?;
-    }
-    eprintln!("blanket: computing Go module closure with the store toolchain...");
-    let out = run_go(
-        store,
-        go_obj,
-        &work,
-        &gate_cache,
-        false,
-        &["mod", "download", "-json", "all"],
-    )?;
-    // Ledger anchor: h1 values must ALSO appear in the project's go.sum —
-    // never trust sums that exist only in the delegated tool's output.
-    let ledger: std::collections::BTreeSet<String> =
-        gosum.lines().map(|l| l.trim().to_string()).collect();
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    // Parse the JSON stream (concatenated objects) BEFORE checking status:
-    // per-module errors ride in the stream.
-    let mut modules = Vec::new();
-    let mut de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
-    let result: io::Result<()> = (|| {
-        while let Some(entry) = de.next() {
-            let entry = entry.map_err(|e| err(format!("go mod download JSON: {e}")))?;
-            if let Some(msg) = &entry.error {
-                return Err(err(format!(
-                    "{}@{}: {msg} (a selected module failed to download; the \
-                     closure would be incomplete)",
-                    entry.path, entry.version
-                )));
-            }
-            // A version-to-version replace surfaces the replacement's
-            // artifacts on the outer entry; a local-path replace has no
-            // Version and no integrity — fail closed.
-            if let Some(rep) = &entry.replace {
-                if rep.version.is_empty() || rep.path.starts_with('.') || rep.path.starts_with('/')
-                {
-                    return Err(err(format!(
-                        "{}: local-path replace directives are not supported \
-                         yet (no go.sum integrity); vendor a released version",
-                        entry.path
-                    )));
-                }
-            }
-            let (Some(zip), Some(gomod_file), Some(sum), Some(gomod_sum)) =
-                (&entry.zip, &entry.go_mod, &entry.sum, &entry.go_mod_sum)
-            else {
-                continue; // main module / no artifacts
-            };
-            // Ledger anchor: the tidied go.sum is the authority. Modules
-            // whose zip sums it omits are build-GRAPH-only (tidy records
-            // zip sums for exactly the modules whose packages a build can
-            // import) — exclude them from the closure rather than fail:
-            // an offline build never loads their sources, and if one were
-            // ever needed the readonly+GOPROXY=off build fails loudly.
-            if !ledger.contains(&format!("{} {} {}", entry.path, entry.version, sum)) {
-                continue;
-            }
-            if !ledger.contains(&format!(
-                "{} {}/go.mod {}",
-                entry.path, entry.version, gomod_sum
-            )) {
-                return Err(err(format!(
-                    "{}@{}: go.mod sum is not in the project's go.sum \
-                     ledger; refusing (run `blanket run go mod tidy`)",
-                    entry.path, entry.version
-                )));
-            }
-            // Blanket-owned verification: recompute both dirhashes.
-            let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
-            if got_h1 != *sum {
-                return Err(err(format!(
-                    "{}@{}: zip dirhash mismatch\n  expected {sum}\n  got      {got_h1}",
-                    entry.path, entry.version
-                )));
-            }
-            let got_mod_h1 = dirhash::hash_gomod(Path::new(gomod_file))?;
-            if got_mod_h1 != *gomod_sum {
-                return Err(err(format!(
-                    "{}@{}: go.mod dirhash mismatch\n  expected {gomod_sum}\n  got      {got_mod_h1}",
-                    entry.path, entry.version
-                )));
-            }
-            let (zip_sha256, _) = cache_insert(store, Path::new(zip))?;
-            let (modfile_sha256, _) = cache_insert(store, Path::new(gomod_file))?;
-            let info = entry.info.as_deref().ok_or_else(|| {
-                err(format!(
-                    "{}@{}: download entry has no Info file",
-                    entry.path, entry.version
-                ))
-            })?;
-            // .info is proxy metadata: verify it says what the plan says
-            // before its bytes become an identity input.
-            let info_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(info)?)
-                .map_err(|e| err(format!("{}@{}: bad .info: {e}", entry.path, entry.version)))?;
-            if info_json["Version"].as_str() != Some(entry.version.as_str()) {
-                return Err(err(format!(
-                    "{}@{}: .info Version {:?} does not match",
-                    entry.path, entry.version, info_json["Version"]
-                )));
-            }
-            let (info_sha256, _) = cache_insert(store, Path::new(info))?;
-            modules.push(GoModule {
-                path: entry.path,
-                version: entry.version,
-                h1: sum.clone(),
-                zip_sha256,
-                modfile_h1: gomod_sum.clone(),
-                modfile_sha256,
-                info_sha256,
-            });
-        }
-        if !out.status.success() {
-            return Err(err(format!(
-                "go mod download failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(())
-    })();
+    let out = download_closure(store, go_obj, &work, &gate_cache, &gomod, &gosum)?;
+    let result = closure_from_download(store, &out, &gosum);
     let _ = crate::kernel::store::remove_tree(&scratch);
-    result?;
+    let mut modules = result?;
     modules.sort_by(|a, b| (&a.path, &a.version).cmp(&(&b.path, &b.version)));
 
     let plan = GoPlan {
@@ -1648,5 +1710,139 @@ mod tests {
         let e = stage_modcache_skeleton(&store, &plan, &staged2).unwrap_err();
         assert!(e.to_string().contains(&info_hash), "{e}");
         let _ = std::fs::remove_dir_all(&temp);
+    }
+    /// Characterization (REFACTOR.md Stage 4 step 3): the plan cache is the
+    /// only part of `plan_go` reachable without a real toolchain, and it is
+    /// the part an attacker can edit. These pin the key formula, the
+    /// validation of cached fields, and the fact that a hit never touches
+    /// the store or the go binary.
+    fn plan_fixture(project: &Path) -> (String, String, GoPlan) {
+        let gomod = "module example.com/m\n\ngo 1.27.0\n";
+        let gosum = "example.com/a v1.0.0 h1:AAAA=\n";
+        fs::create_dir_all(project).unwrap();
+        fs::write(project.join("go.mod"), gomod).unwrap();
+        fs::write(project.join("go.sum"), gosum).unwrap();
+        fs::write(project.join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
+        let plan = GoPlan {
+            go_version: "1.27.0".into(),
+            module: "example.com/m".into(),
+            modules: vec![GoModule {
+                path: "example.com/a".into(),
+                version: "v1.0.0".into(),
+                h1: format!("h1:{}=", "A".repeat(43)),
+                zip_sha256: "a".repeat(64),
+                modfile_h1: format!("h1:{}=", "B".repeat(43)),
+                modfile_sha256: "b".repeat(64),
+                info_sha256: "c".repeat(64),
+            }],
+        };
+        (gomod.into(), gosum.into(), plan)
+    }
+
+    fn write_plan_cache(project: &Path, input_hash: &str, plan: &GoPlan) {
+        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::write(
+            project.join(".blanket/go-plan.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "input_hash": input_hash,
+                "plan": plan,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn expected_input_hash(project: &Path, gomod: &str, gosum: &str) -> String {
+        hex::encode(Sha256::digest(
+            format!(
+                "go-planner/2\x00{}\x00{gomod}\x00{gosum}\x00{}",
+                "1.27.0",
+                source_digest(project).unwrap()
+            )
+            .as_bytes(),
+        ))
+    }
+
+    #[test]
+    fn plan_cache_hit_skips_the_store_and_the_toolchain() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        write_plan_cache(
+            &project,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        // A store root that does not exist and a go binary that does not
+        // exist: a cache hit must reach neither.
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let got = plan_go(
+            &store,
+            Platform::host().unwrap(),
+            &project,
+            Path::new("/nonexistent/go"),
+        )
+        .unwrap();
+        assert_eq!(got.go_version, "1.27.0");
+        assert_eq!(got.module, "example.com/m");
+        assert_eq!(got.modules, plan.modules);
+        assert!(!store.root.exists(), "a cache hit touched the store");
+    }
+
+    #[test]
+    fn plan_cache_hit_validates_hostile_fields_before_use() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, mut plan) = plan_fixture(&project);
+        plan.modules[0].zip_sha256 = "../../objects/x".into();
+        write_plan_cache(
+            &project,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let e = plan_go(
+            &store,
+            Platform::host().unwrap(),
+            &project,
+            Path::new("/nonexistent/go"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("invalid sha256 in plan"), "{e}");
+        assert!(!store.root.exists(), "a rejected cache touched the store");
+    }
+
+    #[test]
+    fn plan_cache_key_covers_the_go_sources() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        let input_hash = expected_input_hash(&project, &gomod, &gosum);
+        write_plan_cache(&project, &input_hash, &plan);
+        // Editing a .go source invalidates the key, so the cached plan is
+        // not returned; without a toolchain the re-plan can only fail.
+        fs::write(
+            project.join("main.go"),
+            "package main\n\nfunc main() { _ = 1 }\n",
+        )
+        .unwrap();
+        assert_ne!(expected_input_hash(&project, &gomod, &gosum), input_hash);
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store { root: store_root };
+        assert!(plan_go(
+            &store,
+            Platform::host().unwrap(),
+            &project,
+            Path::new("/nonexistent/go"),
+        )
+        .is_err());
     }
 }
