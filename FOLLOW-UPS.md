@@ -94,6 +94,11 @@ F3 report accounting, F4 acceptance tests).
    lock lives on the open file description, which a forked child shares
    until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
    verbatim); fix is to retry the try-lock briefly or isolate the test.
+   Also seen once, 2026-09-12 Stage 4 gate:
+   `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
+   failed in one full parallel run and passed 3/3 alone and in the full
+   rerun. It holds `SUPERVISION_TEST_LOCK`; the panic was not captured.
+   Treat as the same family until reproduced.
 9. **`tests/python_select.rs::unpinned_patch_request_fails_closed_before_opening_store`
    fails at HEAD, before the refactor.** Verified 2026-09-12 on `a341b32`
    (the last pre-refactor commit): `blanket sync` opens the store in

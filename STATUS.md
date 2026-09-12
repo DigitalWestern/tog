@@ -33,14 +33,15 @@ committed as a clean series on `wp-gc-safety` (see `git log` and
 ## What is next (in order)
 
 A structural refactor is in progress alongside the items below; see
-[REFACTOR.md](REFACTOR.md) for the stages and the change log. Stages 1 to 3
-(files moved into `kernel/`, `tailors/`, `comforter/`; the entry point split
-into `commands/` and `cli/`; the `Tailor` trait and registry, so a new
+[REFACTOR.md](REFACTOR.md) for the stages and the change log. All four
+stages landed 2026-09-12: folders per layer, `commands/` split, the `Tailor`
+trait and registry, zero two-way module cycles, no file over 3,000 lines, no
+function over 200, and `tests/architecture.rs` keeps it that way. A new
 ecosystem is a folder plus one line, see
-[docs/human/ADDING-A-TAILOR.md](docs/human/ADDING-A-TAILOR.md)) landed
-2026-09-12. Old `crate::<module>` paths
-are gone, so an in-flight branch that touched a moved file rebases by
-re-pointing its imports at the folder paths in ARCHITECTURE.md's layout.
+[docs/human/ADDING-A-TAILOR.md](docs/human/ADDING-A-TAILOR.md). Old
+`crate::<module>` paths are gone, so an in-flight branch that touched a
+moved file rebases by re-pointing its imports at the folder paths in
+ARCHITECTURE.md's layout.
 
 1. **Land the Mac-gate fixes** — commit the 2026-09-10 working-tree fixes
    (Darwin compile errors, symlinked-`TMPDIR` fixtures, APFS test skips,

@@ -618,3 +618,101 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   `python_select::unpinned_patch_request_fails_closed_before_opening_store`,
   the same pre-existing failure as at the Stage 1 gate (FOLLOW-UPS.md
   item 9); it fails identically on the pre-refactor commit a341b32.
+
+### 2026-09-12 — Stage 4 landed: zero cycles, no file over budget, architecture test
+
+- Cycles (step 1), all pure moves except the last:
+  - `Digest` and `Algo` moved to `kernel/digest.rs` (`fetch` re-exports
+    `Digest`); `GitSource` moved to `kernel/types.rs` (serde shape
+    unchanged, `gitsrc` re-exports it). `fetch↔store` and `gitsrc↔types`
+    gone.
+  - `policy↔store`: after the store split the only edge into `policy` is
+    `store::objects → policy`, a chain.
+  - `comforter↔python::build`: `realize_env`, `canonical_packages`,
+    `environment_identity`, `planned_env_object_id`,
+    `realize_env_at_depth`, `project_env*` and their three identity tests
+    moved to `tailors/python/env.rs`. The comforter names no tailor now;
+    callers (python tailor, sdist build, `x`, two integration tests) use
+    `tailors::python::env` directly.
+  - `objmeta↔tailors`: the kernel no longer calls
+    `tailors::kind_adapters()`. `tailors::install_kinds()` fills a
+    `OnceLock` table in `objmeta` once, from `commands::dispatch`; a kind
+    that was never installed has no adapter and fails closed like an
+    unknown kind. This is the "table installed at startup" the Stage 3
+    entry deferred to a crate split, done without one. Unit tests, which
+    never pass through `dispatch`, install the shipped table on first use
+    from inside `objmeta`'s tests module. The metadata goldens and the
+    heavy gc gates are unchanged and green.
+- Splits (step 2), pure moves with `use super::*` in the children,
+  `pub(super)` on items and struct fields that crossed a file boundary,
+  and glob re-exports in `mod.rs` so every external path still resolves;
+  tests stayed in each `mod.rs`:
+  - `kernel/store/` = mod, objects, roots, projection, env, **fsops**
+    (deviation: the descriptor-level helpers serve roots, objects and gc
+    and belong to none of them).
+  - `kernel/gc/` = mod, read, plan, sweep, **migrate** (deviation: D.3
+    maintenance is its own phase). The `docs/agent/review-fixtures/gc-a/`
+    mutation script targets the pre-Stage-1 paths (`src/gc.rs`,
+    `src/store.rs`, `src/main.rs`) and is archived evidence pinned to its
+    review commit; it was not rewritten (docs/agent archives are not
+    edited) and does not run against HEAD.
+  - `tailors/python/manifest/` = mod, discovery, poetry, uv, requirements,
+    setup, **markers** (deviation: the plan's `pdm.rs` has no code; the
+    PEP 508 marker evaluator does).
+  - `tailors/node/lock_import/` = mod, pnpm, yarn1, **yaml** (deviation:
+    the minimal YAML reader).
+  - `tailors/node/` also split into mod, plan, realize, project: not in
+    the plan's list, but `node/mod.rs` was 3,684 lines and the definition
+    of done says no file over 3,000.
+- Functions (step 3): the twelve over 200 lines were extracted into named
+  helpers, each as its own commit, by three subagents in isolated
+  worktrees (node, python, and go/gc/inspect), with a characterization
+  test written first where none existed (21 new tests). Guard lifetimes
+  were preserved (project locks and cache leases are still acquired and
+  dropped in the outer function; gc `read` still opens every directory
+  descriptor in the same order and takes `now` at the same point), and
+  `doctor`'s output is pinned byte-for-byte by
+  `doctor_check_order_and_wording_are_fixed`. Every one of the twelve is
+  now under 150 lines. Eleven other functions sit between 150 and 190
+  lines; the 150 budget is advisory and `tests/architecture.rs` reports
+  them.
+- Architecture test (step 4): `tests/architecture.rs` fails the build on
+  any wrong-way `crate::` path in non-test code (kernel→tailors, tailor→
+  other tailor, anything→commands/cli, cli→anything). Four allow-listed
+  seams, each with its reason in the file: python build → cargo toolchain,
+  node realize/project → python artifacts/nativelibs (FOLLOW-UPS.md item
+  11), cli → `commands::deps::validate_spec`. The size budgets are
+  reported, not enforced.
+- CLAUDE.md (step 5) carries the three layering lines; ARCHITECTURE.md,
+  CLI.md and ADDING-A-TAILOR.md name the new paths.
+- Workspace crates (step 6): measured on this branch, 12 cores, warm
+  target. A one-function change to `tailors/ruby/mod.rs` rebuilds lib+bin
+  in 1.2 s and the test binaries in 4.2 s; no second binary exists. Stay
+  one crate; revisit at the next STATUS review.
+- Re-measured (`tools/modgraph.py`, this commit):
+
+  | Metric | Baseline (fb8b1d6) | Now |
+  |---|---|---|
+  | Source files under `src/` | 40, one flat folder | 104 in `cli/ commands/ kernel/ tailors/ comforter/` |
+  | Lines of Rust | 62,592 total; ~44,000 non-test | 67,913 total; 47,013 non-test |
+  | Files over 3,000 lines | 4 | 0 (largest: `commands/x.rs`, 2,923 with tests) |
+  | Non-test functions over 200 lines | 16 | 0 (11 between 150 and 190) |
+  | Longest non-test function | 492 | 190 (`commands::x::clean`) |
+  | Modules that depend on `store` | 28 of 40 | 47 of 104 (finer files, same hub) |
+  | Two-way module dependencies | 7 | 0 |
+  | Shared traits across tailors | 0 | 1 (`Tailor`, seven implementations) |
+  | `main.rs` lines | 2,106 | 68 |
+
+  The line growth is the characterization tests, the trait, and the
+  per-file headers and imports; non-test code grew by about 3,000 lines
+  over four stages.
+- Gates: `cargo fmt --check`, `cargo build` (the pre-existing
+  `RECORD_LIMIT` dead-code warning only), `cargo test --no-fail-fast`:
+  638 passed, 0 failed, and the set is the Stage 3 set plus the 2
+  architecture tests and the 21 characterization tests. One run had
+  `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
+  fail once; it passed three times in isolation and in the full rerun
+  (FOLLOW-UPS.md item 8). Heavy gate on the structural commit 60bfb30
+  (before the function extractions): 47 passed, 1 failed, the failure
+  being the pre-existing `python_select` case (item 9). The final heavy
+  gate on the merged head is recorded in the next entry.
