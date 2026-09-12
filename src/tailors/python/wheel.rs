@@ -26,6 +26,105 @@ pub fn install_wheel(
     let file = fs::File::open(wheel_path)?;
     let mut archive = ZipArchive::new(file).map_err(zip_error)?;
 
+    let distribution_id = scan_dist_info(&mut archive, wheel_path)?;
+    let data_prefix = format!(
+        "{}.data/",
+        distribution_id
+            .strip_suffix(".dist-info")
+            .unwrap_or(&distribution_id)
+    );
+    let distribution_dir = distribution_id
+        .strip_suffix(".dist-info")
+        .and_then(|name| name.rsplit_once('-').map(|(name, _)| name))
+        .unwrap_or(&distribution_id)
+        .to_string();
+    let distribution_name = distribution_dir.replace('_', "-");
+    let entry_points = read_entry_points(&mut archive, &distribution_id)?;
+
+    let env_root = bin_dir.parent().ok_or_else(|| {
+        invalid_data(format!(
+            "bin directory has no environment root: {}",
+            bin_dir.display()
+        ))
+    })?;
+    validate_python_minor(python_minor)?;
+    let headers_dir = env_root
+        .join("include/site")
+        .join(format!("python{python_minor}"))
+        .join(&distribution_dir);
+    let mut directory_modes = Vec::new();
+
+    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
+    let mut total_written: u64 = 0;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(zip_error)?;
+        let name = entry.name().to_string();
+        let Some((base, relative, executable)) = route_entry(
+            &name,
+            &data_prefix,
+            site_packages,
+            &headers_dir,
+            bin_dir,
+            env_root,
+        )?
+        else {
+            continue;
+        };
+
+        let destination = safe_destination(base, relative, env_root, &name)?;
+        if entry.is_dir() {
+            fs::create_dir_all(&destination)?;
+            if let Some(mode) = entry.unix_mode() {
+                directory_modes.push((destination, mode & 0o777));
+            }
+            continue;
+        }
+
+        if destination.symlink_metadata().is_ok() {
+            resolve_file_collision(
+                &destination,
+                env_root,
+                installed,
+                &distribution_id,
+                &distribution_name,
+            )?;
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        total_written += entry.size();
+        if total_written > MAX_UNPACKED_BYTES {
+            return Err(invalid_data(format!(
+                "wheel expands past {MAX_UNPACKED_BYTES} bytes; refusing (zip bomb guard)"
+            )));
+        }
+        write_wheel_entry(&mut entry, &destination, executable, python_exe)?;
+        installed.insert(destination, distribution_id.clone());
+    }
+
+    for (directory, mode) in directory_modes {
+        set_mode(&directory, mode)?;
+    }
+
+    if let Some(entry_points) = entry_points {
+        install_launchers(
+            &entry_points,
+            bin_dir,
+            env_root,
+            python_exe,
+            &distribution_id,
+            &distribution_name,
+            installed,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// First pass over the archive: reject unsafe or symlink entries and return
+/// the single `.dist-info` directory name the wheel declares.
+fn scan_dist_info(archive: &mut ZipArchive<fs::File>, wheel_path: &Path) -> io::Result<String> {
     let mut dist_info: Option<String> = None;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(zip_error)?;
@@ -49,205 +148,201 @@ pub fn install_wheel(
             }
         }
     }
-
-    if dist_info.is_none() {
-        return Err(invalid_data(format!(
+    dist_info.ok_or_else(|| {
+        invalid_data(format!(
             "{} contains no .dist-info directory; not a wheel",
             wheel_path.display()
-        )));
-    }
-    let data_prefix = dist_info
-        .as_deref()
-        .map(|name| format!("{}.data/", name.strip_suffix(".dist-info").unwrap_or(name)));
-    let distribution_id = dist_info.clone().unwrap();
-    let distribution_dir = distribution_id
-        .strip_suffix(".dist-info")
-        .and_then(|name| name.rsplit_once('-').map(|(name, _)| name))
-        .unwrap_or(&distribution_id)
-        .to_string();
-    let distribution_name = distribution_dir.replace('_', "-");
-    let entry_points = dist_info.as_deref().and_then(|name| {
-        archive
-            .by_name(&format!("{name}/entry_points.txt"))
-            .ok()
-            .map(|mut entry| {
-                let mut contents = String::new();
-                entry.read_to_string(&mut contents).map(|_| contents)
-            })
-    });
-    let entry_points = match entry_points {
-        Some(Ok(contents)) => Some(contents),
-        Some(Err(error)) => return Err(error),
-        None => None,
-    };
-
-    let env_root = bin_dir.parent().ok_or_else(|| {
-        invalid_data(format!(
-            "bin directory has no environment root: {}",
-            bin_dir.display()
         ))
-    })?;
-    validate_python_minor(python_minor)?;
-    let headers_dir = env_root
-        .join("include/site")
-        .join(format!("python{python_minor}"))
-        .join(&distribution_dir);
-    let mut directory_modes = Vec::new();
+    })
+}
 
-    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
-    let mut total_written: u64 = 0;
+/// Read `{dist_info}/entry_points.txt`, if the wheel ships one.
+fn read_entry_points(
+    archive: &mut ZipArchive<fs::File>,
+    dist_info: &str,
+) -> io::Result<Option<String>> {
+    let Ok(mut entry) = archive.by_name(&format!("{dist_info}/entry_points.txt")) else {
+        return Ok(None);
+    };
+    let mut contents = String::new();
+    entry.read_to_string(&mut contents)?;
+    Ok(Some(contents))
+}
 
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(zip_error)?;
-        let name = entry.name().to_string();
-        let (base, relative, executable) = if let Some(prefix) = data_prefix.as_deref() {
-            if let Some(rest) = name.strip_prefix(prefix) {
-                let Some((kind, relative)) = rest.split_once('/') else {
-                    continue;
-                };
-                match kind {
-                    "purelib" | "platlib" => (site_packages, relative, false),
-                    "headers" => (headers_dir.as_path(), relative, false),
-                    "scripts" => (bin_dir, relative, true),
-                    "data" => (env_root, relative, false),
-                    other => {
-                        return Err(invalid_data(format!(
-                            "unsupported wheel .data scheme '{other}' in {name}"
-                        )))
-                    }
-                }
-            } else {
-                (site_packages, name.as_str(), false)
-            }
-        } else {
-            (site_packages, name.as_str(), false)
-        };
-
-        let destination = safe_destination(base, relative, env_root, &name)?;
-        if entry.is_dir() {
-            fs::create_dir_all(&destination)?;
-            if let Some(mode) = entry.unix_mode() {
-                directory_modes.push((destination, mode & 0o777));
-            }
-            continue;
-        }
-
-        if destination.symlink_metadata().is_ok() {
-            if let Some(previous) = installed.get(&destination) {
-                if previous == &distribution_id {
-                    return Err(invalid_data(format!(
-                        "file collision: {} already exists in wheel {}",
-                        destination.display(),
-                        distribution_id
-                    )));
-                }
-                let subject = destination
-                    .strip_prefix(env_root)
-                    .unwrap_or(&destination)
-                    .display()
-                    .to_string();
-                crate::kernel::policy::record(
-                    crate::kernel::policy::FILE_COLLISION,
-                    &subject,
-                    &format!("{previous} and {distribution_name}"),
-                )?;
-                fs::remove_file(&destination)?;
-            } else {
-                return Err(invalid_data(format!(
-                    "file collision: {} already exists (from an earlier wheel or entry)",
-                    destination.display()
-                )));
-            }
-        }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        total_written += entry.size();
-        if total_written > MAX_UNPACKED_BYTES {
+/// Route one archive entry to its install base and relative path. Entries
+/// under `{name}.data/` follow the sysconfig scheme they name; everything
+/// else lands in site-packages. `Ok(None)` means "skip this entry" — a bare
+/// `{name}.data/{scheme}` record with nothing after it.
+fn route_entry<'a>(
+    name: &'a str,
+    data_prefix: &str,
+    site_packages: &'a Path,
+    headers_dir: &'a Path,
+    bin_dir: &'a Path,
+    env_root: &'a Path,
+) -> io::Result<Option<(&'a Path, &'a str, bool)>> {
+    let Some(rest) = name.strip_prefix(data_prefix) else {
+        return Ok(Some((site_packages, name, false)));
+    };
+    let Some((kind, relative)) = rest.split_once('/') else {
+        return Ok(None);
+    };
+    let routed = match kind {
+        "purelib" | "platlib" => (site_packages, relative, false),
+        "headers" => (headers_dir, relative, false),
+        "scripts" => (bin_dir, relative, true),
+        "data" => (env_root, relative, false),
+        other => {
             return Err(invalid_data(format!(
-                "wheel expands past {MAX_UNPACKED_BYTES} bytes; refusing (zip bomb guard)"
-            )));
+                "unsupported wheel .data scheme '{other}' in {name}"
+            )))
         }
-        if executable {
-            // Scripts are small; buffer them for shebang rewriting.
-            let mut contents = Vec::new();
-            entry.read_to_end(&mut contents)?;
-            if contents.starts_with(b"#!python") {
-                contents = rewrite_shebang(&contents, python_exe);
-            }
-            fs::write(&destination, contents)?;
-        } else {
-            let mut out = fs::File::create(&destination)?;
-            io::copy(&mut entry, &mut out)?;
-        }
-        let mode = if executable {
-            Some(0o755)
-        } else {
-            entry.unix_mode().map(|mode| (mode & 0o777).max(0o644))
-        };
-        if let Some(mode) = mode {
-            set_mode(&destination, mode)?;
-        }
-        installed.insert(destination, distribution_id.clone());
-    }
+    };
+    Ok(Some(routed))
+}
 
-    for (directory, mode) in directory_modes {
-        set_mode(&directory, mode)?;
+/// A later wheel may take over a path an earlier one installed; anything
+/// else — the same wheel twice, or a file nobody claims — is an error.
+fn resolve_file_collision(
+    destination: &Path,
+    env_root: &Path,
+    installed: &BTreeMap<PathBuf, String>,
+    distribution_id: &str,
+    distribution_name: &str,
+) -> io::Result<()> {
+    match installed.get(destination) {
+        Some(previous) if previous == distribution_id => Err(invalid_data(format!(
+            "file collision: {} already exists in wheel {}",
+            destination.display(),
+            distribution_id
+        ))),
+        Some(previous) => supersede(destination, env_root, previous, distribution_name),
+        None => Err(invalid_data(format!(
+            "file collision: {} already exists (from an earlier wheel or entry)",
+            destination.display()
+        ))),
     }
+}
 
-    if let Some(entry_points) = entry_points {
-        for (name, module, attr) in parse_entry_points(&entry_points)? {
-            let attr0 = attr.split('.').next().unwrap();
-            let launcher = format!(
-                concat!(
-                    "#!{}\n",
-                    "# -*- coding: utf-8 -*-\n",
-                    "import re, sys\n",
-                    "from {module} import {attr0}\n",
-                    "if __name__ == \"__main__\":\n",
-                    "    sys.argv[0] = re.sub(r\"(-script\\.pyw?|\\.exe)?$\", \"\", sys.argv[0])\n",
-                    "    sys.exit({attr}())\n",
-                ),
-                python_exe.display(),
-                module = module,
-                attr0 = attr0,
-                attr = attr
-            );
-            let destination = bin_dir.join(name);
-            if destination.symlink_metadata().is_ok() {
-                if let Some(previous) = installed.get(&destination) {
-                    if previous == &distribution_id {
-                        return Err(invalid_data(format!(
-                            "console-script collision: {}",
-                            destination.display()
-                        )));
-                    }
-                    let subject = destination
-                        .strip_prefix(env_root)
-                        .unwrap_or(&destination)
-                        .display()
-                        .to_string();
-                    crate::kernel::policy::record(
-                        crate::kernel::policy::FILE_COLLISION,
-                        &subject,
-                        &format!("{previous} and {distribution_name}"),
-                    )?;
-                    fs::remove_file(&destination)?;
-                } else {
-                    return Err(invalid_data(format!(
-                        "console-script collision: {}",
-                        destination.display()
-                    )));
-                }
-            }
-            fs::create_dir_all(bin_dir)?;
-            fs::write(&destination, launcher)?;
-            set_mode(&destination, 0o755)?;
-            installed.insert(destination, distribution_id.clone());
+/// The console-script flavour of [`resolve_file_collision`]; both failure
+/// cases report the same message.
+fn resolve_script_collision(
+    destination: &Path,
+    env_root: &Path,
+    installed: &BTreeMap<PathBuf, String>,
+    distribution_id: &str,
+    distribution_name: &str,
+) -> io::Result<()> {
+    match installed.get(destination) {
+        Some(previous) if previous != distribution_id => {
+            supersede(destination, env_root, previous, distribution_name)
         }
+        _ => Err(invalid_data(format!(
+            "console-script collision: {}",
+            destination.display()
+        ))),
     }
+}
 
+/// Record the overwrite as a policy exception and drop the earlier file.
+fn supersede(
+    destination: &Path,
+    env_root: &Path,
+    previous: &str,
+    distribution_name: &str,
+) -> io::Result<()> {
+    let subject = destination
+        .strip_prefix(env_root)
+        .unwrap_or(destination)
+        .display()
+        .to_string();
+    crate::kernel::policy::record(
+        crate::kernel::policy::FILE_COLLISION,
+        &subject,
+        &format!("{previous} and {distribution_name}"),
+    )?;
+    fs::remove_file(destination)
+}
+
+/// Unpack one file entry and set its mode. Scripts are buffered so a
+/// `#!python` shebang can be pointed at the environment's interpreter.
+fn write_wheel_entry(
+    entry: &mut zip::read::ZipFile<'_>,
+    destination: &Path,
+    executable: bool,
+    python_exe: &Path,
+) -> io::Result<()> {
+    if executable {
+        // Scripts are small; buffer them for shebang rewriting.
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents)?;
+        if contents.starts_with(b"#!python") {
+            contents = rewrite_shebang(&contents, python_exe);
+        }
+        fs::write(destination, contents)?;
+    } else {
+        let mut out = fs::File::create(destination)?;
+        io::copy(entry, &mut out)?;
+    }
+    let mode = if executable {
+        Some(0o755)
+    } else {
+        entry.unix_mode().map(|mode| (mode & 0o777).max(0o644))
+    };
+    if let Some(mode) = mode {
+        set_mode(destination, mode)?;
+    }
     Ok(())
+}
+
+/// Generate `console_scripts`/`gui_scripts` launchers into `bin_dir`.
+fn install_launchers(
+    entry_points: &str,
+    bin_dir: &Path,
+    env_root: &Path,
+    python_exe: &Path,
+    distribution_id: &str,
+    distribution_name: &str,
+    installed: &mut BTreeMap<PathBuf, String>,
+) -> io::Result<()> {
+    for (name, module, attr) in parse_entry_points(entry_points)? {
+        let launcher = launcher_source(python_exe, &module, &attr);
+        let destination = bin_dir.join(name);
+        if destination.symlink_metadata().is_ok() {
+            resolve_script_collision(
+                &destination,
+                env_root,
+                installed,
+                distribution_id,
+                distribution_name,
+            )?;
+        }
+        fs::create_dir_all(bin_dir)?;
+        fs::write(&destination, launcher)?;
+        set_mode(&destination, 0o755)?;
+        installed.insert(destination, distribution_id.to_string());
+    }
+    Ok(())
+}
+
+/// The launcher script pip would have written for one entry point.
+fn launcher_source(python_exe: &Path, module: &str, attr: &str) -> String {
+    let attr0 = attr.split('.').next().unwrap();
+    format!(
+        concat!(
+            "#!{}\n",
+            "# -*- coding: utf-8 -*-\n",
+            "import re, sys\n",
+            "from {module} import {attr0}\n",
+            "if __name__ == \"__main__\":\n",
+            "    sys.argv[0] = re.sub(r\"(-script\\.pyw?|\\.exe)?$\", \"\", sys.argv[0])\n",
+            "    sys.exit({attr}())\n",
+        ),
+        python_exe.display(),
+        module = module,
+        attr0 = attr0,
+        attr = attr
+    )
 }
 
 fn zip_error(error: zip::result::ZipError) -> io::Error {
@@ -740,5 +835,184 @@ mod tests {
             assert!(error.to_string().contains("unsafe zip entry"), "{error}");
             assert!(!temp.path().join("outside.txt").exists());
         }
+    }
+
+    #[test]
+    fn rejects_wheels_without_exactly_one_dist_info() {
+        let temp = TempDir::new();
+        let site = temp.path().join("lib/python3.12/site-packages");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+
+        let missing = temp.path().join("missing.whl");
+        write_wheel(&missing, &[("demo/__init__.py", b"value = 1\n")]);
+        let error = install_wheel(
+            &missing,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("contains no .dist-info directory; not a wheel"),
+            "{error}"
+        );
+
+        let doubled = temp.path().join("doubled.whl");
+        write_wheel(
+            &doubled,
+            &[
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("other-2.0.dist-info/RECORD", b""),
+            ],
+        );
+        let error = install_wheel(
+            &doubled,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "wheel has multiple .dist-info dirs: demo-1.0.dist-info, other-2.0.dist-info"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_data_scheme() {
+        let temp = TempDir::new();
+        let site = temp.path().join("lib/python3.12/site-packages");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let wheel = temp.path().join("demo-1.0.whl");
+        write_wheel(
+            &wheel,
+            &[
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/scriptz/tool", b"nope"),
+            ],
+        );
+
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "unsupported wheel .data scheme 'scriptz' in demo-1.0.data/scriptz/tool"
+        );
+    }
+
+    #[test]
+    fn reports_unclaimed_and_same_wheel_collisions() {
+        let temp = TempDir::new();
+        let wheel = temp.path().join("demo-1.0.whl");
+        write_wheel(
+            &wheel,
+            &[
+                ("demo-1.0.dist-info/RECORD", b""),
+                (
+                    "demo-1.0.dist-info/entry_points.txt",
+                    b"[console_scripts]\ntool = demo:main\n",
+                ),
+                ("demo/__init__.py", b"value = 1\n"),
+            ],
+        );
+
+        // Each phase gets a pristine environment: install_wheel writes
+        // entries in archive order and stops at the first collision.
+        let fresh = |tag: &str| {
+            let site = temp.path().join(tag).join("lib/python3.12/site-packages");
+            let bin = temp.path().join(tag).join("bin");
+            fs::create_dir_all(&site).unwrap();
+            fs::create_dir_all(&bin).unwrap();
+            (site, bin)
+        };
+
+        // A file nobody in `installed` claims is never superseded.
+        let (site, bin) = fresh("unclaimed");
+        fs::create_dir_all(site.join("demo")).unwrap();
+        fs::write(site.join("demo/__init__.py"), b"squatter\n").unwrap();
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("already exists (from an earlier wheel or entry)"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(site.join("demo/__init__.py")).unwrap(),
+            "squatter\n"
+        );
+
+        // The same wheel installing a path twice is an error, not an overwrite.
+        let (site, bin) = fresh("same-wheel");
+        fs::create_dir_all(site.join("demo")).unwrap();
+        fs::write(site.join("demo/__init__.py"), b"squatter\n").unwrap();
+        let mut installed = BTreeMap::new();
+        installed.insert(
+            site.join("demo/__init__.py"),
+            "demo-1.0.dist-info".to_string(),
+        );
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut installed,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("already exists in wheel demo-1.0.dist-info"),
+            "{error}"
+        );
+
+        // Console-script launchers use their own collision message.
+        let (site, bin) = fresh("script");
+        fs::write(bin.join("tool"), b"squatter\n").unwrap();
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!("console-script collision: {}", bin.join("tool").display())
+        );
     }
 }
