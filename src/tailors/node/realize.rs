@@ -334,52 +334,51 @@ pub(super) fn node_env_identity(
     })
 }
 
-pub(super) fn realize_node_env_with_node_object(
+/// The native library set this plan needs, as an identity input.
+///
+/// Linux needs archive inspection to decide whether node-gyp will mount the
+/// native library set. The inspection result is persisted by archive digest,
+/// so a warm environment can be identified before its tarballs are fetched.
+/// Darwin deliberately does not mount this Linux-only set.
+///
+/// Any tarballs fetched for the inspection are appended to `classification`;
+/// the caller keeps those leases until it no longer needs the cached bytes.
+fn resolve_native_libs_id<'a>(
     store: &Store,
     platform: Platform,
-    plan: &NpmPlan,
-    artifacts: &[DeclaredArtifact],
-    node_obj: &Path,
-) -> io::Result<PathBuf> {
-    // Linux needs archive inspection to decide whether node-gyp will mount the
-    // native library set. The inspection result is persisted by archive
-    // digest, so a warm environment can be identified before its tarballs are
-    // fetched. Darwin deliberately does not mount this Linux-only set.
-    let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
-        Vec::new();
-    let native_libs_id = if platform.is_macos() {
-        None
-    } else {
-        let has_native = match persisted_archive_classification(store, &plan.packages)? {
-            Some(has_native) => has_native,
-            None => {
-                classification_tarballs = fetch_npm_tarballs(store, &plan.packages)?;
-                classify_downloaded_archives(store, &classification_tarballs)?
-            }
-        };
-        native_libs_identity_id(store, platform, has_native)?
-    };
-    let identity = node_env_identity(
-        store,
-        platform,
-        node_obj,
-        plan,
-        artifacts,
-        native_libs_id.as_deref(),
-    )?;
-    let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
-        return Ok(store.object_path(&id));
+    plan: &'a NpmPlan,
+    classification: &mut Vec<(&'a NpmPackage, crate::kernel::fetch::CacheLease)>,
+) -> io::Result<Option<String>> {
+    if platform.is_macos() {
+        return Ok(None);
     }
+    let has_native = match persisted_archive_classification(store, &plan.packages)? {
+        Some(has_native) => has_native,
+        None => {
+            *classification = fetch_npm_tarballs(store, &plan.packages)?;
+            classify_downloaded_archives(store, classification)?
+        }
+    };
+    native_libs_identity_id(store, platform, has_native)
+}
 
-    let workspaces = workspace_set(plan);
-    // A warm sync returned at the cache lookup above, so reaching here means a
-    // cold realization. Take a lease on every tarball so gc cannot collect the
-    // cached bytes mid-extraction; peer snapshots are separate graph nodes that
-    // normally share one registry tarball, so deduplicate the byte fetch while
-    // keeping extraction and placement per physical lockfile path.
-    drop(classification_tarballs);
+/// The byte sources for a cold realization: one held cache lease per distinct
+/// registry tarball, plus the realized object for every git dependency.
+///
+/// Peer snapshots are separate graph nodes that normally share one registry
+/// tarball, so the byte fetch is deduplicated while extraction and placement
+/// stay per physical lockfile path. The leases must outlive extraction so gc
+/// cannot collect the cached bytes mid-flight, so they are returned rather
+/// than dropped here.
+#[allow(clippy::type_complexity)]
+fn fetch_plan_sources(
+    store: &Store,
+    plan: &NpmPlan,
+) -> io::Result<(
+    Vec<crate::kernel::fetch::CacheLease>,
+    Vec<(NpmPackage, PathBuf)>,
+    Vec<(NpmPackage, PathBuf)>,
+)> {
     let mut leases: Vec<crate::kernel::fetch::CacheLease> = Vec::new();
     let mut tarballs: Vec<(NpmPackage, PathBuf)> = Vec::new();
     let mut git_objects: Vec<(NpmPackage, PathBuf)> = Vec::new();
@@ -417,18 +416,14 @@ pub(super) fn realize_node_env_with_node_object(
         };
         tarballs.push((p.clone(), t));
     }
+    Ok((leases, tarballs, git_objects))
+}
 
-    let native_libs = if native_libs_id.is_some() {
-        Some(crate::tailors::python::nativelibs::ensure_native_libs(
-            store, platform,
-        )?)
-    } else {
-        None
-    };
-
+/// The staged env skeleton: the root node_modules plus one per workspace.
+fn stage_env_skeleton(store: &Store, workspaces: &[String]) -> io::Result<PathBuf> {
     let staged = store.stage()?;
     fs::create_dir_all(staged.join("node_modules"))?;
-    for workspace in &workspaces {
+    for workspace in workspaces {
         fs::create_dir_all(
             staged
                 .join("workspaces")
@@ -436,10 +431,75 @@ pub(super) fn realize_node_env_with_node_object(
                 .join("node_modules"),
         )?;
     }
-    // Parents before children (path depth = lexicographic prefix ordering
-    // already holds after sort, since "a/node_modules/b" sorts after "a").
-    for (p, tarball) in &mut tarballs {
-        let dest = env_package_path(&staged, &p.path);
+    Ok(staged)
+}
+
+/// A pnpm patch, re-verified against the hash the lock attested before it is
+/// applied: the file on disk can have changed since lock verification.
+fn apply_verified_patch(
+    store: &Store,
+    package_path: &str,
+    patch: &NpmPatch,
+    dest: &Path,
+) -> io::Result<()> {
+    let patch_path = Path::new(&patch.path);
+    let patch_bytes = fs::read(patch_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("{}: read verified patch {}: {e}", package_path, patch.path),
+        )
+    })?;
+    use sha2::Digest as _;
+    let actual = hex::encode(sha2::Sha256::digest(&patch_bytes));
+    let expected = patch.hash.strip_prefix("sha256-").unwrap_or(&patch.hash);
+    if expected.len() != 64 || !expected.eq_ignore_ascii_case(&actual) {
+        return Err(err(format!(
+            "{}: patch {} changed after lock verification (expected {}, got {})",
+            package_path, patch.path, patch.hash, actual
+        )));
+    }
+    let file = fs::File::open(patch_path)?;
+    let mut command = Command::new("/usr/bin/patch");
+    command
+        .args(["-p1", "--batch", "--forward"])
+        .current_dir(dest)
+        .stdin(file);
+    let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "{}: spawn /usr/bin/patch for {}: {e}",
+                package_path, patch.path
+            ),
+        )
+    })?;
+    if !status.success() {
+        return Err(err(format!(
+            "{}: applying patch {} failed",
+            package_path, patch.path
+        )));
+    }
+    normalize_modes(dest).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("{}: normalize patched modes: {e}", package_path),
+        )
+    })
+}
+
+/// Extract every registry tarball into its lockfile path, applying patches
+/// and discovering bins on the way.
+///
+/// Parents before children (path depth = lexicographic prefix ordering
+/// already holds after sort, since "a/node_modules/b" sorts after "a").
+fn extract_tarball_packages(
+    store: &Store,
+    platform: Platform,
+    staged: &Path,
+    tarballs: &mut [(NpmPackage, PathBuf)],
+) -> io::Result<()> {
+    for (p, tarball) in tarballs {
+        let dest = env_package_path(staged, &p.path);
         fs::create_dir_all(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path)))?;
         let mut tar = Command::new("/usr/bin/tar");
@@ -465,47 +525,7 @@ pub(super) fn realize_node_env_with_node_object(
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {
-            let patch_path = Path::new(&patch.path);
-            let patch_bytes = fs::read(patch_path).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}: read verified patch {}: {e}", p.path, patch.path),
-                )
-            })?;
-            use sha2::Digest as _;
-            let actual = hex::encode(sha2::Sha256::digest(&patch_bytes));
-            let expected = patch.hash.strip_prefix("sha256-").unwrap_or(&patch.hash);
-            if expected.len() != 64 || !expected.eq_ignore_ascii_case(&actual) {
-                return Err(err(format!(
-                    "{}: patch {} changed after lock verification (expected {}, got {})",
-                    p.path, patch.path, patch.hash, actual
-                )));
-            }
-            let file = fs::File::open(patch_path)?;
-            let mut command = Command::new("/usr/bin/patch");
-            command
-                .args(["-p1", "--batch", "--forward"])
-                .current_dir(&dest)
-                .stdin(file);
-            let status =
-                crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!("{}: spawn /usr/bin/patch for {}: {e}", p.path, patch.path),
-                    )
-                })?;
-            if !status.success() {
-                return Err(err(format!(
-                    "{}: applying patch {} failed",
-                    p.path, patch.path
-                )));
-            }
-            normalize_modes(&dest).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}: normalize patched modes: {e}", p.path),
-                )
-            })?;
+            apply_verified_patch(store, &p.path, patch, &dest)?;
         }
         if p.bin.is_empty() {
             if let Ok(manifest) = fs::read_to_string(dest.join("package.json")) {
@@ -525,13 +545,21 @@ pub(super) fn realize_node_env_with_node_object(
             )));
         }
     }
+    Ok(())
+}
 
-    // Git packages: the realized commit IS the package content. npm would run
-    // the package's `prepare` script here (git deps are installed from source);
-    // blanket does not, because that script is unsandboxed build logic with its
-    // own dependency needs — the exception says so rather than pretending.
-    for (p, object) in &mut git_objects {
-        let dest = env_package_path(&staged, &p.path);
+/// Git packages: the realized commit IS the package content. npm would run
+/// the package's `prepare` script here (git deps are installed from source);
+/// blanket does not, because that script is unsandboxed build logic with its
+/// own dependency needs — the exception says so rather than pretending.
+fn place_git_packages(
+    store: &Store,
+    platform: Platform,
+    staged: &Path,
+    git_objects: &mut [(NpmPackage, PathBuf)],
+) -> io::Result<()> {
+    for (p, object) in git_objects {
+        let dest = env_package_path(staged, &p.path);
         let source_root = match &p.git.as_ref().and_then(|g| g.subdirectory.clone()) {
             Some(subdir) => {
                 crate::tailors::node::validate_lock_path(subdir).map_err(|e| {
@@ -590,13 +618,27 @@ pub(super) fn realize_node_env_with_node_object(
             p.bin = discover_package_bins(&manifest, &p.name, &dest)?;
         }
     }
-    // Capture provenance before the package vectors are merged and dropped.
-    // Registry packages retain their exact SRI digest; git packages retain
-    // the realized source object; lifecycle inputs are explicit cache
-    // digests rather than guesses from the identity map.
+    Ok(())
+}
+
+/// Provenance for the committed env object.
+///
+/// Registry packages retain their exact SRI digest; git packages retain the
+/// realized source object; lifecycle inputs are explicit cache digests rather
+/// than guesses from the identity map. Called before the package vectors are
+/// merged and dropped.
+fn env_object_deps(
+    store: &Store,
+    platform: Platform,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    node_obj: &Path,
+    native_libs_id: Option<&str>,
+    git_objects: &[(NpmPackage, PathBuf)],
+) -> io::Result<crate::kernel::store::ObjectDeps> {
     let mut deps = crate::kernel::store::ObjectDeps::new();
     deps.object_id(&crate::kernel::store::object_id_from_path(node_obj)?)?;
-    if let Some(native_libs_id) = native_libs_id.as_deref() {
+    if let Some(native_libs_id) = native_libs_id {
         deps.object_id(native_libs_id)?;
     }
     for package in &plan.packages {
@@ -627,17 +669,17 @@ pub(super) fn realize_node_env_with_node_object(
     for artifact in artifacts {
         deps.cache_digest(Digest::sha256(&artifact.sha256)?);
     }
+    Ok(deps)
+}
 
-    let mut tarballs = tarballs;
-    tarballs.append(&mut git_objects);
-
-    // .bin launchers for physically top-level (hoisted) packages, which is
-    // what node_modules/.bin holds in npm's own layout.
-    for (p, _) in &tarballs {
+/// .bin launchers for physically top-level (hoisted) packages, which is what
+/// node_modules/.bin holds in npm's own layout.
+fn link_package_bins(staged: &Path, packages: &[(NpmPackage, PathBuf)]) -> io::Result<()> {
+    for (p, _) in packages {
         if !is_importer_top_level(&p.path) || p.bin.is_empty() {
             continue;
         }
-        let bin_dir = env_node_modules_path(&staged, &p.path).join(".bin");
+        let bin_dir = env_node_modules_path(staged, &p.path).join(".bin");
         fs::create_dir_all(&bin_dir)?;
         for (bin_name, rel) in &p.bin {
             // bin metadata comes from the lockfile (attacker-editable), so
@@ -656,7 +698,7 @@ pub(super) fn realize_node_env_with_node_object(
                 )));
             }
             let rel_path = rel_path.unwrap();
-            let pkg_dir = env_package_path(&staged, &p.path);
+            let pkg_dir = env_package_path(staged, &p.path);
             let target_file = pkg_dir.join(&rel_path);
             let md = match fs::symlink_metadata(&target_file) {
                 Ok(md) => md,
@@ -697,6 +739,87 @@ pub(super) fn realize_node_env_with_node_object(
             fs::set_permissions(&target_file, perms)?;
         }
     }
+    Ok(())
+}
+
+/// Publish the staged tree, recording any exception the commit applied that
+/// was not already a candidate.
+fn commit_env_object(
+    store: &Store,
+    identity: &Identity,
+    staged: &Path,
+    deps: &crate::kernel::store::ObjectDeps,
+) -> io::Result<PathBuf> {
+    let candidate = crate::kernel::policy::object_exceptions();
+    let (object, applied) = store
+        .commit_with_deps(identity, staged, &candidate, deps)
+        .map_err(|e| io::Error::new(e.kind(), format!("commit env: {e}")))?;
+    for exception in applied {
+        if !candidate.contains(&exception) {
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+        }
+    }
+    Ok(object)
+}
+
+pub(super) fn realize_node_env_with_node_object(
+    store: &Store,
+    platform: Platform,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    node_obj: &Path,
+) -> io::Result<PathBuf> {
+    let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
+        Vec::new();
+    let native_libs_id =
+        resolve_native_libs_id(store, platform, plan, &mut classification_tarballs)?;
+    let identity = node_env_identity(
+        store,
+        platform,
+        node_obj,
+        plan,
+        artifacts,
+        native_libs_id.as_deref(),
+    )?;
+    let id = identity.object_id();
+    if store.has(&id)? {
+        crate::kernel::policy::check_cached(store, &id)?;
+        return Ok(store.object_path(&id));
+    }
+
+    let workspaces = workspace_set(plan);
+    // A warm sync returned at the cache lookup above, so reaching here means a
+    // cold realization. Take a lease on every tarball so gc cannot collect the
+    // cached bytes mid-extraction; `leases` is held to the end of this
+    // function for exactly that reason.
+    drop(classification_tarballs);
+    let (_leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, plan)?;
+
+    let native_libs = if native_libs_id.is_some() {
+        Some(crate::tailors::python::nativelibs::ensure_native_libs(
+            store, platform,
+        )?)
+    } else {
+        None
+    };
+
+    let staged = stage_env_skeleton(store, &workspaces)?;
+    extract_tarball_packages(store, platform, &staged, &mut tarballs)?;
+    place_git_packages(store, platform, &staged, &mut git_objects)?;
+    // Capture provenance before the package vectors are merged and dropped.
+    let deps = env_object_deps(
+        store,
+        platform,
+        plan,
+        artifacts,
+        node_obj,
+        native_libs_id.as_deref(),
+        &git_objects,
+    )?;
+
+    let mut tarballs = tarballs;
+    tarballs.append(&mut git_objects);
+    link_package_bins(&staged, &tarballs)?;
 
     // Lifecycle setup may fetch declared artifacts and a pinned Python for
     // node-gyp; the package tarballs have already been fully extracted.
@@ -711,16 +834,7 @@ pub(super) fn realize_node_env_with_node_object(
         native_libs.as_ref().map(|set| set.path.as_path()),
     )?;
 
-    let candidate = crate::kernel::policy::object_exceptions();
-    let (object, applied) = store
-        .commit_with_deps(&identity, &staged, &candidate, &deps)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit env: {e}")))?;
-    for exception in applied {
-        if !candidate.contains(&exception) {
-            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
-        }
-    }
-    Ok(object)
+    commit_env_object(store, &identity, &staged, &deps)
 }
 
 /// npm lifecycle install scripts, run hermetically: network denied, writes

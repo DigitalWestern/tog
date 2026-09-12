@@ -671,6 +671,149 @@ mod tests {
         );
     }
 
+    /// Minimal base64 for building an SRI out of raw digest bytes; the
+    /// kernel's encoder is private to the store module.
+    fn sri_base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+            out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    /// Characterization of the COLD realization path, offline: the tarball is
+    /// seeded into the download cache by digest, so the fetch is a cache hit
+    /// and no network is touched. Pins extraction, bin-link creation, the
+    /// committed object id, and the fact that a second call is a cache hit.
+    #[test]
+    fn realize_node_env_cold_path_extracts_and_links_bins() {
+        // Extraction runs `tar` through the supervisor, which owns
+        // process-wide signal dispositions: one supervised child at a time.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("blanket-npm-cold-{}-{nonce}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
+            fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+
+        // A real store object stands in for the node toolchain: the env
+        // records it as a dependency, so it has to be complete.
+        let node_staged = store.stage().unwrap();
+        fs::create_dir_all(node_staged.join("bin")).unwrap();
+        let (node_obj, _) = store
+            .commit_with_deps(
+                &crate::kernel::types::Identity {
+                    kind: "nodejs".into(),
+                    name: "nodejs".into(),
+                    version: "24.20.0".into(),
+                    inputs: BTreeMap::new(),
+                },
+                &node_staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
+            .unwrap();
+
+        // A real registry tarball, seeded into the download cache by digest.
+        let src = root.join("src");
+        fs::create_dir_all(src.join("package/bin")).unwrap();
+        fs::write(
+            src.join("package/package.json"),
+            r#"{"name":"a","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(src.join("package/bin/a.js"), "#!/usr/bin/env node\n").unwrap();
+        let tarball = root.join("a.tgz");
+        assert!(std::process::Command::new("/usr/bin/tar")
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&src)
+            .arg("package")
+            .status()
+            .unwrap()
+            .success());
+        let bytes = fs::read(&tarball).unwrap();
+        use sha2::Digest as _;
+        let raw = sha2::Sha512::digest(&bytes);
+        let sri = format!("sha512-{}", sri_base64(&raw));
+        fs::write(store.cache_path("sha512", &hex::encode(raw)), &bytes).unwrap();
+
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "node_modules/a".into(),
+                name: "a".into(),
+                version: "1.0.0".into(),
+                url: "https://127.0.0.1:9/a.tgz".into(),
+                integrity: sri.clone(),
+                bin: vec![("a".into(), "bin/a.js".into())],
+                patch: None,
+                git: None,
+                optional: false,
+            }],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let platform = Platform::Aarch64AppleDarwin;
+        let env = realize_node_env_with_node_object(&store, platform, &plan, &[], &node_obj)
+            .expect("cold realization");
+
+        let expected = node_env_identity(&store, platform, &node_obj, &plan, &[], None)
+            .unwrap()
+            .object_id();
+        assert_eq!(env.file_name().unwrap().to_string_lossy(), expected);
+        assert_eq!(
+            fs::read_to_string(env.join("node_modules/a/package.json")).unwrap(),
+            r#"{"name":"a","version":"1.0.0"}"#,
+            "the tarball is extracted with its leading component stripped"
+        );
+        let link = env.join("node_modules/.bin/a");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            PathBuf::from("../a/bin/a.js")
+        );
+
+        // A second call is a cache hit and returns the same object.
+        let again = realize_node_env_with_node_object(&store, platform, &plan, &[], &node_obj)
+            .expect("warm realization");
+        assert_eq!(again, env);
+        crate::kernel::store::remove_tree(&root).unwrap();
+    }
+
     #[test]
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
         let root =
