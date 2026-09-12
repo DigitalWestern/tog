@@ -1,7 +1,9 @@
 //! Linux Python round-trip test. Heavy: downloads CPython, uv, and the
 //! manylinux wheels into a throwaway store, so it is ignored.
 
-use blanket::{platform::Platform, python, store::Store};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::store::Store;
+use blanket::tailors::python;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

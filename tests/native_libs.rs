@@ -2,12 +2,10 @@
 //! `BLANKET_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp
 //! BLANKET_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
 
-use blanket::{
-    nativelibs::{compose_env, ensure_native_libs, size_bytes},
-    platform::Platform,
-    sandbox::{run_build_spec, BuildSpec},
-    store::Store,
-};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::sandbox::{run_build_spec, BuildSpec};
+use blanket::kernel::store::Store;
+use blanket::tailors::python::nativelibs::{compose_env, ensure_native_libs, size_bytes};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

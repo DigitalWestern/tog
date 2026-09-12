@@ -1,9 +1,9 @@
 //! The content-addressed object store (kernel layer): object paths, atomic
 //! commit, root records, projection bases, and the `BLANKET_STORE` override.
 
-use crate::activity::{ActivityMode, StoreActivity};
-use crate::policy::Exception;
-use crate::types::Identity;
+use crate::kernel::activity::{ActivityMode, StoreActivity};
+use crate::kernel::policy::Exception;
+use crate::kernel::types::Identity;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, OsString};
@@ -165,7 +165,7 @@ pub struct RootDiagnostic {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectDeps {
     pub objects: BTreeSet<String>,
-    pub cache: BTreeSet<crate::fetch::Digest>,
+    pub cache: BTreeSet<crate::kernel::fetch::Digest>,
 }
 
 impl ObjectDeps {
@@ -184,7 +184,7 @@ impl ObjectDeps {
         Ok(self)
     }
 
-    pub fn cache_digest(&mut self, digest: crate::fetch::Digest) -> &mut Self {
+    pub fn cache_digest(&mut self, digest: crate::kernel::fetch::Digest) -> &mut Self {
         self.cache.insert(digest);
         self
     }
@@ -1286,7 +1286,7 @@ impl Store {
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
         validate_cached_dependency_evidence(&self.root, id, deps)?;
         let winner = self.exceptions(id)?;
-        let result = crate::policy::check_exception_set(id, &winner).and_then(|_| {
+        let result = crate::kernel::policy::check_exception_set(id, &winner).and_then(|_| {
             if winner != candidate {
                 return Err(io::Error::other(format!(
                     "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run sync"
@@ -2978,9 +2978,9 @@ fn validate_cached_dependency_evidence(
                 )
             })?;
         let digest = match algo {
-            "sha1" => crate::fetch::Digest::sha1(hex),
-            "sha256" => crate::fetch::Digest::sha256(hex),
-            "sha512" => crate::fetch::Digest::sha512(hex),
+            "sha1" => crate::kernel::fetch::Digest::sha1(hex),
+            "sha256" => crate::kernel::fetch::Digest::sha256(hex),
+            "sha512" => crate::kernel::fetch::Digest::sha512(hex),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("object metadata {id} uses unsupported cache algorithm {other}"),
@@ -3252,7 +3252,7 @@ mod tests {
         };
         let identity = identity();
         let exception = Exception {
-            kind: crate::policy::FILE_COLLISION.into(),
+            kind: crate::kernel::policy::FILE_COLLISION.into(),
             subject: "content".into(),
             detail: "first and second".into(),
         };
@@ -3292,7 +3292,7 @@ mod tests {
     fn strict_policy_rejects_cached_exceptions() {
         if std::env::var_os("BLANKET_STORE_STRICT_CHILD").is_some() {
             let store = Store::open().unwrap();
-            crate::policy::init(&store.root, false).unwrap();
+            crate::kernel::policy::init(&store.root, false).unwrap();
             let error = store
                 .commit_with_deps(&identity(), &staged(&store), &[], &ObjectDeps::new())
                 .unwrap_err();
@@ -3305,7 +3305,7 @@ mod tests {
             root: temp.0.canonicalize().unwrap(),
         };
         let exception = Exception {
-            kind: crate::policy::FILE_COLLISION.into(),
+            kind: crate::kernel::policy::FILE_COLLISION.into(),
             subject: "content".into(),
             detail: "first and second".into(),
         };

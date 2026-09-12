@@ -9,11 +9,11 @@
 //! env vars, so every blanket-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
-use crate::fetch::{download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::sandbox::{force_env, BuildSpec};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -62,7 +62,7 @@ fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, "Ruby", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Ruby", "stage 4")?;
     ruby_pin(platform).map(|_| ())
 }
 
@@ -210,7 +210,7 @@ fn extract_ruby_bottle(store: &Store, tarball: &Path, staged: &Path) -> io::Resu
         .args(["-C"])
         .arg(staged)
         .args(["--strip-components", "2"]);
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(err("portable-ruby extraction failed"));
     }
@@ -238,23 +238,23 @@ pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Ruby", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Ruby", "stage 4")?;
     let pin = ruby_pin(platform)?;
     let identity = ruby_identity(pin);
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     if let Err(error) = extract_ruby_bottle(store, &tarball, &staged) {
-        let _ = crate::store::remove_tree(&staged);
+        let _ = crate::kernel::store::remove_tree(&staged);
         return Err(error);
     }
     store
         .commit_with_deps(&identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(pin.sha256)?);
             deps
         })
@@ -316,9 +316,9 @@ pub(crate) fn run_checked(
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<()> {
-    crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
+    crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
     let out = run_ruby_edit(store, ruby_obj, cwd, gem_home, args)?;
-    if crate::ui::verbose() {
+    if crate::kernel::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
     if !out.status.success() {
@@ -373,7 +373,7 @@ fn run_ruby_with_env(
     cmd.env("PATH", path);
     force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &environment);
     cmd.stdin(std::process::Stdio::null());
-    crate::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
 }
 
@@ -584,7 +584,7 @@ pub fn plan_ruby(
         eprintln!("blanket: no Gemfile.lock; resolving with the store bundler...");
         let scratch = store.stage()?;
         let out = run_ruby(store, ruby_obj, project_dir, &scratch, &["bundle", "lock"])?;
-        let _ = crate::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
                 "store bundle lock failed: {}",
@@ -622,7 +622,7 @@ pub fn plan_ruby(
         ],
     )?;
     if !out.status.success() {
-        let _ = crate::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err(format!(
             "Gemfile/Gemfile.lock validation failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -641,7 +641,7 @@ pub fn plan_ruby(
             lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
         ],
     )?;
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     if !out.status.success() {
         return Err(err(format!(
             "bundler lock analysis failed: {}{}",
@@ -733,13 +733,13 @@ pub fn realize_gems(
     plan: &RubyPlan,
     ruby_obj: &Path,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Ruby gems", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Ruby gems", "stage 4")?;
     let pin = ruby_pin(platform)?;
     validate_plan(plan)?;
     let identity = ruby_gems_identity(pin, plan);
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -847,21 +847,23 @@ pub fn realize_gems(
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
         };
-        crate::sandbox::run_build_spec_on_for_store(platform, &spec, store).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "{}: sandboxed gem install failed: {e}\n(network is denied; \
+        crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, store).map_err(
+            |e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{}: sandboxed gem install failed: {e}\n(network is denied; \
                  gems whose installers need network or missing host \
                  libraries are unsupported in v0)",
-                    g.full_name
-                ),
-            )
-        })?;
+                        g.full_name
+                    ),
+                )
+            },
+        )?;
     }
-    let _ = crate::store::remove_tree(&scratch);
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(ruby_obj)?)?;
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(ruby_obj)?)?;
     for gem in &plan.gems {
         deps.cache_digest(Digest::sha256(&gem.sha256)?);
     }
@@ -880,9 +882,9 @@ pub fn project_ruby_env(
 ) -> io::Result<()> {
     let ruby_obj = ruby_obj.canonicalize()?;
     let gems_obj = gems_obj.canonicalize()?;
-    let store = crate::project::store_from_object_path(&ruby_obj)
+    let store = crate::comforter::store_from_object_path(&ruby_obj)
         .ok_or_else(|| err("Ruby object is not in a Blanket store"))?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -890,10 +892,10 @@ pub fn project_ruby_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
-    let mut refs = crate::project::ClosureRefs::new();
+    let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &ruby_obj)?;
     refs.object_path(&store, &activity, &gems_obj)?;
-    crate::project::write_closure(
+    crate::comforter::write_closure(
         project_dir,
         "ruby",
         serde_json::json!({
@@ -925,9 +927,9 @@ mod tests {
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -937,7 +939,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
     use super::*;
@@ -962,7 +964,7 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = crate::store::remove_tree(&self.0);
+            let _ = crate::kernel::store::remove_tree(&self.0);
         }
     }
 

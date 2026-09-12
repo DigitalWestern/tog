@@ -5,11 +5,13 @@
 //! projects with identical locks share one env object; different locks get
 //! different objects and coexist. Projection into a project is one symlink.
 
-use crate::fetch::download_verified_held;
-use crate::platform::{no_pin, Platform};
-use crate::store::{ProjectionBase, ProjectionRef, Store};
-use crate::types::{ArtifactKind, Identity, Plan};
-use crate::{pyselect, python, wheel};
+use crate::kernel::fetch::download_verified_held;
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};
+use crate::kernel::types::{ArtifactKind, Identity, Plan};
+use crate::tailors::python;
+use crate::tailors::python::pyselect;
+use crate::tailors::python::wheel;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -39,7 +41,7 @@ impl ClosureRefs {
     pub fn object_path(
         &mut self,
         store: &Store,
-        activity: &crate::activity::StoreActivity,
+        activity: &crate::kernel::activity::StoreActivity,
         path: &Path,
     ) -> io::Result<&mut Self> {
         store.require_activity(activity, "closure object reference")?;
@@ -67,11 +69,11 @@ impl ClosureRefs {
     pub fn object_id(
         &mut self,
         store: &Store,
-        activity: &crate::activity::StoreActivity,
+        activity: &crate::kernel::activity::StoreActivity,
         id: &str,
     ) -> io::Result<&mut Self> {
         store.require_activity(activity, "closure object reference")?;
-        if !crate::store::is_object_id(id) {
+        if !crate::kernel::store::is_object_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("closure object reference is not a complete object id: {id:?}"),
@@ -92,7 +94,7 @@ impl ClosureRefs {
     pub fn optional_object_id(
         &mut self,
         store: &Store,
-        activity: &crate::activity::StoreActivity,
+        activity: &crate::kernel::activity::StoreActivity,
         id: Option<&str>,
     ) -> io::Result<&mut Self> {
         if let Some(id) = id {
@@ -104,7 +106,7 @@ impl ClosureRefs {
     pub fn forest(
         &mut self,
         store: &Store,
-        activity: &crate::activity::StoreActivity,
+        activity: &crate::kernel::activity::StoreActivity,
         path: &Path,
     ) -> io::Result<&mut Self> {
         self.projection(store, activity, ProjectionBase::Forests, path)
@@ -113,7 +115,7 @@ impl ClosureRefs {
     pub fn backup(
         &mut self,
         store: &Store,
-        activity: &crate::activity::StoreActivity,
+        activity: &crate::kernel::activity::StoreActivity,
         path: &Path,
     ) -> io::Result<&mut Self> {
         self.projection(store, activity, ProjectionBase::Backups, path)
@@ -130,7 +132,7 @@ impl ClosureRefs {
     fn projection(
         &mut self,
         store: &Store,
-        activity: &crate::activity::StoreActivity,
+        activity: &crate::kernel::activity::StoreActivity,
         base: ProjectionBase,
         path: &Path,
     ) -> io::Result<&mut Self> {
@@ -150,7 +152,7 @@ pub fn write_closure(
     ecosystem: &str,
     body: serde_json::Value,
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     refs: ClosureRefs,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
@@ -174,7 +176,7 @@ pub(crate) fn write_closure_with_project_lock(
     ecosystem: &str,
     body: serde_json::Value,
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     refs: ClosureRefs,
     project_lock: &fs::File,
 ) -> io::Result<()> {
@@ -196,7 +198,7 @@ pub fn write_closure_with_refs(
     ecosystem: &str,
     body: serde_json::Value,
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     refs: ClosureRefs,
 ) -> io::Result<()> {
     write_closure(project_dir, ecosystem, body, store, activity, refs)
@@ -209,7 +211,7 @@ pub fn write_closure_with_refs(
 pub(crate) fn persist_root_for_refs_with_project_lock(
     project_dir: &Path,
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     refs: &ClosureRefs,
     project_lock: &fs::File,
 ) -> io::Result<()> {
@@ -239,7 +241,7 @@ pub(crate) fn write_closure_legacy(
         Some(store) => store,
         None => Store::open()?,
     };
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     write_closure_inner(project_dir, ecosystem, body, &store, &activity, None, None)
 }
 
@@ -248,7 +250,7 @@ fn write_closure_inner(
     ecosystem: &str,
     mut body: serde_json::Value,
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     explicit_refs: Option<ClosureRefs>,
     supplied_project_lock: Option<&fs::File>,
 ) -> io::Result<()> {
@@ -306,7 +308,7 @@ fn write_closure_inner(
             dir.display()
         )));
     }
-    let pending = crate::policy::pending();
+    let pending = crate::kernel::policy::pending();
     if let Some(body) = body.as_object_mut() {
         body.insert("exceptions".into(), serde_json::to_value(&pending)?);
     }
@@ -391,7 +393,7 @@ fn write_closure_inner(
     if !durable_root {
         store.register_root_with_activity(activity, &project_dir)?;
     }
-    crate::policy::clear();
+    crate::kernel::policy::clear();
     Ok(())
 }
 
@@ -491,7 +493,7 @@ pub(crate) fn replace_project_symlink(path: &Path, target: &Path, label: &str) -
     let destination = path
         .file_name()
         .ok_or_else(|| invalid(format!("{label} has no destination name")))?;
-    match crate::store::stat_at(parent_fd.as_raw_fd(), destination.as_bytes()) {
+    match crate::kernel::store::stat_at(parent_fd.as_raw_fd(), destination.as_bytes()) {
         Ok(stat) => {
             if (stat.st_mode & libc::S_IFMT) != libc::S_IFLNK {
                 return Err(invalid(format!(
@@ -761,7 +763,7 @@ pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io:
     };
     if !clone.success() {
         if dest.exists() {
-            crate::store::remove_tree(dest)?;
+            crate::kernel::store::remove_tree(dest)?;
         }
         let plain = Command::new("/bin/cp")
             .arg("-R")
@@ -784,23 +786,23 @@ pub(crate) fn clone_tree_for_store(
     dest: &Path,
     platform: Platform,
 ) -> io::Result<()> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let clone = if platform.is_macos() {
         let mut command = std::process::Command::new("/bin/cp");
         command.args(["-Rc"]).arg(src).arg(dest);
-        crate::supervise::status(&mut command, &activity)?
+        crate::kernel::supervise::status(&mut command, &activity)?
     } else {
         let mut command = std::process::Command::new("/bin/cp");
         command.args(["-a", "--reflink=auto"]).arg(src).arg(dest);
-        crate::supervise::status(&mut command, &activity)?
+        crate::kernel::supervise::status(&mut command, &activity)?
     };
     if !clone.success() {
         if dest.exists() {
-            crate::store::remove_tree(dest)?;
+            crate::kernel::store::remove_tree(dest)?;
         }
         let mut plain = std::process::Command::new("/bin/cp");
         plain.arg("-R").arg(src).arg(dest);
-        let plain_status = crate::supervise::status(&mut plain, &activity)?;
+        let plain_status = crate::kernel::supervise::status(&mut plain, &activity)?;
         if !plain_status.success() {
             return Err(io::Error::other("cloning projected tree failed"));
         }
@@ -832,7 +834,7 @@ fn restore_write_bits(path: &Path) -> io::Result<()> {
 /// closure must never inject arbitrary executable paths into `blanket run`
 /// (Sol review 5, reproduced against the ruby closure).
 pub fn closure_object(
-    store: &crate::store::Store,
+    store: &crate::kernel::store::Store,
     closure: &serde_json::Value,
     key: &str,
     probe: &str,
@@ -875,8 +877,10 @@ pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result
 
 /// Canonical package order and duplicate rejection shared by planning and
 /// realization.
-fn canonical_packages<'a>(plan: &'a Plan) -> io::Result<Vec<&'a crate::types::LockedPackage>> {
-    let mut packages: Vec<&crate::types::LockedPackage> = plan.packages.iter().collect();
+fn canonical_packages<'a>(
+    plan: &'a Plan,
+) -> io::Result<Vec<&'a crate::kernel::types::LockedPackage>> {
+    let mut packages: Vec<&crate::kernel::types::LockedPackage> = plan.packages.iter().collect();
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     for w in packages.windows(2) {
         if w[0].name == w[1].name {
@@ -923,12 +927,12 @@ fn environment_identity(
                 // archive's hash (a pure function of the commit's tree).
                 let owned;
                 let p = if p.git.is_some() {
-                    owned = crate::build::git_sdist_package(store, platform, p)?;
+                    owned = crate::tailors::python::build::git_sdist_package(store, platform, p)?;
                     &owned
                 } else {
                     p
                 };
-                let sdist = crate::build::plan_sdist_identity_input(
+                let sdist = crate::tailors::python::build::plan_sdist_identity_input(
                     store,
                     platform,
                     p,
@@ -982,7 +986,7 @@ pub(crate) fn realize_env_at_depth(
     plan: &Plan,
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Python environment", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "Python environment", "stage 2")?;
     let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
         no_pin(
             &format!("cpython {}", plan.python_version),
@@ -1003,7 +1007,7 @@ pub(crate) fn realize_env_at_depth(
     let identity = environment_identity(store, platform, plan, &cpython_id)?;
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1012,7 +1016,7 @@ pub(crate) fn realize_env_at_depth(
     let packages = canonical_packages(plan)?;
 
     // Fetch everything first (all-or-nothing before assembly starts).
-    let mut artifacts: Vec<(&crate::types::LockedPackage, PathBuf)> = Vec::new();
+    let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
     // Keep verified cache leases alive until every wheel has been extracted.
     let mut _cache_leases = Vec::new();
     for &p in &packages {
@@ -1027,12 +1031,12 @@ pub(crate) fn realize_env_at_depth(
             ArtifactKind::Sdist => {
                 let owned;
                 let source = if p.git.is_some() {
-                    owned = crate::build::git_sdist_package(store, platform, p)?;
+                    owned = crate::tailors::python::build::git_sdist_package(store, platform, p)?;
                     &owned
                 } else {
                     p
                 };
-                crate::build::build_sdist_wheel_at_depth(
+                crate::tailors::python::build::build_sdist_wheel_at_depth(
                     store,
                     platform,
                     source,
@@ -1091,16 +1095,16 @@ pub(crate) fn realize_env_at_depth(
         )?;
     }
 
-    let candidate = crate::policy::object_exceptions();
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(&python_obj)?)?;
+    let candidate = crate::kernel::policy::object_exceptions();
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(&python_obj)?)?;
     if let Some(native_id) = identity.inputs.get("native_libs") {
         deps.object_id(native_id)?;
     }
     for (package, wheel_file) in &artifacts {
         match package.kind {
             ArtifactKind::Wheel => {
-                deps.cache_digest(crate::fetch::Digest::sha256(&package.sha256)?);
+                deps.cache_digest(crate::kernel::fetch::Digest::sha256(&package.sha256)?);
             }
             ArtifactKind::Sdist => {
                 let object = wheel_file.parent().ok_or_else(|| {
@@ -1112,14 +1116,14 @@ pub(crate) fn realize_env_at_depth(
                         ),
                     )
                 })?;
-                deps.object_id(&crate::store::object_id_from_path(object)?)?;
+                deps.object_id(&crate::kernel::store::object_id_from_path(object)?)?;
             }
         }
     }
     let (object, applied) = store.commit_with_deps(&identity, &staged, &candidate, &deps)?;
     for exception in applied {
         if !candidate.contains(&exception) {
-            crate::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
         }
     }
     Ok(object)
@@ -1210,7 +1214,7 @@ pub fn reserve_backup_real_dir_for_store(
                 .unwrap()
                 .as_nanos()
         );
-        match crate::store::stat_at(backups_dir.as_raw_fd(), name.as_bytes()) {
+        match crate::kernel::store::stat_at(backups_dir.as_raw_fd(), name.as_bytes()) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => break backups.join(name),
             Ok(_) => {}
             Err(error) => return Err(error),
@@ -1279,7 +1283,8 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
     }
     let source_dir = open_real_directory(source_parent, "backup source parent")?;
     let backups_dir = open_real_directory(backups, "store backups")?;
-    let source_entry = crate::store::stat_at(source_dir.as_raw_fd(), source_name.as_bytes())?;
+    let source_entry =
+        crate::kernel::store::stat_at(source_dir.as_raw_fd(), source_name.as_bytes())?;
     // libc's stat field widths are per-platform (st_dev is i32 on Darwin,
     // u64 on Linux); widen to u64 to match MetadataExt.
     if source_entry.st_dev as u64 != source_stat.dev()
@@ -1293,7 +1298,7 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
             ),
         ));
     }
-    match crate::store::stat_at(backups_dir.as_raw_fd(), destination_name.as_bytes()) {
+    match crate::kernel::store::stat_at(backups_dir.as_raw_fd(), destination_name.as_bytes()) {
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -1465,10 +1470,10 @@ fn project_env_inner(
     let venv = project_dir.join(".venv");
     let store = store_from_object_path(env_obj)
         .ok_or_else(|| io::Error::other("environment object is not in a Blanket store"))?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let project_lock = store.project_lock(project_dir)?;
-    let native_reference = crate::nativelibs::env_reference(&env_obj)?;
+    let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
     let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
     let mut refs = ClosureRefs::new();
     refs.object_path(&store, &activity, &env_obj)?;
@@ -1531,7 +1536,7 @@ fn project_env_inner(
 #[cfg(test)]
 mod closure_platform_tests {
     use super::*;
-    use crate::types::LockedPackage;
+    use crate::kernel::types::LockedPackage;
     use sha2::Digest as _;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1618,7 +1623,9 @@ mod closure_platform_tests {
     fn cached_build_plan(store: &Store, requirement: &str, sha256: &str) -> String {
         let platform = Platform::host().unwrap();
         let requires = vec![requirement.to_string()];
-        let key = crate::build_requires::lock_cache_key(platform, "3.12.14", &requires, None);
+        let key = crate::tailors::python::build_requires::lock_cache_key(
+            platform, "3.12.14", &requires, None,
+        );
         let lock = store.cache_path("build-lock", &key);
         let plan_path = store.cache_path("build-plan", &key);
         fs::create_dir_all(lock.parent().unwrap()).unwrap();
@@ -1665,7 +1672,7 @@ mod closure_platform_tests {
         fs::create_dir_all(&project).unwrap();
         let store = test_store("unrecordable");
         let activity = store
-            .activity(crate::activity::ActivityMode::Exclusive)
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
         let error = super::write_closure(
             &project,
@@ -1686,7 +1693,7 @@ mod closure_platform_tests {
 
     #[test]
     fn foreign_platform_closure_is_refused_and_legacy_is_accepted() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let host = Platform::host().unwrap();
@@ -1715,7 +1722,7 @@ mod closure_platform_tests {
     /// Self-leases its own shared activity, so callers must not hold the
     /// exclusive lease across it.
     fn complete_object(store: &Store, name: &str) -> String {
-        let identity = crate::types::Identity {
+        let identity = crate::kernel::types::Identity {
             kind: "test".into(),
             name: name.into(),
             version: "1".into(),
@@ -1725,7 +1732,12 @@ mod closure_platform_tests {
         let staged = store.stage().unwrap();
         fs::write(staged.join("payload"), name).unwrap();
         store
-            .commit_with_deps(&identity, &staged, &[], &crate::store::ObjectDeps::new())
+            .commit_with_deps(
+                &identity,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
             .unwrap();
         let object = store.object_path(&id);
         let mut perms = fs::metadata(&object).unwrap().permissions();
@@ -1741,7 +1753,7 @@ mod closure_platform_tests {
     /// deletion authority.
     #[test]
     fn strict_publication_writes_the_durable_root_record() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let project = std::env::temp_dir().join(format!(
@@ -1761,7 +1773,7 @@ mod closure_platform_tests {
         // caller-supplied one); commit above self-leased shared, so take the
         // exclusive lease only now.
         let activity = store
-            .activity(crate::activity::ActivityMode::Exclusive)
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
         let mut refs = super::ClosureRefs::new();
         refs.object_id(&store, &activity, &id).unwrap();
@@ -1784,13 +1796,13 @@ mod closure_platform_tests {
         assert_eq!(roots.len(), 1, "no durable root record was published");
         let record = roots[0].record.as_ref().expect("root/2 record");
         assert!(record.objects.contains(&id), "{:?}", record.objects);
-        let _ = crate::store::remove_tree(&store.root);
+        let _ = crate::kernel::store::remove_tree(&store.root);
         let _ = fs::remove_dir_all(&project);
     }
 
     #[test]
     fn write_closure_succeeds_for_normal_directories() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let project = std::env::temp_dir().join(format!(
@@ -1823,7 +1835,7 @@ mod closure_platform_tests {
 
     #[test]
     fn write_closure_rejects_symlinked_blanket_without_creating_outside_closures() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
@@ -1853,7 +1865,7 @@ mod closure_platform_tests {
 
     #[test]
     fn write_closure_rejects_symlinked_closures_without_writing_outside() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
@@ -1883,7 +1895,7 @@ mod closure_platform_tests {
 
     #[test]
     fn fast_sdist_parent_input_keeps_the_legacy_identity() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("fast-golden");
@@ -1913,7 +1925,7 @@ mod closure_platform_tests {
                     format!(
                         "Sdist:{}:{}",
                         fast.sha256,
-                        crate::build::derivation_fingerprint()
+                        crate::tailors::python::build::derivation_fingerprint()
                     ),
                 ),
             ]),
@@ -1925,7 +1937,7 @@ mod closure_platform_tests {
 
     #[test]
     fn isolated_sdist_build_environment_changes_parent_identity() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("isolated-input");
@@ -1946,7 +1958,7 @@ mod closure_platform_tests {
         );
         assert_eq!(
             key,
-            crate::build_requires::lock_cache_key(
+            crate::tailors::python::build_requires::lock_cache_key(
                 Platform::host().unwrap(),
                 "3.12.14",
                 &["setuptools~=83.1".into()],
@@ -1958,7 +1970,7 @@ mod closure_platform_tests {
 
     #[test]
     fn planned_and_realized_env_id_match_for_a_native_sdist() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("native-sdist-identity");
@@ -1974,7 +1986,8 @@ mod closure_platform_tests {
         let realized = environment_identity(&store, platform, &plan, &cpython_id).unwrap();
         assert_eq!(planned, realized.object_id());
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-            let native_id = crate::nativelibs::object_id_for(&store, platform).unwrap();
+            let native_id =
+                crate::tailors::python::nativelibs::object_id_for(&store, platform).unwrap();
             assert_eq!(
                 realized.inputs.get("native_libs").map(String::as_str),
                 Some(native_id.as_str())

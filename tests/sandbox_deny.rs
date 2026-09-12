@@ -4,13 +4,11 @@
 //! tests/acceptance.sh runs it with a shared BLANKET_STORE:
 //!     cargo test --test sandbox_deny -- --ignored
 
-use blanket::{
-    build,
-    platform::Platform,
-    sandbox::{run_build_spec, BuildSpec},
-    store::Store,
-    types::*,
-};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::sandbox::{run_build_spec, BuildSpec};
+use blanket::kernel::store::Store;
+use blanket::kernel::types::*;
+use blanket::tailors::python::build;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

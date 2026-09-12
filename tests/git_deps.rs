@@ -4,17 +4,18 @@
 //! The fixture repository is local and served over `file://`, so this needs no
 //! network beyond the pinned Node toolchain.
 
-use blanket::gitsrc::{ensure_git_source, normalize_url, GitSource};
-use blanket::npm::{self, NpmPackage, NpmPlan};
-use blanket::store::Store;
-use blanket::{platform::Platform, policy};
+use blanket::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::policy;
+use blanket::kernel::store::Store;
+use blanket::tailors::node::{self, NpmPackage, NpmPlan};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        let _ = blanket::store::remove_tree(&self.0);
+        let _ = blanket::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -87,7 +88,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     let lock = format!(
         r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#{commit}"}}}}}}"#
     );
-    let plan = npm::plan_npm(platform, &lock).expect("plan");
+    let plan = node::plan_npm(platform, &lock).expect("plan");
     assert_eq!(plan.packages.len(), 1);
     let package: &NpmPackage = &plan.packages[0];
     let source = package
@@ -97,7 +98,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     assert_eq!(source.commit, commit);
     assert_eq!(package.integrity, format!("git:{commit}"));
 
-    let env = npm::realize_node_env(&store, platform, &plan, &[]).expect("realize");
+    let env = node::realize_node_env(&store, platform, &plan, &[]).expect("realize");
     assert_eq!(
         std::fs::read_to_string(env.join("node_modules/git-dep/index.js")).unwrap(),
         "module.exports = 'from-git';\n"
@@ -107,7 +108,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
 
     // The commit is the identity: the same plan hits the cache, and a
     // different commit is a different environment.
-    let again = npm::realize_node_env(&store, platform, &plan, &[]).expect("second realize");
+    let again = node::realize_node_env(&store, platform, &plan, &[]).expect("second realize");
     assert_eq!(env, again);
 
     let kinds: Vec<String> = policy::pending()
@@ -129,7 +130,7 @@ fn an_unpinned_git_reference_is_refused() {
     let lock = format!(
         r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#main"}}}}}}"#
     );
-    let error = npm::plan_npm(platform, &lock)
+    let error = node::plan_npm(platform, &lock)
         .err()
         .map(|e| e.to_string())
         .unwrap_or_default();
@@ -247,22 +248,26 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     policy::clear();
 
     let requirement = format!("gitdep @ {url}@{commit}");
-    let reqs = blanket::pypi::parse_requirements(&requirement).expect("parse");
-    let packages =
-        blanket::pypi::lock_requirements(platform, blanket::pypi::Glibc(0, 0), &reqs, "cp312")
-            .expect("lock");
+    let reqs = blanket::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
+    let packages = blanket::tailors::python::pypi::lock_requirements(
+        platform,
+        blanket::tailors::python::pypi::Glibc(0, 0),
+        &reqs,
+        "cp312",
+    )
+    .expect("lock");
     assert_eq!(packages.len(), 1);
     assert!(
         packages[0].git.is_some(),
         "the package carries its git source"
     );
 
-    let plan = blanket::types::Plan {
+    let plan = blanket::kernel::types::Plan {
         ecosystem: "python".into(),
         python_version: "3.12.14".into(),
         packages,
     };
-    let env = blanket::project::realize_env(&store, platform, &plan).expect("realize");
+    let env = blanket::comforter::realize_env(&store, platform, &plan).expect("realize");
     let site = env.join("lib/python3.12/site-packages/gitdep/__init__.py");
     assert_eq!(
         std::fs::read_to_string(&site).unwrap(),
@@ -270,7 +275,7 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     );
 
     // The commit determines the environment: realizing again is a cache hit.
-    let again = blanket::project::realize_env(&store, platform, &plan).expect("second realize");
+    let again = blanket::comforter::realize_env(&store, platform, &plan).expect("second realize");
     assert_eq!(env, again);
 }
 
@@ -305,14 +310,14 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     let lock = format!(
         "version = 3\n\n[[package]]\nname = \"gitdep\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
     );
-    let plan = blanket::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let plan = blanket::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
     assert_eq!(plan.crates.len(), 1);
     assert!(
         plan.crates[0].git.is_some(),
         "the crate carries its git source"
     );
 
-    let vendor = blanket::cargo::realize_vendor(&store, &plan).expect("vendor");
+    let vendor = blanket::tailors::cargo::realize_vendor(&store, &plan).expect("vendor");
     let crate_dir = vendor.join("gitdep-1.0.0");
     assert_eq!(
         std::fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -329,6 +334,6 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     );
 
     // Realizing again is a cache hit on the same object.
-    let again = blanket::cargo::realize_vendor(&store, &plan).expect("second vendor");
+    let again = blanket::tailors::cargo::realize_vendor(&store, &plan).expect("second vendor");
     assert_eq!(vendor, again);
 }

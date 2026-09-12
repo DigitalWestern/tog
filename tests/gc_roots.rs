@@ -18,8 +18,8 @@ use std::time::{Duration, SystemTime};
 /// different id, and a legacy (schemaless) record of an unknown kind can
 /// never be certified, so the fixture publishes a complete `object-meta/2`
 /// record the way `tests/cli.rs::publish_certified_object` does.
-fn protected_identity() -> blanket::types::Identity {
-    blanket::types::Identity {
+fn protected_identity() -> blanket::kernel::types::Identity {
+    blanket::kernel::types::Identity {
         kind: "test".into(),
         name: "protected".into(),
         version: "1".into(),
@@ -35,7 +35,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = blanket::store::remove_tree(&self.base);
+        let _ = blanket::kernel::store::remove_tree(&self.base);
     }
 }
 
@@ -125,7 +125,7 @@ impl Fixture {
 
     /// Write a registry record by hand, exactly as `register_root` would.
     fn record(&self, project: &Path) -> String {
-        let key = blanket::store::Store::root_key(project).unwrap();
+        let key = blanket::kernel::store::Store::root_key(project).unwrap();
         self.record_as(&key, format!("{}\n", project.display()).as_bytes());
         key
     }
@@ -377,7 +377,7 @@ fn a_pathname_that_is_not_utf8_is_refused() {
     }
     fixture.make_project(&raw_project, true);
     let lossy_twin = fixture.project("project-\u{fffd}", false);
-    let twin_key = blanket::store::Store::root_key(&lossy_twin).unwrap();
+    let twin_key = blanket::kernel::store::Store::root_key(&lossy_twin).unwrap();
 
     // argv stays UTF-8; the child canonicalizes `.` into the raw pathname.
     let register = fixture.run_in(&raw_project, &["gc", "--register", ".", "--keep-days=0"]);
@@ -460,7 +460,7 @@ fn dry_run_never_writes_a_record() {
     let key = fixture.record(&old);
     fs::remove_dir_all(&old).unwrap();
     let new = fixture.project("new", true);
-    let new_key = blanket::store::Store::root_key(&new).unwrap();
+    let new_key = blanket::kernel::store::Store::root_key(&new).unwrap();
 
     let before = fixture.record_names();
     let combined = fixture.run(&[

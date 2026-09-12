@@ -1,6 +1,6 @@
 //! Ignored e2e for interpreter selection and warm lock/plan caches.
 
-use blanket::platform::Platform;
+use blanket::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

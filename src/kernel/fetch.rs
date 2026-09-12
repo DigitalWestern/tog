@@ -1,7 +1,7 @@
 //! Verified downloads into the store (kernel layer): fetch a URL, check
 //! its digest, and hold the bytes as a store object.
 
-use crate::store::{self, Store};
+use crate::kernel::store::{self, Store};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha512};
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ pub(crate) struct CacheLease {
     // Keep operation protection with the verified path. A GC-lock-only
     // lease would allow the caller's store activity to end before extraction
     // or another cache consumer finishes using this path.
-    _activity: crate::activity::StoreActivity,
+    _activity: crate::kernel::activity::StoreActivity,
     _gc_lock: Arc<fs::File>,
 }
 
@@ -153,7 +153,7 @@ impl Digest {
 /// cache hit: read-only bits stop accidents, not same-user replacement).
 /// A poisoned entry is deleted and reported missing.
 pub fn cache_verified(store: &Store, sha256: &str) -> io::Result<PathBuf> {
-    let _activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     cache_verified_held(store, sha256).map(CacheLease::into_path)
 }
 
@@ -172,7 +172,7 @@ pub(crate) fn cache_verified_held(store: &Store, sha256: &str) -> io::Result<Cac
 }
 
 pub(crate) fn cache_verified_digest_held(store: &Store, digest: &Digest) -> io::Result<CacheLease> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let gc_lock = acquire_gc_lock(store)?;
     let path = store.cache_path(digest.algo(), digest.hex());
     match hash_file(&path, digest.algo) {
@@ -306,7 +306,7 @@ pub fn fetch_text(url: &str) -> io::Result<String> {
 }
 
 pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<PathBuf> {
-    let _activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     download_verified_held(store, url, sha256).map(CacheLease::into_path)
 }
 
@@ -323,7 +323,7 @@ pub(crate) fn download_verified_held(
 /// by blanket — e.g. Go module zips h1-checked by dirhash). Returns
 /// (sha256 hex, cache path). Publication mirrors download_verified.
 pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String, PathBuf)> {
-    let _activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let hex = hash_file(src, Algo::Sha256)?;
     let _gc_lock = acquire_gc_lock(store)?;
     let dest = store.cache_path("sha256", &hex);
@@ -370,7 +370,7 @@ pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String,
 /// cache (keyed by algo/hex). Idempotent; an existing entry short-circuits
 /// (offline reconstruction). file:// URLs read local files (mirrors, tests).
 pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io::Result<PathBuf> {
-    let _activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     download_verified_digest_held(store, url, digest).map(CacheLease::into_path)
 }
 
@@ -379,7 +379,7 @@ pub(crate) fn download_verified_digest_held(
     url: &str,
     digest: &Digest,
 ) -> io::Result<CacheLease> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let gc_lock = acquire_gc_lock(store)?;
     let dest = store.cache_path(digest.algo(), digest.hex());
     if dest.is_file() {

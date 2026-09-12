@@ -30,7 +30,7 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = blanket::store::remove_tree(&self.0);
+        let _ = blanket::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -321,7 +321,8 @@ fn pnpm_add_update_remove_roundtrip() {
         .iter()
         .find(|package| package["path"] == "node_modules/pnpm")
         .unwrap();
-    let digest = blanket::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
+    let digest =
+        blanket::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
     let tarball =
         std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
     let corepack_sha224 = hex::encode(Sha224::digest(&tarball));

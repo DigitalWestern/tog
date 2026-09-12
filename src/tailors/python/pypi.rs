@@ -2,9 +2,9 @@
 //! requirement to one exact PyPI artifact (wheel preferred, sdist
 //! fallback), cutting the pattern (Plan) the kernel realizes.
 
-use crate::platform::Platform;
-use crate::store::Store;
-use crate::types::{ArtifactKind, LockedPackage, Plan};
+use crate::kernel::platform::Platform;
+use crate::kernel::store::Store;
+use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::ffi::CStr;
 use std::fs;
@@ -90,7 +90,7 @@ pub struct Requirement {
     pub sha256s: Vec<String>, // lowercase hex, no "sha256:" prefix
     /// A `name @ git+URL@<commit>` requirement (NEXT.md item 4). The commit is
     /// the verification, so such a line carries no `--hash`.
-    pub git: Option<crate::gitsrc::GitSource>,
+    pub git: Option<crate::kernel::gitsrc::GitSource>,
 }
 
 /// Parse `name @ git+URL@<40-hex commit>`, optionally with
@@ -114,13 +114,13 @@ pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
         None => (reference, None),
     };
     let (url, commit) = reference.rsplit_once('@')?;
-    if !crate::gitsrc::is_full_commit(commit) {
+    if !crate::kernel::gitsrc::is_full_commit(commit) {
         return None;
     }
     let name = normalize_name(name);
     // The name becomes a path component and an archive member, so it must be
     // a plain component — normalize_name alone still admits '/' and ','.
-    if !crate::gitsrc::is_safe_component(&name) {
+    if !crate::kernel::gitsrc::is_safe_component(&name) {
         return None;
     }
     Some(Requirement {
@@ -128,8 +128,8 @@ pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
         // A git requirement has no release version; the commit names it.
         version: format!("0+git.{}", &commit[..12]),
         sha256s: Vec::new(),
-        git: Some(crate::gitsrc::GitSource {
-            url: crate::gitsrc::normalize_url(url),
+        git: Some(crate::kernel::gitsrc::GitSource {
+            url: crate::kernel::gitsrc::normalize_url(url),
             commit: commit.to_ascii_lowercase(),
             subdirectory,
         }),
@@ -769,7 +769,7 @@ pub(crate) fn lock_requirement_text_with_uv(
     python_version: &str,
     constraints: Option<&str>,
 ) -> io::Result<String> {
-    let uv = crate::python::ensure_uv_for(store, platform)?.join("uv");
+    let uv = crate::tailors::python::ensure_uv_for(store, platform)?.join("uv");
     let scratch = store.stage()?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");
@@ -800,7 +800,7 @@ pub(crate) fn lock_requirement_text_with_uv(
         }
         let uv_output = {
             command.arg(&input).args(["-o"]).arg(&output);
-            crate::supervise::output_owned(&mut command, store).map_err(|e| {
+            crate::kernel::supervise::output_owned(&mut command, store).map_err(|e| {
                 io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
             })?
         };
@@ -827,7 +827,7 @@ pub(crate) fn lock_requirement_text_with_uv(
         }
         fs::read_to_string(&output)
     })();
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     result
 }
 

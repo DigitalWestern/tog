@@ -497,3 +497,16 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
 - Not runnable as-is: `docs/agent/review-fixtures/gc-a/mutations.py` is
   pinned to commit `9b11e05` and asserts that HEAD; it is evidence of a past
   review, not a live check, so its `src/gc.rs` paths were left alone.
+
+### 2026-09-12 — Stage 1 sweep landed: old paths gone, shims deleted
+
+- Every `crate::<old>` and `blanket::<old>` path now names the folder path
+  (`crate::kernel::store`, `crate::tailors::python::pypi`, ...). Grouped
+  `use crate::{..}` imports were expanded one module per line; the four
+  modules whose leaf name changed are referred to by the new name at
+  their call sites (`npm::` → `node::`, `golang::` → `go::`,
+  `npm_lock_import::` → `lock_import::`, `project::` → `comforter::`).
+- `lib.rs` has no compatibility shims. Stage 1 definition of done is met
+  for everything that is not a file split.
+- Gate: `cargo fmt --check`, `cargo test --no-run` (all targets),
+  `cargo test` (614 passed, same set as baseline).

@@ -24,9 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use blanket::activity::{ActivityMode, StoreActivity};
-use blanket::store::Store;
-use blanket::supervise;
+use blanket::kernel::activity::{ActivityMode, StoreActivity};
+use blanket::kernel::store::Store;
+use blanket::kernel::supervise;
 
 /// Every wait in this file is bounded. A blown deadline fails the case with
 /// the output collected so far rather than hanging the suite.
@@ -110,7 +110,7 @@ impl TempStore {
 
 impl Drop for TempStore {
     fn drop(&mut self) {
-        let _ = blanket::store::remove_tree(&self.root);
+        let _ = blanket::kernel::store::remove_tree(&self.root);
     }
 }
 

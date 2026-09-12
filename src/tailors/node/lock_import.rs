@@ -5,9 +5,9 @@
 //! scalars, and arbitrary YAML tags are rejected. The graph is normalized to
 //! the npm tailor's literal node_modules paths before realization.
 
-use crate::fetch::Digest;
-use crate::npm::{NpmLink, NpmPackage, NpmPatch, NpmPlan};
-use crate::platform::Platform;
+use crate::kernel::fetch::Digest;
+use crate::kernel::platform::Platform;
+use crate::tailors::node::{NpmLink, NpmPackage, NpmPatch, NpmPlan};
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -602,8 +602,8 @@ fn attach_pnpm_patches(
 fn integrity_policy(path: &str, integrity: &str) -> io::Result<()> {
     let digest = Digest::from_sri(integrity)?;
     if digest.algo() == "sha1" {
-        crate::policy::record(
-            crate::policy::WEAK_INTEGRITY,
+        crate::kernel::policy::record(
+            crate::kernel::policy::WEAK_INTEGRITY,
             path,
             "sha1 integrity accepted and verified, but is cryptographically weak",
         )?;
@@ -630,15 +630,15 @@ fn package_url(
 /// The git source a pnpm resolution names, when it is pinned to a full commit.
 fn pinned_git_source(
     resolution: Option<&BTreeMap<String, YamlValue>>,
-) -> Option<crate::gitsrc::GitSource> {
+) -> Option<crate::kernel::gitsrc::GitSource> {
     let resolution = resolution?;
     if let (Some(repo), Some(commit)) = (
         yaml_str(resolution.get("repo")),
         yaml_str(resolution.get("commit")),
     ) {
-        if crate::gitsrc::is_full_commit(commit) {
-            return Some(crate::gitsrc::GitSource {
-                url: crate::gitsrc::normalize_url(repo),
+        if crate::kernel::gitsrc::is_full_commit(commit) {
+            return Some(crate::kernel::gitsrc::GitSource {
+                url: crate::kernel::gitsrc::normalize_url(repo),
                 commit: commit.to_ascii_lowercase(),
                 subdirectory: None,
             });
@@ -649,10 +649,10 @@ fn pinned_git_source(
     // integrity to verify; explicit git protocols remain git sources.
     let tarball = yaml_str(resolution.get("tarball")).unwrap_or_default();
     let integrity = yaml_str(resolution.get("integrity"));
-    crate::npm::explicit_git_source(tarball).or_else(|| {
+    crate::tailors::node::explicit_git_source(tarball).or_else(|| {
         integrity
             .is_none()
-            .then(|| crate::npm::git_source_from_url(tarball))
+            .then(|| crate::tailors::node::git_source_from_url(tarball))
             .flatten()
     })
 }
@@ -669,7 +669,7 @@ fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) ->
         let repo = repo.unwrap_or("(unknown repository)");
         let commit = yaml_str(resolution.get("commit")).unwrap_or("unspecified commit");
         return Some(
-            crate::npm::git_dependency_detail(name, &format!("git+{repo}#{commit}"))
+            crate::tailors::node::git_dependency_detail(name, &format!("git+{repo}#{commit}"))
                 .unwrap_or_else(|| {
                     format!(
                         "npm_git_dep: {name}: repo {repo}, commit {commit}; \
@@ -681,7 +681,7 @@ fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) ->
     let tarball = yaml_str(resolution.get("tarball")).unwrap_or_default();
     let has_integrity = yaml_str(resolution.get("integrity")).is_some();
     if !has_integrity {
-        if let Some(detail) = crate::npm::git_dependency_detail(name, tarball) {
+        if let Some(detail) = crate::tailors::node::git_dependency_detail(name, tarball) {
             return Some(detail);
         }
     }
@@ -691,10 +691,10 @@ fn source_error(name: &str, resolution: Option<&BTreeMap<String, YamlValue>>) ->
     None
 }
 
-fn lock_git_source(url: &str, has_integrity: bool) -> Option<crate::gitsrc::GitSource> {
-    crate::npm::explicit_git_source(url).or_else(|| {
+fn lock_git_source(url: &str, has_integrity: bool) -> Option<crate::kernel::gitsrc::GitSource> {
+    crate::tailors::node::explicit_git_source(url).or_else(|| {
         (!has_integrity)
-            .then(|| crate::npm::git_source_from_url(url))
+            .then(|| crate::tailors::node::git_source_from_url(url))
             .flatten()
     })
 }
@@ -1851,7 +1851,7 @@ pub fn plan_yarn(
         } else if entry.integrity.is_some() {
             None
         } else {
-            crate::npm::git_dependency_detail(&entry.name, &entry.resolved)
+            crate::tailors::node::git_dependency_detail(&entry.name, &entry.resolved)
         };
         let integrity = if git_detail.is_some() || pinned_git.is_some() {
             String::new()
@@ -2195,8 +2195,8 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             Target::External(detail) => {
                 if dependency.optional {
                     if detail.starts_with("npm_git_dep:") {
-                        crate::policy::record(
-                            crate::policy::GIT_DEPENDENCY,
+                        crate::kernel::policy::record(
+                            crate::kernel::policy::GIT_DEPENDENCY,
                             &dependency.name,
                             detail,
                         )?;
@@ -2231,8 +2231,8 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
                 if let Some(detail) = &node.external {
                     if dependency.optional || node.optional {
                         if detail.starts_with("npm_git_dep:") {
-                            crate::policy::record(
-                                crate::policy::GIT_DEPENDENCY,
+                            crate::kernel::policy::record(
+                                crate::kernel::policy::GIT_DEPENDENCY,
                                 &node.name,
                                 detail,
                             )?;
@@ -2420,7 +2420,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
 
     let mut packages = Vec::new();
     for (path, occupied) in occupied {
-        crate::npm::validate_lock_path(&path)?;
+        crate::tailors::node::validate_lock_path(&path)?;
         let Occupied::Package { node_key, .. } = occupied else {
             continue;
         };
@@ -2446,10 +2446,12 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
     }
     packages.sort_by(|a, b| a.path.cmp(&b.path));
     for link in links.values() {
-        crate::npm::validate_lock_path(&link.path)?;
+        crate::tailors::node::validate_lock_path(&link.path)?;
     }
     Ok(NpmPlan {
-        node_version: crate::npm::node_pin(platform)?.version.to_string(),
+        node_version: crate::tailors::node::node_pin(platform)?
+            .version
+            .to_string(),
         packages,
         links: links.into_values().collect(),
         workspaces: workspace_paths.into_iter().collect(),
@@ -3219,7 +3221,7 @@ mod git_import_tests {
         );
         let project = project();
         let plan = super::plan_pnpm(
-            crate::platform::Platform::X86_64UnknownLinuxGnu,
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             &project,
         )
@@ -3227,7 +3229,7 @@ mod git_import_tests {
         let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
         assert!(package.git.is_none());
         assert_eq!(package.integrity, SRI);
-        let _ = crate::store::remove_tree(&project);
+        let _ = crate::kernel::store::remove_tree(&project);
     }
 
     #[test]
@@ -3243,7 +3245,7 @@ plugin@1.0.0:
         );
         let project = project();
         let plan = super::plan_yarn(
-            crate::platform::Platform::X86_64UnknownLinuxGnu,
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             r#"{"dependencies":{"plugin":"1.0.0"}}"#,
             &project,
@@ -3252,7 +3254,7 @@ plugin@1.0.0:
         let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
         assert!(package.git.is_none());
         assert_eq!(package.integrity, SRI);
-        let _ = crate::store::remove_tree(&project);
+        let _ = crate::kernel::store::remove_tree(&project);
     }
 
     #[test]
@@ -3290,11 +3292,11 @@ plugin@1.0.0:
         )
         .unwrap();
         let result = super::plan_pnpm(
-            crate::platform::Platform::X86_64UnknownLinuxGnu,
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
             &lock,
             &project,
         );
-        let _ = crate::store::remove_tree(&project);
+        let _ = crate::kernel::store::remove_tree(&project);
         let plan = match result {
             Ok(plan) => plan,
             Err(error) => panic!("codeload dependency was rejected: {error}"),

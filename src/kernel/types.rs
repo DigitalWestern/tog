@@ -59,7 +59,7 @@ pub struct LockedPackage {
     /// is the ordinary sdist path. Absent for registry packages, so plans
     /// written before this field stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git: Option<crate::gitsrc::GitSource>,
+    pub git: Option<crate::kernel::gitsrc::GitSource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,11 +1,11 @@
 //! The pinned Rust formatting component used by `blanket fmt`.
 
-use crate::cargo;
-use crate::fetch::{download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::sandbox::BuildSpec;
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::sandbox::BuildSpec;
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
+use crate::tailors::cargo;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -41,7 +41,7 @@ fn component(platform: Platform) -> io::Result<&'static RustfmtComponent> {
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, "rustfmt component", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "rustfmt component", "stage 4")?;
     component(platform).map(|_| ())
 }
 
@@ -95,7 +95,7 @@ pub fn ensure_rustfmt(
     rust_version: &str,
     rust_object: &Path,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "rustfmt component", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "rustfmt component", "stage 4")?;
     let expected_rust_id = cargo::rust_object_id(platform, rust_version)?;
     let rust_object = rust_object.canonicalize()?;
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {
@@ -108,12 +108,12 @@ pub fn ensure_rustfmt(
     let identity = rustfmt_identity(platform, rust_version, &rust_object)?;
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
     if !store.cache_path("sha256", pin.sha256).is_file() {
-        crate::ui::note(&format!(
+        crate::kernel::ui::note(&format!(
             "fetching rustfmt {rust_version} for {}",
             platform.triple()
         ));
@@ -121,7 +121,7 @@ pub fn ensure_rustfmt(
     let archive = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
     if let Err(error) = stage_rustfmt(store, &staged, platform, archive.as_ref(), &rust_object) {
-        let _ = crate::store::remove_tree(&staged);
+        let _ = crate::kernel::store::remove_tree(&staged);
         return Err(error);
     }
 
@@ -142,10 +142,10 @@ pub fn ensure_rustfmt(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", staged.join("bin").display()),
     };
-    let probe_result = crate::sandbox::run_build_spec_on_for_store(platform, &probe, store);
-    let _ = crate::store::remove_tree(&scratch);
+    let probe_result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &probe, store);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     if let Err(error) = probe_result {
-        let _ = crate::store::remove_tree(&staged);
+        let _ = crate::kernel::store::remove_tree(&staged);
         return Err(io::Error::new(
             error.kind(),
             format!("rustfmt probe failed before publication: {error}"),
@@ -160,7 +160,7 @@ pub fn ensure_rustfmt(
     std::os::unix::fs::symlink(&committed_link, &lib)?;
     let actual_link = fs::read_link(&lib)?;
     if actual_link.is_absolute() || actual_link != committed_link {
-        let _ = crate::store::remove_tree(&staged);
+        let _ = crate::kernel::store::remove_tree(&staged);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "rustfmt publication link is not the expected relative Rust lib link",
@@ -169,7 +169,7 @@ pub fn ensure_rustfmt(
 
     store
         .commit_with_deps(&identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.object_id(
                 rust_object
                     .file_name()
@@ -212,7 +212,7 @@ pub fn run_sandboxed(
     argv.extend(args.iter().cloned());
     let mut trace = Command::new(&argv[0]);
     trace.args(&argv[1..]).current_dir(invocation_dir);
-    crate::ui::trace_command(&trace);
+    crate::kernel::ui::trace_command(&trace);
     let spec = BuildSpec {
         argv,
         cwd: invocation_dir.to_path_buf(),
@@ -236,8 +236,8 @@ pub fn run_sandboxed(
             rust_object.join("bin").display()
         ),
     };
-    let result = crate::sandbox::run_build_spec_status_on_for_store(platform, &spec, store);
-    let _ = crate::store::remove_tree(&scratch);
+    let result = crate::kernel::sandbox::run_build_spec_status_on_for_store(platform, &spec, store);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     result
 }
 
@@ -270,7 +270,7 @@ fn stage_rustfmt(
         .args(["--strip-components", "2"])
         .arg(&cargo_fmt)
         .arg(&rustfmt);
-    let status = crate::supervise::status_owned(&mut command, store)
+    let status = crate::kernel::supervise::status_owned(&mut command, store)
         .map_err(|error| io::Error::new(error.kind(), format!("spawn tar for rustfmt: {error}")))?;
     if !status.success() {
         return Err(io::Error::other("rustfmt archive extraction failed"));
@@ -317,7 +317,7 @@ fn rust_object_lib_link(rust_object: &Path) -> io::Result<PathBuf> {
 fn archive_entries(store: &Store, archive: &Path) -> io::Result<Vec<String>> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-tJf"]).arg(archive);
-    let output = crate::supervise::output_owned(&mut command, store)
+    let output = crate::kernel::supervise::output_owned(&mut command, store)
         .map_err(|error| io::Error::new(error.kind(), format!("list rustfmt archive: {error}")))?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
@@ -403,7 +403,7 @@ mod tests {
             let rust_object = format!("{}-rust-{RUSTFMT_VERSION}", "b".repeat(40));
             let identity =
                 rustfmt_identity(*platform, RUSTFMT_VERSION, Path::new(&rust_object)).unwrap();
-            let stub = crate::objmeta::legacy_record(crate::types::Identity {
+            let stub = crate::kernel::objmeta::legacy_record(crate::kernel::types::Identity {
                 kind: "rust".into(),
                 name: "rust".into(),
                 version: RUSTFMT_VERSION.into(),
@@ -411,8 +411,8 @@ mod tests {
             });
             let mut stub = stub;
             stub.id = rust_object.clone();
-            match crate::objmeta::adapt_identity_for_test(identity, vec![stub]) {
-                crate::objmeta::Adaptation::Proven(deps) => {
+            match crate::kernel::objmeta::adapt_identity_for_test(identity, vec![stub]) {
+                crate::kernel::objmeta::Adaptation::Proven(deps) => {
                     assert_eq!(
                         deps.objects.iter().cloned().collect::<Vec<_>>(),
                         vec![rust_object]
@@ -425,7 +425,7 @@ mod tests {
                         vec![format!("sha256:{}", pin.sha256)]
                     );
                 }
-                crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+                crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
             }
         }
     }
@@ -497,7 +497,7 @@ mod tests {
             assert!(name.starts_with("stage-"), "{name}");
             assert!(name.starts_with(prefix), "{name}");
         }
-        let _ = crate::store::remove_tree(&parent);
+        let _ = crate::kernel::store::remove_tree(&parent);
     }
 
     #[test]
@@ -524,6 +524,6 @@ mod tests {
         assert!(!link.is_absolute());
         assert_eq!(link, PathBuf::from(format!("../{rust_id}/lib")));
 
-        let _ = crate::store::remove_tree(&root);
+        let _ = crate::kernel::store::remove_tree(&root);
     }
 }

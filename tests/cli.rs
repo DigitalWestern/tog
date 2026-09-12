@@ -621,7 +621,7 @@ fn x_needs_a_registry_outside_a_project() {
 fn command_dispatch_runs_automatic_metadata_maintenance() {
     let home = TempDir::new("x-maintenance");
     let store_root = home.0.join("store");
-    let identity = blanket::types::Identity {
+    let identity = blanket::kernel::types::Identity {
         kind: "cpython".into(),
         name: "cpython".into(),
         version: "3.11.9".into(),
@@ -925,7 +925,9 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         format!(
             "x/2\0{}\0python\0fake\0\0{}",
             store.display(),
-            blanket::platform::Platform::host().unwrap().triple()
+            blanket::kernel::platform::Platform::host()
+                .unwrap()
+                .triple()
         )
         .as_bytes(),
     ));
@@ -943,7 +945,7 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         serde_json::json!({
             "schema": "closure/1",
             "ecosystem": "python",
-            "platform": blanket::platform::Platform::host().unwrap().triple(),
+            "platform": blanket::kernel::platform::Platform::host().unwrap().triple(),
             "body": body
         })
         .to_string(),
@@ -1089,7 +1091,7 @@ fn registered_x_environment(home: &Path, store_root: &Path) -> (PathBuf, String)
 /// requires the closure to name one, and these cases must not depend on a
 /// realized toolchain or the network.
 fn publish_certified_object(store_root: &Path, name: &str) -> PathBuf {
-    let identity = blanket::types::Identity {
+    let identity = blanket::kernel::types::Identity {
         kind: "test".into(),
         name: name.into(),
         version: "1".into(),
@@ -1292,7 +1294,7 @@ fn synced_python_closure_with_exception(project: &Path, kind: &str) -> PathBuf {
     let requirements = hex::encode(Sha256::digest(
         std::fs::read(project.join("requirements.txt")).unwrap(),
     ));
-    let platform = blanket::platform::Platform::host().unwrap();
+    let platform = blanket::kernel::platform::Platform::host().unwrap();
     let closures = project.join(".blanket/closures");
     std::fs::create_dir_all(&closures).unwrap();
     let path = closures.join("python.json");

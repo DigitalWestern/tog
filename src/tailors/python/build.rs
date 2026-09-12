@@ -1,13 +1,13 @@
 //! Sandboxed sdist to wheel builds. PEP 517 build dependencies are inspected
 //! without execution and, when needed, realized as a separate Python env.
 
-use crate::build_requires::{self, ArchiveInfo};
-use crate::fetch::{download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::project;
-use crate::sandbox::Sandbox;
-use crate::store::Store;
-use crate::types::{ArtifactKind, Identity, LockedPackage, Plan};
+use crate::comforter;
+use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::sandbox::Sandbox;
+use crate::kernel::store::Store;
+use crate::kernel::types::{ArtifactKind, Identity, LockedPackage, Plan};
+use crate::tailors::python::build_requires::{self, ArchiveInfo};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -73,7 +73,7 @@ pub fn derivation_fingerprint() -> String {
 fn sdist_identity(
     platform: Platform,
     pkg: &LockedPackage,
-    pin: &crate::python::PinnedPython,
+    pin: &crate::tailors::python::PinnedPython,
 ) -> Identity {
     Identity {
         kind: "sdist-build".into(),
@@ -105,7 +105,7 @@ fn object_id(path: &Path, label: &str) -> io::Result<String> {
 fn isolated_sdist_identity_from_ids(
     platform: Platform,
     pkg: &LockedPackage,
-    pin: &crate::python::PinnedPython,
+    pin: &crate::tailors::python::PinnedPython,
     build_env_id: &str,
     rust_id: Option<&str>,
     vendor_id: Option<&str>,
@@ -200,7 +200,9 @@ fn native_libs_identity_id(
     fast_requirements: bool,
 ) -> io::Result<Option<String>> {
     if (native_build || !fast_requirements) && native_libs_supported(platform) {
-        Ok(Some(crate::nativelibs::object_id_for(store, platform)?))
+        Ok(Some(crate::tailors::python::nativelibs::object_id_for(
+            store, platform,
+        )?))
     } else {
         Ok(None)
     }
@@ -225,7 +227,7 @@ pub(crate) fn plan_sdist_identity_input(
     python_version: &str,
     runtime_plan: Option<&Plan>,
 ) -> io::Result<SdistIdentityPlan> {
-    let pin = crate::python::lookup(platform, python_version)
+    let pin = crate::tailors::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(store, &sdist)?;
@@ -254,7 +256,7 @@ pub(crate) fn plan_sdist_identity_input(
     // Planning the nested environment may inspect more sdists and acquire
     // the same GC lock.
     drop(sdist);
-    let build_env_id = crate::project::planned_env_object_id(store, platform, &build_plan)?;
+    let build_env_id = crate::comforter::planned_env_object_id(store, platform, &build_plan)?;
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
@@ -275,7 +277,7 @@ pub(crate) fn plan_sdist_identity_input(
                 native_libs_id.as_deref(),
             ))
         })();
-        let _ = crate::store::remove_tree(&work);
+        let _ = crate::kernel::store::remove_tree(&work);
         result?
     } else {
         isolated_sdist_identity_from_ids(
@@ -353,7 +355,7 @@ fn generate_cargo_lock(
         .env("PATH", path_var)
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
-    let status = crate::supervise::status_owned(&mut command, store).map_err(|e| {
+    let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("run store cargo to generate Cargo.lock: {e}"),
@@ -395,8 +397,8 @@ fn rust_plan_inputs(
         )
     })?;
     let manifest = source.join(manifest_rel);
-    let rust_version = crate::cargo::resolve_toolchain(platform, source)?.to_string();
-    let rust_id = crate::cargo::rust_object_id(platform, &rust_version)?;
+    let rust_version = crate::tailors::cargo::resolve_toolchain(platform, source)?.to_string();
+    let rust_id = crate::tailors::cargo::rust_object_id(platform, &rust_version)?;
     let generated_path =
         store.cache_path("cargo-lock", &cargo_lock_cache_key(sdist_sha256, &rust_id));
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
@@ -423,7 +425,7 @@ fn rust_plan_inputs(
     } else {
         // This is the one cold path that must invoke Cargo. Persist the lock
         // before any later wheel-cache lookup so warm rebuilds stay offline.
-        let rust_obj = crate::cargo::ensure_rust_for(store, platform, &rust_version)?;
+        let rust_obj = crate::tailors::cargo::ensure_rust_for(store, platform, &rust_version)?;
         let plan_home = work.join("cargo-plan-home");
         let lock = generate_cargo_lock(store, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
@@ -431,8 +433,8 @@ fn rust_plan_inputs(
         fs::write(&generated_path, &text)?;
         (text, true)
     };
-    let cargo_plan = crate::cargo::plan_cargo(&lock_text, &rust_version)?;
-    let vendor_id = crate::cargo::vendor_object_id(&cargo_plan)?;
+    let cargo_plan = crate::tailors::cargo::plan_cargo(&lock_text, &rust_version)?;
+    let vendor_id = crate::tailors::cargo::vendor_object_id(&cargo_plan)?;
     Ok(RustPlanInputs {
         rust_version,
         rust_id,
@@ -455,17 +457,17 @@ fn prepare_rust(
             "Rust build trigger found, but the sdist has no Cargo.toml",
         )
     })?;
-    let rust_obj = crate::cargo::ensure_rust_for(store, platform, &inputs.rust_version)?;
-    let cargo_plan = crate::cargo::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
-    let vendor_obj = crate::cargo::realize_vendor(store, &cargo_plan)?;
+    let rust_obj = crate::tailors::cargo::ensure_rust_for(store, platform, &inputs.rust_version)?;
+    let cargo_plan = crate::tailors::cargo::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
+    let vendor_obj = crate::tailors::cargo::realize_vendor(store, &cargo_plan)?;
     let cargo_home = work.join("cargo-home");
     fs::create_dir_all(&cargo_home)?;
     // An sdist's vendored crates can themselves come from git sources.
     fs::write(
         cargo_home.join("config.toml"),
-        crate::cargo::blanket_config_text_for(
+        crate::tailors::cargo::blanket_config_text_for(
             &vendor_obj,
-            &crate::cargo::plan_git_sources(&cargo_plan),
+            &crate::tailors::cargo::plan_git_sources(&cargo_plan),
         )?,
     )?;
     Ok((rust_obj, vendor_obj))
@@ -530,7 +532,7 @@ fn run_sdist_build(
     }
     envs.push(("PATH".into(), base_path));
     if let Some(native_libs) = native_libs {
-        envs = crate::nativelibs::compose_env(native_libs, &envs);
+        envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
     }
     let path = envs
         .iter()
@@ -546,9 +548,9 @@ fn run_sdist_build(
             .collect(),
         write: vec![work],
     };
-    crate::sandbox::run_build_spec_on_for_store(
+    crate::kernel::sandbox::run_build_spec_on_for_store(
         platform,
-        &crate::sandbox::BuildSpec {
+        &crate::kernel::sandbox::BuildSpec {
             argv,
             cwd: work.to_path_buf(),
             env: envs,
@@ -605,7 +607,7 @@ pub(crate) fn git_sdist_package(
             format!("{}: not a git dependency", pkg.name),
         )
     })?;
-    let object = crate::gitsrc::ensure_git_source(store, source)?;
+    let object = crate::kernel::gitsrc::ensure_git_source(store, source)?;
     let root = match &source.subdirectory {
         Some(subdir) => {
             if subdir.contains("..") || subdir.starts_with('/') {
@@ -631,7 +633,7 @@ pub(crate) fn git_sdist_package(
         ));
     }
     let (sha256, filename) =
-        crate::gitsrc::pack_checkout(store, platform, &root, &pkg.name, &pkg.version)?;
+        crate::kernel::gitsrc::pack_checkout(store, platform, &root, &pkg.name, &pkg.version)?;
     Ok(LockedPackage {
         name: pkg.name.clone(),
         version: pkg.version.clone(),
@@ -640,7 +642,7 @@ pub(crate) fn git_sdist_package(
         // fetch path never dials out for this URL.
         url: format!("git+{}@{}", source.url, source.commit),
         sha256,
-        kind: crate::types::ArtifactKind::Sdist,
+        kind: crate::kernel::types::ArtifactKind::Sdist,
         git: None,
     })
 }
@@ -662,8 +664,8 @@ pub(crate) fn build_sdist_wheel_at_depth(
             ),
         ));
     }
-    crate::platform::require_host(platform, "sdist build", "stage 3")?;
-    let pin = crate::python::lookup(platform, python_version)
+    crate::kernel::platform::require_host(platform, "sdist build", "stage 3")?;
+    let pin = crate::tailors::python::lookup(platform, python_version)
         .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
 
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
@@ -678,7 +680,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     if fast_sdist {
         let fast_id = fast_identity.object_id();
         if store.has(&fast_id)? {
-            crate::policy::check_cached(store, &fast_id)?;
+            crate::kernel::policy::check_cached(store, &fast_id)?;
             return find_wheel(&store.object_path(&fast_id));
         }
     }
@@ -696,7 +698,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // The nested build environment may fetch its own artifacts. Do not hold
     // this sdist's cache lease while it acquires the same GC lock.
     drop(sdist);
-    let build_env = project::realize_env_at_depth(store, platform, &build_plan, depth)?;
+    let build_env = comforter::realize_env_at_depth(store, platform, &build_plan, depth)?;
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
@@ -771,13 +773,15 @@ pub(crate) fn build_sdist_wheel_at_depth(
     };
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
-        let _ = crate::store::remove_tree(&work);
+        crate::kernel::policy::check_cached(store, &id)?;
+        let _ = crate::kernel::store::remove_tree(&work);
         return find_wheel(&store.object_path(&id));
     }
 
     let native_libs = if native_libs_id.is_some() {
-        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+        Some(crate::tailors::python::nativelibs::ensure_native_libs(
+            store, platform,
+        )?)
     } else {
         None
     };
@@ -788,8 +792,8 @@ pub(crate) fn build_sdist_wheel_at_depth(
                 .cargo_manifest
                 .as_ref()
                 .expect("Rust source has a Cargo manifest");
-            crate::policy::record(
-                crate::policy::UNATTESTED_CARGO_LOCK,
+            crate::kernel::policy::record(
+                crate::kernel::policy::UNATTESTED_CARGO_LOCK,
                 &manifest.display().to_string(),
                 "Cargo.lock was generated by store Cargo outside the build sandbox",
             )?;
@@ -803,7 +807,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         (None, None, None)
     };
 
-    let cpython_obj = crate::python::ensure_python_for(store, pin, platform)?;
+    let cpython_obj = crate::tailors::python::ensure_python_for(store, pin, platform)?;
     let input = source.as_deref().unwrap_or(&sdist_named);
     run_sdist_build(
         store,
@@ -840,18 +844,20 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let built = wheels[0].clone();
     let staged = store.stage()?;
     fs::copy(&built, staged.join(built.file_name().unwrap()))?;
-    let _ = crate::store::remove_tree(&work);
-    let candidate = crate::policy::object_exceptions();
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(&cpython_obj)?)?;
-    deps.object_id(&crate::store::object_id_from_path(&build_env)?)?;
+    let _ = crate::kernel::store::remove_tree(&work);
+    let candidate = crate::kernel::policy::object_exceptions();
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(&cpython_obj)?)?;
+    deps.object_id(&crate::kernel::store::object_id_from_path(&build_env)?)?;
     deps.cache_digest(Digest::sha256(&pkg.sha256)?);
     if let Some(inputs) = &rust_inputs {
         deps.object_id(&inputs.rust_id)?;
         deps.object_id(&inputs.vendor_id)?;
     }
     if let Some(native_libs) = native_libs.as_ref() {
-        deps.object_id(&crate::store::object_id_from_path(&native_libs.path)?)?;
+        deps.object_id(&crate::kernel::store::object_id_from_path(
+            &native_libs.path,
+        )?)?;
     }
     let (object, _) = store.commit_with_deps(&identity, &staged, &candidate, &deps)?;
     find_wheel(&object)
@@ -933,7 +939,7 @@ mod tests {
 
     #[test]
     fn darwin_sdist_identity_unchanged() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
@@ -945,7 +951,7 @@ mod tests {
             kind: ArtifactKind::Sdist,
                 git: None,
         };
-        let pin = crate::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
+        let pin = crate::tailors::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
         let identity = sdist_identity(Platform::Aarch64AppleDarwin, &pkg, pin);
         assert_eq!(
             identity.object_id(),
@@ -955,7 +961,7 @@ mod tests {
 
     #[test]
     fn darwin_native_sdist_identity_does_not_realize_native_libs() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("darwin-native");
@@ -978,7 +984,7 @@ mod tests {
 
     #[test]
     fn isolated_identity_has_schema_three_and_build_env() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
@@ -990,7 +996,7 @@ mod tests {
             kind: ArtifactKind::Sdist,
             git: None,
         };
-        let pin = crate::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
+        let pin = crate::tailors::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
         let identity = isolated_sdist_identity_from_ids(
             Platform::Aarch64AppleDarwin,
             &pkg,
@@ -1010,7 +1016,7 @@ mod tests {
 
     #[test]
     fn native_sdist_identity_records_linker_configuration() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
@@ -1022,7 +1028,8 @@ mod tests {
             kind: ArtifactKind::Sdist,
             git: None,
         };
-        let pin = crate::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
+        let pin =
+            crate::tailors::python::lookup(Platform::X86_64UnknownLinuxGnu, "3.12.14").unwrap();
         let identity = isolated_sdist_identity_from_ids(
             Platform::X86_64UnknownLinuxGnu,
             &pkg,
@@ -1038,7 +1045,7 @@ mod tests {
 
     #[test]
     fn recursion_cap_is_loud() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
@@ -1066,7 +1073,7 @@ mod tests {
 
     #[test]
     fn build_sdist_preserves_unsupported_kind() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let pkg = LockedPackage {
@@ -1088,7 +1095,7 @@ mod tests {
 
     #[test]
     fn linux_sdist_build_uses_host_compilers() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         assert_eq!(
@@ -1112,5 +1119,5 @@ pub fn ensure_build_environment(
     platform: Platform,
     python_version: &str,
 ) -> io::Result<PathBuf> {
-    project::realize_env(store, platform, &build_toolchain_plan(python_version))
+    comforter::realize_env(store, platform, &build_toolchain_plan(python_version))
 }

@@ -12,10 +12,10 @@ pub mod pypi;
 pub mod pyselect;
 pub mod wheel;
 
-use crate::fetch::{download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
@@ -129,7 +129,7 @@ fn lookup_in_pins<'a>(
     version: &str,
 ) -> Option<&'a PinnedPython> {
     let release_len = canonical_release_len(version)?;
-    let requested = crate::pep440::Version::parse(version).ok()?;
+    let requested = crate::tailors::python::pep440::Version::parse(version).ok()?;
     if requested.has_epoch() || requested.is_prerelease() || requested.has_local() {
         return None;
     }
@@ -155,8 +155,8 @@ fn lookup_in_pins<'a>(
     }
 }
 
-fn parse_pinned_version(version: &str) -> Option<crate::pep440::Version> {
-    let parsed = crate::pep440::Version::parse(version).ok()?;
+fn parse_pinned_version(version: &str) -> Option<crate::tailors::python::pep440::Version> {
+    let parsed = crate::tailors::python::pep440::Version::parse(version).ok()?;
     (parsed.release_len() == 3
         && !parsed.has_epoch()
         && !parsed.is_prerelease()
@@ -171,7 +171,7 @@ pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<Str
 }
 
 pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
-    crate::platform::require_host(platform, "CPython", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "CPython", "stage 2")?;
     lookup(platform, version)
         .map(|_| ())
         .ok_or_else(|| no_pin(&format!("cpython {version}"), platform, "stage 2"))
@@ -230,7 +230,7 @@ pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "uv", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "uv", "stage 2")?;
     let pin = UV
         .iter()
         .find(|pin| pin.platform == platform)
@@ -238,7 +238,7 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     let identity = uv_identity(pin);
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
@@ -251,13 +251,13 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
         .args(["-C"])
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() || !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
     store
         .commit_with_deps(&identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(pin.sha256)?);
             deps
         })
@@ -275,7 +275,7 @@ pub(crate) fn ensure_python_for(
     pin: &PinnedPython,
     platform: Platform,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "CPython", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "CPython", "stage 2")?;
     if pin.platform != platform {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -290,7 +290,7 @@ pub(crate) fn ensure_python_for(
     let identity = cpython_identity(pin);
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -304,7 +304,7 @@ pub(crate) fn ensure_python_for(
         .args(["-C"])
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -313,7 +313,7 @@ pub(crate) fn ensure_python_for(
     }
     store
         .commit_with_deps(&identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(pin.sha256)?);
             deps
         })
@@ -343,9 +343,9 @@ mod tests {
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -355,7 +355,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
 

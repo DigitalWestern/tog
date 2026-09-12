@@ -379,7 +379,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
     let mut components = Vec::new();
     let mut exception_properties = Vec::new();
     for eco in &entries {
-        let body = crate::project::read_closure(project_dir, eco)?;
+        let body = crate::comforter::read_closure(project_dir, eco)?;
         if let Some(exceptions) = body.get("exceptions").and_then(Value::as_array) {
             for exception in exceptions {
                 let kind = exception

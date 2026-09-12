@@ -2,7 +2,7 @@
 //! project policy chain, the exception kinds a sync may wave through, and
 //! the collision checks the store consults at commit time.
 
-use crate::store::Store;
+use crate::kernel::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -253,13 +253,13 @@ pub fn object_exceptions() -> Vec<Exception> {
 
 /// Refuse a cached object when its recorded exceptions are denied now.
 pub fn check_cached(store: &Store, id: &str) -> io::Result<()> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     check_cached_with_activity(store, &activity, id)
 }
 
 pub fn check_cached_with_activity(
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     id: &str,
 ) -> io::Result<()> {
     store.require_activity(activity, "cached policy check")?;

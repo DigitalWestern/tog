@@ -6,8 +6,8 @@
 //! the network, so it happens at realization time like any other download —
 //! never inside a build sandbox.
 
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -202,11 +202,11 @@ fn configure_git(command: &mut Command, args: &[&str], cwd: Option<&Path>) {
 fn run_git_with_activity(
     args: &[&str],
     cwd: Option<&Path>,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);
-    crate::supervise::output(&mut command, activity)
+    crate::kernel::supervise::output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
 }
 
@@ -228,7 +228,7 @@ fn git_ok_with_activity(
     args: &[&str],
     cwd: Option<&Path>,
     what: &str,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<String> {
     let output = run_git_with_activity(args, cwd, activity)?;
     if !output.status.success() {
@@ -289,7 +289,7 @@ fn remove_git_dirs(root: &Path) -> io::Result<()> {
             }
             if file_type.is_dir() {
                 if entry.file_name() == ".git" {
-                    crate::store::remove_tree(&path)?;
+                    crate::kernel::store::remove_tree(&path)?;
                 } else {
                     stack.push(path);
                 }
@@ -409,7 +409,7 @@ fn resolve_target_components(
 
 fn validate_checkout_tree_with_activity(
     root: &Path,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<()> {
     validate_checkout_tree_at_with_activity(root, 0, activity)
 }
@@ -417,7 +417,7 @@ fn validate_checkout_tree_with_activity(
 fn validate_checkout_tree_at_with_activity(
     root: &Path,
     depth: usize,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<()> {
     if depth > 32 {
         return Err(err("git submodule nesting exceeds 32 levels"));
@@ -490,11 +490,11 @@ fn validate_checkout_tree_at_with_activity(
 /// Realize a git source in the store and return its object path.
 pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBuf> {
     validate_source(source)?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(source);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -599,7 +599,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
         validate_symlinks(&work)
     })();
     if let Err(e) = result {
-        let _ = crate::store::remove_tree(&work);
+        let _ = crate::kernel::store::remove_tree(&work);
         return Err(e);
     }
     store
@@ -608,7 +608,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
             &identity,
             &work,
             &[],
-            &crate::store::ObjectDeps::new(),
+            &crate::kernel::store::ObjectDeps::new(),
         )
         .map(|(path, _)| path)
 }
@@ -717,7 +717,7 @@ mod tests {
         std::os::unix::fs::symlink("chain-end", root.join("chain-start")).unwrap();
         std::os::unix::fs::symlink("../../outside", root.join("chain-end")).unwrap();
         assert!(validate_symlinks(&root).is_err());
-        let _ = crate::store::remove_tree(&root);
+        let _ = crate::kernel::store::remove_tree(&root);
     }
 }
 
@@ -728,7 +728,7 @@ mod realization_tests {
     struct Temp(PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {
-            let _ = crate::store::remove_tree(&self.0);
+            let _ = crate::kernel::store::remove_tree(&self.0);
         }
     }
     fn temp(tag: &str) -> Temp {
@@ -765,19 +765,19 @@ mod realization_tests {
         (format!("file://{}", repo.display()), commit)
     }
 
-    fn store_at(root: &Path) -> crate::store::Store {
+    fn store_at(root: &Path) -> crate::kernel::store::Store {
         let store_root = root.join("store");
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(store_root.join(sub)).unwrap();
         }
-        crate::store::Store {
+        crate::kernel::store::Store {
             root: store_root.canonicalize().unwrap(),
         }
     }
 
     #[test]
     fn realizes_a_commit_and_strips_git_metadata() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = temp("realize");
@@ -808,7 +808,7 @@ mod realization_tests {
 
     #[test]
     fn a_wrong_commit_is_refused() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = temp("wrong");
@@ -828,7 +828,7 @@ mod realization_tests {
 
     #[test]
     fn an_unpinned_ref_is_refused_and_resolve_ref_pins_it() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = temp("ref");
@@ -849,7 +849,7 @@ mod realization_tests {
 
     #[test]
     fn checkout_rejects_attribute_transformed_content() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = temp("attributes");
@@ -881,7 +881,7 @@ mod realization_tests {
 
     #[test]
     fn pack_keeps_safe_links_empty_dirs_and_verbatim_names() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = temp("pack");
@@ -890,7 +890,7 @@ mod realization_tests {
         fs::write(checkout.join("line\nname"), b"content\n").unwrap();
         std::os::unix::fs::symlink("line\nname", checkout.join("safe-link")).unwrap();
         let store = store_at(&root.0);
-        let platform = crate::platform::Platform::host().unwrap();
+        let platform = crate::kernel::platform::Platform::host().unwrap();
         let (hash, filename) = pack_checkout(&store, platform, &checkout, "pkg", "1.0").unwrap();
         let archive = store.cache_path("sha256", &hash);
         let unpacked = root.0.join("unpacked");
@@ -954,10 +954,10 @@ mod realization_tests {
 
     #[test]
     fn pack_rejects_paths_and_links_that_no_ustar_header_can_hold() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let platform = crate::platform::Platform::host().unwrap();
+        let platform = crate::kernel::platform::Platform::host().unwrap();
 
         // bsdtar drops an overlong path and still exits 0, so relying on the
         // subprocess would cache a truncated archive here instead of failing.
@@ -994,7 +994,7 @@ struct StageGuard(PathBuf);
 
 impl Drop for StageGuard {
     fn drop(&mut self) {
-        let _ = crate::store::remove_tree(&self.0);
+        let _ = crate::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -1008,7 +1008,7 @@ impl Drop for StageGuard {
 /// hash, and that hash is what the wheel's identity commits to.
 pub fn pack_checkout(
     store: &Store,
-    platform: crate::platform::Platform,
+    platform: crate::kernel::platform::Platform,
     source_root: &Path,
     name: &str,
     version: &str,
@@ -1018,7 +1018,7 @@ pub fn pack_checkout(
             "refusing to pack {name:?}-{version:?}: names and versions must be [A-Za-z0-9._+-]"
         )));
     }
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let work = store.stage_with_activity(&activity)?;
     let _cleanup = StageGuard(work.clone());
     let prefix = format!("{name}-{version}");
@@ -1027,7 +1027,7 @@ pub fn pack_checkout(
     // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
     // would take a rewrite expression built from these strings.
     let staged = work.join(&prefix);
-    crate::project::clone_tree_for_store(store, source_root, &staged, platform)?;
+    crate::comforter::clone_tree_for_store(store, source_root, &staged, platform)?;
     validate_symlinks(&staged)?;
     normalize_for_packing(&staged)?;
 
@@ -1097,7 +1097,7 @@ pub fn pack_checkout(
         .arg(&work)
         .arg("-T")
         .arg(&list);
-    let tar_status = crate::supervise::status(&mut tar, &activity)?;
+    let tar_status = crate::kernel::supervise::status(&mut tar, &activity)?;
     if !tar_status.success() {
         let _ = fs::remove_file(&uncompressed);
         return Err(err(format!(
@@ -1109,7 +1109,7 @@ pub fn pack_checkout(
     gzip.args(["-n", "-9", "-c"])
         .arg(&uncompressed)
         .stdout(fs::File::create(&archive)?);
-    let gzip_status = crate::supervise::status(&mut gzip, &activity)?;
+    let gzip_status = crate::kernel::supervise::status(&mut gzip, &activity)?;
     let _ = fs::remove_file(&uncompressed);
     if !gzip_status.success() {
         return Err(err(format!(
@@ -1119,7 +1119,7 @@ pub fn pack_checkout(
             gzip_status,
         )));
     }
-    let (sha256, _) = crate::fetch::cache_insert(store, &archive)?;
+    let (sha256, _) = crate::kernel::fetch::cache_insert(store, &archive)?;
     Ok((sha256, filename))
 }
 

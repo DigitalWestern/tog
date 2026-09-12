@@ -31,7 +31,7 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = blanket::store::remove_tree(&self.0);
+        let _ = blanket::kernel::store::remove_tree(&self.0);
     }
 }
 

@@ -3,10 +3,10 @@
 //! Inspection reads only archive metadata and pyproject.toml. Source is
 //! executed only later, by pip inside the existing build sandbox.
 
-use crate::platform::Platform;
-use crate::pyselect;
-use crate::store::Store;
-use crate::types::Plan;
+use crate::kernel::platform::Platform;
+use crate::kernel::store::Store;
+use crate::kernel::types::Plan;
+use crate::tailors::python::pyselect;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -108,14 +108,14 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
 
 fn status_for(command: &mut Command, store: Option<&Store>) -> io::Result<ExitStatus> {
     match store {
-        Some(store) => crate::supervise::status_owned(command, store),
+        Some(store) => crate::kernel::supervise::status_owned(command, store),
         None => command.status(),
     }
 }
 
 fn output_for(command: &mut Command, store: Option<&Store>) -> io::Result<Output> {
     match store {
-        Some(store) => crate::supervise::output_owned(command, store),
+        Some(store) => crate::kernel::supervise::output_owned(command, store),
         None => command.output(),
     }
 }
@@ -407,7 +407,7 @@ pub(crate) fn resolve_build_plan(
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let text = requires_resolution_text(requires);
-            let lock = crate::pypi::lock_requirement_text_with_uv(
+            let lock = crate::tailors::python::pypi::lock_requirement_text_with_uv(
                 store,
                 platform,
                 &text,
@@ -425,7 +425,7 @@ pub(crate) fn resolve_build_plan(
         }
     }
     // Cache selected URLs too: a warm build needs neither uv nor PyPI JSON.
-    let plan = crate::pypi::plan_python(platform, &lock, python_version)?;
+    let plan = crate::tailors::python::pypi::plan_python(platform, &lock, python_version)?;
     fs::write(&plan_path, serde_json::to_vec(&plan)?)?;
     Ok(plan)
 }
@@ -962,13 +962,13 @@ build-backend = "hatchling.build"
         let plan = Plan {
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
-            packages: vec![crate::types::LockedPackage {
+            packages: vec![crate::kernel::types::LockedPackage {
                 name: "NumPy".into(),
                 version: "1.26.4".into(),
                 filename: "numpy.whl".into(),
                 url: String::new(),
                 sha256: "a".repeat(64),
-                kind: crate::types::ArtifactKind::Wheel,
+                kind: crate::kernel::types::ArtifactKind::Wheel,
                 git: None,
             }],
         };

@@ -6,13 +6,13 @@
 //! exact artifact URL selected from their own file list; they still enter the
 //! ordinary Python `Plan` and realization path.
 
-use crate::build;
-use crate::platform::Platform;
-use crate::pypi;
-use crate::pyselect::{self, ConstraintSource, PythonInputs};
-use crate::sandbox::BuildSpec;
-use crate::store::Store;
-use crate::types::{ArtifactKind, LockedPackage};
+use crate::kernel::platform::Platform;
+use crate::kernel::sandbox::BuildSpec;
+use crate::kernel::store::Store;
+use crate::kernel::types::{ArtifactKind, LockedPackage};
+use crate::tailors::python::build;
+use crate::tailors::python::pypi;
+use crate::tailors::python::pyselect::{self, ConstraintSource, PythonInputs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -145,13 +145,13 @@ impl Manifest {
 
         let build_env = build::ensure_build_environment(store, platform, python_version)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
-        let pin = crate::python::lookup(platform, python_version).ok_or_else(|| {
+        let pin = crate::tailors::python::lookup(platform, python_version).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("no pinned CPython {python_version} for setup.py egg_info"),
             )
         })?;
-        let cpython = crate::python::ensure_python_for(store, pin, platform)
+        let cpython = crate::tailors::python::ensure_python_for(store, pin, platform)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
         let scratch = store.stage()?;
         let egg_base = scratch.join("egg-info");
@@ -175,7 +175,7 @@ impl Manifest {
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", build_env.join("bin").display()),
         };
-        let result = crate::sandbox::run_build_spec_on_for_store(platform, &spec, store);
+        let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, store);
         if let Err(error) = result {
             let tail = read_tail(&log, 20);
             let _ = fs::remove_dir_all(&scratch);
@@ -492,8 +492,8 @@ fn setup_or_requirements_manifest(dir: &Path, cfg: &BlanketPythonConfig) -> io::
                 requirements.extend(values.iter().cloned());
             } else {
                 for value in values {
-                    crate::policy::record(
-                        crate::policy::SKIPPED_OPTIONAL,
+                    crate::kernel::policy::record(
+                        crate::kernel::policy::SKIPPED_OPTIONAL,
                         value,
                         &format!("setup.cfg extra `{extra}` was not requested"),
                     )?;
@@ -576,8 +576,8 @@ fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io::Result<Ma
     for requirement in requirements {
         if pypi::is_skippable_spec(&requirement) {
             has_skippable_specs = true;
-            crate::policy::record(
-                crate::policy::REQUIREMENT_SKIPPED,
+            crate::kernel::policy::record(
+                crate::kernel::policy::REQUIREMENT_SKIPPED,
                 &requirement,
                 "project-local or direct reference is not a locked registry package",
             )?;
@@ -595,8 +595,8 @@ fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io::Result<Ma
     )?;
     let has_index_options = !index_options.is_empty();
     for option in index_options {
-        crate::policy::record(
-            crate::policy::UNATTESTED_INDEX,
+        crate::kernel::policy::record(
+            crate::kernel::policy::UNATTESTED_INDEX,
             &option,
             "requirements index/find-links options are recorded but never followed",
         )?;
@@ -673,8 +673,8 @@ fn project_manifest(
                 if active {
                     requirements.push(value.to_string());
                 } else {
-                    crate::policy::record(
-                        crate::policy::SKIPPED_OPTIONAL,
+                    crate::kernel::policy::record(
+                        crate::kernel::policy::SKIPPED_OPTIONAL,
                         value,
                         &format!("optional dependency group `{extra}` was not requested"),
                     )?;
@@ -683,8 +683,8 @@ fn project_manifest(
         }
     }
     if value.get("dependency-groups").is_some() {
-        crate::policy::record(
-            crate::policy::SKIPPED_OPTIONAL,
+        crate::kernel::policy::record(
+            crate::kernel::policy::SKIPPED_OPTIONAL,
             "[dependency-groups]",
             "PEP 735 dependency groups are excluded by default",
         )?;
@@ -696,8 +696,8 @@ fn project_manifest(
         .and_then(toml::Value::as_table)
         .and_then(|pdm| pdm.get("dev-dependencies"))
     {
-        crate::policy::record(
-            crate::policy::SKIPPED_OPTIONAL,
+        crate::kernel::policy::record(
+            crate::kernel::policy::SKIPPED_OPTIONAL,
             "[tool.pdm.dev-dependencies]",
             &format!("development dependency group excluded by default ({dev})"),
         )?;
@@ -784,8 +784,8 @@ fn poetry_manifest(
                     .get("name")
                     .and_then(toml::Value::as_str)
                     .unwrap_or("poetry source");
-                crate::policy::record(
-                    crate::policy::UNATTESTED_INDEX,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::UNATTESTED_INDEX,
                     name,
                     "Poetry private source is not followed; the public PyPI index remains the only resolver",
                 )?;
@@ -825,8 +825,8 @@ fn poetry_manifest(
         if !present {
             continue;
         }
-        crate::policy::record(
-            crate::policy::SKIPPED_OPTIONAL,
+        crate::kernel::policy::record(
+            crate::kernel::policy::SKIPPED_OPTIONAL,
             group,
             "Poetry development dependency group is excluded by default",
         )?;
@@ -906,8 +906,8 @@ fn poetry_requirement(
                         .any(|dep| dep.eq_ignore_ascii_case(name))
             });
             if !active {
-                crate::policy::record(
-                    crate::policy::SKIPPED_OPTIONAL,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::SKIPPED_OPTIONAL,
                     name,
                     "Poetry optional dependency was not selected by a requested extra",
                 )?;
@@ -916,8 +916,8 @@ fn poetry_requirement(
         }
         for key in ["git", "path", "url"] {
             if table.contains_key(key) {
-                crate::policy::record(
-                    crate::policy::REQUIREMENT_SKIPPED,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::REQUIREMENT_SKIPPED,
                     name,
                     &format!("Poetry {key} dependency is not a locked registry package"),
                 )?;
@@ -925,8 +925,8 @@ fn poetry_requirement(
             }
         }
         if table.contains_key("source") {
-            crate::policy::record(
-                crate::policy::UNATTESTED_INDEX,
+            crate::kernel::policy::record(
+                crate::kernel::policy::UNATTESTED_INDEX,
                 name,
                 "Poetry private source is not followed; the public PyPI index remains the only resolver",
             )?;
@@ -1099,7 +1099,7 @@ fn poetry_python_marker(version: &str) -> io::Result<Option<String>> {
                                 format!("unsupported Poetry python constraint `{version}`"),
                             )
                         })?;
-                    let variable = if crate::pep440::Version::parse(value)
+                    let variable = if crate::tailors::python::pep440::Version::parse(value)
                         .ok()
                         .is_some_and(|value| value.release_len() >= 3)
                     {
@@ -1302,8 +1302,8 @@ fn poetry_lock_requirements(
                 .and_then(toml::Value::as_str)
                 .unwrap_or_default();
             if matches!(source_type, "directory" | "git" | "url") {
-                crate::policy::record(
-                    crate::policy::REQUIREMENT_SKIPPED,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::REQUIREMENT_SKIPPED,
                     &name,
                     &format!("Poetry lock package uses unsupported {source_type} source"),
                 )?;
@@ -1316,8 +1316,8 @@ fn poetry_lock_requirements(
             if !is_public_pypi_url(url)
                 && source.get("reference").and_then(toml::Value::as_str) != Some("pypi")
             {
-                crate::policy::record(
-                    crate::policy::UNATTESTED_INDEX,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::UNATTESTED_INDEX,
                     &name,
                     "Poetry lock package has a non-default source",
                 )?;
@@ -1448,7 +1448,7 @@ fn poetry_package_matches(
             .map(String::as_str)
             .collect::<Vec<_>>();
         if !specifiers.is_empty()
-            && !crate::pep440::matches_specifiers_with_candidates(
+            && !crate::tailors::python::pep440::matches_specifiers_with_candidates(
                 &specifiers,
                 version,
                 candidate_versions,
@@ -1854,7 +1854,7 @@ fn marker_matches_for_extra(
     if (left_is_variable && is_python_marker(left))
         || (right_is_variable && is_python_marker(right))
     {
-        return crate::pep440::matches_specifier(
+        return crate::tailors::python::pep440::matches_specifier(
             &format!("{}{}", operator.trim(), right_value),
             &left_value,
         );
@@ -2146,8 +2146,8 @@ fn check_poetry_content_hash(project: &toml::Value, lock: &toml::Value) -> io::R
     let actual = hex::encode(Sha256::digest(json));
     if actual != expected {
         eprintln!("blanket: warning: poetry.lock content-hash disagrees with pyproject.toml; preferring the lock");
-        crate::policy::record(
-            crate::policy::LOCK_DISAGREEMENT,
+        crate::kernel::policy::record(
+            crate::kernel::policy::LOCK_DISAGREEMENT,
             "poetry.lock",
             &format!("content-hash {expected} != computed {actual}; lock preferred"),
         )?;
@@ -2205,16 +2205,16 @@ fn record_uv_sources(value: &toml::Value) -> io::Result<()> {
         if let Some(table) = source.as_table() {
             for key in ["path", "git", "directory", "url"] {
                 if table.contains_key(key) {
-                    crate::policy::record(
-                        crate::policy::REQUIREMENT_SKIPPED,
+                    crate::kernel::policy::record(
+                        crate::kernel::policy::REQUIREMENT_SKIPPED,
                         name,
                         &format!("uv source `{key}` is not a locked registry package"),
                     )?;
                 }
             }
             if table.contains_key("index") {
-                crate::policy::record(
-                    crate::policy::UNATTESTED_INDEX,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::UNATTESTED_INDEX,
                     name,
                     "uv private index source is not followed",
                 )?;
@@ -2613,8 +2613,8 @@ fn uv_lock_manifest(
     for package in selected_packages.into_values() {
         if is_local_uv_source(&package.source) {
             if !is_uv_project_root(&package.source) {
-                crate::policy::record(
-                    crate::policy::REQUIREMENT_SKIPPED,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::REQUIREMENT_SKIPPED,
                     &package.name,
                     "uv lock package is a local or VCS source, not a locked registry artifact",
                 )?;
@@ -2626,8 +2626,8 @@ fn uv_lock_manifest(
             && !package.source.contains("pypi.org")
             && !package.source.contains("files.pythonhosted.org")
         {
-            crate::policy::record(
-                crate::policy::UNATTESTED_INDEX,
+            crate::kernel::policy::record(
+                crate::kernel::policy::UNATTESTED_INDEX,
                 &package.name,
                 "uv lock package names a non-public registry source",
             )?;
@@ -2690,7 +2690,7 @@ fn select_uv_package<'a>(
                 .iter()
                 .map(|variant| variant.version.as_str())
                 .collect::<Vec<_>>();
-            crate::pep440::matches_specifiers_with_candidates(
+            crate::tailors::python::pep440::matches_specifiers_with_candidates(
                 &specifiers,
                 &package.version,
                 &candidates,
@@ -3740,7 +3740,7 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
         let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
         assert_eq!(manifest.requirements, ["six>=1"]);
         assert_eq!(manifest.resolver_text(), "six>=1\n");
-        crate::policy::clear();
+        crate::kernel::policy::clear();
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -3794,7 +3794,7 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
             let got = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
             assert_eq!(got.provenance, expected, "{name}");
             let _ = fs::remove_dir_all(dir);
-            crate::policy::clear();
+            crate::kernel::policy::clear();
         }
     }
 

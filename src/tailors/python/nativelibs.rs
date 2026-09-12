@@ -6,10 +6,10 @@
 //! to the native-libs object. macOS has no native pin yet and fails before it
 //! touches the store or network.
 
-use crate::fetch::{download_verified_held, Digest as FetchDigest};
-use crate::platform::{no_pin, Platform};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_held, Digest as FetchDigest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -584,14 +584,14 @@ pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
 }
 
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
-    crate::platform::require_host(platform, "native library set", "stage 3")?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    crate::kernel::platform::require_host(platform, "native library set", "stage 3")?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(store, platform)?;
     let id = identity.object_id();
     let object = store.object_path(&id);
     let manifest_sha256 = identity.inputs["manifest_sha256"].clone();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         validate_layout(&object)?;
         return Ok(NativeLibSet {
             id,
@@ -607,11 +607,11 @@ pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<Nativ
     let packages = packages(platform)?;
     let result = realize_staged(store, &work, &package_work, &object, packages);
     if let Err(error) = result {
-        let _ = crate::store::remove_tree(&work);
+        let _ = crate::kernel::store::remove_tree(&work);
         return Err(error);
     }
     validate_layout(&work)?;
-    let mut deps = crate::store::ObjectDeps::new();
+    let mut deps = crate::kernel::store::ObjectDeps::new();
     for package in packages {
         deps.cache_digest(FetchDigest::sha256(package.sha256)?);
     }
@@ -655,7 +655,7 @@ fn realize_staged(
         relocate_package(&package_root, &info_root, object, &package_placeholders)?;
         let info = package_root.join("info");
         if info.exists() {
-            crate::store::remove_tree(&info)?;
+            crate::kernel::store::remove_tree(&info)?;
         }
         merge_tree(&package_root, work).map_err(|e| {
             io::Error::new(
@@ -663,8 +663,8 @@ fn realize_staged(
                 format!("merge native package {}: {e}", package.name),
             )
         })?;
-        crate::store::remove_tree(&package_root)?;
-        crate::store::remove_tree(&info_root)?;
+        crate::kernel::store::remove_tree(&package_root)?;
+        crate::kernel::store::remove_tree(&info_root)?;
     }
     placeholders.sort();
     placeholders.dedup();
@@ -707,7 +707,7 @@ fn extract_package(
             .arg("-C")
             .arg(package_root)
             .args(["--no-same-owner", "--no-same-permissions"]);
-        let status = crate::supervise::status_owned(&mut command, store)
+        let status = crate::kernel::supervise::status_owned(&mut command, store)
             .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", package.filename)))?;
         if !status.success() {
             return Err(io::Error::new(
@@ -798,7 +798,7 @@ fn zstd_decompress(store: &Store, input: &Path, output: &Path) -> io::Result<()>
         .args(["-d", "-f", "-q", "-o"])
         .arg(output)
         .arg(input);
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(invalid_conda(format!(
             "zstd failed for {}",
@@ -816,7 +816,7 @@ fn extract_tar(store: &Store, archive: &Path, destination: &Path) -> io::Result<
         .arg("-C")
         .arg(destination)
         .args(["--no-same-owner", "--no-same-permissions"]);
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(invalid_conda(format!(
             "tar extraction failed for {}",
@@ -1497,9 +1497,9 @@ mod tests {
         let identity = identity(&store, platform).unwrap();
         assert_eq!(identity.kind, "native-libs");
         assert!(identity.inputs.contains_key("manifest_sha256"));
-        let deps = match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => deps,
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+        let deps = match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => deps,
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         };
         let recovered: std::collections::BTreeSet<String> =
             deps.cache.iter().map(|d| d.hex().to_string()).collect();
@@ -1513,7 +1513,7 @@ mod tests {
             !recovered.contains(&manifest_sha256(platform).unwrap()),
             "the manifest digest was fabricated as a cached artifact"
         );
-        let _ = crate::store::remove_tree(&store.root);
+        let _ = crate::kernel::store::remove_tree(&store.root);
     }
 
     /// The manifest hash is a digest over the pinned rows, including each

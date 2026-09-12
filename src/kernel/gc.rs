@@ -5,8 +5,8 @@
 //! closure. A root never stops protecting its project: an unavailable project
 //! stops the sweep until it returns or its record is explicitly forgotten.
 
-use crate::activity::StoreActivity;
-use crate::store::{self, ObjectDeps, RootEntry, Store};
+use crate::kernel::activity::StoreActivity;
+use crate::kernel::store::{self, ObjectDeps, RootEntry, Store};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
@@ -524,7 +524,7 @@ pub struct Snapshot {
     /// exclusive lease and after the plan has been validated — a dry run and
     /// a failed validation both leave them exactly as found.
     crash_temps: Vec<OsString>,
-    meta: crate::objmeta::MetaIndex,
+    meta: crate::kernel::objmeta::MetaIndex,
     objects: Vec<ObjectEntry>,
     cache: Vec<CacheEntry>,
     stages: Vec<DirEntrySnapshot>,
@@ -613,7 +613,7 @@ fn read<W: Write>(
     let now = SystemTime::now();
     let (roots, crash_temps) = store.roots_for_sweep()?;
     let state = collect_roots(store, &roots, options, out)?;
-    let mut meta = crate::objmeta::MetaIndex::read(store)?;
+    let mut meta = crate::kernel::objmeta::MetaIndex::read(store)?;
     meta.apply(upgrades)?;
 
     let objects_path = store.root.join("objects");
@@ -851,7 +851,7 @@ fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Result<Validat
     // Legacy evidence can never authorize a deletion. Maintenance runs before
     // this phase, so anything still legacy here could not be certified.
     for (id, record) in snapshot.meta.iter() {
-        if record.evidence == crate::objmeta::Evidence::Legacy {
+        if record.evidence == crate::kernel::objmeta::Evidence::Legacy {
             blocked.push(format!(
                 "object {id} ({}) still carries pre-object-meta/2 metadata; its dependencies are \
                  not proven, so no sweep can run. Run `blanket gc --migrate-metadata` and resolve \
@@ -962,7 +962,7 @@ fn blockage(reasons: &[String]) -> io::Error {
 fn retained_by_policy(
     now: SystemTime,
     entry: &ObjectEntry,
-    record: &crate::objmeta::Record,
+    record: &crate::kernel::objmeta::Record,
     options: &Options,
 ) -> bool {
     if recent_at(now, &entry.stat, ACTIVE_WINDOW) {
@@ -1414,7 +1414,7 @@ fn migrate_metadata_locked<W: Write>(
     // Every migration input is re-read here, under the exclusive token. An
     // earlier probe is a hint about whether to bother, never a snapshot to
     // write from.
-    let index = crate::objmeta::MetaIndex::read(store)?;
+    let index = crate::kernel::objmeta::MetaIndex::read(store)?;
     let mut report = MigrationReport::default();
     if !index.has_legacy() {
         return Ok((report, BTreeMap::new()));
@@ -1424,14 +1424,14 @@ fn migrate_metadata_locked<W: Write>(
     let mut proposals: BTreeMap<String, ObjectDeps> = BTreeMap::new();
     let mut unresolved: BTreeMap<String, String> = BTreeMap::new();
     for (id, record) in index.iter() {
-        if record.evidence != crate::objmeta::Evidence::Legacy {
+        if record.evidence != crate::kernel::objmeta::Evidence::Legacy {
             continue;
         }
-        match crate::objmeta::adapt(record, &index) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+        match crate::kernel::objmeta::adapt(record, &index) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 proposals.insert(id.clone(), deps);
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => {
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => {
                 unresolved.insert(id.clone(), reason);
             }
         }
@@ -1510,7 +1510,7 @@ fn migrate_metadata_locked<W: Write>(
 /// Rewrite one legacy record as `object-meta/2`, preserving its identity, id,
 /// creation timestamp and exceptions exactly as stored.
 fn upgraded_record(
-    record: &crate::objmeta::Record,
+    record: &crate::kernel::objmeta::Record,
     deps: &ObjectDeps,
 ) -> io::Result<serde_json::Value> {
     let mut value = record.value.clone();
@@ -1548,7 +1548,7 @@ fn upgraded_record(
         serde_json::json!(format!(
             "adapted:{}@{}",
             record.identity.kind,
-            crate::objmeta::adapter_version(&record.identity.kind)
+            crate::kernel::objmeta::adapter_version(&record.identity.kind)
         )),
     );
     if !record.had_legacy_refs {
@@ -1590,7 +1590,7 @@ fn present_cache_entries(store: &Store) -> io::Result<BTreeSet<String>> {
 fn effective_deps<'a>(
     id: &str,
     proposals: &'a BTreeMap<String, ObjectDeps>,
-    index: &'a crate::objmeta::MetaIndex,
+    index: &'a crate::kernel::objmeta::MetaIndex,
 ) -> Option<(&'a BTreeSet<String>, Vec<String>)> {
     if let Some(deps) = proposals.get(id) {
         return Some((
@@ -1623,10 +1623,10 @@ fn effective_deps<'a>(
 /// object, and that object names the sdist tarball the environment used to
 /// name directly.
 fn certification_covers_legacy_retention(
-    record: &crate::objmeta::Record,
+    record: &crate::kernel::objmeta::Record,
     deps: &ObjectDeps,
     proposals: &BTreeMap<String, ObjectDeps>,
-    index: &crate::objmeta::MetaIndex,
+    index: &crate::kernel::objmeta::MetaIndex,
     cached: &BTreeSet<String>,
 ) -> Result<(), String> {
     let identity_value = serde_json::to_value(&record.identity)
@@ -1855,8 +1855,8 @@ fn short_sha256(bytes: &[u8], hex_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activity::ActivityMode;
-    use crate::types::Identity;
+    use crate::kernel::activity::ActivityMode;
+    use crate::kernel::types::Identity;
     use sha2::Digest;
     use std::collections::BTreeMap;
 
@@ -1948,8 +1948,9 @@ mod tests {
     }
 
     /// Read one record the way every phase reads it.
-    fn record(store: &Store, id: &str) -> crate::objmeta::Record {
-        crate::objmeta::read_record_at(&store.root.join("meta").join(format!("{id}.json"))).unwrap()
+    fn record(store: &Store, id: &str) -> crate::kernel::objmeta::Record {
+        crate::kernel::objmeta::read_record_at(&store.root.join("meta").join(format!("{id}.json")))
+            .unwrap()
     }
 
     fn closure(project: &Path, object: &Path, extra: serde_json::Value) {
@@ -2018,7 +2019,7 @@ mod tests {
                 }
             }
             fs::write(&meta_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-            let error = crate::objmeta::read_record_at(&meta_path).unwrap_err();
+            let error = crate::kernel::objmeta::read_record_at(&meta_path).unwrap_err();
             assert!(
                 error.to_string().contains("evidence"),
                 "{label} evidence marker was accepted: {error}"
@@ -2049,8 +2050,9 @@ mod tests {
                 ("platform".into(), "x86_64-unknown-linux-gnu".into()),
             ]),
         };
-        let fingerprint =
-            crate::elixir::fingerprint_of_joined(&format!("{otp}:{elixir}:{hex_archive}:{rebar3}"));
+        let fingerprint = crate::tailors::elixir::fingerprint_of_joined(&format!(
+            "{otp}:{elixir}:{hex_archive}:{rebar3}"
+        ));
         cached_artifact(store, &otp);
         cached_artifact(store, &elixir);
         let id = commit_legacy_fixture(store, &identity, Some(&[]));
@@ -2107,7 +2109,7 @@ mod tests {
         assert!(text.contains("kind hex-deps, schema hex-deps/1"), "{text}");
         assert!(text.contains(&inner), "the reason names no digest: {text}");
         assert!(
-            record(&store, &id).evidence == crate::objmeta::Evidence::Legacy,
+            record(&store, &id).evidence == crate::kernel::objmeta::Evidence::Legacy,
             "the record was rewritten despite the narrowing"
         );
         drop(activity);
@@ -2140,7 +2142,7 @@ mod tests {
         let upgraded = record(&store, &id);
         assert_eq!(
             upgraded.evidence,
-            crate::objmeta::Evidence::Adapted("hex-deps@1".into())
+            crate::kernel::objmeta::Evidence::Adapted("hex-deps@1".into())
         );
         assert_eq!(upgraded.dependencies, BTreeSet::from([beam]));
         assert_eq!(
@@ -2188,11 +2190,11 @@ mod tests {
         assert_eq!((report.upgraded, report.unresolved), (1, 1), "{text}");
         assert_eq!(
             record(&store, &good_id).evidence,
-            crate::objmeta::Evidence::Adapted("cpython@1".into())
+            crate::kernel::objmeta::Evidence::Adapted("cpython@1".into())
         );
         assert_eq!(
             record(&store, &unknown_id).evidence,
-            crate::objmeta::Evidence::Legacy,
+            crate::kernel::objmeta::Evidence::Legacy,
             "an unknown kind was certified"
         );
         assert!(text.contains("kind not-a-known-kind"), "{text}");
@@ -3446,7 +3448,7 @@ mod tests {
         );
         assert_eq!(
             record(&store, &id).evidence,
-            crate::objmeta::Evidence::Legacy
+            crate::kernel::objmeta::Evidence::Legacy
         );
     }
 
@@ -3532,7 +3534,7 @@ mod tests {
         // Nothing was published, so the store is still legacy...
         assert_eq!(
             record(&store, &dead).evidence,
-            crate::objmeta::Evidence::Legacy
+            crate::kernel::objmeta::Evidence::Legacy
         );
         // ...yet the preview planned a deletion, which is only possible if
         // the adaptation happened in memory.
@@ -3598,7 +3600,7 @@ mod tests {
         let upgraded = record(&store, &id);
         assert_eq!(
             upgraded.evidence,
-            crate::objmeta::Evidence::Adapted("cpython@1".into())
+            crate::kernel::objmeta::Evidence::Adapted("cpython@1".into())
         );
         assert_eq!(
             upgraded
@@ -3623,10 +3625,11 @@ mod tests {
                 }),
             );
         });
-        let error =
-            crate::objmeta::read_record_at(&store.root.join("meta").join(format!("{id}.json")))
-                .unwrap_err()
-                .to_string();
+        let error = crate::kernel::objmeta::read_record_at(
+            &store.root.join("meta").join(format!("{id}.json")),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("hashes to a different object id"), "{error}");
     }
 
@@ -3665,7 +3668,7 @@ mod tests {
         assert!(result.is_err(), "a store with an unknown kind swept anyway");
         assert_eq!(
             record(&store, &id).evidence,
-            crate::objmeta::Evidence::Legacy
+            crate::kernel::objmeta::Evidence::Legacy
         );
     }
 
@@ -3690,7 +3693,7 @@ mod tests {
         let staged = store.stage().unwrap();
         fs::write(staged.join("payload"), "cpython").unwrap();
         let mut deps = ObjectDeps::new();
-        deps.cache_digest(crate::fetch::Digest::sha256(&digest).unwrap());
+        deps.cache_digest(crate::kernel::fetch::Digest::sha256(&digest).unwrap());
         store
             .commit_with_deps(&identity, &staged, &[], &deps)
             .unwrap();
@@ -3702,7 +3705,7 @@ mod tests {
         );
         assert_eq!(
             record(&store, &id).evidence,
-            crate::objmeta::Evidence::Legacy
+            crate::kernel::objmeta::Evidence::Legacy
         );
     }
 
@@ -3726,7 +3729,7 @@ mod tests {
         assert_eq!((report.upgraded, report.unresolved), (1, 0));
         assert_eq!(
             record(&store, &id).evidence,
-            crate::objmeta::Evidence::Adapted("cpython@1".into())
+            crate::kernel::objmeta::Evidence::Adapted("cpython@1".into())
         );
         let job = store.activity(ActivityMode::Shared).unwrap();
         store.require_activity(&job, "job").unwrap();
@@ -3762,7 +3765,7 @@ mod tests {
         assert!(text.contains("metadata maintenance deferred"), "{text}");
         assert_eq!(
             record(&store, &id).evidence,
-            crate::objmeta::Evidence::Legacy
+            crate::kernel::objmeta::Evidence::Legacy
         );
         // The caller's own lease is untouched and still usable.
         store.require_activity(&job, "job").unwrap();
@@ -3830,9 +3833,9 @@ mod tests {
                 age(&path);
             }
             let digest = match algo {
-                "sha1" => crate::fetch::Digest::sha1(&keep),
-                "sha256" => crate::fetch::Digest::sha256(&keep),
-                _ => crate::fetch::Digest::sha512(&keep),
+                "sha1" => crate::kernel::fetch::Digest::sha1(&keep),
+                "sha256" => crate::kernel::fetch::Digest::sha256(&keep),
+                _ => crate::kernel::fetch::Digest::sha512(&keep),
             }
             .unwrap();
             deps.cache_digest(digest);
@@ -4026,10 +4029,10 @@ mod tests {
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut refs = crate::project::ClosureRefs::new();
+        let mut refs = crate::comforter::ClosureRefs::new();
         refs.object_id(&store, &activity, &named).unwrap();
         refs.object_id(&store, &activity, &unnamed).unwrap();
-        crate::project::write_closure(
+        crate::comforter::write_closure(
             &project,
             "python",
             serde_json::json!({"ok": true}),
@@ -4073,7 +4076,7 @@ mod tests {
         // Real publication with an unavailable reference: it must fail
         // before either durable write, so nothing is published.
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
-        let mut refs = crate::project::ClosureRefs::new();
+        let mut refs = crate::comforter::ClosureRefs::new();
         refs.object_id(&store, &activity, &("0".repeat(40) + "-missing-1"))
             .unwrap_err();
         assert!(!project.join(".blanket/closures").exists());

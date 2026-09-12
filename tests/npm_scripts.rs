@@ -5,10 +5,12 @@
 //! runs it with a shared BLANKET_STORE:
 //!     cargo test --test npm_scripts -- --ignored
 
-use blanket::fetch::{self, Digest};
-use blanket::npm::{self, NpmPackage, NpmPlan};
-use blanket::store::Store;
-use blanket::{platform::Platform, policy, project};
+use blanket::comforter;
+use blanket::kernel::fetch::{self, Digest};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::policy;
+use blanket::kernel::store::Store;
+use blanket::tailors::node::{self, NpmPackage, NpmPlan};
 use sha2::{Digest as Sha2Digest, Sha512};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -262,7 +264,7 @@ fn network_access_during_install_script_fails() {
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let result = npm::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]);
+        let result = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]);
         let err = result.expect_err("install script reaching the network must fail");
         assert!(
             err.to_string().contains("network-denied"),
@@ -312,7 +314,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let err = npm::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
+        let err = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
             .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
         assert!(err
@@ -331,13 +333,13 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let store = store_at(&dir);
     policy::init(&dir, false).unwrap();
     let plan = plan_for(&tarball, &sri);
-    let env = npm::realize_node_env(&store, platform, &plan, &[]).expect("permissive realize");
+    let env = node::realize_node_env(&store, platform, &plan, &[]).expect("permissive realize");
     let package_dir = env.join("node_modules/fixture-pkg");
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    npm::project_node_env(&dir, &env, platform, &plan, &[], false).expect("project");
-    let closure = project::read_closure(&dir, "node").unwrap();
+    node::project_node_env(&dir, &env, platform, &plan, &[], false).expect("project");
+    let closure = comforter::read_closure(&dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
     assert_eq!(exceptions.len(), 1);
     assert_eq!(exceptions[0]["kind"], "install-script-failed");
@@ -379,7 +381,7 @@ fn benign_install_script_runs_and_output_is_captured() {
     );
     let store = store_at(&dir);
     let env =
-        npm::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]).expect("realize");
+        node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]).expect("realize");
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
     let _ = std::fs::remove_dir_all(&dir);
@@ -400,7 +402,7 @@ fn linux_npm_roundtrip() {
     let project = &temp.0;
     let store = store_at(project);
     let store_root = store.root.clone();
-    let node = npm::ensure_node_for(&store, platform).expect("pinned Linux Node");
+    let node = node::ensure_node_for(&store, platform).expect("pinned Linux Node");
     let node_bin = node.join("bin");
     std::fs::write(
         project.join("package.json"),
@@ -508,7 +510,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     let synced = blanket(binary, project, &store_root, &["sync", "--strict"]);
     assert_success(&synced, "blanket sync --strict");
 
-    let closure = project::read_closure(project, "node").unwrap();
+    let closure = comforter::read_closure(project, "node").unwrap();
     let package_paths: Vec<&str> = closure["packages"]
         .as_array()
         .unwrap()
@@ -571,7 +573,7 @@ console.log('linux-npm-roundtrip-ok');
     );
     let repeated = blanket(binary, project, &store_root, &["sync", "--strict"]);
     assert_success(&repeated, "offline warm sync --strict");
-    let repeated_closure = project::read_closure(project, "node").unwrap();
+    let repeated_closure = comforter::read_closure(project, "node").unwrap();
     assert_eq!(
         repeated_closure["env_object"], closure["env_object"],
         "identical inputs produced a different node environment object"
@@ -603,7 +605,7 @@ fn skip_download_switch_is_injected_and_recorded() {
         "node -e \"if(process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){process.exit(3)};require('fs').writeFileSync('skipped.txt','ok')\"",
     );
     let store = store_at(&dir);
-    let env = npm::realize_node_env(
+    let env = node::realize_node_env(
         &store,
         platform,
         &plan_named(&tarball, &sri, "puppeteer"),
@@ -633,7 +635,7 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
         "node -e \"if(process.env.npm_config_build_from_source!=='true'){process.exit(3)};require('fs').writeFileSync('compiled.txt','ok')\" # prebuild-install",
     );
     let store = store_at(&dir);
-    let env = npm::realize_node_env(
+    let env = node::realize_node_env(
         &store,
         platform,
         &plan_named(&tarball, &sri, "fake-prebuilt"),

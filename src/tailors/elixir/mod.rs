@@ -10,11 +10,11 @@
 //! native deps (make/rebar3 ports) write INTO their source trees, so the
 //! deps projection is a writable clonefile copy, recorded unattested.
 
-use crate::fetch::{download_verified_digest_held, download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::sandbox::{force_env, BuildSpec};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -64,7 +64,7 @@ fn otp_pin(platform: Platform) -> io::Result<&'static OtpPin> {
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
     otp_pin(platform).map(|_| ())
 }
 
@@ -523,7 +523,7 @@ fn run_installer_spec_for(store: &Store, spec: &BuildSpec) -> io::Result<()> {
     for (key, value) in &spec.env {
         command.env(key, value);
     }
-    let output = crate::supervise::output_owned(&mut command, store)
+    let output = crate::kernel::supervise::output_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -747,7 +747,7 @@ fn probe_otp_runtime(store: &Store, otp_root: &Path, scratch: &Path) -> io::Resu
         .env("TMPDIR", scratch)
         .env("LANG", "C")
         .stdin(std::process::Stdio::null());
-    let output = crate::supervise::output_owned(&mut command, store)
+    let output = crate::kernel::supervise::output_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
@@ -816,7 +816,7 @@ fn extract_otp_archive_for(
     if strip > 0 {
         command.arg(format!("--strip-components={strip}"));
     }
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() {
         return Err(err(format!(
             "OTP extraction failed ({status}) for {} into {}",
@@ -835,13 +835,13 @@ pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    crate::kernel::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let pin = otp_pin(platform)?;
     let identity = beam_identity(pin, &store.root)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let otp_tar = download_verified_held(store, pin.url, pin.sha256)?;
@@ -870,7 +870,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             })
             .and_then(|()| verify_otp_install(&otp_root, &final_root, &layout))
             .and_then(|()| probe_otp_runtime(store, &otp_root, &scratch));
-            let _ = crate::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&scratch);
             installed?;
         }
 
@@ -881,7 +881,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             .arg(&elixir_zip)
             .args(["-d"])
             .arg(staged.join("elixir"));
-        let st = crate::supervise::status(&mut command, &activity)?;
+        let st = crate::kernel::supervise::status(&mut command, &activity)?;
         if !st.success() || !staged.join("elixir/bin/mix").is_file() {
             return Err(err("Elixir extraction failed or has unexpected layout"));
         }
@@ -894,7 +894,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             .arg(&hex_ez)
             .args(["-d"])
             .arg(staged.join(format!("archives/hex-{HEX_VERSION}")));
-        let st = crate::supervise::status(&mut command, &activity)?;
+        let st = crate::kernel::supervise::status(&mut command, &activity)?;
         if !st.success() {
             return Err(err("Hex archive extraction failed"));
         }
@@ -903,7 +903,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(staged.join("rebar3"), fs::Permissions::from_mode(0o755))?;
         }
-        let mut deps = crate::store::ObjectDeps::new();
+        let mut deps = crate::kernel::store::ObjectDeps::new();
         deps.cache_digest(Digest::sha256(pin.sha256)?);
         deps.cache_digest(Digest::sha256(ELIXIR_SHA256)?);
         deps.cache_digest(Digest::sha512(HEX_SHA512)?);
@@ -913,7 +913,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             .map(|(path, _)| path)
     })();
     if result.is_err() {
-        let _ = crate::store::remove_tree(&staged);
+        let _ = crate::kernel::store::remove_tree(&staged);
     }
     result
 }
@@ -1001,9 +1001,9 @@ pub(crate) fn run_checked(
     offline: bool,
     args: &[&str],
 ) -> io::Result<()> {
-    crate::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
+    crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
     let out = run_mix(store, beam_obj, cwd, scratch, offline, args)?;
-    if crate::ui::verbose() {
+    if crate::kernel::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
     if !out.status.success() {
@@ -1035,7 +1035,7 @@ fn run_mix(
     }
     force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
     cmd.stdin(std::process::Stdio::null());
-    crate::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
 }
 
@@ -1197,7 +1197,7 @@ pub fn plan_elixir(
             &["mix", "deps.get"],
         )?;
         if !out.status.success() {
-            let _ = crate::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&scratch);
             return Err(err(format!(
                 "store mix deps.get failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -1219,7 +1219,7 @@ pub fn plan_elixir(
             &["mix", "deps.get", "--check-locked"],
         )?;
         if !out.status.success() {
-            let _ = crate::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&scratch);
             return Err(err(format!(
                 "mix.exs and mix.lock are out of sync; run `blanket run mix \
                  deps.get` and retry\n{}",
@@ -1245,7 +1245,7 @@ pub fn plan_elixir(
             lock_path.to_str().ok_or_else(|| err("path not UTF-8"))?,
         ],
     )?;
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     if !out.status.success() {
         return Err(err(format!(
             "mix.lock analysis failed: {}",
@@ -1316,8 +1316,8 @@ pub fn realize_deps(
     plan: &ElixirPlan,
     beam_obj: &Path,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Hex dependencies", "stage 4")?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    crate::kernel::platform::require_host(platform, "Hex dependencies", "stage 4")?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let _ = otp_pin(platform)?;
     validate_plan(plan)?;
     let mut inputs = BTreeMap::from([
@@ -1349,7 +1349,7 @@ pub fn realize_deps(
     };
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1370,7 +1370,7 @@ pub fn realize_deps(
         fs::create_dir_all(&outer_dir)?;
         let mut command = Command::new("/usr/bin/tar");
         command.args(["-xf"]).arg(&tar).args(["-C"]).arg(&outer_dir);
-        let st = crate::supervise::status_owned(&mut command, store)?;
+        let st = crate::kernel::supervise::status_owned(&mut command, store)?;
         if !st.success() {
             return Err(err(format!("{}: outer tar extraction failed", d.app)));
         }
@@ -1416,7 +1416,7 @@ pub fn realize_deps(
             .arg(outer_dir.join("contents.tar.gz"))
             .args(["-C"])
             .arg(&dep_dir);
-        let st = crate::supervise::status_owned(&mut command, store)?;
+        let st = crate::kernel::supervise::status_owned(&mut command, store)?;
         if !st.success() {
             return Err(err(format!("{}: contents extraction failed", d.app)));
         }
@@ -1473,9 +1473,9 @@ pub fn realize_deps(
             )));
         }
     }
-    let _ = crate::store::remove_tree(&scratch);
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(beam_obj)?)?;
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(beam_obj)?)?;
     for dep in &plan.deps {
         deps.cache_digest(Digest::sha256(&dep.outer_sha256)?);
     }
@@ -1519,18 +1519,18 @@ pub fn project_elixir_env(
 ) -> io::Result<PathBuf> {
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
-    let store = crate::project::store_from_object_path(&beam_obj)
+    let store = crate::comforter::store_from_object_path(&beam_obj)
         .ok_or_else(|| err("BEAM object is not in a Blanket store"))?;
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let project_lock = store.project_lock(project_dir)?;
     store.ensure_namespace(Path::new("forests"))?;
-    let mut refs = crate::project::ClosureRefs::new();
+    let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &beam_obj)?;
     refs.object_path(&store, &activity, &deps_obj)?;
     refs.forest(&store, &activity, &proj_dir)?;
     // Protect the dependency projection before cloning or publishing it.
-    crate::project::persist_root_for_refs_with_project_lock(
+    crate::comforter::persist_root_for_refs_with_project_lock(
         project_dir,
         &store,
         &activity,
@@ -1538,7 +1538,7 @@ pub fn project_elixir_env(
         &project_lock,
     )?;
     if fresh && proj_dir.exists() {
-        crate::store::remove_tree(&proj_dir)?;
+        crate::kernel::store::remove_tree(&proj_dir)?;
     }
     if !proj_dir.exists() {
         // Atomic publication: clone into a tmp sibling, then rename — a
@@ -1547,9 +1547,9 @@ pub fn project_elixir_env(
         fs::create_dir_all(parent)?;
         let tmp = parent.join(format!(".hex-deps.tmp.{}", std::process::id()));
         if tmp.exists() {
-            crate::store::remove_tree(&tmp)?;
+            crate::kernel::store::remove_tree(&tmp)?;
         }
-        crate::project::clone_tree_for_store(&store, &deps_obj, &tmp, platform)?;
+        crate::comforter::clone_tree_for_store(&store, &deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
@@ -1559,7 +1559,7 @@ pub fn project_elixir_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
-    crate::project::write_closure_with_project_lock(
+    crate::comforter::write_closure_with_project_lock(
         project_dir,
         "elixir",
         serde_json::json!({
@@ -1628,8 +1628,8 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: beam_path(&beam_obj),
     };
-    let result =
-        crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
+    let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store)
+        .map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -1639,7 +1639,7 @@ pub fn build_sandboxed(
                 ),
             )
         });
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     result
 }
 
@@ -1677,9 +1677,9 @@ mod tests {
             let pin = otp_pin(*platform).unwrap();
             let identity =
                 beam_identity_with(pin, Path::new("/tmp/store"), LINUX_RELOCATION_SCHEMA).unwrap();
-            let beam = crate::objmeta::legacy_record(identity);
+            let beam = crate::kernel::objmeta::legacy_record(identity);
             let outer = "a".repeat(64);
-            let hex_deps = crate::types::Identity {
+            let hex_deps = crate::kernel::types::Identity {
                 kind: "hex-deps".into(),
                 name: "deps".into(),
                 version: "1".into(),
@@ -1695,21 +1695,21 @@ mod tests {
                     ),
                 ]),
             };
-            match crate::objmeta::adapt_identity_for_test(hex_deps, vec![beam.clone()]) {
-                crate::objmeta::Adaptation::Proven(deps) => {
+            match crate::kernel::objmeta::adapt_identity_for_test(hex_deps, vec![beam.clone()]) {
+                crate::kernel::objmeta::Adaptation::Proven(deps) => {
                     assert_eq!(
                         deps.objects.iter().cloned().collect::<Vec<_>>(),
                         vec![beam.id.clone()]
                     );
                 }
-                crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+                crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
             }
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -1719,7 +1719,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
     use super::*;
@@ -1750,7 +1750,7 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = crate::store::remove_tree(&self.0);
+            let _ = crate::kernel::store::remove_tree(&self.0);
         }
     }
 

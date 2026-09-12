@@ -2,7 +2,10 @@
 //! sdist-only on PyPI) must build into a wheel inside the network-denied
 //! sandbox. Heavy; run: cargo test --test sdist_build -- --ignored
 
-use blanket::{build, platform::Platform, store::Store, types::*};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::store::Store;
+use blanket::kernel::types::*;
+use blanket::tailors::python::build;
 
 #[test]
 #[ignore]

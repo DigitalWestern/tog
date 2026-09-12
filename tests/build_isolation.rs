@@ -4,12 +4,10 @@
 //! BLANKET_STORE=$HOME/scratch/tmp/nx11-store TMPDIR=$HOME/scratch/tmp
 //! BLANKET_SANDBOX_TESTS=required cargo test --test build_isolation -- --ignored
 
-use blanket::{
-    build,
-    platform::Platform,
-    store::Store,
-    types::{ArtifactKind, LockedPackage, Plan},
-};
+use blanket::kernel::platform::Platform;
+use blanket::kernel::store::Store;
+use blanket::kernel::types::{ArtifactKind, LockedPackage, Plan};
+use blanket::tailors::python::build;
 use std::process::Command;
 
 fn package(name: &str, version: &str, filename: &str, url: &str, sha256: &str) -> LockedPackage {
@@ -141,7 +139,7 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
             // branch, so keep the tokenizers specimen as a TODO and prove the
             // same Rust path with the smaller real fastuuid sdist.
             eprintln!("TODO tokenizers on CPython 3.11: {error}");
-            blanket::policy::clear();
+            blanket::kernel::policy::clear();
             let fallback = package(
                 "fastuuid",
                 "0.14.0",

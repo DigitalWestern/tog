@@ -1,8 +1,30 @@
-use blanket::{
-    activity::ActivityMode, audit, cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest,
-    npm, npm_lock_import, platform::Platform, policy, project, pypi, pyselect, python, ruby,
-    rustfmt, sbom, store, supervise, types, ui, xrun,
-};
+use blanket::audit;
+use blanket::cli;
+use blanket::comforter;
+use blanket::deps;
+use blanket::inspect;
+use blanket::kernel::activity::ActivityMode;
+use blanket::kernel::gc;
+use blanket::kernel::platform::Platform;
+use blanket::kernel::policy;
+use blanket::kernel::store;
+use blanket::kernel::supervise;
+use blanket::kernel::types;
+use blanket::kernel::ui;
+use blanket::sbom;
+use blanket::tailors::cargo;
+use blanket::tailors::cargo::rustfmt;
+use blanket::tailors::dotnet;
+use blanket::tailors::elixir;
+use blanket::tailors::go;
+use blanket::tailors::node;
+use blanket::tailors::node::lock_import;
+use blanket::tailors::python;
+use blanket::tailors::python::manifest;
+use blanket::tailors::python::pypi;
+use blanket::tailors::python::pyselect;
+use blanket::tailors::ruby;
+use blanket::xrun;
 
 use std::io;
 use std::io::Write;
@@ -139,7 +161,7 @@ fn resolve(pending: Pending) -> io::Result<cli::Command> {
             let is_script = has_package_json
                 && std::fs::read_to_string(&package_json)
                     .ok()
-                    .and_then(|json| npm::script_commands_from_package(&json, &name, &[]).ok())
+                    .and_then(|json| node::script_commands_from_package(&json, &name, &[]).ok())
                     .flatten()
                     .is_some();
             if is_script {
@@ -676,7 +698,7 @@ fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> io::
 type PythonPlan = (
     types::Plan,
     pyselect::PythonSelection,
-    Vec<project::InputRecord>,
+    Vec<comforter::InputRecord>,
 );
 
 /// Candidate input files for the status record: the manifest that won, the
@@ -684,7 +706,7 @@ type PythonPlan = (
 fn python_input_records(
     dir: &Path,
     manifest: &manifest::Manifest,
-) -> io::Result<Vec<project::InputRecord>> {
+) -> io::Result<Vec<comforter::InputRecord>> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     match &manifest.source_path {
         Some(path) => candidates.push(path.clone()),
@@ -702,7 +724,7 @@ fn python_input_records(
     ] {
         candidates.push(dir.join(extra));
     }
-    project::input_records(dir, &candidates)
+    comforter::input_records(dir, &candidates)
 }
 
 fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
@@ -1104,14 +1126,14 @@ fn has_python_input(dir: &Path) -> io::Result<bool> {
 
 struct GoInputs {
     go_obj: PathBuf,
-    plan: golang::GoPlan,
+    plan: go::GoPlan,
     gosum_sha256: String,
 }
 
 fn load_go_inputs(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<GoInputs> {
-    let go_version = golang::resolve_project_toolchain(platform, dir)?;
-    let go_obj = golang::ensure_go_for(store, platform, go_version)?;
-    let plan = golang::plan_go(store, platform, dir, &go_obj)?;
+    let go_version = go::resolve_project_toolchain(platform, dir)?;
+    let go_obj = go::ensure_go_for(store, platform, go_version)?;
+    let plan = go::plan_go(store, platform, dir, &go_obj)?;
     if plan.go_version != go_version {
         return Err(io::Error::other(format!(
             "go.mod selected Go {go_version}, but planning selected {}; re-run blanket sync after keeping go.mod unchanged",
@@ -1150,7 +1172,7 @@ fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> io::
     eprintln!("blanket: no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
     // blanket. npm-cli's shebang is `env node`, so the store bin leads PATH.
-    let node = npm::ensure_node_for(store, platform)?;
+    let node = node::ensure_node_for(store, platform)?;
     let path = format!(
         "{}:{}",
         node.join("bin").display(),
@@ -1190,7 +1212,7 @@ fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
     .iter()
     .any(|name| dir.join(name).is_file())
     {
-        npm::preflight(platform)?;
+        node::preflight(platform)?;
     }
     if has_python_input(dir)? {
         let selection =
@@ -1198,7 +1220,7 @@ fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
         python::preflight(platform, selection.pin.version)?;
     }
     if dir.join("go.mod").is_file() {
-        golang::preflight_platform(platform)?;
+        go::preflight_platform(platform)?;
     }
     if dir.join("Gemfile").is_file() {
         ruby::preflight_platform(platform)?;
@@ -1224,28 +1246,28 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     let mut any = false;
     if has_python_input(&dir)? {
         let (plan, selection, inputs) = read_plan(platform, &dir, &store)?;
-        let env = project::realize_env(&store, platform, &plan)?;
-        project::project_env_with_inputs(&dir, &env, &plan, &selection, &inputs)?;
+        let env = comforter::realize_env(&store, platform, &plan)?;
+        comforter::project_env_with_inputs(&dir, &env, &plan, &selection, &inputs)?;
         ui::synced(".venv", &env);
         any = true;
     }
     if let Some(plan) = load_npm_plan(platform, &dir)? {
-        let mut config = npm::BlanketConfig::default();
+        let mut config = node::BlanketConfig::default();
         if plan.lock_source == "package-lock.json" {
             let lock = std::fs::read_to_string(dir.join("package-lock.json"))?;
             if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
-                npm::check_lock_freshness(&pkg, &lock)?;
-                config = npm::parse_blanket_config(&pkg)?;
+                node::check_lock_freshness(&pkg, &lock)?;
+                config = node::parse_blanket_config(&pkg)?;
             }
         } else if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
-            config = npm::parse_blanket_config(&pkg)?;
+            config = node::parse_blanket_config(&pkg)?;
         }
-        let env = npm::realize_node_env(&store, platform, &plan, &config.artifacts)?;
-        let inputs = project::input_records(
+        let env = node::realize_node_env(&store, platform, &plan, &config.artifacts)?;
+        let inputs = comforter::input_records(
             &dir,
             &[dir.join("package.json"), dir.join(&plan.lock_source)],
         )?;
-        npm::project_node_env_recorded(
+        node::project_node_env_recorded(
             &dir,
             &env,
             platform,
@@ -1259,8 +1281,8 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     }
     if dir.join("go.mod").is_file() {
         let inputs = load_go_inputs(platform, &dir, &store)?;
-        let modcache = golang::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
-        golang::project_go_env(
+        let modcache = go::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
+        go::project_go_env(
             &dir,
             &inputs.go_obj,
             &modcache,
@@ -1323,15 +1345,15 @@ fn run_sync(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn load_npm_plan(platform: Platform, dir: &Path) -> io::Result<Option<npm::NpmPlan>> {
+fn load_npm_plan(platform: Platform, dir: &Path) -> io::Result<Option<node::NpmPlan>> {
     if dir.join("package-lock.json").is_file() {
-        return Ok(Some(npm::plan_npm(
+        return Ok(Some(node::plan_npm(
             platform,
             &std::fs::read_to_string(dir.join("package-lock.json"))?,
         )?));
     }
     if dir.join("pnpm-lock.yaml").is_file() {
-        return Ok(Some(npm_lock_import::plan_pnpm(
+        return Ok(Some(lock_import::plan_pnpm(
             platform,
             &std::fs::read_to_string(dir.join("pnpm-lock.yaml"))?,
             dir,
@@ -1339,7 +1361,7 @@ fn load_npm_plan(platform: Platform, dir: &Path) -> io::Result<Option<npm::NpmPl
     }
     if dir.join("yarn.lock").is_file() {
         let package = std::fs::read_to_string(dir.join("package.json"))?;
-        return Ok(Some(npm_lock_import::plan_yarn(
+        return Ok(Some(lock_import::plan_yarn(
             platform,
             &std::fs::read_to_string(dir.join("yarn.lock"))?,
             &package,
@@ -1471,16 +1493,15 @@ fn run_build(platform: Platform, args: &[String], store: &store::Store) -> io::R
                 })?
                 .to_path_buf();
             let inputs = load_go_inputs(platform, &root, &store)?;
-            let modcache =
-                golang::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
-            golang::project_go_env(
+            let modcache = go::realize_modcache(&store, platform, &inputs.plan, &inputs.go_obj)?;
+            go::project_go_env(
                 &root,
                 &inputs.go_obj,
                 &modcache,
                 &inputs.plan,
                 &inputs.gosum_sha256,
             )?;
-            golang::build_sandboxed(platform, &root, &inputs.go_obj, &modcache, rest)
+            go::build_sandboxed(platform, &root, &inputs.go_obj, &modcache, rest)
         }
         "elixir" => {
             let root = cwd
@@ -1548,7 +1569,7 @@ fn run_fmt(
             let is_script = package_json.is_file()
                 && std::fs::read_to_string(&package_json)
                     .ok()
-                    .and_then(|json| npm::script_commands_from_package(&json, "fmt", &[]).ok())
+                    .and_then(|json| node::script_commands_from_package(&json, "fmt", &[]).ok())
                     .flatten()
                     .is_some();
             if is_script {
@@ -1633,10 +1654,10 @@ fn run_fmt(
             "id": id,
         }))
     };
-    let mut refs = project::ClosureRefs::new();
+    let mut refs = comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &rust_object)?;
     refs.object_path(&store, &activity, &rustfmt_object)?;
-    project::write_closure(
+    comforter::write_closure(
         &workspace_root,
         "rustfmt",
         serde_json::json!({
@@ -1683,7 +1704,7 @@ fn run_run(
     platform: Platform,
     cmd: &[String],
     store: &store::Store,
-    activity: &blanket::activity::StoreActivity,
+    activity: &blanket::kernel::activity::StoreActivity,
 ) -> io::Result<i32> {
     if cmd.is_empty() {
         return Err(io::Error::new(
@@ -1726,7 +1747,7 @@ fn run_run(
         nm.clone()
     };
     let package_json = if node_projected {
-        project::read_closure(&dir, "node")?;
+        comforter::read_closure(&dir, "node")?;
         let path = dir.join("package.json");
         if std::fs::symlink_metadata(&path).is_ok() {
             Some((path.canonicalize()?, std::fs::read_to_string(path)?))
@@ -1738,7 +1759,7 @@ fn run_run(
     };
     let script_steps = package_json
         .as_ref()
-        .map(|(_, json)| npm::script_commands_from_package(json, &cmd[0], &cmd[1..]))
+        .map(|(_, json)| node::script_commands_from_package(json, &cmd[0], &cmd[1..]))
         .transpose()?
         .flatten();
     let package_metadata = if script_steps.is_some() {
@@ -1778,14 +1799,14 @@ fn run_run(
             prefix.push(nm.join(".bin").to_string_lossy().into_owned());
         }
         // Node toolchain from the store (cache hit after sync).
-        let node = npm::ensure_node_for(store, platform)?;
+        let node = node::ensure_node_for(store, platform)?;
         prefix.push(node.join("bin").to_string_lossy().into_owned());
     }
     if cargo_home.exists() {
-        let closure = project::read_closure(&dir, "cargo")?;
+        let closure = comforter::read_closure(&dir, "cargo")?;
         // Store-contained resolution: a project-editable closure must never
         // inject arbitrary executable paths (Sol review 5).
-        let rust_obj = project::closure_object(store, &closure, "rust_object", "bin/rustc")?;
+        let rust_obj = comforter::closure_object(store, &closure, "rust_object", "bin/rustc")?;
         prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());
         prefix.push(rust_obj.join("bin").to_string_lossy().into_owned());
         command.env("CARGO_HOME", cargo_home.canonicalize()?);
@@ -1793,11 +1814,11 @@ fn run_run(
         command.env_remove("RUSTUP_TOOLCHAIN");
     }
     if dir.join(".blanket/closures/go.json").exists() {
-        let closure = project::read_closure(&dir, "go")?;
-        let go_obj = project::closure_object(store, &closure, "go_object", "bin/go")?;
-        let modcache = project::closure_object(store, &closure, "modcache_object", "")?;
+        let closure = comforter::read_closure(&dir, "go")?;
+        let go_obj = comforter::closure_object(store, &closure, "go_object", "bin/go")?;
+        let modcache = comforter::closure_object(store, &closure, "modcache_object", "")?;
         prefix.push(go_obj.join("bin").to_string_lossy().into_owned());
-        for (k, v) in golang::go_env(&go_obj, &modcache, true) {
+        for (k, v) in go::go_env(&go_obj, &modcache, true) {
             if v.is_empty() {
                 command.env_remove(&k);
             } else {
@@ -1806,21 +1827,21 @@ fn run_run(
         }
     }
     if dir.join(".blanket/closures/ruby.json").exists() {
-        let closure = project::read_closure(&dir, "ruby")?;
-        let ruby_obj = project::closure_object(store, &closure, "ruby_object", "bin/ruby")?;
-        let gems_obj = project::closure_object(store, &closure, "gems_object", "")?;
+        let closure = comforter::read_closure(&dir, "ruby")?;
+        let ruby_obj = comforter::closure_object(store, &closure, "ruby_object", "bin/ruby")?;
+        let gems_obj = comforter::closure_object(store, &closure, "gems_object", "")?;
         // Ruby FIRST, then gem binstubs (a gem exe must never shadow ruby).
         prefix.push(ruby_obj.join("bin").to_string_lossy().into_owned());
         prefix.push(gems_obj.join("bin").to_string_lossy().into_owned());
         let (prefixes, remove, set) = ruby::run_env(&dir, &gems_obj);
-        blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
+        blanket::kernel::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if dir.join(".blanket/closures/elixir.json").exists() {
-        let closure = project::read_closure(&dir, "elixir")?;
-        let beam = project::closure_object(store, &closure, "beam_object", "elixir/bin/mix")?;
+        let closure = comforter::read_closure(&dir, "elixir")?;
+        let beam = comforter::closure_object(store, &closure, "beam_object", "elixir/bin/mix")?;
         // The deps projection is a writable clone OUTSIDE the store; verify
         // it lives under the blanket home and matches the recorded deps id.
-        let deps_obj = project::closure_object(store, &closure, "deps_object", "")?;
+        let deps_obj = comforter::closure_object(store, &closure, "deps_object", "")?;
         // Never trust the recorded projection path: reconstruct the ONE
         // expected forest path from canonical project + deps id and require
         // exact canonical equality (Sol: lexical checks admitted foreign
@@ -1846,7 +1867,7 @@ fn run_run(
             &elixir::build_root(platform, &dir)?,
             &scratch,
         )?;
-        blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
+        blanket::kernel::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if dir.join(".blanket/closures/dotnet.json").exists() {
         // This prevents accidental unsandboxed builds, not deliberate bypasses
@@ -1856,14 +1877,14 @@ fn run_run(
         if let Some(reason) = dotnet::refused_run_command(cmd) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
         }
-        let closure = project::read_closure(&dir, "dotnet")?;
-        let sdk = project::closure_object(store, &closure, "sdk_object", "dotnet")?;
-        let packages = project::closure_object(store, &closure, "packages_object", "")?;
+        let closure = comforter::read_closure(&dir, "dotnet")?;
+        let sdk = comforter::closure_object(store, &closure, "sdk_object", "dotnet")?;
+        let packages = comforter::closure_object(store, &closure, "packages_object", "")?;
         prefix.push(sdk.to_string_lossy().into_owned());
         let scratch = std::env::temp_dir().join(format!("blanket-dn-run-{}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
         let (prefixes, remove, set) = dotnet::run_env(&sdk, &packages, &scratch);
-        blanket::sandbox::force_env(&mut command, &prefixes, &remove, &set);
+        blanket::kernel::sandbox::force_env(&mut command, &prefixes, &remove, &set);
     }
     if prefix.is_empty() {
         return Err(io::Error::new(
@@ -1917,7 +1938,7 @@ fn run_run(
             }
             step.env("npm_package_json", package_json_path);
             step.env("INIT_CWD", &cwd);
-            let status = blanket::supervise::status(&mut step, activity)
+            let status = blanket::kernel::supervise::status(&mut step, activity)
                 .map_err(|e| io::Error::new(e.kind(), format!("run npm script {event}: {e}")))?;
             if !status.success() {
                 return Ok(child_status_code(&status));
@@ -1925,7 +1946,7 @@ fn run_run(
         }
         return Ok(0);
     }
-    let status = blanket::supervise::status(&mut command, activity)?;
+    let status = blanket::kernel::supervise::status(&mut command, activity)?;
     Ok(child_status_code(&status))
 }
 

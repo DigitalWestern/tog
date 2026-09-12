@@ -7,13 +7,13 @@
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
 
-use crate::archive::Compression;
-use crate::dirhash;
-use crate::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::sandbox::BuildSpec;
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::archive::Compression;
+use crate::kernel::dirhash;
+use crate::kernel::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::sandbox::BuildSpec;
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -68,7 +68,7 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Go toolchain", "stage 4")?;
     go_pins(platform).map(|_| ())
 }
 
@@ -129,13 +129,15 @@ fn extract_go_toolchain_inner(
     // List first (src/archive.rs): the layout check below and the
     // containment rules both run before tar writes anything.
     let entries = match store {
-        Some(store) => crate::archive::list_for_store(
+        Some(store) => crate::kernel::archive::list_for_store(
             store,
             archive_platform(platform),
             archive,
             Compression::Gzip,
         ),
-        None => crate::archive::list(archive_platform(platform), archive, Compression::Gzip),
+        None => {
+            crate::kernel::archive::list(archive_platform(platform), archive, Compression::Gzip)
+        }
     }
     .map_err(|e| err(format!("could not inspect Go archive layout: {e}")))?;
     let mut saw_entry = false;
@@ -161,7 +163,7 @@ fn extract_go_toolchain_inner(
     }
 
     match store {
-        Some(store) => crate::archive::extract_validated_for_store(
+        Some(store) => crate::kernel::archive::extract_validated_for_store(
             store,
             archive_platform(platform),
             archive,
@@ -170,7 +172,7 @@ fn extract_go_toolchain_inner(
             Compression::Gzip,
             &entries,
         )?,
-        None => crate::archive::extract_validated(
+        None => crate::kernel::archive::extract_validated(
             archive_platform(platform),
             archive,
             staged,
@@ -197,7 +199,7 @@ pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Go toolchain", "stage 4")?;
     // Resolve the exact row before touching the store or downloading. A
     // future catalog may carry several versions for one platform; falling
     // back to GO_VERSION here would pair the plan with the wrong toolchain.
@@ -205,7 +207,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
     let identity = go_identity(pin);
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
@@ -213,7 +215,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
     extract_go_toolchain_for(store, platform, &tarball, &staged)?;
     store
         .commit_with_deps(&identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(pin.sha256)?);
             deps
         })
@@ -265,13 +267,13 @@ pub(crate) fn run_checked(
     offline: bool,
     args: &[&str],
 ) -> io::Result<()> {
-    crate::ui::trace(&format!(
+    crate::kernel::ui::trace(&format!(
         "run: go {} (in {})",
         args.join(" "),
         cwd.display()
     ));
     let out = run_go(store, go_obj, cwd, modcache, offline, args)?;
-    if crate::ui::verbose() {
+    if crate::kernel::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
     if !out.status.success() {
@@ -301,7 +303,7 @@ fn run_go(
             cmd.env(&k, &v);
         }
     }
-    crate::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
 }
 
@@ -591,7 +593,7 @@ pub fn plan_go(
             &["mod", "tidy"],
         )?;
         if !out.status.success() {
-            let _ = crate::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&scratch);
             return Err(err(format!(
                 "store go mod tidy failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -740,7 +742,7 @@ pub fn plan_go(
         }
         Ok(())
     })();
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     result?;
     modules.sort_by(|a, b| (&a.path, &a.version).cmp(&(&b.path, &b.version)));
 
@@ -917,13 +919,13 @@ pub fn realize_modcache(
     plan: &GoPlan,
     go_obj: &Path,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Go module cache", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Go module cache", "stage 4")?;
     let pin = go_pin(platform, &plan.go_version)?;
     let identity = modcache_identity(pin, plan);
 
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -960,7 +962,7 @@ pub fn realize_modcache(
         );
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run_go(store, go_obj, &scratch, &staged, true, &arg_refs)?;
-        let _ = crate::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
                 "offline module extraction failed: {}",
@@ -970,8 +972,8 @@ pub fn realize_modcache(
     }
     // The extraction writes lock files under cache/lock and per-module
     // .lock files; harmless immutable residue.
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(go_obj)?)?;
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(go_obj)?)?;
     for module in &plan.modules {
         deps.cache_digest(Digest::sha256(&module.zip_sha256)?);
         deps.cache_digest(Digest::sha256(&module.modfile_sha256)?);
@@ -993,9 +995,9 @@ pub fn project_go_env(
 ) -> io::Result<()> {
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
-    let store = crate::project::store_from_object_path(&go_obj)
+    let store = crate::comforter::store_from_object_path(&go_obj)
         .ok_or_else(|| err("Go object is not in a Blanket store"))?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -1003,10 +1005,10 @@ pub fn project_go_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
-    let mut refs = crate::project::ClosureRefs::new();
+    let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &go_obj)?;
     refs.object_path(&store, &activity, &modcache_obj)?;
-    crate::project::write_closure(
+    crate::comforter::write_closure(
         project_dir,
         "go",
         serde_json::json!({
@@ -1101,8 +1103,8 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", go_obj.join("bin").display()),
     };
-    let result =
-        crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
+    let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store)
+        .map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -1121,7 +1123,7 @@ pub fn build_sandboxed(
         }
         Ok(())
     });
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     moved
 }
 
@@ -1141,9 +1143,9 @@ mod tests {
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -1153,7 +1155,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
     use super::*;
@@ -1177,7 +1179,7 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = crate::store::remove_tree(&self.0);
+            let _ = crate::kernel::store::remove_tree(&self.0);
         }
     }
 
@@ -1235,7 +1237,7 @@ mod tests {
 
     #[test]
     fn ensure_go_for_rejects_unpinned_version_before_store_access() {
-        let _lock = crate::store::STORE_ENV_LOCK
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new();
@@ -1589,7 +1591,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&temp).unwrap();
-        let _lock = crate::store::STORE_ENV_LOCK
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("BLANKET_STORE", temp.join("store"));

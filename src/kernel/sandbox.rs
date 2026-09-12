@@ -11,9 +11,9 @@
 //! scanned: sockets there remain an accepted cooperative-hermeticity gap,
 //! and should also be documented in LIMITATIONS.md.
 
-use crate::activity::StoreActivity;
-use crate::platform::Platform;
-use crate::store::Store;
+use crate::kernel::activity::StoreActivity;
+use crate::kernel::platform::Platform;
+use crate::kernel::store::Store;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -101,7 +101,7 @@ pub(crate) fn run_build_spec_on_for_store(
     spec: &BuildSpec,
     store: &Store,
 ) -> io::Result<()> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     run_build_spec_on_with_activity(platform, spec, &activity)
 }
 
@@ -150,7 +150,7 @@ pub(crate) fn run_build_spec_status_on_for_store(
     spec: &BuildSpec,
     store: &Store,
 ) -> io::Result<std::process::ExitStatus> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     run_build_spec_status_on_with_activity(platform, spec, &activity)
 }
 
@@ -390,7 +390,8 @@ impl Sandbox<'_> {
         for (k, v) in envs {
             command.env(k, v);
         }
-        let (status, stderr) = crate::supervise::status_with_stderr(&mut command, activity)?;
+        let (status, stderr) =
+            crate::kernel::supervise::status_with_stderr(&mut command, activity)?;
         if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
             return Err(sandbox_failure_error(
                 SandboxFailureKind::Setup,
@@ -444,7 +445,8 @@ impl Sandbox<'_> {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::piped());
-            let (status, stderr) = crate::supervise::status_with_stderr(&mut command, activity)?;
+            let (status, stderr) =
+                crate::kernel::supervise::status_with_stderr(&mut command, activity)?;
             if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, &stderr) {
                 return Err(sandbox_failure_error(
                     SandboxFailureKind::Setup,
@@ -933,7 +935,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             .stderr(std::process::Stdio::piped());
         let probe_output = match activity {
             Some(activity) => {
-                let output = crate::supervise::output(&mut probe_command, activity)
+                let output = crate::kernel::supervise::output(&mut probe_command, activity)
                     .map_err(|error| error.to_string())?;
                 (output.status, output.stderr)
             }
@@ -958,7 +960,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
 }
 
 fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> bool {
-    crate::supervise::output(command, activity)
+    crate::kernel::supervise::output(command, activity)
         .map(|output| output.status.success())
         .unwrap_or(false)
 }

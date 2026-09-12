@@ -24,8 +24,8 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
-use crate::platform::Platform;
-use crate::store::Store;
+use crate::kernel::platform::Platform;
+use crate::kernel::store::Store;
 
 /// One archive member as tar lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,7 +533,7 @@ fn extract_validated_inner(
 
 fn output_for(command: &mut Command, store: Option<&Store>) -> io::Result<std::process::Output> {
     match store {
-        Some(store) => crate::supervise::output_owned(command, store),
+        Some(store) => crate::kernel::supervise::output_owned(command, store),
         None => command.output(),
     }
 }
@@ -543,7 +543,7 @@ fn status_for(
     store: Option<&Store>,
 ) -> io::Result<std::process::ExitStatus> {
     match store {
-        Some(store) => crate::supervise::status_owned(command, store),
+        Some(store) => crate::kernel::supervise::status_owned(command, store),
         None => command.status(),
     }
 }

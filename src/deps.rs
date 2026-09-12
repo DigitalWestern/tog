@@ -21,11 +21,21 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::platform::Platform;
-use crate::store::Store;
-use crate::{
-    cargo, elixir, golang, inspect, manifest, npm, pypi, pyselect, python, ruby, sandbox, ui, xrun,
-};
+use crate::inspect;
+use crate::kernel::platform::Platform;
+use crate::kernel::sandbox;
+use crate::kernel::store::Store;
+use crate::kernel::ui;
+use crate::tailors::cargo;
+use crate::tailors::elixir;
+use crate::tailors::go;
+use crate::tailors::node;
+use crate::tailors::python;
+use crate::tailors::python::manifest;
+use crate::tailors::python::pypi;
+use crate::tailors::python::pyselect;
+use crate::tailors::ruby;
+use crate::xrun;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
@@ -1073,7 +1083,7 @@ fn uv_command(
 
 fn run_inherited(store: &Store, mut command: Command, what: &str) -> io::Result<()> {
     ui::trace_command(&command);
-    let status = crate::supervise::status_owned(&mut command, store)
+    let status = crate::kernel::supervise::status_owned(&mut command, store)
         .map_err(|error| io::Error::new(error.kind(), format!("run {what}: {error}")))?;
     if !status.success() {
         return Err(other(format!(
@@ -1344,7 +1354,7 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
     let lock_path = root.join("pnpm-lock.yaml");
     let text = fs::read_to_string(&lock_path)
         .map_err(|error| other(format!("read {}: {error}", lock_path.display())))?;
-    let importers = crate::npm_lock_import::pnpm_lock_importers(&text).map_err(|error| {
+    let importers = crate::tailors::node::lock_import::pnpm_lock_importers(&text).map_err(|error| {
         other(format!(
             "{}: {error}; blanket reads workspace membership from this file, so it must parse. If it is the result of an unresolved merge conflict, resolve the conflict or delete the file and run 'pnpm install' in {} to regenerate it, then run blanket again",
             lock_path.display(),
@@ -1613,7 +1623,7 @@ fn node(
         }
     };
     if lock_name == "package-lock.json" {
-        let node_obj = npm::ensure_node_for(store, platform)?;
+        let node_obj = node::ensure_node_for(store, platform)?;
         let mut command = Command::new(node_obj.join("bin/npm"));
         if !ui::verbose() {
             command.arg("--silent");
@@ -1667,7 +1677,7 @@ fn node(
         manager.version(),
         manager.corepack_hash(),
     )?;
-    let node_obj = npm::ensure_node_for(store, platform)?;
+    let node_obj = node::ensure_node_for(store, platform)?;
     let executable = tool_root
         .join("node_modules/.bin")
         .join(manager.executable());
@@ -1738,7 +1748,7 @@ fn node(
         run_inherited(store, command, &format!("store {}", manager.name()))?;
         Ok(())
     })();
-    let _ = crate::store::remove_tree(&stage);
+    let _ = crate::kernel::store::remove_tree(&stage);
     result?;
     let package_label = package_path
         .strip_prefix(&lock_root)
@@ -1818,8 +1828,8 @@ fn go_delegate(
             "--dev has no meaning in Go (one dependency set per module)",
         ));
     }
-    let go_version = golang::resolve_project_toolchain(platform, project)?;
-    let go_obj = golang::ensure_go_for(store, platform, go_version)?;
+    let go_version = go::resolve_project_toolchain(platform, project)?;
+    let go_obj = go::ensure_go_for(store, platform, go_version)?;
     let scratch = store.stage()?;
     let args: Vec<String> = match verb {
         Verb::Add => std::iter::once("get".to_string())
@@ -1838,8 +1848,8 @@ fn go_delegate(
         }
     };
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = golang::run_checked(store, &go_obj, project, &scratch, false, &refs);
-    let _ = crate::store::remove_tree(&scratch);
+    let result = go::run_checked(store, &go_obj, project, &scratch, false, &refs);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     result?;
     Ok(vec!["go.mod".to_string(), "go.sum".to_string()])
 }
@@ -1889,7 +1899,7 @@ fn ruby_delegate(
             }
         }
     })();
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     result?;
     Ok(vec!["Gemfile".to_string(), "Gemfile.lock".to_string()])
 }
@@ -1936,7 +1946,7 @@ fn elixir_delegate(
             }
             args.extend(texts.iter().map(String::as_str));
             let result = elixir::run_checked(store, &beam, project, &scratch, false, &args);
-            let _ = crate::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&scratch);
             result?;
             Ok(vec!["mix.lock".to_string()])
         }

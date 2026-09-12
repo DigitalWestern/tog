@@ -11,9 +11,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::platform::Platform;
-use crate::store::Store;
-use crate::{dotnet, golang, manifest, sandbox};
+use crate::kernel::platform::Platform;
+use crate::kernel::sandbox;
+use crate::kernel::store::Store;
+use crate::tailors::dotnet;
+use crate::tailors::go;
+use crate::tailors::python::manifest;
 
 /// Display order; also the `ls <ecosystem>` vocabulary.
 pub const ECOSYSTEMS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
@@ -616,7 +619,7 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
     if !recorded_version.is_empty() {
         let go_mod = dir.join("go.mod");
         match fs::read_to_string(&go_mod) {
-            Ok(text) => match golang::resolve_toolchain(platform, &text) {
+            Ok(text) => match go::resolve_toolchain(platform, &text) {
                 Ok(selected) if selected == recorded_version => {}
                 Ok(_) => changed.push("go.mod".to_string()),
                 Err(_) => changed.push("go.mod (Go toolchain selection unavailable)".to_string()),
@@ -927,7 +930,7 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
 
     if let Some(platform) = platform {
         if dir.join("go.mod").is_file() {
-            match golang::resolve_project_toolchain(platform, dir) {
+            match go::resolve_project_toolchain(platform, dir) {
                 Ok(version) => checks.push(check(
                     "go-toolchain",
                     Level::Ok,
@@ -1515,7 +1518,7 @@ mod tests {
 
     #[test]
     fn doctor_reports_host_and_project() {
-        let _lock = crate::store::STORE_ENV_LOCK
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new("doctor");

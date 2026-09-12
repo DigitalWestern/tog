@@ -1,7 +1,7 @@
 //! End-to-end Cargo tailor test. Heavy: downloads the pinned Rust toolchain
 //! and crates.io closure on first run.
 
-use blanket::platform::Platform;
+use blanket::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

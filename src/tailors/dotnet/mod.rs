@@ -10,11 +10,11 @@
 //! lock (not project obj/) is the only durable authority: every sandboxed
 //! build re-restores offline into scratch and builds --no-restore.
 
-use crate::fetch::{cache_insert, download_verified_digest_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::sandbox::{force_env, BuildSpec};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::sandbox::{force_env, BuildSpec};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -51,7 +51,7 @@ fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, ".NET SDK", "stage 4")?;
+    crate::kernel::platform::require_host(platform, ".NET SDK", "stage 4")?;
     sdk_pin(platform).map(|_| ())
 }
 
@@ -84,13 +84,13 @@ pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, ".NET SDK", "stage 4")?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    crate::kernel::platform::require_host(platform, ".NET SDK", "stage 4")?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let pin = sdk_pin(platform)?;
     let identity = sdk_identity(pin);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
     let tarball = download_verified_digest_held(store, pin.url, &Digest::sha512(pin.sha512)?)?;
@@ -98,7 +98,7 @@ pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> 
     extract_sdk_archive_for(store, &tarball, &staged)?;
     store
         .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha512(pin.sha512)?);
             deps
         })
@@ -122,7 +122,7 @@ fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
 fn extract_sdk_archive_for(store: &Store, tarball: &Path, staged: &Path) -> io::Result<()> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-xzf"]).arg(tarball).args(["-C"]).arg(staged);
-    let status = crate::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
     if !status.success() || !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
@@ -669,7 +669,7 @@ pub fn plan_dotnet(
             &["restore", "--use-lock-file", "--configfile", &config_arg],
         )?;
         let ok = out.status.success();
-        let _ = crate::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&scratch);
         if !ok {
             return Err(err(format!(
                 "store dotnet restore --use-lock-file failed: {}",
@@ -780,7 +780,7 @@ fn run_dotnet(
         &forced_env(sdk_obj, packages, scratch),
     );
     cmd.stdin(std::process::Stdio::null());
-    crate::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output_owned(&mut cmd, store)
         .map_err(|e| io::Error::new(e.kind(), format!("run store dotnet {args:?}: {e}")))
 }
 
@@ -872,8 +872,8 @@ pub fn realize_packages(
     sdk_obj: &Path,
     project_dir: &Path,
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, ".NET packages", "stage 4")?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    crate::kernel::platform::require_host(platform, ".NET packages", "stage 4")?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let _ = sdk_pin(platform)?;
     let _ = preflight(project_dir)?;
     validate_plan(plan)?;
@@ -933,8 +933,8 @@ pub fn realize_packages(
     };
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
-        let _ = crate::store::remove_tree(&scratch);
+        crate::kernel::policy::check_cached(store, &id)?;
+        let _ = crate::kernel::store::remove_tree(&scratch);
         return Ok(store.object_path(&id));
     }
 
@@ -970,7 +970,7 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::sandbox::run_build_spec_on_for_store(
+    let result = crate::kernel::sandbox::run_build_spec_on_for_store(
         platform,
         &BuildSpec {
             argv: vec![
@@ -993,8 +993,8 @@ pub fn realize_packages(
         &store,
     );
     if let Err(e) = result {
-        let _ = crate::store::remove_tree(&scratch);
-        let _ = crate::store::remove_tree(&staged);
+        let _ = crate::kernel::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&staged);
         return Err(io::Error::new(
             e.kind(),
             format!("locked-mode package verification failed: {e}"),
@@ -1007,22 +1007,22 @@ pub fn realize_packages(
             .join(p.id.to_ascii_lowercase())
             .join(p.version.to_ascii_lowercase());
         if !dir.join(".nupkg.metadata").is_file() {
-            let _ = crate::store::remove_tree(&scratch);
-            let _ = crate::store::remove_tree(&staged);
+            let _ = crate::kernel::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&staged);
             return Err(err(format!(
                 "{}@{}: not materialized by locked restore",
                 p.id, p.version
             )));
         }
         if let Err(e) = rewrite_metadata_source(&dir.join(".nupkg.metadata")) {
-            let _ = crate::store::remove_tree(&scratch);
-            let _ = crate::store::remove_tree(&staged);
+            let _ = crate::kernel::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&staged);
             return Err(e);
         }
     }
-    let _ = crate::store::remove_tree(&scratch);
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(&sdk_obj)?)?;
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(&sdk_obj)?)?;
     for raw_sha256 in raw_hashes.values() {
         deps.cache_digest(Digest::sha256(raw_sha256)?);
     }
@@ -1040,9 +1040,9 @@ pub fn project_dotnet_env(
 ) -> io::Result<()> {
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
-    let store = crate::project::store_from_object_path(&sdk_obj)
+    let store = crate::comforter::store_from_object_path(&sdk_obj)
         .ok_or_else(|| err(".NET SDK object is not in a Blanket store"))?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -1050,10 +1050,10 @@ pub fn project_dotnet_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
-    let mut refs = crate::project::ClosureRefs::new();
+    let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &sdk_obj)?;
     refs.object_path(&store, &activity, &packages_obj)?;
-    crate::project::write_closure(
+    crate::comforter::write_closure(
         project_dir,
         "dotnet",
         serde_json::json!({
@@ -1268,11 +1268,13 @@ fn publish_output(
         Ok(()) => {}
         Err(e) if e.raw_os_error() == Some(18) => {
             let cloned = match store {
-                Some(store) => crate::project::clone_tree_for_store(store, staged, &new, platform),
-                None => crate::project::clone_tree_for(staged, &new, platform),
+                Some(store) => {
+                    crate::comforter::clone_tree_for_store(store, staged, &new, platform)
+                }
+                None => crate::comforter::clone_tree_for(staged, &new, platform),
             };
             if let Err(clone_error) = cloned {
-                let _ = crate::store::remove_tree(&new);
+                let _ = crate::kernel::store::remove_tree(&new);
                 return Err(io::Error::new(
                     clone_error.kind(),
                     format!("publish {}: {clone_error}", output.display()),
@@ -1290,7 +1292,7 @@ fn publish_output(
     let had_old = output.exists();
     if had_old {
         if let Err(e) = fs::rename(&output, &old) {
-            let _ = crate::store::remove_tree(&new);
+            let _ = crate::kernel::store::remove_tree(&new);
             return Err(io::Error::new(
                 e.kind(),
                 format!("publish {}: {e}", output.display()),
@@ -1298,7 +1300,7 @@ fn publish_output(
         }
     }
     if let Err(e) = fs::rename(&new, &output) {
-        let _ = crate::store::remove_tree(&new);
+        let _ = crate::kernel::store::remove_tree(&new);
         let restore = if had_old {
             fs::rename(&old, &output)
         } else {
@@ -1316,7 +1318,7 @@ fn publish_output(
         });
     }
     if had_old {
-        if let Err(e) = crate::store::remove_tree(&old) {
+        if let Err(e) = crate::kernel::store::remove_tree(&old) {
             // The publish itself succeeded; rolling back here could lose
             // BOTH versions (the old tree may be partially deleted). Keep
             // the new output and report the leftover.
@@ -1387,7 +1389,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
+    crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -1398,7 +1400,7 @@ pub fn build_sandboxed(
         )
     })?;
     if !objdir.join("project.assets.json").is_file() {
-        let _ = crate::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err("restore produced no project.assets.json"));
     }
     let assets = fs::read(objdir.join("project.assets.json"))?;
@@ -1424,8 +1426,8 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    if let Err(e) = crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store) {
-        let _ = crate::store::remove_tree(&scratch);
+    if let Err(e) = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store) {
+        let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(io::Error::new(
             e.kind(),
             format!("dotnet build failed: {e}\n(network is denied during builds)"),
@@ -1433,7 +1435,7 @@ pub fn build_sandboxed(
     }
     let after = fs::read(objdir.join("project.assets.json"))?;
     if hex::encode(Sha256::digest(&after)) != assets_sha256 {
-        let _ = crate::store::remove_tree(&scratch);
+        let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err(
             "project.assets.json changed during build; refusing to publish output",
         ));
@@ -1447,11 +1449,11 @@ pub fn build_sandboxed(
     ) {
         Ok(output) => output,
         Err(e) => {
-            let _ = crate::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&scratch);
             return Err(e);
         }
     };
-    let _ = crate::store::remove_tree(&scratch);
+    let _ = crate::kernel::store::remove_tree(&scratch);
     eprintln!("blanket: built into {}", output.display());
     Ok(())
 }
@@ -1473,9 +1475,9 @@ mod tests {
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -1485,7 +1487,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
     use super::*;
@@ -1600,7 +1602,7 @@ mod tests {
             .to_string();
         assert!(error.contains("is owned by uid"), "{error}");
 
-        let _ = crate::store::remove_tree(&base);
+        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     #[test]
@@ -1907,7 +1909,7 @@ mod tests {
         fs::write(&projector, "<Projector/>").unwrap();
         assert!(validate_csproj(&projector).is_err());
 
-        let _ = crate::store::remove_tree(&base);
+        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     #[test]
@@ -1960,7 +1962,7 @@ mod tests {
             .to_string();
         assert!(error.contains("unexpected layout"), "{error}");
 
-        let _ = crate::store::remove_tree(&base);
+        let _ = crate::kernel::store::remove_tree(&base);
     }
 
     #[test]
@@ -2027,6 +2029,6 @@ mod tests {
             .join(format!(".blanket-fp.old.{}", std::process::id()))
             .exists());
 
-        let _ = crate::store::remove_tree(&base);
+        let _ = crate::kernel::store::remove_tree(&base);
     }
 }

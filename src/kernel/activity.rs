@@ -351,7 +351,7 @@ mod tests {
         drop(exclusive);
         // With the exclusive lease gone the same request succeeds.
         StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     /// `try_exclusive` answers "is this store in use?". A lease held by the
@@ -363,7 +363,7 @@ mod tests {
         assert!(StoreActivity::try_exclusive(&root).unwrap().is_none());
         drop(shared);
         assert!(StoreActivity::try_exclusive(&root).unwrap().is_some());
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     /// The blocking form of the same mistake is unsatisfiable and must say so
@@ -374,7 +374,7 @@ mod tests {
         let _shared = StoreActivity::acquire(&root, ActivityMode::Shared).unwrap();
         let error = StoreActivity::acquire(&root, ActivityMode::Exclusive).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     /// Independent shared leases coexist; a lease for one store never
@@ -393,7 +393,7 @@ mod tests {
         // The other store was never affected.
         assert!(StoreActivity::try_exclusive(&second).unwrap().is_none());
         drop(b);
-        crate::store::remove_tree(&first).unwrap();
-        crate::store::remove_tree(&second).unwrap();
+        crate::kernel::store::remove_tree(&first).unwrap();
+        crate::kernel::store::remove_tree(&second).unwrap();
     }
 }

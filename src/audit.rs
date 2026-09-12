@@ -25,8 +25,8 @@
 //!   file can name it, so no policy file can be said to have allowed it.
 
 use crate::inspect::{self, ClosureFile, State};
-use crate::platform::Platform;
-use crate::policy::{self, Exception, Policy};
+use crate::kernel::platform::Platform;
+use crate::kernel::policy::{self, Exception, Policy};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io;
@@ -365,7 +365,9 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY};
+    use crate::kernel::policy::{
+        GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;

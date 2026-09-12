@@ -2,10 +2,10 @@
 
 pub mod rustfmt;
 
-use crate::fetch::{download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,7 +85,7 @@ fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Rust toolchain", "stage 4")?;
     rust_components(platform).map(|_| ())
 }
 
@@ -153,8 +153,8 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Rust toolchain", "stage 4")?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    crate::kernel::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let components = rust_components(platform)?;
     if version != RUST_VERSION {
         return Err(err(format!(
@@ -164,7 +164,7 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
     let identity = rust_identity(platform, &components);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -182,7 +182,7 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
 
     store
         .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             for component in &components {
                 deps.cache_digest(Digest::sha256(component.sha256)?);
             }
@@ -211,7 +211,7 @@ fn extract_rust_components_for(
             .args(["-C"])
             .arg(staged)
             .args(["--strip-components", "2"]);
-        let status = crate::supervise::status_owned(&mut command, store).map_err(|e| {
+        let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("spawn tar for {}: {e}", component.component),
@@ -355,8 +355,8 @@ fn resolve_toolchain_spec(
             .cloned()
             .collect();
         if !unavailable.is_empty() {
-            crate::policy::record(
-                crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
+            crate::kernel::policy::record(
+                crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
                 &path.display().to_string(),
                 &format!("components unavailable: {}", unavailable.join(", ")),
             )?;
@@ -433,7 +433,7 @@ pub struct CargoGitSource {
     /// be replaced with the same kind, not with `rev`.
     pub reference: CargoGitReference,
     #[serde(skip)]
-    pub inner: crate::gitsrc::GitSource,
+    pub inner: crate::kernel::gitsrc::GitSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -602,7 +602,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
 pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
     let rest = source.strip_prefix("git+")?;
     let (locator, commit) = rest.rsplit_once('#')?;
-    if !crate::gitsrc::is_full_commit(commit) {
+    if !crate::kernel::gitsrc::is_full_commit(commit) {
         return None;
     }
     let (url, query) = match locator.split_once('?') {
@@ -625,8 +625,8 @@ pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
     Some(CargoGitSource {
         source: source.to_string(),
         reference,
-        inner: crate::gitsrc::GitSource {
-            url: crate::gitsrc::normalize_url(url),
+        inner: crate::kernel::gitsrc::GitSource {
+            url: crate::kernel::gitsrc::normalize_url(url),
             commit: commit.to_ascii_lowercase(),
             subdirectory: None,
         },
@@ -749,11 +749,11 @@ fn reject_workspace_inheritance(crate_dir: &Path, name: &str) -> io::Result<()> 
 }
 
 fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -763,17 +763,18 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
     let mut git_roots = Vec::new();
     for krate in &crates {
         if let Some(git) = &krate.git {
-            let object = crate::gitsrc::ensure_git_source(store, &git.inner).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{}@{}: git source {}: {e}",
-                        krate.name, krate.version, git.inner.url
-                    ),
-                )
-            })?;
-            crate::policy::record(
-                crate::policy::GIT_DEPENDENCY,
+            let object =
+                crate::kernel::gitsrc::ensure_git_source(store, &git.inner).map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!(
+                            "{}@{}: git source {}: {e}",
+                            krate.name, krate.version, git.inner.url
+                        ),
+                    )
+                })?;
+            crate::kernel::policy::record(
+                crate::kernel::policy::GIT_DEPENDENCY,
                 &format!("{}@{}", krate.name, krate.version),
                 &format!("{} at {}", git.inner.url, git.inner.commit),
             )?;
@@ -795,14 +796,14 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         // workspace repository is searched for the crate the lock names.
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         let source_dir = crate_dir_in_repo(root, &krate.name, &krate.version)?;
-        crate::project::clone_tree_for_store(store, &source_dir, &crate_dir, Platform::host()?)
+        crate::comforter::clone_tree_for_store(store, &source_dir, &crate_dir, Platform::host()?)
             .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
-                )
-            })?;
-        crate::gitsrc::validate_symlinks(&crate_dir).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
+            )
+        })?;
+        crate::kernel::gitsrc::validate_symlinks(&crate_dir).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -843,7 +844,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
             .args(["-C"])
             .arg(&crate_dir)
             .args(["--strip-components", "1"]);
-        let status = crate::supervise::status(&mut command, &activity).map_err(|e| {
+        let status = crate::kernel::supervise::status(&mut command, &activity).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("{}@{}: spawn tar: {e}", krate.name, krate.version),
@@ -884,7 +885,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         })?;
     }
 
-    let mut deps = crate::store::ObjectDeps::new();
+    let mut deps = crate::kernel::store::ObjectDeps::new();
     for krate in &crates {
         if krate.git.is_some() {
             let (_, object) = git_roots
@@ -898,7 +899,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
                         krate.name, krate.version
                     ))
                 })?;
-            deps.object_id(&crate::store::object_id_from_path(object)?)?;
+            deps.object_id(&crate::kernel::store::object_id_from_path(object)?)?;
         } else {
             deps.cache_digest(Digest::sha256(&krate.sha256)?);
         }
@@ -921,7 +922,7 @@ fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> 
         let checksum = match &krate.git {
             // The realized source tree depends on the normalized repository
             // URL as well as its commit (including relative submodule bases).
-            Some(git) => format!("git:{}", crate::gitsrc::object_id(&git.inner)),
+            Some(git) => format!("git:{}", crate::kernel::gitsrc::object_id(&git.inner)),
             None => normalize_checksum(&krate.sha256)?,
         };
         if !seen.insert((krate.name.clone(), krate.version.clone())) {
@@ -1160,9 +1161,9 @@ pub fn project_cargo_env(
     Store::check_registrable(&project_dir)?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
-    let store = crate::project::store_from_object_path(&rust_obj)
+    let store = crate::comforter::store_from_object_path(&rust_obj)
         .ok_or_else(|| err("Rust object is not in a Blanket store"))?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
     let cargo_home = project_child_dir(&project_dir, ".blanket/cargo-home")?;
@@ -1217,12 +1218,12 @@ pub fn project_cargo_env(
         .all(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(crate::store::is_object_id)
+                .is_some_and(crate::kernel::store::is_object_id)
         });
     if !valid_objects {
         #[cfg(test)]
         {
-            return crate::project::write_closure_legacy(&project_dir, "cargo", body);
+            return crate::comforter::write_closure_legacy(&project_dir, "cargo", body);
         }
         #[cfg(not(test))]
         {
@@ -1231,10 +1232,10 @@ pub fn project_cargo_env(
             ));
         }
     }
-    let mut refs = crate::project::ClosureRefs::new();
+    let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &rust_obj)?;
     refs.object_path(&store, &activity, &vendor_obj)?;
-    crate::project::write_closure(&project_dir, "cargo", body, &store, &activity, refs)
+    crate::comforter::write_closure(&project_dir, "cargo", body, &store, &activity, refs)
 }
 
 /// Build a Cargo project in the existing network-denied seatbelt sandbox.
@@ -1289,7 +1290,7 @@ pub fn build_sandboxed(
         "build".to_string(),
     ];
     argv.extend(args.iter().cloned());
-    let spec = crate::sandbox::BuildSpec {
+    let spec = crate::kernel::sandbox::BuildSpec {
         argv,
         cwd: project_dir.clone(),
         env: vec![
@@ -1309,7 +1310,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
     };
-    let result = crate::sandbox::run_build_spec_on_for_store(platform, &spec, &store);
+    let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store);
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
         io::Error::new(e.kind(), format!(
@@ -1415,9 +1416,9 @@ mod tests {
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -1427,7 +1428,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
     use super::*;
@@ -1539,7 +1540,7 @@ mod tests {
         }
     }
 
-    use crate::store::STORE_ENV_LOCK;
+    use crate::kernel::store::STORE_ENV_LOCK;
 
     struct StoreEnv(Option<OsString>);
 
@@ -1565,7 +1566,7 @@ mod tests {
     fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::policy::clear();
+        crate::kernel::policy::clear();
         guard
     }
 
@@ -1733,7 +1734,7 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
             "1.96.1"
         );
-        crate::policy::clear();
+        crate::kernel::policy::clear();
     }
 
     #[test]
@@ -1788,10 +1789,11 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
             "1.96.1"
         );
-        assert!(crate::policy::pending()
+        assert!(crate::kernel::policy::pending()
             .iter()
-            .any(|exception| exception.kind == crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE));
-        crate::policy::clear();
+            .any(|exception| exception.kind
+                == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE));
+        crate::kernel::policy::clear();
 
         fs::write(
             root.join("rust-toolchain"),
@@ -1817,12 +1819,12 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
             "1.96.1"
         );
-        assert!(crate::policy::pending().iter().any(|exception| {
-            exception.kind == crate::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE
+        assert!(crate::kernel::policy::pending().iter().any(|exception| {
+            exception.kind == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE
                 && exception.subject.ends_with("rust-toolchain.toml")
                 && exception.detail.contains("rustfmt")
         }));
-        crate::policy::clear();
+        crate::kernel::policy::clear();
     }
 
     fn make_component_archives(
@@ -1943,7 +1945,7 @@ checksum = "{hash_b}"
 
     #[test]
     fn realizes_vendor_and_writes_complete_checksums() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
@@ -1981,7 +1983,7 @@ checksum = "{hash_b}"
 
     #[test]
     fn rejects_symlinked_crate_entries() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
@@ -2076,7 +2078,7 @@ checksum = "{hash_b}"
             );
         }
 
-        let closure = crate::project::read_closure(&project, "cargo").unwrap();
+        let closure = crate::comforter::read_closure(&project, "cargo").unwrap();
         assert_eq!(closure["rust_object"]["id"], "rust-id");
         assert_eq!(closure["vendor_object"]["id"], "vendor-id");
         assert_eq!(closure["cargo_lock_sha256"], digest);
@@ -2251,7 +2253,7 @@ mod git_source_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("another version"), "{error}");
-        let _ = crate::store::remove_tree(&root);
+        let _ = crate::kernel::store::remove_tree(&root);
     }
 
     #[test]
@@ -2281,7 +2283,7 @@ mod git_source_tests {
         )
         .unwrap();
         std::os::unix::fs::symlink("../../outside", root.join("escape")).unwrap();
-        assert!(crate::gitsrc::validate_symlinks(&root).is_err());
-        let _ = crate::store::remove_tree(&root);
+        assert!(crate::kernel::gitsrc::validate_symlinks(&root).is_err());
+        let _ = crate::kernel::store::remove_tree(&root);
     }
 }

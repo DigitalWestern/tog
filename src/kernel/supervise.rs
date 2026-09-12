@@ -22,8 +22,8 @@
 #[cfg(test)]
 pub(crate) static SUPERVISION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-use crate::activity::StoreActivity;
-use crate::store::Store;
+use crate::kernel::activity::StoreActivity;
+use crate::kernel::store::Store;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -724,7 +724,7 @@ fn drain_stderr(
 /// complete supervised child interval; callers with a long-lived activity
 /// lease should prefer `status` directly.
 pub fn status_owned(command: &mut Command, store: &Store) -> io::Result<ExitStatus> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     status(command, &activity)
 }
 
@@ -848,15 +848,15 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
 
 /// Captured-output counterpart to `status_owned`.
 pub fn output_owned(command: &mut Command, store: &Store) -> io::Result<Output> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     output(command, &activity)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activity::ActivityMode;
-    use crate::store::Store;
+    use crate::kernel::activity::ActivityMode;
+    use crate::kernel::store::Store;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -891,7 +891,7 @@ mod tests {
 
     #[test]
     fn status_preserves_a_numeric_exit_across_sequential_children() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _test_session = TEST_SESSION.lock().unwrap();
@@ -904,12 +904,12 @@ mod tests {
         second.args(["-c", "exit 0"]);
         assert!(status(&mut second, &activity).unwrap().success());
         drop(activity);
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]
     fn output_drains_both_pipes_before_reaping() {
-        let _supervision = crate::supervise::SUPERVISION_TEST_LOCK
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _test_session = TEST_SESSION.lock().unwrap();
@@ -924,6 +924,6 @@ mod tests {
         assert_eq!(result.stdout.len(), 131072);
         assert_eq!(result.stderr, b"stderr");
         drop(activity);
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 }

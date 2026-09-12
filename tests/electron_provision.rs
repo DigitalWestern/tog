@@ -1,14 +1,14 @@
 //! Electron provisioning (NEXT.md item 5). Heavy: downloads the real release
 //! zip (~100 MB), so it is ignored by default.
 
-use blanket::platform::Platform;
-use blanket::store::Store;
+use blanket::kernel::platform::Platform;
+use blanket::kernel::store::Store;
 use std::path::{Path, PathBuf};
 
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        let _ = blanket::store::remove_tree(&self.0);
+        let _ = blanket::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -41,10 +41,11 @@ fn electron_is_provisioned_where_its_installer_looks() {
 
     // A real, published release.
     let version = "39.0.0";
-    let provisioning =
-        blanket::artifacts::provision(&store, platform, "electron", version, &scratch)
-            .expect("provision")
-            .expect("electron is provisioned");
+    let provisioning = blanket::tailors::python::artifacts::provision(
+        &store, platform, "electron", version, &scratch,
+    )
+    .expect("provision")
+    .expect("electron is provisioned");
 
     let cache_root = provisioning
         .envs
@@ -53,7 +54,8 @@ fn electron_is_provisioned_where_its_installer_looks() {
         .map(|(_, value)| PathBuf::from(value))
         .expect("the installer's cache variable is set");
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
-    let dir = cache_root.join(blanket::artifacts::electron_cache_directory(&release_url));
+    let dir = cache_root
+        .join(blanket::tailors::python::artifacts::electron_cache_directory(&release_url));
     let (os, arch) = match platform {
         Platform::Aarch64AppleDarwin => ("darwin", "arm64"),
         Platform::X86_64UnknownLinuxGnu => ("linux", "x64"),

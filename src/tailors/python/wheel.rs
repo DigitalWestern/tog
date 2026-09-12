@@ -146,8 +146,8 @@ pub fn install_wheel(
                     .unwrap_or(&destination)
                     .display()
                     .to_string();
-                crate::policy::record(
-                    crate::policy::FILE_COLLISION,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::FILE_COLLISION,
                     &subject,
                     &format!("{previous} and {distribution_name}"),
                 )?;
@@ -227,8 +227,8 @@ pub fn install_wheel(
                         .unwrap_or(&destination)
                         .display()
                         .to_string();
-                    crate::policy::record(
-                        crate::policy::FILE_COLLISION,
+                    crate::kernel::policy::record(
+                        crate::kernel::policy::FILE_COLLISION,
                         &subject,
                         &format!("{previous} and {distribution_name}"),
                     )?;
@@ -601,7 +601,7 @@ mod tests {
         );
         let mut wheels = vec![second, first];
         wheels.sort();
-        let _ = crate::policy::drain();
+        let _ = crate::kernel::policy::drain();
         let mut installed = BTreeMap::new();
         for wheel in wheels {
             install_wheel(
@@ -618,7 +618,7 @@ mod tests {
             fs::read_to_string(site.join("shared.py")).unwrap(),
             "second\n"
         );
-        assert_eq!(crate::policy::drain().len(), 1);
+        assert_eq!(crate::kernel::policy::drain().len(), 1);
     }
 
     #[test]

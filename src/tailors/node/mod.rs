@@ -18,10 +18,10 @@
 
 pub mod lock_import;
 
-use crate::fetch::{download_verified_digest_held, download_verified_held, Digest};
-use crate::platform::{no_pin, Platform};
-use crate::store::Store;
-use crate::types::Identity;
+use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
+use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::store::Store;
+use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -145,7 +145,7 @@ pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
 }
 
 pub fn preflight(platform: Platform) -> io::Result<()> {
-    crate::platform::require_host(platform, "Node.js", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "Node.js", "stage 2")?;
     node_pin(platform).map(|_| ())
 }
 
@@ -185,12 +185,12 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
 }
 
 pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "Node.js", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "Node.js", "stage 2")?;
     let node = node_pin(platform)?;
     let identity = node_identity(node);
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         validate_node_layout(&store.object_path(&id))?;
         return Ok(store.object_path(&id));
     }
@@ -205,7 +205,7 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
         .arg("-C")
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::supervise::status_owned(&mut command, store)
+    let status = crate::kernel::supervise::status_owned(&mut command, store)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn tar: {e}")))?;
     if !status.success() {
         return Err(err("node tarball extraction failed"));
@@ -213,7 +213,7 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     validate_node_layout(&staged)?;
     store
         .commit_with_deps(&identity, &staged, &[], &{
-            let mut deps = crate::store::ObjectDeps::new();
+            let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(node.sha256)?);
             deps
         })
@@ -236,7 +236,7 @@ pub struct NpmPackage {
     /// A git dependency pinned to a commit (NEXT.md item 4). When set, the
     /// package content comes from the realized git object, not a tarball, and
     /// `integrity` carries `git:<commit>` rather than an SRI.
-    pub git: Option<crate::gitsrc::GitSource>,
+    pub git: Option<crate::kernel::gitsrc::GitSource>,
     /// Install-script failures are kept by default; strict policy makes them
     /// fatal for both optional and required packages.
     pub optional: bool,
@@ -621,17 +621,17 @@ fn managed_projection_symlink_for_store(
 /// A git dependency URL pinned to a full commit, in any of the spellings npm,
 /// pnpm and yarn write (NEXT.md item 4). An unpinned ref returns None: the
 /// caller reports it rather than guessing which commit was meant.
-pub(crate) fn git_source_from_url(url: &str) -> Option<crate::gitsrc::GitSource> {
+pub(crate) fn git_source_from_url(url: &str) -> Option<crate::kernel::gitsrc::GitSource> {
     let (repo, commit) = git_repo_and_commit(url)?;
-    if !crate::gitsrc::is_full_commit(&commit) {
+    if !crate::kernel::gitsrc::is_full_commit(&commit) {
         return None;
     }
-    let source = crate::gitsrc::GitSource {
-        url: crate::gitsrc::normalize_url(&repo),
+    let source = crate::kernel::gitsrc::GitSource {
+        url: crate::kernel::gitsrc::normalize_url(&repo),
         commit: commit.to_ascii_lowercase(),
         subdirectory: None,
     };
-    crate::gitsrc::validate_source(&source).ok()?;
+    crate::kernel::gitsrc::validate_source(&source).ok()?;
     Some(source)
 }
 
@@ -641,7 +641,7 @@ pub(crate) fn git_source_from_url(url: &str) -> Option<crate::gitsrc::GitSource>
 /// lock attests, and a checkout of the same commit can legitimately differ
 /// (`.gitattributes` export-ignore/export-subst). Such an entry only falls
 /// back to git when the lock gives no integrity to verify.
-pub(crate) fn explicit_git_source(url: &str) -> Option<crate::gitsrc::GitSource> {
+pub(crate) fn explicit_git_source(url: &str) -> Option<crate::kernel::gitsrc::GitSource> {
     url.starts_with("git+")
         .then(|| git_source_from_url(url))
         .flatten()
@@ -918,7 +918,11 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
         if pinned_git.is_none() {
             if let Some(detail) = git_dependency_detail(&name, resolved) {
                 if entry["optional"].as_bool() == Some(true) {
-                    crate::policy::record(crate::policy::GIT_DEPENDENCY, path, &detail)?;
+                    crate::kernel::policy::record(
+                        crate::kernel::policy::GIT_DEPENDENCY,
+                        path,
+                        &detail,
+                    )?;
                     skipped.push(format!("{path}/"));
                     continue;
                 }
@@ -942,8 +946,8 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
                 })?;
                 let digest = Digest::from_sri(integrity)?; // validate early
                 if digest.algo() == "sha1" {
-                    if let Err(policy_error) = crate::policy::record(
-                        crate::policy::WEAK_INTEGRITY,
+                    if let Err(policy_error) = crate::kernel::policy::record(
+                        crate::kernel::policy::WEAK_INTEGRITY,
                         path,
                         "sha1 integrity accepted and verified, but is cryptographically weak",
                     ) {
@@ -1019,7 +1023,7 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
 fn tarball_has_binding_gyp(store: &Store, path: &Path) -> io::Result<bool> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-tzf"]).arg(path);
-    let output = crate::supervise::output_owned(&mut command, store).map_err(|e| {
+    let output = crate::kernel::supervise::output_owned(&mut command, store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("list npm tarball {}: {e}", path.display()),
@@ -1179,7 +1183,7 @@ fn persisted_archive_classification(
         // binding.gyp is visible in the object once realized, and until then
         // the classification is unknown.
         if let Some(source) = &package.git {
-            let object = store.object_path(&crate::gitsrc::object_id(source));
+            let object = store.object_path(&crate::kernel::gitsrc::object_id(source));
             if !object.is_dir() {
                 return Ok(None);
             }
@@ -1197,7 +1201,7 @@ fn persisted_archive_classification(
 
 fn classify_downloaded_archives(
     store: &Store,
-    tarballs: &[(&NpmPackage, crate::fetch::CacheLease)],
+    tarballs: &[(&NpmPackage, crate::kernel::fetch::CacheLease)],
 ) -> io::Result<bool> {
     let mut has_native = false;
     for (package, tarball) in tarballs {
@@ -1214,7 +1218,7 @@ fn classify_downloaded_archives(
 fn fetch_npm_tarballs<'a>(
     store: &Store,
     packages: &'a [NpmPackage],
-) -> io::Result<Vec<(&'a NpmPackage, crate::fetch::CacheLease)>> {
+) -> io::Result<Vec<(&'a NpmPackage, crate::kernel::fetch::CacheLease)>> {
     packages
         .iter()
         .filter(|p| p.git.is_none())
@@ -1234,7 +1238,9 @@ fn native_libs_identity_id(
     has_native: bool,
 ) -> io::Result<Option<String>> {
     if has_native && matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-        Ok(Some(crate::nativelibs::object_id_for(store, platform)?))
+        Ok(Some(crate::tailors::python::nativelibs::object_id_for(
+            store, platform,
+        )?))
     } else {
         Ok(None)
     }
@@ -1248,7 +1254,7 @@ pub fn realize_node_env(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
-    crate::platform::require_host(platform, "node environment", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "node environment", "stage 2")?;
     let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
     realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
 }
@@ -1282,7 +1288,7 @@ fn node_env_identity(
         // A git package has no registry tarball: its content is the realized
         // commit, so the git object id takes the digest's place.
         let content = match &p.git {
-            Some(source) => format!("git:{}", crate::gitsrc::object_id(source)),
+            Some(source) => format!("git:{}", crate::kernel::gitsrc::object_id(source)),
             None => {
                 let digest = Digest::from_sri(&p.integrity)?;
                 format!("{}:{}", digest.algo(), digest.hex())
@@ -1315,9 +1321,9 @@ fn node_env_identity(
     // be replaced, so the package version alone does not determine the bytes
     // that reach the install script.
     for p in &plan.packages {
-        if let Some(input) =
-            crate::artifacts::provisioned_identity_input(store, platform, &p.name, &p.version)?
-        {
+        if let Some(input) = crate::tailors::python::artifacts::provisioned_identity_input(
+            store, platform, &p.name, &p.version,
+        )? {
             inputs.insert(format!("provisioned:{}", p.path), input);
         }
     }
@@ -1353,7 +1359,8 @@ fn realize_node_env_with_node_object(
     // native library set. The inspection result is persisted by archive
     // digest, so a warm environment can be identified before its tarballs are
     // fetched. Darwin deliberately does not mount this Linux-only set.
-    let mut classification_tarballs: Vec<(&NpmPackage, crate::fetch::CacheLease)> = Vec::new();
+    let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
+        Vec::new();
     let native_libs_id = if platform.is_macos() {
         None
     } else {
@@ -1376,7 +1383,7 @@ fn realize_node_env_with_node_object(
     )?;
     let id = identity.object_id();
     if store.has(&id)? {
-        crate::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1387,7 +1394,7 @@ fn realize_node_env_with_node_object(
     // normally share one registry tarball, so deduplicate the byte fetch while
     // keeping extraction and placement per physical lockfile path.
     drop(classification_tarballs);
-    let mut leases: Vec<crate::fetch::CacheLease> = Vec::new();
+    let mut leases: Vec<crate::kernel::fetch::CacheLease> = Vec::new();
     let mut tarballs: Vec<(NpmPackage, PathBuf)> = Vec::new();
     let mut git_objects: Vec<(NpmPackage, PathBuf)> = Vec::new();
     let mut downloaded = BTreeMap::<(String, String), PathBuf>::new();
@@ -1395,14 +1402,14 @@ fn realize_node_env_with_node_object(
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
         if let Some(source) = &p.git {
-            let object = crate::gitsrc::ensure_git_source(store, source).map_err(|e| {
+            let object = crate::kernel::gitsrc::ensure_git_source(store, source).map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!("{}: git source {}: {e}", p.path, source.url),
                 )
             })?;
-            crate::policy::record(
-                crate::policy::GIT_DEPENDENCY,
+            crate::kernel::policy::record(
+                crate::kernel::policy::GIT_DEPENDENCY,
                 &format!("{}@{}", p.name, p.version),
                 &format!("{} at {}", source.url, source.commit),
             )?;
@@ -1426,7 +1433,9 @@ fn realize_node_env_with_node_object(
     }
 
     let native_libs = if native_libs_id.is_some() {
-        Some(crate::nativelibs::ensure_native_libs(store, platform)?)
+        Some(crate::tailors::python::nativelibs::ensure_native_libs(
+            store, platform,
+        )?)
     } else {
         None
     };
@@ -1463,7 +1472,7 @@ fn realize_node_env_with_node_object(
             // identical either way (LINUX_PORT.md, stage 5 follow-up).
             tar.arg("--delay-directory-restore");
         }
-        let status = crate::supervise::status_owned(&mut tar, store)?;
+        let status = crate::kernel::supervise::status_owned(&mut tar, store)?;
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
@@ -1492,12 +1501,13 @@ fn realize_node_env_with_node_object(
                 .args(["-p1", "--batch", "--forward"])
                 .current_dir(&dest)
                 .stdin(file);
-            let status = crate::supervise::status_owned(&mut command, store).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}: spawn /usr/bin/patch for {}: {e}", p.path, patch.path),
-                )
-            })?;
+            let status =
+                crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("{}: spawn /usr/bin/patch for {}: {e}", p.path, patch.path),
+                    )
+                })?;
             if !status.success() {
                 return Err(err(format!(
                     "{}: applying patch {} failed",
@@ -1538,7 +1548,7 @@ fn realize_node_env_with_node_object(
         let dest = env_package_path(&staged, &p.path);
         let source_root = match &p.git.as_ref().and_then(|g| g.subdirectory.clone()) {
             Some(subdir) => {
-                crate::npm::validate_lock_path(subdir).map_err(|e| {
+                crate::tailors::node::validate_lock_path(subdir).map_err(|e| {
                     io::Error::new(e.kind(), format!("{}: subdirectory {subdir}: {e}", p.path))
                 })?;
                 object.join(subdir)
@@ -1563,14 +1573,14 @@ fn realize_node_env_with_node_object(
             ".blanket-git-{}",
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
-        let _ = crate::store::remove_tree(&staging);
-        crate::project::clone_tree_for_store(store, &source_root, &staging, platform)
+        let _ = crate::kernel::store::remove_tree(&staging);
+        crate::comforter::clone_tree_for_store(store, &source_root, &staging, platform)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path)))?;
         for entry in fs::read_dir(&staging)? {
             let entry = entry?;
             fs::rename(entry.path(), dest.join(entry.file_name()))?;
         }
-        let _ = crate::store::remove_tree(&staging);
+        let _ = crate::kernel::store::remove_tree(&staging);
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         let manifest = fs::read_to_string(dest.join("package.json")).map_err(|e| {
@@ -1584,8 +1594,8 @@ fn realize_node_env_with_node_object(
             .and_then(|value| value["scripts"]["prepare"].as_str().map(str::to_string))
             .is_some()
         {
-            crate::policy::record(
-                crate::policy::GIT_DEPENDENCY,
+            crate::kernel::policy::record(
+                crate::kernel::policy::GIT_DEPENDENCY,
                 &format!("{}@{}", p.name, p.version),
                 "package has a `prepare` script; blanket does not run it for git sources",
             )?;
@@ -1598,8 +1608,8 @@ fn realize_node_env_with_node_object(
     // Registry packages retain their exact SRI digest; git packages retain
     // the realized source object; lifecycle inputs are explicit cache
     // digests rather than guesses from the identity map.
-    let mut deps = crate::store::ObjectDeps::new();
-    deps.object_id(&crate::store::object_id_from_path(node_obj)?)?;
+    let mut deps = crate::kernel::store::ObjectDeps::new();
+    deps.object_id(&crate::kernel::store::object_id_from_path(node_obj)?)?;
     if let Some(native_libs_id) = native_libs_id.as_deref() {
         deps.object_id(native_libs_id)?;
     }
@@ -1609,11 +1619,11 @@ fn realize_node_env_with_node_object(
                 .iter()
                 .find(|(candidate, _)| candidate.path == package.path)
                 .ok_or_else(|| err(format!("missing realized git source for {}", package.path)))?;
-            deps.object_id(&crate::store::object_id_from_path(object)?)?;
+            deps.object_id(&crate::kernel::store::object_id_from_path(object)?)?;
         } else {
             deps.cache_digest(Digest::from_sri(&package.integrity)?);
         }
-        if let Some(input) = crate::artifacts::provisioned_identity_input(
+        if let Some(input) = crate::tailors::python::artifacts::provisioned_identity_input(
             store,
             platform,
             &package.name,
@@ -1715,13 +1725,13 @@ fn realize_node_env_with_node_object(
         native_libs.as_ref().map(|set| set.path.as_path()),
     )?;
 
-    let candidate = crate::policy::object_exceptions();
+    let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
         .commit_with_deps(&identity, &staged, &candidate, &deps)
         .map_err(|e| io::Error::new(e.kind(), format!("commit env: {e}")))?;
     for exception in applied {
         if !candidate.contains(&exception) {
-            crate::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
         }
     }
     Ok(object)
@@ -1779,7 +1789,7 @@ fn run_install_scripts(
         &mut cleanup,
     );
     for t in cleanup {
-        let _ = crate::store::remove_tree(&t);
+        let _ = crate::kernel::store::remove_tree(&t);
     }
     result
 }
@@ -1794,7 +1804,7 @@ fn run_install_scripts_staged(
     native_libs: Option<&Path>,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     // Deepest first: nested deps build before their dependents.
     let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
     pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
@@ -1885,16 +1895,17 @@ fn run_install_scripts_staged(
         let snapshot_root = store.stage()?;
         cleanup.push(snapshot_root.clone());
         let snapshot = snapshot_root.join("package");
-        crate::project::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
+        crate::comforter::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
 
         let python = match &python_obj {
             Some(p) => p.clone(),
             None => {
-                let pin = crate::python::lookup(platform, "3.12")
-                    .ok_or_else(|| crate::platform::no_pin("cpython 3.12", platform, "stage 2"))?;
-                let p = crate::python::ensure_python_for(store, pin, platform).map_err(|e| {
-                    io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}"))
+                let pin = crate::tailors::python::lookup(platform, "3.12").ok_or_else(|| {
+                    crate::kernel::platform::no_pin("cpython 3.12", platform, "stage 2")
                 })?;
+                let p = crate::tailors::python::ensure_python_for(store, pin, platform).map_err(
+                    |e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")),
+                )?;
                 python_obj.insert(p).clone()
             }
         };
@@ -1969,11 +1980,17 @@ fn run_install_scripts_staged(
         });
         // Provisioning comes first: if blanket can supply the artifact, the
         // package is really installed rather than skipped.
-        match crate::artifacts::provision(store, platform, &p.name, &p.version, &tmp) {
+        match crate::tailors::python::artifacts::provision(
+            store, platform, &p.name, &p.version, &tmp,
+        ) {
             Ok(Some(provisioning)) => {
                 envs.extend(provisioning.envs);
                 for (subject, detail) in &provisioning.records {
-                    crate::policy::record(crate::policy::ARTIFACT_PROVISIONED, subject, detail)?;
+                    crate::kernel::policy::record(
+                        crate::kernel::policy::ARTIFACT_PROVISIONED,
+                        subject,
+                        detail,
+                    )?;
                 }
             }
             Ok(None) => {}
@@ -1984,33 +2001,34 @@ fn run_install_scripts_staged(
                     "blanket: {}: could not provision its artifact: {error}",
                     p.name
                 );
-                crate::policy::record(
-                    crate::policy::ARTIFACT_NOT_PROVISIONED,
+                crate::kernel::policy::record(
+                    crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
                     &format!("{}@{}", p.name, p.version),
                     &format!("provisioning failed: {error}"),
                 )?;
             }
         }
-        if let Some(skip) = crate::artifacts::skip_download_for(&p.name) {
+        if let Some(skip) = crate::tailors::python::artifacts::skip_download_for(&p.name) {
             for (key, value) in skip.envs {
                 envs.push(((*key).to_string(), (*value).to_string()));
             }
-            crate::policy::record(
-                crate::policy::ARTIFACT_NOT_PROVISIONED,
+            crate::kernel::policy::record(
+                crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
                 &format!("{}@{}", p.name, p.version),
                 &format!("install-time download skipped; run: {}", skip.hint),
             )?;
-        } else if crate::artifacts::wants_source_build(&script_text, declared_here) {
-            envs.extend(crate::artifacts::source_build_envs());
-            crate::policy::record(
-                crate::policy::BUILT_FROM_SOURCE,
+        } else if crate::tailors::python::artifacts::wants_source_build(&script_text, declared_here)
+        {
+            envs.extend(crate::tailors::python::artifacts::source_build_envs());
+            crate::kernel::policy::record(
+                crate::kernel::policy::BUILT_FROM_SOURCE,
                 &format!("{}@{}", p.name, p.version),
                 "prebuilt binary not downloaded; compiled from source in the sandbox",
             )?;
         }
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {
-            envs = crate::nativelibs::compose_env(native_libs, &envs);
+            envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
         }
         let path_env = envs
             .iter()
@@ -2018,7 +2036,7 @@ fn run_install_scripts_staged(
             .map(|(_, value)| value.as_str())
             .unwrap_or("/usr/bin:/bin");
         // Tools dir is readable+executable but NOT writable in-sandbox.
-        let sandbox = crate::sandbox::Sandbox {
+        let sandbox = crate::kernel::sandbox::Sandbox {
             read: vec![staged, node_obj, &python, &tools_dir]
                 .into_iter()
                 .chain(native_libs)
@@ -2056,16 +2074,18 @@ fn run_install_scripts_staged(
                 "{phase}: {}. {hint}",
                 error.chars().take(300).collect::<String>()
             );
-            if let Err(policy_error) =
-                crate::policy::record(crate::policy::INSTALL_SCRIPT_FAILED, &p.path, &detail)
-            {
+            if let Err(policy_error) = crate::kernel::policy::record(
+                crate::kernel::policy::INSTALL_SCRIPT_FAILED,
+                &p.path,
+                &detail,
+            ) {
                 return Err(err(format!(
                     "{}: {phase} script failed under the network-denied build \
                      sandbox: {e}. {hint} ({policy_error})",
                     p.path
                 )));
             }
-            crate::store::remove_tree(&pkg_dir)?;
+            crate::kernel::store::remove_tree(&pkg_dir)?;
             fs::rename(&snapshot, &pkg_dir)?;
             remove_dangling_bin_links(staged, plan)?;
             break;
@@ -2231,7 +2251,7 @@ fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
 }
 
 fn replace_with_symlink(path: &Path, target: &Path, label: &str) -> io::Result<()> {
-    crate::project::replace_project_symlink(path, target, label)
+    crate::comforter::replace_project_symlink(path, target, label)
 }
 
 /// Project the env into the project as a "forest": the root and every
@@ -2265,11 +2285,11 @@ pub fn project_node_env_recorded(
     plan: &NpmPlan,
     mutable: &[String],
     fresh: bool,
-    inputs: &[crate::project::InputRecord],
+    inputs: &[crate::comforter::InputRecord],
 ) -> io::Result<()> {
     if !mutable.is_empty() {
-        crate::policy::record(
-            crate::policy::UNATTESTED_MUTABLE_STATE,
+        crate::kernel::policy::record(
+            crate::kernel::policy::UNATTESTED_MUTABLE_STATE,
             &mutable.join(", "),
             "mutable package projection is unattested",
         )?;
@@ -2281,11 +2301,11 @@ pub fn project_node_env_recorded(
     // removal, or projection mutation. A lexical `packages/lib` can be an
     // external symlink after the previous closure was written.
     validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
-    let store = crate::project::store_from_object_path(env_obj)
+    let store = crate::comforter::store_from_object_path(env_obj)
         .ok_or_else(|| err("environment object is not in a Blanket store"))?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
-    let native_reference = crate::nativelibs::env_reference(&env_obj)?;
+    let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
     let native_id = native_reference
         .as_ref()
         .map(|reference| {
@@ -2300,8 +2320,10 @@ pub fn project_node_env_recorded(
     let valid_env = env_obj
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(crate::store::is_object_id);
-    let valid_native = native_id.map(crate::store::is_object_id).unwrap_or(true);
+        .is_some_and(crate::kernel::store::is_object_id);
+    let valid_native = native_id
+        .map(crate::kernel::store::is_object_id)
+        .unwrap_or(true);
     let strict_refs = valid_env && valid_native;
     if !strict_refs {
         #[cfg(not(test))]
@@ -2353,7 +2375,7 @@ pub fn project_node_env_recorded(
             Some(&store.root),
         ) {
             if let Some(backup) =
-                crate::project::reserve_backup_real_dir_for_store(&workspace_nm, &store)?
+                crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, &store)?
             {
                 pending_backups.push((workspace_nm, backup.clone()));
                 backup_paths.push(backup);
@@ -2363,14 +2385,14 @@ pub fn project_node_env_recorded(
     // A real (npm-made) node_modules is moved aside automatically so
     // pointing blanket at an existing project is one command. Workspace
     // importers get the same treatment in their source directories.
-    if let Some(backup) = crate::project::reserve_backup_real_dir_for_store(&nm, &store)? {
+    if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(&nm, &store)? {
         pending_backups.push((nm.clone(), backup.clone()));
         backup_paths.push(backup);
     }
     for workspace in &workspaces {
         let workspace_nm = project_dir.join(workspace).join("node_modules");
         if let Some(backup) =
-            crate::project::reserve_backup_real_dir_for_store(&workspace_nm, &store)?
+            crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, &store)?
         {
             pending_backups.push((workspace_nm, backup.clone()));
             backup_paths.push(backup);
@@ -2410,7 +2432,7 @@ pub fn project_node_env_recorded(
     let forest = proj_dir.join("node_modules");
     store.ensure_namespace(Path::new("forests"))?;
     store.ensure_namespace(Path::new("backups"))?;
-    let mut refs = crate::project::ClosureRefs::new();
+    let mut refs = crate::comforter::ClosureRefs::new();
     if strict_refs {
         refs.object_path(&store, &activity, &env_obj)?;
         if let Some(native_id) = native_id {
@@ -2427,7 +2449,7 @@ pub fn project_node_env_recorded(
         let project_lock = project_lock
             .as_ref()
             .expect("strict Node publication owns a project lock");
-        crate::project::persist_root_for_refs_with_project_lock(
+        crate::comforter::persist_root_for_refs_with_project_lock(
             project_dir,
             &store,
             &activity,
@@ -2436,7 +2458,7 @@ pub fn project_node_env_recorded(
         )?;
     }
     for (source, backup) in pending_backups {
-        crate::project::move_reserved_backup(&source, &backup)?;
+        crate::comforter::move_reserved_backup(&source, &backup)?;
     }
     for workspace in &previous_workspaces {
         if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
@@ -2453,7 +2475,7 @@ pub fn project_node_env_recorded(
         }
     }
     if fresh && proj_dir.exists() {
-        crate::store::remove_tree(&proj_dir)?;
+        crate::kernel::store::remove_tree(&proj_dir)?;
     }
     let workspace_forests_ready = workspaces.iter().all(|workspace| {
         proj_dir
@@ -2466,14 +2488,14 @@ pub fn project_node_env_recorded(
         fs::create_dir_all(&nm_root)?;
         let tmp = nm_root.join(format!(".{proj_id}.tmp.{}", std::process::id()));
         if tmp.exists() {
-            crate::store::remove_tree(&tmp)?;
+            crate::kernel::store::remove_tree(&tmp)?;
         }
         fs::create_dir_all(&tmp)?;
         let src = env_obj.join("node_modules");
         if mutable.is_empty() {
             build_forest(&src, &tmp.join("node_modules"))?;
         } else {
-            crate::project::clone_tree_for_store(
+            crate::comforter::clone_tree_for_store(
                 &store,
                 &src,
                 &tmp.join("node_modules"),
@@ -2492,7 +2514,7 @@ pub fn project_node_env_recorded(
             if mutable.is_empty() {
                 build_forest(&src, &dest)?;
             } else {
-                crate::project::clone_tree_for_store(&store, &src, &dest, platform)?;
+                crate::comforter::clone_tree_for_store(&store, &src, &dest, platform)?;
             }
         }
         fs::rename(&tmp, &proj_dir)?;
@@ -2609,12 +2631,12 @@ pub fn project_node_env_recorded(
     });
     #[cfg(test)]
     if !strict_refs {
-        return crate::project::write_closure_legacy(project_dir, "node", body);
+        return crate::comforter::write_closure_legacy(project_dir, "node", body);
     }
     let project_lock = project_lock
         .as_ref()
         .expect("strict Node publication owns a project lock");
-    crate::project::write_closure_with_project_lock(
+    crate::comforter::write_closure_with_project_lock(
         project_dir,
         "node",
         body,
@@ -2709,9 +2731,9 @@ mod tests {
         }
     }
 
-    fn recovered_cache(identity: crate::types::Identity) -> Vec<String> {
-        match crate::objmeta::adapt_identity_for_test(identity, Vec::new()) {
-            crate::objmeta::Adaptation::Proven(deps) => {
+    fn recovered_cache(identity: crate::kernel::types::Identity) -> Vec<String> {
+        match crate::kernel::objmeta::adapt_identity_for_test(identity, Vec::new()) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
                 assert!(
                     deps.objects.is_empty(),
                     "a pinned artifact has no object deps"
@@ -2721,7 +2743,7 @@ mod tests {
                     .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
                     .collect()
             }
-            crate::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => panic!("{reason}"),
         }
     }
 
@@ -2817,7 +2839,12 @@ mod tests {
         // an empty set keeps the fixture from asserting evidence the
         // producer would not have supplied here.
         let (expected, _) = store
-            .commit_with_deps(&identity, &staged, &[], &crate::store::ObjectDeps::new())
+            .commit_with_deps(
+                &identity,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
             .unwrap();
 
         let realized = realize_node_env_with_node_object(
@@ -2835,7 +2862,7 @@ mod tests {
                 .count(),
             0
         );
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]
@@ -2886,7 +2913,12 @@ mod tests {
         // an empty set keeps the fixture from asserting evidence the
         // producer would not have supplied here.
         let (expected, _) = store
-            .commit_with_deps(&identity, &staged, &[], &crate::store::ObjectDeps::new())
+            .commit_with_deps(
+                &identity,
+                &staged,
+                &[],
+                &crate::kernel::store::ObjectDeps::new(),
+            )
             .unwrap();
 
         // Simulate the user clearing all downloaded package archives. The
@@ -2907,7 +2939,7 @@ mod tests {
                 .count(),
             0
         );
-        crate::store::remove_tree(&root).unwrap();
+        crate::kernel::store::remove_tree(&root).unwrap();
     }
 
     #[test]

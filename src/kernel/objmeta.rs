@@ -15,9 +15,9 @@
 //! indirect reference recorded as a fingerprint) and over-broad. Adapters
 //! reconstruct the set from the producer's own input grammar instead.
 
-use crate::fetch::Digest;
-use crate::store::{self, ObjectDeps};
-use crate::types::Identity;
+use crate::kernel::fetch::Digest;
+use crate::kernel::store::{self, ObjectDeps};
+use crate::kernel::types::Identity;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -756,21 +756,21 @@ fn beam_toolchain(record: &Record) -> Result<ObjectDeps, String> {
 /// `manifest_sha256` and emitted the manifest hash itself as a cache digest,
 /// fabricating a digest for a file that never existed in the cache.
 fn native_libs(record: &Record) -> Result<ObjectDeps, String> {
-    if record.identity.version != crate::nativelibs::NATIVE_LIBS_VERSION {
+    if record.identity.version != crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION {
         return Err(format!(
             "libset version {} predates the pinned manifest this build knows (v{}); its library \
              digests are not recoverable from metadata",
             record.identity.version,
-            crate::nativelibs::NATIVE_LIBS_VERSION
+            crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION
         ));
     }
     let recorded = input(record, "manifest_sha256")?;
     let platform_input = input(record, "platform")?;
-    let platform = crate::platform::Platform::ALL
+    let platform = crate::kernel::platform::Platform::ALL
         .iter()
         .find(|platform| platform.triple() == platform_input)
         .ok_or_else(|| format!("unknown platform {platform_input}"))?;
-    let manifest = crate::nativelibs::manifest_sha256(*platform)
+    let manifest = crate::tailors::python::nativelibs::manifest_sha256(*platform)
         .map_err(|error| format!("no pinned library manifest for {platform_input}: {error}"))?;
     if manifest != recorded {
         return Err(format!(
@@ -779,7 +779,7 @@ fn native_libs(record: &Record) -> Result<ObjectDeps, String> {
         ));
     }
     let mut deps = ObjectDeps::new();
-    for sha256 in crate::nativelibs::pinned_package_digests(*platform)
+    for sha256 in crate::tailors::python::nativelibs::pinned_package_digests(*platform)
         .map_err(|error| format!("pinned library set: {error}"))?
     {
         add_digest(&mut deps, Algo::Sha256, &sha256, "pinned library")?;
@@ -981,7 +981,7 @@ fn beam_fingerprint_of(record: &Record) -> Option<String> {
         Some(relocation) => format!("{otp}:{elixir}:{hex}:{rebar3}:{relocation}"),
         None => format!("{otp}:{elixir}:{hex}:{rebar3}"),
     };
-    Some(crate::elixir::fingerprint_of_joined(&joined))
+    Some(crate::tailors::elixir::fingerprint_of_joined(&joined))
 }
 
 /// `nuget-packages/1`: the extractor is the SDK object id itself. `pkg:` holds
@@ -1731,7 +1731,10 @@ mod tests {
         } else {
             format!("{otp}:{elixir}:{hex_ez}:{rebar3}")
         };
-        (inputs, crate::elixir::fingerprint_of_joined(&joined))
+        (
+            inputs,
+            crate::tailors::elixir::fingerprint_of_joined(&joined),
+        )
     }
 
     fn beam_identity(relocation: bool) -> (Identity, String) {
@@ -2228,13 +2231,13 @@ mod tests {
 
     #[test]
     fn adapter_native_libs_recovers_the_pinned_manifest_digests() {
-        let platform = crate::platform::Platform::X86_64UnknownLinuxGnu;
-        let manifest = crate::nativelibs::manifest_sha256(platform).unwrap();
+        let platform = crate::kernel::platform::Platform::X86_64UnknownLinuxGnu;
+        let manifest = crate::tailors::python::nativelibs::manifest_sha256(platform).unwrap();
         let (objects, cache) = proven(
             ident(
                 "native-libs",
                 "libset",
-                crate::nativelibs::NATIVE_LIBS_VERSION,
+                crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION,
                 &[
                     ("platform", platform.triple()),
                     ("manifest_sha256", &manifest),
@@ -2245,11 +2248,12 @@ mod tests {
         );
         assert!(objects.is_empty());
         let expected: Vec<String> = {
-            let mut digests: Vec<String> = crate::nativelibs::pinned_package_digests(platform)
-                .unwrap()
-                .into_iter()
-                .map(|hex| format!("sha256:{hex}"))
-                .collect();
+            let mut digests: Vec<String> =
+                crate::tailors::python::nativelibs::pinned_package_digests(platform)
+                    .unwrap()
+                    .into_iter()
+                    .map(|hex| format!("sha256:{hex}"))
+                    .collect();
             digests.sort();
             digests.dedup();
             digests
@@ -2265,12 +2269,12 @@ mod tests {
 
     #[test]
     fn adapter_native_libs_refuses_a_manifest_this_build_cannot_reproduce() {
-        let platform = crate::platform::Platform::X86_64UnknownLinuxGnu;
+        let platform = crate::kernel::platform::Platform::X86_64UnknownLinuxGnu;
         let reason = unresolved(
             ident(
                 "native-libs",
                 "libset",
-                crate::nativelibs::NATIVE_LIBS_VERSION,
+                crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION,
                 &[
                     ("platform", platform.triple()),
                     ("manifest_sha256", &sha256('0')),
@@ -2284,8 +2288,8 @@ mod tests {
 
     #[test]
     fn adapter_native_libs_refuses_an_older_libset_version() {
-        let platform = crate::platform::Platform::X86_64UnknownLinuxGnu;
-        let manifest = crate::nativelibs::manifest_sha256(platform).unwrap();
+        let platform = crate::kernel::platform::Platform::X86_64UnknownLinuxGnu;
+        let manifest = crate::tailors::python::nativelibs::manifest_sha256(platform).unwrap();
         let reason = unresolved(
             ident(
                 "native-libs",

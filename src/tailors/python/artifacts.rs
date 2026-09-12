@@ -11,8 +11,8 @@
 //! Every entry's environment variable was read out of the package's own
 //! source, not from memory; add entries the same way.
 
-use crate::platform::Platform;
-use crate::store::Store;
+use crate::kernel::platform::Platform;
+use crate::kernel::store::Store;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -150,7 +150,7 @@ fn resolve_electron(
             // Trust-on-first-use over HTTPS, exactly like the pinned toolchain
             // tables: this IS the checksum source. The zip is then verified
             // against it, so a corrupted or swapped zip fails.
-            let text = crate::fetch::fetch_text(&sums_url).map_err(|e| {
+            let text = crate::kernel::fetch::fetch_text(&sums_url).map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!("electron {version}: fetch {sums_url}: {e}"),
@@ -189,7 +189,7 @@ pub fn provisioned_identity_input(
     }
     let version = version.trim_start_matches('v');
     if !version.starts_with(|c: char| c.is_ascii_digit())
-        || !crate::gitsrc::is_safe_component(version)
+        || !crate::kernel::gitsrc::is_safe_component(version)
     {
         return Ok(None);
     }
@@ -215,13 +215,16 @@ pub fn provision(
     // repository's release (self-consistent zip AND checksum manifest), and a
     // `/../` in the filename writes the fetched bytes outside the cache dir.
     if !version.starts_with(|c: char| c.is_ascii_digit())
-        || !crate::gitsrc::is_safe_component(version)
+        || !crate::kernel::gitsrc::is_safe_component(version)
     {
         return Ok(None);
     }
     let (sha256, sums, release_url, zip_name) = resolve_electron(store, platform, version)?;
-    let zip =
-        crate::fetch::download_verified_held(store, &format!("{release_url}/{zip_name}"), &sha256)?;
+    let zip = crate::kernel::fetch::download_verified_held(
+        store,
+        &format!("{release_url}/{zip_name}"),
+        &sha256,
+    )?;
 
     let cache_root = scratch.join(".cache/blanket-electron");
     let dir = cache_root.join(electron_cache_directory(&release_url));

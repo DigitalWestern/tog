@@ -18,9 +18,17 @@ use std::rc::Rc;
 
 use sha2::{Digest, Sha224, Sha256, Sha512};
 
-use crate::platform::Platform;
-use crate::store::{self, RootEntry, Store};
-use crate::{fetch, inspect, npm, policy, project, pypi, pyselect, python, ui};
+use crate::comforter;
+use crate::inspect;
+use crate::kernel::fetch;
+use crate::kernel::platform::Platform;
+use crate::kernel::policy;
+use crate::kernel::store::{self, RootEntry, Store};
+use crate::kernel::ui;
+use crate::tailors::node;
+use crate::tailors::python;
+use crate::tailors::python::pypi;
+use crate::tailors::python::pyselect;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -795,7 +803,7 @@ fn cached_projection(
     root: &Path,
     ecosystem: &str,
 ) -> io::Result<(serde_json::Value, String)> {
-    let closure = project::read_closure(root, ecosystem)?;
+    let closure = comforter::read_closure(root, ecosystem)?;
     let path_text = closure["env_object"].as_str().ok_or_else(|| {
         other("x: cached closure has no environment object; run the command again")
     })?;
@@ -1447,7 +1455,7 @@ fn originating_store(root: &Path) -> io::Result<Option<Store>> {
         let mut paths = Vec::new();
         collect_legacy_object_references(body, &mut paths);
         for path in paths {
-            let Some(store) = project::store_from_object_path(&path) else {
+            let Some(store) = comforter::store_from_object_path(&path) else {
                 continue;
             };
             let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
@@ -1806,7 +1814,7 @@ pub fn run(
     platform: Platform,
     cwd: &Path,
     request: Request,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<i32> {
     let ecosystem = choose_ecosystem(&request, cwd)?;
     let (tool, tool_version) = split_version(&request.tool);
@@ -1913,7 +1921,7 @@ pub fn run(
                         "'{package}' installed but provides no '{bin}' executable; name it with --from: 'blanket x --from {package} <tool>'"
                     )));
                 }
-                let node_obj = npm::ensure_node_for(&store, platform)?;
+                let node_obj = node::ensure_node_for(&store, platform)?;
                 (
                     executable,
                     vec![node_modules.join(".bin"), node_obj.join("bin")],
@@ -1935,7 +1943,7 @@ pub fn run(
         command.env("PYTHONDONTWRITEBYTECODE", "1");
     }
     ui::trace_command(&command);
-    let status = crate::supervise::status(&mut command, activity)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     use std::os::unix::process::ExitStatusExt;
     Ok(status
         .code()
@@ -2030,7 +2038,7 @@ pub(crate) fn realize_node_tool(
     corepack_hash: Option<&CorepackHash>,
 ) -> io::Result<(PathBuf, fs::File)> {
     validate_exact_version(version)?;
-    let activity = store.activity(crate::activity::ActivityMode::Shared)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let root = node_cache_root(store, platform, package, Some(version))?;
     // Take the same shared lifecycle lock `blanket x` takes, and hand it back
     // to the caller. `blanket x --clean` removes a cached root under an
@@ -2074,7 +2082,7 @@ fn verify_corepack_hash(
             "x: packageManager has a malformed {name} hash for {package}@{version}"
         )));
     }
-    let closure = project::read_closure(root, "node")?;
+    let closure = comforter::read_closure(root, "node")?;
     let packages = closure["packages"].as_array().ok_or_else(|| {
         other(format!(
             "x: cannot verify packageManager {name} for {package}@{version}: realized node closure has no package list; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
@@ -2118,7 +2126,7 @@ fn verify_corepack_hash(
 
 fn realize_python(
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
     root: &Path,
     package: &str,
@@ -2158,7 +2166,7 @@ fn realize_python(
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
     ui::trace_command(&command);
-    let status = crate::supervise::status(&mut command, activity)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(other(format!(
             "could not resolve '{}' from PyPI (uv pip compile exit {status})",
@@ -2167,15 +2175,15 @@ fn realize_python(
     }
     let text = fs::read_to_string(&output)?;
     let plan = pypi::plan_python(platform, &text, pin.version)?;
-    let env = project::realize_env(store, platform, &plan)?;
-    project::project_env_with_selection(root, &env, &plan, &selection)?;
+    let env = comforter::realize_env(store, platform, &plan)?;
+    comforter::project_env_with_selection(root, &env, &plan, &selection)?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())
 }
 
 fn realize_node(
     store: &Store,
-    activity: &crate::activity::StoreActivity,
+    activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
     root: &Path,
     package: &str,
@@ -2199,7 +2207,7 @@ fn realize_node(
         "resolving {package}@{} with the store npm...",
         version.unwrap_or("latest")
     ));
-    let node_obj = npm::ensure_node_for(store, platform)?;
+    let node_obj = node::ensure_node_for(store, platform)?;
     let mut command = Command::new(node_obj.join("bin/npm"));
     command.args(["install", "--package-lock-only", "--ignore-scripts"]);
     if !ui::verbose() {
@@ -2214,15 +2222,15 @@ fn realize_node(
         ),
     );
     ui::trace_command(&command);
-    let status = crate::supervise::status(&mut command, activity)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(other(format!(
             "could not resolve '{package}' from npm (npm exit {status})"
         )));
     }
-    let plan = npm::plan_npm(platform, &fs::read_to_string(&lock)?)?;
-    let env = npm::realize_node_env(store, platform, &plan, &[])?;
-    npm::project_node_env(root, &env, platform, &plan, &[], false)?;
+    let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
+    let env = node::realize_node_env(store, platform, &plan, &[])?;
+    node::project_node_env(root, &env, platform, &plan, &[], false)?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())
 }
