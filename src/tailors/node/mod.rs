@@ -886,6 +886,56 @@ mod tests {
         assert!(plan.packages[0].path < plan.packages[1].path);
     }
 
+    /// Characterization: one lockfile that exercises every branch of
+    /// `plan_npm` at once — a registry package with bins, a workspace source
+    /// dir, a link entry, a pinned git dependency, a bundled entry and an
+    /// optional platform-incompatible subtree — pinned field by field so a
+    /// refactor of the loop cannot silently move a value.
+    #[test]
+    fn plan_npm_characterization_covers_every_entry_kind() {
+        let l = format!(
+            r#"{{"name":"x","lockfileVersion":3,"packages":{{
+                 "":{{"name":"x","workspaces":["packages/lib"]}},
+                 "packages/lib":{{"name":"@mono/lib","version":"0.1.0"}},
+                 "node_modules/@mono/lib":{{"resolved":"packages/lib","link":true}},
+                 "node_modules/a":{{"version":"1.2.3","resolved":"https://r/a.tgz","integrity":"{TEST_SRI}","bin":{{"a":"cli.js","a2":"bin/a2.js"}}}},
+                 "node_modules/a/node_modules/bundled":{{"version":"9","inBundle":true}},
+                 "node_modules/g":{{"version":"2.0.0","resolved":"git+https://github.com/o/g.git#1234567890abcdef1234567890abcdef12345678"}},
+                 "node_modules/w":{{"version":"1","optional":true,"cpu":["wasm32"],"resolved":"https://r/w.tgz","integrity":"{TEST_SRI}"}},
+                 "node_modules/w/node_modules/x":{{"version":"1"}}
+               }}}}"#
+        );
+        let plan = plan_npm(Platform::Aarch64AppleDarwin, &l).unwrap();
+        assert_eq!(plan.lock_source, "package-lock.json");
+        assert_eq!(plan.workspaces, vec!["packages/lib".to_string()]);
+        assert_eq!(plan.links.len(), 1);
+        assert_eq!(plan.links[0].path, "node_modules/@mono/lib");
+        assert_eq!(plan.links[0].target, "packages/lib");
+        // bundled, the optional wasm32 package and its descendant are gone.
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["node_modules/a", "node_modules/g"]);
+        let a = &plan.packages[0];
+        assert_eq!(a.name, "a");
+        assert_eq!(a.version, "1.2.3");
+        assert_eq!(a.url, "https://r/a.tgz");
+        assert_eq!(a.integrity, TEST_SRI);
+        assert_eq!(
+            a.bin,
+            vec![
+                ("a".to_string(), "cli.js".to_string()),
+                ("a2".to_string(), "bin/a2.js".to_string()),
+            ]
+        );
+        assert!(a.patch.is_none());
+        assert!(a.git.is_none());
+        assert!(!a.optional);
+        let g = &plan.packages[1];
+        let source = g.git.as_ref().expect("pinned git source");
+        assert_eq!(source.commit, "1234567890abcdef1234567890abcdef12345678");
+        assert_eq!(g.integrity, "git:1234567890abcdef1234567890abcdef12345678");
+        assert_eq!(g.name, "g");
+    }
+
     #[test]
     fn workspace_local_packages_are_packages_not_workspaces() {
         // package-lock v3 monorepo: "packages/lib" is a workspace source dir;

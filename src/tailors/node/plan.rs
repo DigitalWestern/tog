@@ -179,6 +179,180 @@ pub(super) fn libc_compatible(platform: Platform, entry: &serde_json::Value) -> 
         .unwrap_or(true)
 }
 
+/// A `link: true` lock entry: a symlink into the project's own source. The
+/// target comes from the lockfile (attacker-editable), so it is validated
+/// before it can become a projected symlink.
+fn lock_link_entry(path: &str, entry: &serde_json::Value) -> io::Result<NpmLink> {
+    let target = entry["resolved"].as_str().unwrap_or_default();
+    let ok = !target.is_empty()
+        && !target.starts_with('/')
+        && target
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..");
+    if !ok {
+        return Err(err(format!("{path}: unsafe link target {target:?}")));
+    }
+    Ok(NpmLink {
+        path: path.to_string(),
+        target: target.to_string(),
+    })
+}
+
+/// Platform filtering: lock entries carry os/cpu/libc restrictions.
+/// Incompatible optional deps are skipped (npm does the same), which is what
+/// `Ok(false)` means; incompatible required deps are an error. Linux uses
+/// npm's list semantics (deny a matching exclusion, then require a matching
+/// positive when positives exist), while Darwin keeps its established
+/// Stage 1 behavior.
+fn entry_platform_compatible(
+    platform: Platform,
+    entry: &serde_json::Value,
+    path: &str,
+) -> io::Result<bool> {
+    let os_ok = platform_list_compatible(platform, entry, "os", platform.npm_os());
+    let cpu_ok = platform_list_compatible(platform, entry, "cpu", platform.npm_cpu());
+    let libc_ok = libc_compatible(platform, entry);
+    if os_ok && cpu_ok && libc_ok {
+        return Ok(true);
+    }
+    if entry["optional"].as_bool() == Some(true) {
+        return Ok(false);
+    }
+    let restriction = if !libc_ok {
+        format!(
+            "libc restriction {:?} is incompatible with host {LINUX_LIBC}",
+            entry["libc"]
+        )
+    } else if !os_ok {
+        format!("os restriction {:?} is incompatible", entry["os"])
+    } else {
+        format!("cpu restriction {:?} is incompatible", entry["cpu"])
+    };
+    Err(err(format!(
+        "{path}: required dependency does not support host {} ({}; npm {}/{})",
+        platform.triple(),
+        restriction,
+        platform.npm_os(),
+        platform.npm_cpu()
+    )))
+}
+
+/// Outcome of classifying a lock entry's `resolved` URL as a git source.
+enum PinnedGit {
+    /// The entry is realizable: `Some` from git, `None` from its tarball.
+    Resolved(Option<crate::kernel::gitsrc::GitSource>),
+    /// An unrealizable git dependency that is optional: recorded as a policy
+    /// exception and dropped with its subtree.
+    SkipOptional,
+}
+
+/// A git dependency pinned to a full commit is realizable (item 4); anything
+/// else (a branch, a tag, a bare repo URL) is not, because the bytes it names
+/// can change.
+///
+/// An explicit git+ URL is always realized from git. Anything else (a
+/// codeload/archive tarball) is only realized from git when the lock has no
+/// integrity to verify it with.
+fn pinned_git_for_entry(
+    path: &str,
+    name: &str,
+    resolved: &str,
+    entry: &serde_json::Value,
+) -> io::Result<PinnedGit> {
+    let pinned_git = explicit_git_source(resolved).or_else(|| {
+        entry["integrity"]
+            .as_str()
+            .is_none()
+            .then(|| git_source_from_url(resolved))
+            .flatten()
+    });
+    if pinned_git.is_none() {
+        if let Some(detail) = git_dependency_detail(name, resolved) {
+            if entry["optional"].as_bool() == Some(true) {
+                crate::kernel::policy::record(
+                    crate::kernel::policy::GIT_DEPENDENCY,
+                    path,
+                    &detail,
+                )?;
+                return Ok(PinnedGit::SkipOptional);
+            }
+            return Err(err(format!("{path}: {detail}")));
+        }
+    }
+    if pinned_git.is_none() && !resolved.starts_with("https://") {
+        return Err(err(format!(
+            "{path}: only https registry tarballs supported (v0), got {resolved}"
+        )));
+    }
+    Ok(PinnedGit::Resolved(pinned_git))
+}
+
+/// A git package's content is verified by the commit hash, so the lockfile
+/// carries no SRI for it.
+fn entry_integrity(
+    path: &str,
+    entry: &serde_json::Value,
+    pinned_git: &Option<crate::kernel::gitsrc::GitSource>,
+) -> io::Result<String> {
+    if pinned_git.is_some() {
+        return Ok(String::new());
+    }
+    let integrity = entry["integrity"].as_str().ok_or_else(|| {
+        err(format!(
+            "{path}: missing 'integrity' (regenerate the lockfile)"
+        ))
+    })?;
+    let digest = Digest::from_sri(integrity)?; // validate early
+    if digest.algo() == "sha1" {
+        if let Err(policy_error) = crate::kernel::policy::record(
+            crate::kernel::policy::WEAK_INTEGRITY,
+            path,
+            "sha1 integrity accepted and verified, but is cryptographically weak",
+        ) {
+            return Err(err(format!(
+                "unsupported integrity algorithm: sha1 ({policy_error})"
+            )));
+        }
+    }
+    Ok(integrity.to_string())
+}
+
+fn npm_package_from_entry(
+    path: &str,
+    entry: &serde_json::Value,
+    resolved: &str,
+    git: Option<crate::kernel::gitsrc::GitSource>,
+    integrity: String,
+) -> NpmPackage {
+    let name = entry["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| name_from_path(path));
+    let version = entry["version"].as_str().unwrap_or("0.0.0").to_string();
+    let mut bin = Vec::new();
+    if let Some(map) = entry["bin"].as_object() {
+        for (k, val) in map {
+            if let Some(rel) = val.as_str() {
+                bin.push((k.clone(), rel.to_string()));
+            }
+        }
+    }
+    NpmPackage {
+        path: path.to_string(),
+        name,
+        version,
+        url: resolved.to_string(),
+        integrity: match &git {
+            Some(source) => format!("git:{}", source.commit),
+            None => integrity,
+        },
+        bin,
+        patch: None,
+        git,
+        optional: entry["optional"].as_bool() == Some(true),
+    }
+}
+
 /// Parse package-lock.json (lockfileVersion 2 or 3) into a plan.
 /// Pure parsing: no network. Deterministic (sorted by path).
 pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
@@ -230,19 +404,7 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
             continue; // descendant of a platform-skipped package
         }
         if entry["link"].as_bool() == Some(true) {
-            let target = entry["resolved"].as_str().unwrap_or_default();
-            let ok = !target.is_empty()
-                && !target.starts_with('/')
-                && target
-                    .split('/')
-                    .all(|c| !c.is_empty() && c != "." && c != "..");
-            if !ok {
-                return Err(err(format!("{path}: unsafe link target {target:?}")));
-            }
-            links.push(NpmLink {
-                path: path.clone(),
-                target: target.to_string(),
-            });
+            links.push(lock_link_entry(path, entry)?);
             continue;
         }
         // Bundled deps ship inside the parent tarball (covered by the
@@ -251,38 +413,9 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
         if entry["inBundle"].as_bool() == Some(true) {
             continue;
         }
-        // Platform filtering: lock entries carry os/cpu/libc restrictions.
-        // Incompatible optional deps are skipped (npm does the same);
-        // incompatible required deps are an error. Linux uses npm's list
-        // semantics (deny a matching exclusion, then require a matching
-        // positive when positives exist), while Darwin keeps its established
-        // Stage 1 behavior.
-        let os_ok = platform_list_compatible(platform, entry, "os", platform.npm_os());
-        let cpu_ok = platform_list_compatible(platform, entry, "cpu", platform.npm_cpu());
-        let libc_ok = libc_compatible(platform, entry);
-        let compatible = os_ok && cpu_ok && libc_ok;
-        if !compatible {
-            if entry["optional"].as_bool() == Some(true) {
-                skipped.push(format!("{path}/"));
-                continue;
-            }
-            let restriction = if !libc_ok {
-                format!(
-                    "libc restriction {:?} is incompatible with host {LINUX_LIBC}",
-                    entry["libc"]
-                )
-            } else if !os_ok {
-                format!("os restriction {:?} is incompatible", entry["os"])
-            } else {
-                format!("cpu restriction {:?} is incompatible", entry["cpu"])
-            };
-            return Err(err(format!(
-                "{path}: required dependency does not support host {} ({}; npm {}/{})",
-                platform.triple(),
-                restriction,
-                platform.npm_os(),
-                platform.npm_cpu()
-            )));
+        if !entry_platform_compatible(platform, entry, path)? {
+            skipped.push(format!("{path}/"));
+            continue;
         }
         let resolved = entry["resolved"].as_str().ok_or_else(|| {
             err(format!(
@@ -293,91 +426,17 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| name_from_path(path));
-        // A git dependency pinned to a full commit is realizable (item 4);
-        // anything else (a branch, a tag, a bare repo URL) is not, because the
-        // bytes it names can change.
-        // An explicit git+ URL is always realized from git. Anything else
-        // (a codeload/archive tarball) is only realized from git when the lock
-        // has no integrity to verify it with.
-        let pinned_git = explicit_git_source(resolved).or_else(|| {
-            entry["integrity"]
-                .as_str()
-                .is_none()
-                .then(|| git_source_from_url(resolved))
-                .flatten()
-        });
-        if pinned_git.is_none() {
-            if let Some(detail) = git_dependency_detail(&name, resolved) {
-                if entry["optional"].as_bool() == Some(true) {
-                    crate::kernel::policy::record(
-                        crate::kernel::policy::GIT_DEPENDENCY,
-                        path,
-                        &detail,
-                    )?;
-                    skipped.push(format!("{path}/"));
-                    continue;
-                }
-                return Err(err(format!("{path}: {detail}")));
-            }
-        }
-        if pinned_git.is_none() && !resolved.starts_with("https://") {
-            return Err(err(format!(
-                "{path}: only https registry tarballs supported (v0), got {resolved}"
-            )));
-        }
-        // A git package's content is verified by the commit hash, so the
-        // lockfile carries no SRI for it.
-        let integrity = match &pinned_git {
-            Some(_) => String::new(),
-            None => {
-                let integrity = entry["integrity"].as_str().ok_or_else(|| {
-                    err(format!(
-                        "{path}: missing 'integrity' (regenerate the lockfile)"
-                    ))
-                })?;
-                let digest = Digest::from_sri(integrity)?; // validate early
-                if digest.algo() == "sha1" {
-                    if let Err(policy_error) = crate::kernel::policy::record(
-                        crate::kernel::policy::WEAK_INTEGRITY,
-                        path,
-                        "sha1 integrity accepted and verified, but is cryptographically weak",
-                    ) {
-                        return Err(err(format!(
-                            "unsupported integrity algorithm: sha1 ({policy_error})"
-                        )));
-                    }
-                }
-                integrity.to_string()
+        let pinned_git = match pinned_git_for_entry(path, &name, resolved, entry)? {
+            PinnedGit::Resolved(pinned_git) => pinned_git,
+            PinnedGit::SkipOptional => {
+                skipped.push(format!("{path}/"));
+                continue;
             }
         };
-        let name = entry["name"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| name_from_path(path));
-        let version = entry["version"].as_str().unwrap_or("0.0.0").to_string();
-        let mut bin = Vec::new();
-        if let Some(map) = entry["bin"].as_object() {
-            for (k, val) in map {
-                if let Some(rel) = val.as_str() {
-                    bin.push((k.clone(), rel.to_string()));
-                }
-            }
-        }
-        let git = pinned_git;
-        out.push(NpmPackage {
-            path: path.clone(),
-            name,
-            version,
-            url: resolved.to_string(),
-            integrity: match &git {
-                Some(source) => format!("git:{}", source.commit),
-                None => integrity,
-            },
-            bin,
-            patch: None,
-            git,
-            optional: entry["optional"].as_bool() == Some(true),
-        });
+        let integrity = entry_integrity(path, entry, &pinned_git)?;
+        out.push(npm_package_from_entry(
+            path, entry, resolved, pinned_git, integrity,
+        ));
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
