@@ -716,3 +716,17 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   (before the function extractions): 47 passed, 1 failed, the failure
   being the pre-existing `python_select` case (item 9). The final heavy
   gate on the merged head is recorded in the next entry.
+
+### 2026-09-12 — Stage 4 heavy gate
+
+- `cargo test --no-fail-fast -- --ignored --test-threads=1` on Linux with
+  `BLANKET_SANDBOX_TESTS=required` and a temp `BLANKET_STORE`, on the
+  merged head (all splits, the kind table, and the twelve extractions):
+  47 passed, 1 failed. The failure is
+  `python_select::unpinned_patch_request_fails_closed_before_opening_store`,
+  the same pre-existing case as at every earlier gate (FOLLOW-UPS.md
+  item 9). The sandboxed sdist builds, npm install scripts, gc e2e cases,
+  and the git-dependency realizations all pass, which covers the paths the
+  offline suite cannot: `build_sdist_wheel_at_depth`,
+  `run_install_scripts_staged`, `plan_go`'s download path, and gc `read`
+  through the binary with the startup-installed kind table.
