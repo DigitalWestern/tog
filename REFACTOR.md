@@ -554,3 +554,7 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   item 9). `native_libs::linux_native_libs_pkg_config_sdist_and_runtime`
   failed only because the gate shell exported `CARGO_TARGET_DIR`, which the
   test's own Rust probe build inherited; see the rerun note below.
+- Rerun of `native_libs` with `--target-dir` instead of an exported
+  `CARGO_TARGET_DIR`: passed. Stage 1 heavy gate is therefore 40 of 41,
+  the one failure pre-existing. Lesson for future gates: pass the target
+  dir as a flag; the e2e tests spawn cargo themselves.
