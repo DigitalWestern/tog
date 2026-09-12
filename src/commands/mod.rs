@@ -102,6 +102,7 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
 /// One line per verb: every arm is a single call into the verb's file.
 pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     use cli::Command::*;
+    crate::tailors::install_kinds();
     // Maintenance commands do not need host-platform validation. In
     // particular, GC must remain usable when inspecting a copied store on a
     // host that cannot realize its objects. The admission gate (`audit`) is

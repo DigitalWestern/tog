@@ -218,12 +218,18 @@ pub fn for_closure(name: &str) -> Option<&'static dyn Tailor> {
         .find(|tailor| tailor.owns_closure(name))
 }
 
-/// Every tailor's object-kind rows, in registry order (`objmeta` reads
-/// these; it is the kernel's one seam into this layer).
+/// Every tailor's object-kind rows, in registry order.
 pub fn kind_adapters() -> impl Iterator<Item = &'static KindAdapter> {
     registry()
         .iter()
         .flat_map(|tailor| tailor.object_kinds().iter())
+}
+
+/// Hand the kernel every tailor's object-kind rows. `commands::dispatch`
+/// calls this once before any command runs; tests that adapt tailor kinds
+/// through `objmeta` or `gc` call it in their setup. Idempotent.
+pub fn install_kinds() {
+    crate::kernel::objmeta::install_kinds(kind_adapters());
 }
 
 /// The tailors whose inputs are present in `dir`, in registry order.

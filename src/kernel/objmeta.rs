@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// The result of adapting one legacy record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,14 +468,31 @@ fn no_dependencies(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, S
 /// `schema` input match only `None`, so a record that carries an unexpected
 /// schema value can never share a path with one that does not.
 ///
-/// This is the one place the kernel reaches into `tailors`: it asks the
-/// registry for rows, never a tailor by name. A future crate split replaces
-/// the call with a table installed at startup.
+/// The kernel never names a tailor: the layer above installs the tailors'
+/// rows once at startup (`tailors::install_kinds`, called by
+/// `commands::dispatch`). A kind that was never installed has no adapter,
+/// which fails closed: gc refuses to sweep a store whose records it cannot
+/// read, exactly as for an unknown kind.
 fn adapter_for(kind: &str, schema: Option<&str>) -> Option<&'static KindAdapter> {
     KERNEL_KINDS
         .iter()
-        .chain(crate::tailors::kind_adapters())
+        .chain(installed_kinds().iter().copied())
         .find(|adapter| adapter.kind == kind && adapter.schema == schema)
+}
+
+static INSTALLED_KINDS: OnceLock<Vec<&'static KindAdapter>> = OnceLock::new();
+
+/// Install the object-kind rows the kernel may adapt beyond its own. The
+/// first call wins; later calls are ignored, so tests that install the same
+/// table from several threads are safe.
+pub fn install_kinds(rows: impl IntoIterator<Item = &'static KindAdapter>) {
+    let _ = INSTALLED_KINDS.set(rows.into_iter().collect());
+}
+
+fn installed_kinds() -> &'static [&'static KindAdapter] {
+    #[cfg(test)]
+    tests::install_shipped_kinds();
+    INSTALLED_KINDS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
 fn no_adapter_reason(kind: &str, schema: Option<&str>) -> String {
@@ -666,6 +684,13 @@ pub(crate) fn adapt_identity_for_test(identity: Identity, others: Vec<Record>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unit tests never pass through `commands::dispatch`, so the shipped
+    /// table is installed on first use. The non-test kernel names no tailor
+    /// (tests/architecture.rs checks that).
+    pub(super) fn install_shipped_kinds() {
+        crate::tailors::install_kinds();
+    }
 
     fn ident(kind: &str, name: &str, version: &str, inputs: &[(&str, &str)]) -> Identity {
         Identity {

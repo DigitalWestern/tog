@@ -87,14 +87,6 @@ fn layer(relative: &Path) -> String {
 /// The one-way exceptions, each documented where it lives. Adding to this
 /// list is a shared-layer review (REFACTOR.md §2 principle 2).
 const ALLOWED: &[(&str, &str, &str)] = &[
-    // objmeta asks the tailor registry for its object-kind rows; the kernel
-    // never names a tailor. A crate split replaces this with a table
-    // installed at startup (REFACTOR.md Stage 3 change-log entry).
-    (
-        "kernel/objmeta.rs",
-        "tailors::kind_adapters",
-        "the one kernel→tailors seam",
-    ),
     // Python sdists with Rust extensions build with the cargo tailor's
     // pinned toolchain. A kernel-level toolchain provider would remove this
     // (FOLLOW-UPS.md).
