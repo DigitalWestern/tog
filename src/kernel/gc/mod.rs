@@ -2710,4 +2710,84 @@ mod tests {
             "a blocked preview still authorized a deletion: {text}"
         );
     }
+    /// Characterization (REFACTOR.md Stage 4 step 3): the read phase's
+    /// structural refusals. Every other gc test drives `read` through a
+    /// healthy store; these pin the four "refusing to sweep" stops that
+    /// guard the object, metadata, cache and stage enumerations, so an
+    /// extraction cannot quietly drop one or reorder them.
+    fn read_refusal(label: &str, plant: impl FnOnce(&Store)) -> String {
+        let temp = TempStore::new(label);
+        let store = temp.store();
+        let id = commit(&store, "kept", None);
+        assert!(store.object_path(&id).is_dir());
+        plant(&store);
+        let activity = store.try_activity_exclusive().unwrap().unwrap();
+        let mut out = Vec::new();
+        match read(
+            &store,
+            &activity,
+            &Options::default(),
+            &BTreeMap::new(),
+            &mut out,
+        ) {
+            Ok(_) => panic!("the read phase accepted a malformed store"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn read_refuses_an_object_entry_that_is_not_an_object() {
+        let message = read_refusal("read-bad-object", |store| {
+            fs::write(store.root.join("objects").join("not-an-id"), b"x").unwrap();
+        });
+        assert!(
+            message.contains("refusing to sweep: invalid object entry"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn read_refuses_an_object_without_readable_metadata() {
+        let message = read_refusal("read-no-meta", |store| {
+            let id = commit(store, "orphan", None);
+            fs::remove_file(store.root.join("meta").join(format!("{id}.json"))).unwrap();
+        });
+        assert!(message.contains("has no readable metadata"), "{message}");
+        assert!(message.contains("rebuild it or restore meta/"), "{message}");
+    }
+
+    #[test]
+    fn read_refuses_a_cache_namespace_that_is_not_a_real_directory() {
+        let message = read_refusal("read-cache-symlink", |store| {
+            let path = store.root.join("cache").join("sha256");
+            fs::remove_dir_all(&path).unwrap();
+            std::os::unix::fs::symlink(store.root.join("objects"), &path).unwrap();
+        });
+        assert!(
+            message.contains("refusing to sweep: cache/sha256 is not a real directory"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn read_refuses_a_cache_entry_that_is_not_a_digest() {
+        let message = read_refusal("read-bad-cache", |store| {
+            fs::write(store.root.join("cache/sha256").join("nothex"), b"x").unwrap();
+        });
+        assert!(
+            message.contains("refusing to sweep: invalid cache entry"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn read_refuses_a_stage_entry_that_is_not_a_directory() {
+        let message = read_refusal("read-bad-stage", |store| {
+            fs::write(store.root.join("tmp").join("stage-bogus"), b"x").unwrap();
+        });
+        assert!(
+            message.contains("refusing to sweep: invalid stage entry"),
+            "{message}"
+        );
+    }
 }

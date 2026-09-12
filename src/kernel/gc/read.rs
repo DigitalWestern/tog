@@ -406,33 +406,17 @@ pub struct Snapshot {
 
 pub(super) const CACHE_ALGORITHMS: [(&str, usize); 3] =
     [("sha1", 40), ("sha256", 64), ("sha512", 128)];
-
-/// Phase 1. Read the whole deletion surface.
-///
-/// Root *resolution* happens here rather than in `validate` because it is an
-/// I/O probe, not a structural check; either way it runs before anything can
-/// be deleted, which is the property D.4 is protecting.
-pub(super) fn read<W: Write>(
-    store: &Store,
-    activity: &StoreActivity,
-    options: &Options,
+/// Enumerate `objects/`, pairing every object with the record it must have.
+/// Both stats come from the held descriptors, so what is measured here is
+/// the inode the removal will later be relative to.
+fn read_objects(
+    objects_path: &Path,
+    objects: &HeldDir,
+    meta_dir: &HeldDir,
     upgrades: &BTreeMap<String, serde_json::Value>,
-    out: &mut W,
-) -> io::Result<Snapshot> {
-    store.require_exclusive_activity(activity, "garbage collection")?;
-    let now = SystemTime::now();
-    let (roots, crash_temps) = store.roots_for_sweep()?;
-    let state = collect_roots(store, &roots, options, out)?;
-    let mut meta = crate::kernel::objmeta::MetaIndex::read(store)?;
-    meta.apply(upgrades)?;
-
-    let objects_path = store.root.join("objects");
-    let objects = open_held(&objects_path, "objects")?;
-    let meta_dir = open_held(&store.root.join("meta"), "meta")?;
-    let tmp = open_held(&store.root.join("tmp"), "tmp")?;
-
+) -> io::Result<Vec<ObjectEntry>> {
     let mut object_entries = Vec::new();
-    for entry in fs::read_dir(&objects_path)? {
+    for entry in fs::read_dir(objects_path)? {
         let entry = entry?;
         let name = entry.file_name();
         let id = name
@@ -471,7 +455,13 @@ pub(super) fn read<W: Write>(
             meta_size,
         });
     }
+    Ok(object_entries)
+}
 
+/// Enumerate every cache namespace, holding each one open. The returned
+/// descriptors are the `Parent::Cache(index)` targets, so the push order
+/// here is what the indexes recorded on the entries mean.
+fn read_cache(store: &Store) -> io::Result<(Vec<(&'static str, HeldDir)>, Vec<CacheEntry>)> {
     let mut cache_dirs = Vec::new();
     let mut cache_entries = Vec::new();
     for (algo, width) in CACHE_ALGORITHMS {
@@ -516,7 +506,11 @@ pub(super) fn read<W: Write>(
         }
         cache_dirs.push((algo, held));
     }
+    Ok((cache_dirs, cache_entries))
+}
 
+/// Enumerate interrupted staging directories under the already-held `tmp`.
+fn read_stages(store: &Store, tmp: &HeldDir) -> io::Result<Vec<DirEntrySnapshot>> {
     let mut stages = Vec::new();
     for entry in fs::read_dir(store.root.join("tmp"))? {
         let entry = entry?;
@@ -538,72 +532,118 @@ pub(super) fn read<W: Write>(
             stat,
         });
     }
+    Ok(stages)
+}
 
-    // Projections are only enumerated for a `--project` sweep; a sweep that
-    // will not touch them must not hold their descriptors either.
-    let mut forest_projects: Vec<HeldDir> = Vec::new();
-    let mut forests = Vec::new();
-    let mut backups_dir = None;
-    let mut backups = Vec::new();
-    let mut legacy_projection_note = None;
-    if options.project {
-        let forests_path = store.root.join("forests");
-        validate_projection_namespace(&forests_path, "forests")?;
-        if forests_path.is_dir() {
-            for project in fs::read_dir(&forests_path)? {
-                let project = project?;
-                let project_stat = fs::symlink_metadata(project.path())?;
-                if project_stat.file_type().is_symlink() || !project_stat.is_dir() {
-                    continue;
-                }
-                let held = open_held(&project.path(), "forest project")?;
-                let index = forest_projects.len();
-                for projection in fs::read_dir(project.path())? {
-                    let projection = projection?;
-                    let name = projection.file_name();
-                    let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
-                    if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
-                        continue;
-                    }
-                    forests.push(DirEntrySnapshot {
-                        name,
-                        path: projection.path(),
-                        parent: Parent::ForestProject(index),
-                        stat,
-                    });
-                }
-                forest_projects.push(held);
+/// The projection half of the snapshot. Default (everything empty, no
+/// descriptors held) is what a sweep that will not touch projections reads.
+#[derive(Default)]
+struct Projections {
+    forest_projects: Vec<HeldDir>,
+    forests: Vec<DirEntrySnapshot>,
+    backups_dir: Option<HeldDir>,
+    backups: Vec<DirEntrySnapshot>,
+    legacy_projection_note: Option<String>,
+}
+
+/// Enumerate the project projections, holding each project directory and
+/// the backups directory open. Only a `--project` sweep calls this: a sweep
+/// that will not touch them must not hold their descriptors either.
+fn read_projections(store: &Store) -> io::Result<Projections> {
+    let mut read = Projections::default();
+    let forests_path = store.root.join("forests");
+    validate_projection_namespace(&forests_path, "forests")?;
+    if forests_path.is_dir() {
+        for project in fs::read_dir(&forests_path)? {
+            let project = project?;
+            let project_stat = fs::symlink_metadata(project.path())?;
+            if project_stat.file_type().is_symlink() || !project_stat.is_dir() {
+                continue;
             }
-        }
-        let backups_path = store.root.join("backups");
-        validate_projection_namespace(&backups_path, "backups")?;
-        if backups_path.is_dir() {
-            let held = open_held(&backups_path, "backups")?;
-            for entry in fs::read_dir(&backups_path)? {
-                let entry = entry?;
-                let name = entry.file_name();
+            let held = open_held(&project.path(), "forest project")?;
+            let index = read.forest_projects.len();
+            for projection in fs::read_dir(project.path())? {
+                let projection = projection?;
+                let name = projection.file_name();
                 let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
                 if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
                     continue;
                 }
-                backups.push(DirEntrySnapshot {
+                read.forests.push(DirEntrySnapshot {
                     name,
-                    path: entry.path(),
-                    parent: Parent::Backups,
+                    path: projection.path(),
+                    parent: Parent::ForestProject(index),
                     stat,
                 });
             }
-            backups_dir = Some(held);
-        }
-        if let Some(home) = store.root.parent() {
-            if home.join("forests").is_dir() || home.join("backups").is_dir() {
-                legacy_projection_note = Some(format!(
-                    "legacy project projections under {} are shared by sibling stores",
-                    home.display()
-                ));
-            }
+            read.forest_projects.push(held);
         }
     }
+    let backups_path = store.root.join("backups");
+    validate_projection_namespace(&backups_path, "backups")?;
+    if backups_path.is_dir() {
+        let held = open_held(&backups_path, "backups")?;
+        for entry in fs::read_dir(&backups_path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let stat = store::stat_at(held.file.as_raw_fd(), name.as_bytes())?;
+            if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+                continue;
+            }
+            read.backups.push(DirEntrySnapshot {
+                name,
+                path: entry.path(),
+                parent: Parent::Backups,
+                stat,
+            });
+        }
+        read.backups_dir = Some(held);
+    }
+    if let Some(home) = store.root.parent() {
+        if home.join("forests").is_dir() || home.join("backups").is_dir() {
+            read.legacy_projection_note = Some(format!(
+                "legacy project projections under {} are shared by sibling stores",
+                home.display()
+            ));
+        }
+    }
+    Ok(read)
+}
+
+/// Phase 1. Read the whole deletion surface.
+///
+/// Root *resolution* happens here rather than in `validate` because it is an
+/// I/O probe, not a structural check; either way it runs before anything can
+/// be deleted, which is the property D.4 is protecting.
+pub(super) fn read<W: Write>(
+    store: &Store,
+    activity: &StoreActivity,
+    options: &Options,
+    upgrades: &BTreeMap<String, serde_json::Value>,
+    out: &mut W,
+) -> io::Result<Snapshot> {
+    store.require_exclusive_activity(activity, "garbage collection")?;
+    let now = SystemTime::now();
+    let (roots, crash_temps) = store.roots_for_sweep()?;
+    let state = collect_roots(store, &roots, options, out)?;
+    let mut meta = crate::kernel::objmeta::MetaIndex::read(store)?;
+    meta.apply(upgrades)?;
+
+    // Every descriptor below is held from here through execution, so the
+    // acquisition order and the set held are part of the contract.
+    let objects_path = store.root.join("objects");
+    let objects = open_held(&objects_path, "objects")?;
+    let meta_dir = open_held(&store.root.join("meta"), "meta")?;
+    let tmp = open_held(&store.root.join("tmp"), "tmp")?;
+
+    let object_entries = read_objects(&objects_path, &objects, &meta_dir, upgrades)?;
+    let (cache_dirs, cache_entries) = read_cache(store)?;
+    let stages = read_stages(store, &tmp)?;
+    let projections = if options.project {
+        read_projections(store)?
+    } else {
+        Projections::default()
+    };
 
     Ok(Snapshot {
         now,
@@ -613,17 +653,17 @@ pub(super) fn read<W: Write>(
         objects: object_entries,
         cache: cache_entries,
         stages,
-        forests,
-        backups,
+        forests: projections.forests,
+        backups: projections.backups,
         dirs: Dirs {
             objects,
             meta: meta_dir,
             cache: cache_dirs,
             tmp,
-            forest_projects,
-            backups: backups_dir,
+            forest_projects: projections.forest_projects,
+            backups: projections.backups_dir,
         },
-        legacy_projection_note,
+        legacy_projection_note: projections.legacy_projection_note,
     })
 }
 
