@@ -894,6 +894,322 @@ pub(super) fn run_install_scripts(
     result
 }
 
+/// The lifecycle scripts this staged package runs, in npm's order.
+///
+/// `None` means the package has no lifecycle work at all: no readable
+/// manifest, or no preinstall/install/postinstall and no binding.gyp. A
+/// package with a binding.gyp and no install script gets npm's default
+/// `node-gyp rebuild`.
+fn package_lifecycle_phases(pkg_dir: &Path) -> Option<Vec<(&'static str, String)>> {
+    let manifest = fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    let scripts = &manifest["scripts"];
+    let has = |k: &str| scripts[k].as_str().is_some();
+    let default_gyp = !has("install") && !has("preinstall") && pkg_dir.join("binding.gyp").exists();
+    if !has("preinstall") && !has("install") && !has("postinstall") && !default_gyp {
+        return None;
+    }
+    Some(
+        ["preinstall", "install", "postinstall"]
+            .iter()
+            .filter_map(|ph| match scripts[*ph].as_str() {
+                Some(s) => Some((*ph, s.to_string())),
+                None if *ph == "install" && default_gyp => {
+                    Some((*ph, "node-gyp rebuild".to_string()))
+                }
+                None => None,
+            })
+            .collect(),
+    )
+}
+
+/// The shared tool stage dir, created on first use.
+///
+/// Tools live in their own stage dir which is NOT in the sandbox write list —
+/// a script can execute the node-gyp shim but never replace it.
+fn ensure_lifecycle_tools(
+    store: &Store,
+    node_obj: &Path,
+    tools: &mut Option<PathBuf>,
+    cleanup: &mut Vec<PathBuf>,
+) -> io::Result<PathBuf> {
+    if let Some(t) = tools {
+        return Ok(t.clone());
+    }
+    // A store stage dir: collision-proof and already canonical
+    // (Seatbelt matches real paths).
+    let t = store.stage()?;
+    // node-gyp shim: npm normally injects this into PATH.
+    let bin = t.join("bin");
+    fs::create_dir_all(&bin)?;
+    let gyp_js = node_obj.join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js");
+    fs::write(
+        bin.join("node-gyp"),
+        format!(
+            "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
+            node_obj.join("bin/node").display(),
+            gyp_js.display()
+        ),
+    )?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(bin.join("node-gyp"), fs::Permissions::from_mode(0o755))?;
+    cleanup.push(t.clone());
+    Ok(tools.insert(t).clone())
+}
+
+/// Plant declared artifacts where this package's installer looks (paths are
+/// HOME-relative; HOME is this scratch dir).
+fn plant_declared_artifacts(
+    store: &Store,
+    artifacts: &[DeclaredArtifact],
+    tmp: &Path,
+) -> io::Result<()> {
+    for a in artifacts {
+        let src = download_verified_held(store, &a.url, &a.sha256)
+            .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
+        let dest = tmp.join(&a.path);
+        fs::create_dir_all(dest.parent().unwrap())?;
+        fs::copy(&src, &dest).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("placing declared artifact {}: {e}", a.path),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// node-gyp needs a Python; the store's pinned CPython keeps builds off the
+/// system toolchain drift. Realized lazily, only when needed.
+fn ensure_gyp_python(
+    store: &Store,
+    platform: Platform,
+    python_obj: &mut Option<PathBuf>,
+) -> io::Result<PathBuf> {
+    if let Some(p) = python_obj {
+        return Ok(p.clone());
+    }
+    let pin = crate::tailors::python::lookup(platform, "3.12")
+        .ok_or_else(|| crate::kernel::platform::no_pin("cpython 3.12", platform, "stage 2"))?;
+    let p = crate::tailors::python::ensure_python_for(store, pin, platform)
+        .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
+    Ok(python_obj.insert(p).clone())
+}
+
+/// PATH for one package's lifecycle scripts: the tool shims first, then the
+/// node toolchain, then the nearest and root .bin dirs, then the system.
+fn lifecycle_path_env(
+    tools_dir: &Path,
+    node_obj: &Path,
+    staged: &Path,
+    package_path: &str,
+) -> String {
+    let nearest_bin = env_node_modules_path(staged, package_path).join(".bin");
+    let root_bin = staged.join("node_modules/.bin");
+    let mut path_entries = vec![
+        tools_dir.join("bin").display().to_string(),
+        node_obj.join("bin").display().to_string(),
+        nearest_bin.display().to_string(),
+    ];
+    if nearest_bin != root_bin {
+        path_entries.push(root_bin.display().to_string());
+    }
+    path_entries.extend([
+        "/usr/bin".into(),
+        "/bin".into(),
+        "/usr/sbin".into(),
+        "/sbin".into(),
+    ]);
+    path_entries.join(":")
+}
+
+/// The environment every lifecycle phase of this package starts from, before
+/// artifact policy and PATH are appended.
+fn lifecycle_base_envs(
+    platform: Platform,
+    node_obj: &Path,
+    python_bin: &Path,
+    tmp: &Path,
+    p: &NpmPackage,
+) -> Vec<(String, String)> {
+    let mut envs: Vec<(String, String)> = vec![
+        ("PYTHON".into(), python_bin.display().to_string()),
+        ("npm_config_python".into(), python_bin.display().to_string()),
+        ("npm_config_nodedir".into(), node_obj.display().to_string()),
+        (
+            "npm_config_node_gyp".into(),
+            node_obj
+                .join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js")
+                .display()
+                .to_string(),
+        ),
+        // NOTE: npm_config_build_from_source is not set globally here: it
+        // would make packages like sharp skip their local-cache lookup
+        // (where declared artifacts land). It is set per package, below,
+        // only for prebuilt-binary downloaders with no declared artifacts
+        // (NEXT.md item 5).
+        // Deterministic npm cache location inside the scratch HOME —
+        // also where declared artifacts under .npm/ land.
+        (
+            "npm_config_cache".into(),
+            tmp.join(".npm").display().to_string(),
+        ),
+        ("npm_package_name".into(), p.name.clone()),
+        ("npm_package_version".into(), p.version.clone()),
+    ];
+    if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+        // python-build-standalone's sysconfig may name clang even though
+        // Linux node-gyp is intentionally built with the host toolchain.
+        // The sandbox cleared the inherited environment, so these are the
+        // only compiler selections visible to the lifecycle process.
+        envs.push(("CC".into(), "gcc".into()));
+        envs.push(("CXX".into(), "g++".into()));
+    }
+    envs
+}
+
+/// NEXT.md item 5: packages whose installers download at install time.
+///
+/// A documented skip switch turns a doomed fetch into a recorded exception
+/// naming what the user runs later; a prebuilt-binary downloader is told to
+/// compile instead, which is the path it would have fallen back to anyway
+/// once the network denied it. Provisioning comes first: if blanket can
+/// supply the artifact, the package is really installed rather than skipped.
+fn apply_artifact_policy(
+    store: &Store,
+    platform: Platform,
+    p: &NpmPackage,
+    tmp: &Path,
+    artifacts: &[DeclaredArtifact],
+    phases: &[(&str, String)],
+    envs: &mut Vec<(String, String)>,
+) -> io::Result<()> {
+    let script_text = phases
+        .iter()
+        .map(|(_, script)| script.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Only artifacts planted for THIS package suppress the source build:
+    // one declared artifact anywhere must not silently change how every
+    // other package installs.
+    let declared_here = artifacts.iter().any(|a| {
+        a.path.split('/').any(|segment| segment == p.name)
+            || a.url.contains(&format!("/{}/", p.name))
+    });
+    match crate::tailors::python::artifacts::provision(store, platform, &p.name, &p.version, tmp) {
+        Ok(Some(provisioning)) => {
+            envs.extend(provisioning.envs);
+            for (subject, detail) in &provisioning.records {
+                crate::kernel::policy::record(
+                    crate::kernel::policy::ARTIFACT_PROVISIONED,
+                    subject,
+                    detail,
+                )?;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            // A provisioning failure is not fatal: the install script still
+            // runs and fails loudly on its own if it needs the artifact.
+            eprintln!(
+                "blanket: {}: could not provision its artifact: {error}",
+                p.name
+            );
+            crate::kernel::policy::record(
+                crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
+                &format!("{}@{}", p.name, p.version),
+                &format!("provisioning failed: {error}"),
+            )?;
+        }
+    }
+    if let Some(skip) = crate::tailors::python::artifacts::skip_download_for(&p.name) {
+        for (key, value) in skip.envs {
+            envs.push(((*key).to_string(), (*value).to_string()));
+        }
+        crate::kernel::policy::record(
+            crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
+            &format!("{}@{}", p.name, p.version),
+            &format!("install-time download skipped; run: {}", skip.hint),
+        )?;
+    } else if crate::tailors::python::artifacts::wants_source_build(&script_text, declared_here) {
+        envs.extend(crate::tailors::python::artifacts::source_build_envs());
+        crate::kernel::policy::record(
+            crate::kernel::policy::BUILT_FROM_SOURCE,
+            &format!("{}@{}", p.name, p.version),
+            "prebuilt binary not downloaded; compiled from source in the sandbox",
+        )?;
+    }
+    Ok(())
+}
+
+/// Run one package's lifecycle phases in the sandbox, stopping at the first
+/// failure. A failure restores the package from the snapshot and is recorded
+/// as an exception; strict policy turns the record into a hard error.
+#[allow(clippy::too_many_arguments)]
+fn run_package_phases(
+    platform: Platform,
+    staged: &Path,
+    plan: &NpmPlan,
+    p: &NpmPackage,
+    pkg_dir: &Path,
+    snapshot: &Path,
+    tmp: &Path,
+    phases: &[(&str, String)],
+    envs: &[(String, String)],
+    path_env: &str,
+    sandbox: &crate::kernel::sandbox::Sandbox,
+    activity: &crate::kernel::activity::StoreActivity,
+) -> io::Result<()> {
+    for (phase, script) in phases {
+        eprintln!("blanket: {} {}: {phase} (sandboxed)", p.name, p.version);
+        let envs_phase: Vec<(String, String)> = envs
+            .iter()
+            .cloned()
+            .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
+            .collect();
+        let result = sandbox.run_in_on_with_activity(
+            platform,
+            &["/bin/sh", "-c", script],
+            &path_env,
+            tmp,
+            pkg_dir,
+            &envs_phase,
+            activity,
+        );
+        // A missing sandbox backend is never a script failure: it must
+        // not become a permissive install-script-failed exception.
+        let e = match classify_lifecycle_result(result) {
+            Ok(()) => continue,
+            Err(LifecycleFailure::SandboxUnavailable(e)) => return Err(e),
+            Err(LifecycleFailure::Script(e)) => e,
+        };
+        let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
+                    \"blanket\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
+                    placed where the package's downloader caches them (see README).";
+        let error = e.to_string();
+        let detail = format!(
+            "{phase}: {}. {hint}",
+            error.chars().take(300).collect::<String>()
+        );
+        if let Err(policy_error) = crate::kernel::policy::record(
+            crate::kernel::policy::INSTALL_SCRIPT_FAILED,
+            &p.path,
+            &detail,
+        ) {
+            return Err(err(format!(
+                "{}: {phase} script failed under the network-denied build \
+                 sandbox: {e}. {hint} ({policy_error})",
+                p.path
+            )));
+        }
+        crate::kernel::store::remove_tree(pkg_dir)?;
+        fs::rename(snapshot, pkg_dir)?;
+        remove_dangling_bin_links(staged, plan)?;
+        break;
+    }
+    Ok(())
+}
+
 pub(super) fn run_install_scripts_staged(
     store: &Store,
     platform: Platform,
@@ -909,85 +1225,22 @@ pub(super) fn run_install_scripts_staged(
     let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
     pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
 
-    // Tools live in their own stage dir which is NOT in the sandbox write
-    // list — a script can execute the node-gyp shim but never replace it.
+    // The shared tool stage dir and the pinned node-gyp Python are realized
+    // lazily, on the first package that actually has lifecycle work.
     let mut tools: Option<PathBuf> = None;
-    // node-gyp needs a Python; the store's pinned CPython keeps builds off
-    // the system toolchain drift. Realized lazily, only when needed.
     let mut python_obj: Option<PathBuf> = None;
     for p in &pkgs {
         let pkg_dir = env_package_path(staged, &p.path);
-        let manifest = match fs::read_to_string(pkg_dir.join("package.json")) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let manifest: serde_json::Value = match serde_json::from_str(&manifest) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let scripts = &manifest["scripts"];
-        let has = |k: &str| scripts[k].as_str().is_some();
-        let default_gyp =
-            !has("install") && !has("preinstall") && pkg_dir.join("binding.gyp").exists();
-        if !has("preinstall") && !has("install") && !has("postinstall") && !default_gyp {
+        let Some(phases) = package_lifecycle_phases(&pkg_dir) else {
             continue;
-        }
-
-        let tools_dir = match &tools {
-            Some(t) => t.clone(),
-            None => {
-                // A store stage dir: collision-proof and already canonical
-                // (Seatbelt matches real paths).
-                let t = store.stage()?;
-                // node-gyp shim: npm normally injects this into PATH.
-                let bin = t.join("bin");
-                fs::create_dir_all(&bin)?;
-                let gyp_js =
-                    node_obj.join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js");
-                fs::write(
-                    bin.join("node-gyp"),
-                    format!(
-                        "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
-                        node_obj.join("bin/node").display(),
-                        gyp_js.display()
-                    ),
-                )?;
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(bin.join("node-gyp"), fs::Permissions::from_mode(0o755))?;
-                cleanup.push(t.clone());
-                tools.insert(t).clone()
-            }
         };
+
+        let tools_dir = ensure_lifecycle_tools(store, node_obj, &mut tools, cleanup)?;
         // Fresh scratch HOME per package: no shared writable state between
         // one package's scripts and the next.
         let tmp = store.stage()?;
         cleanup.push(tmp.clone());
-        // Plant declared artifacts where this package's installer looks
-        // (paths are HOME-relative; HOME is this scratch dir).
-        for a in artifacts {
-            let src = download_verified_held(store, &a.url, &a.sha256).map_err(|e| {
-                io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url))
-            })?;
-            let dest = tmp.join(&a.path);
-            fs::create_dir_all(dest.parent().unwrap())?;
-            fs::copy(&src, &dest).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("placing declared artifact {}: {e}", a.path),
-                )
-            })?;
-        }
-
-        let phases: Vec<(&str, String)> = ["preinstall", "install", "postinstall"]
-            .iter()
-            .filter_map(|ph| match scripts[*ph].as_str() {
-                Some(s) => Some((*ph, s.to_string())),
-                None if *ph == "install" && default_gyp => {
-                    Some((*ph, "node-gyp rebuild".to_string()))
-                }
-                None => None,
-            })
-            .collect();
+        plant_declared_artifacts(store, artifacts, &tmp)?;
 
         // Snapshot lives in its own stage dir: neither readable nor writable
         // inside the sandbox, so a failing script cannot tamper with what
@@ -997,135 +1250,12 @@ pub(super) fn run_install_scripts_staged(
         let snapshot = snapshot_root.join("package");
         crate::comforter::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
 
-        let python = match &python_obj {
-            Some(p) => p.clone(),
-            None => {
-                let pin = crate::tailors::python::lookup(platform, "3.12").ok_or_else(|| {
-                    crate::kernel::platform::no_pin("cpython 3.12", platform, "stage 2")
-                })?;
-                let p = crate::tailors::python::ensure_python_for(store, pin, platform).map_err(
-                    |e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")),
-                )?;
-                python_obj.insert(p).clone()
-            }
-        };
+        let python = ensure_gyp_python(store, platform, &mut python_obj)?;
         let python_bin = python.join("bin/python3");
 
-        let nearest_bin = env_node_modules_path(staged, &p.path).join(".bin");
-        let root_bin = staged.join("node_modules/.bin");
-        let mut path_entries = vec![
-            tools_dir.join("bin").display().to_string(),
-            node_obj.join("bin").display().to_string(),
-            nearest_bin.display().to_string(),
-        ];
-        if nearest_bin != root_bin {
-            path_entries.push(root_bin.display().to_string());
-        }
-        path_entries.extend([
-            "/usr/bin".into(),
-            "/bin".into(),
-            "/usr/sbin".into(),
-            "/sbin".into(),
-        ]);
-        let path_env = path_entries.join(":");
-        let mut envs: Vec<(String, String)> = vec![
-            ("PYTHON".into(), python_bin.display().to_string()),
-            ("npm_config_python".into(), python_bin.display().to_string()),
-            ("npm_config_nodedir".into(), node_obj.display().to_string()),
-            (
-                "npm_config_node_gyp".into(),
-                node_obj
-                    .join("lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js")
-                    .display()
-                    .to_string(),
-            ),
-            // NOTE: npm_config_build_from_source is not set globally here: it
-            // would make packages like sharp skip their local-cache lookup
-            // (where declared artifacts land). It is set per package, below,
-            // only for prebuilt-binary downloaders with no declared artifacts
-            // (NEXT.md item 5).
-            // Deterministic npm cache location inside the scratch HOME —
-            // also where declared artifacts under .npm/ land.
-            (
-                "npm_config_cache".into(),
-                tmp.join(".npm").display().to_string(),
-            ),
-            ("npm_package_name".into(), p.name.clone()),
-            ("npm_package_version".into(), p.version.clone()),
-        ];
-        if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-            // python-build-standalone's sysconfig may name clang even though
-            // Linux node-gyp is intentionally built with the host toolchain.
-            // The sandbox cleared the inherited environment, so these are the
-            // only compiler selections visible to the lifecycle process.
-            envs.push(("CC".into(), "gcc".into()));
-            envs.push(("CXX".into(), "g++".into()));
-        }
-        // NEXT.md item 5: packages whose installers download at install time.
-        // A documented skip switch turns a doomed fetch into a recorded
-        // exception naming what the user runs later; a prebuilt-binary
-        // downloader is told to compile instead, which is the path it would
-        // have fallen back to anyway once the network denied it.
-        let script_text = phases
-            .iter()
-            .map(|(_, script)| script.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Only artifacts planted for THIS package suppress the source build:
-        // one declared artifact anywhere must not silently change how every
-        // other package installs.
-        let declared_here = artifacts.iter().any(|a| {
-            a.path.split('/').any(|segment| segment == p.name)
-                || a.url.contains(&format!("/{}/", p.name))
-        });
-        // Provisioning comes first: if blanket can supply the artifact, the
-        // package is really installed rather than skipped.
-        match crate::tailors::python::artifacts::provision(
-            store, platform, &p.name, &p.version, &tmp,
-        ) {
-            Ok(Some(provisioning)) => {
-                envs.extend(provisioning.envs);
-                for (subject, detail) in &provisioning.records {
-                    crate::kernel::policy::record(
-                        crate::kernel::policy::ARTIFACT_PROVISIONED,
-                        subject,
-                        detail,
-                    )?;
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                // A provisioning failure is not fatal: the install script still
-                // runs and fails loudly on its own if it needs the artifact.
-                eprintln!(
-                    "blanket: {}: could not provision its artifact: {error}",
-                    p.name
-                );
-                crate::kernel::policy::record(
-                    crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
-                    &format!("{}@{}", p.name, p.version),
-                    &format!("provisioning failed: {error}"),
-                )?;
-            }
-        }
-        if let Some(skip) = crate::tailors::python::artifacts::skip_download_for(&p.name) {
-            for (key, value) in skip.envs {
-                envs.push(((*key).to_string(), (*value).to_string()));
-            }
-            crate::kernel::policy::record(
-                crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
-                &format!("{}@{}", p.name, p.version),
-                &format!("install-time download skipped; run: {}", skip.hint),
-            )?;
-        } else if crate::tailors::python::artifacts::wants_source_build(&script_text, declared_here)
-        {
-            envs.extend(crate::tailors::python::artifacts::source_build_envs());
-            crate::kernel::policy::record(
-                crate::kernel::policy::BUILT_FROM_SOURCE,
-                &format!("{}@{}", p.name, p.version),
-                "prebuilt binary not downloaded; compiled from source in the sandbox",
-            )?;
-        }
+        let path_env = lifecycle_path_env(&tools_dir, node_obj, staged, &p.path);
+        let mut envs = lifecycle_base_envs(platform, node_obj, &python_bin, &tmp, p);
+        apply_artifact_policy(store, platform, p, &tmp, artifacts, &phases, &mut envs)?;
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {
             envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
@@ -1143,53 +1273,10 @@ pub(super) fn run_install_scripts_staged(
                 .collect(),
             write: vec![&pkg_dir, &tmp],
         };
-        for (phase, script) in &phases {
-            eprintln!("blanket: {} {}: {phase} (sandboxed)", p.name, p.version);
-            let envs_phase: Vec<(String, String)> = envs
-                .iter()
-                .cloned()
-                .chain([("npm_lifecycle_event".to_string(), phase.to_string())])
-                .collect();
-            let result = sandbox.run_in_on_with_activity(
-                platform,
-                &["/bin/sh", "-c", script],
-                &path_env,
-                &tmp,
-                &pkg_dir,
-                &envs_phase,
-                &activity,
-            );
-            // A missing sandbox backend is never a script failure: it must
-            // not become a permissive install-script-failed exception.
-            let e = match classify_lifecycle_result(result) {
-                Ok(()) => continue,
-                Err(LifecycleFailure::SandboxUnavailable(e)) => return Err(e),
-                Err(LifecycleFailure::Script(e)) => e,
-            };
-            let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
-                        \"blanket\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
-                        placed where the package's downloader caches them (see README).";
-            let error = e.to_string();
-            let detail = format!(
-                "{phase}: {}. {hint}",
-                error.chars().take(300).collect::<String>()
-            );
-            if let Err(policy_error) = crate::kernel::policy::record(
-                crate::kernel::policy::INSTALL_SCRIPT_FAILED,
-                &p.path,
-                &detail,
-            ) {
-                return Err(err(format!(
-                    "{}: {phase} script failed under the network-denied build \
-                     sandbox: {e}. {hint} ({policy_error})",
-                    p.path
-                )));
-            }
-            crate::kernel::store::remove_tree(&pkg_dir)?;
-            fs::rename(&snapshot, &pkg_dir)?;
-            remove_dangling_bin_links(staged, plan)?;
-            break;
-        }
+        run_package_phases(
+            platform, staged, plan, p, &pkg_dir, &snapshot, &tmp, &phases, &envs, path_env,
+            &sandbox, &activity,
+        )?;
     }
     Ok(())
 }

@@ -814,6 +814,91 @@ mod tests {
         crate::kernel::store::remove_tree(&root).unwrap();
     }
 
+    /// Characterization of the skip decision in `run_install_scripts_staged`:
+    /// a package with no install hooks and no binding.gyp gets no scratch
+    /// stage dir, no tool shim, and no cleanup entry. Packages that DO have
+    /// hooks need the build sandbox and are covered by the `#[ignore]` gates
+    /// in tests/npm_scripts.rs (benign_install_script_runs_and_output_is_captured,
+    /// permissive_install_script_is_cached_but_rejected_strict,
+    /// network_access_during_install_script_fails).
+    #[test]
+    fn install_scripts_skip_packages_without_lifecycle_hooks() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "blanket-npm-lifecycle-{}-{nonce}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let node_obj = store.object_path("node-cache");
+        fs::create_dir_all(&node_obj).unwrap();
+        let staged = store.stage().unwrap();
+        // "no hooks", "unreadable manifest" and "unparsable manifest" are the
+        // three ways the loop declines a package.
+        for (path, manifest) in [
+            (
+                "plain",
+                Some(r#"{"name":"plain","scripts":{"test":"echo"}}"#),
+            ),
+            ("broken", Some("{not json")),
+            ("missing", None),
+        ] {
+            let dir = staged.join("node_modules").join(path);
+            fs::create_dir_all(&dir).unwrap();
+            if let Some(manifest) = manifest {
+                fs::write(dir.join("package.json"), manifest).unwrap();
+            }
+        }
+        let package = |name: &str| NpmPackage {
+            path: format!("node_modules/{name}"),
+            name: name.into(),
+            version: "1.0.0".into(),
+            url: "https://127.0.0.1:9/never-requested.tgz".into(),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![package("plain"), package("broken"), package("missing")],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let mut cleanup: Vec<PathBuf> = Vec::new();
+        run_install_scripts_staged(
+            &store,
+            Platform::host().unwrap(),
+            &staged,
+            &node_obj,
+            &plan,
+            &[],
+            None,
+            &mut cleanup,
+        )
+        .expect("no lifecycle work to do");
+        assert!(
+            cleanup.is_empty(),
+            "no scratch stage dirs were taken: {cleanup:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(staged.join("node_modules/plain/package.json")).unwrap(),
+            r#"{"name":"plain","scripts":{"test":"echo"}}"#,
+            "the package tree is untouched"
+        );
+        crate::kernel::store::remove_tree(&root).unwrap();
+    }
+
     #[test]
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
         let root =
