@@ -144,6 +144,39 @@ the three open nits are listed there. Linux acceptance on the final commit
 test`, `fmt_e2e --ignored`, and `gc --ignored` green. Mac cold/warm gate
 outstanding.
 
+## 7. ✅ `blanket audit` and the company policy template — branch `t3code/add-closure-policy-audit`
+
+Files: `src/audit.rs` (new: per-closure verdicts, policy union, report),
+`src/inspect.rs` (`status` split into a per-record `closure_state`;
+`ClosureFile` gains `path` and `record_sha256`), `src/policy.rs`
+(`parse_file`, `union`, `denied` made public), `src/cli.rs` (`parse_audit`,
+spec), `src/main.rs` (`Audit` arm, dispatched before the store is opened),
+`docs/human/policy-company.toml` (new), `tests/cli.rs`, `docs/human/CLI.md`,
+`docs/human/ARCHITECTURE.md`, `docs/human/LIMITATIONS.md`.
+
+**Why it matters.** The first command whose output is meant as evidence for
+someone outside the project (a CI admission gate for enterprise buyers). A
+wrong pass is worse than a wrong fail, and the inputs are files in the
+working tree that anyone can edit.
+
+**Looked for:** any way `--policy`, an environment variable, or a crafted
+closure file loosens the effective policy or gets a stale, unchecked,
+orphaned, foreign-platform, duplicated, or misnamed record to exit 0; side
+effects on the dispatch path (store open, leases, processes, network);
+usage errors leaking exit 1 and failures leaking exit 2; ecosystems where
+`status` says synced while inputs could have changed; stdout/stderr
+discipline and `--quiet`; the rustfmt toolchain-only and unchecked-exits-1
+decisions; test coverage and isolation (shared `HOME`, `BLANKET_POLICY`);
+the template's comments against the recording sites in the code.
+
+Reviewed 2026-09-11 by a Claude Opus 5 subagent (`general-purpose`, did not
+write the code; Codex unavailable until 09-13). Round 1: 2 blockers, 5
+should-fix, 4 nits, listed in the log row below with their fixes. Round 2
+re-ran every round-1 repro: all fixed (one withdrawn), 3 nits on the fixes
+(fixed by the author, not independently rechecked), and three product
+decisions handed to the owner in FOLLOW-UPS.md Flag 3. Linux only; the Mac
+gate has not run.
+
 ---
 
 ## Recurring defect classes
@@ -276,3 +309,4 @@ and now the isolated A commit `9b11e05`. Current standing:
   The **macOS gate is untouched** — the reviews above ran on Linux x86_64
   only. No claim is made about Darwin behaviour, and B.9's Mac RSS
   measurement is not taken.
+| 2026-09-11 | `blanket audit` + `policy-company.toml` (branch `t3code/add-closure-policy-audit`, entry 7) | Claude Opus 5 subagent (independent of the author; not Codex) | r1 review, r2 recheck | r1: **B1** an exception kind outside `policy::KINDS` was permitted and no policy file could deny it (version-skew hole) → fixed: unknown kinds are a failing `unknown` verdict; **B2** freshness was looked up by ecosystem name, so a second closure file claiming the same ecosystem inherited the first file's verdict (directory-order dependent pass of a stale record) → fixed: `status` split into per-record `inspect::closure_state`, audit judges every file from its own body, and a file whose `ecosystem` field differs from its name is refused; **S3** `"ecosystem": "rustfmt"` in any file skipped freshness → fixed: toolchain-only needs the rustfmt name and no recorded inputs; **S4** `--policy --json` took the flag as a file name and a missing/malformed `--policy` file exited 1 → fixed: `-`-prefixed values are usage errors, file errors exit 2; **S5** template comment for `unattested_index` inverted the semantics (blanket does not follow the index; resolution stays public, the dependency-confusion shape) → rewritten; **S6** docs did not state that the evidence is working-tree files → LIMITATIONS.md sentence; **S11** test gaps (unknown kind, duplicate/misnamed closure, `NotSynced` mapping, flag-as-value, malformed policy file, chain loading) → tests added; **N7** `artifact_not_provisioned` comment covered one of two recording sites → fixed; **N8** platform-less closures were never platform-checked (pre-existing `status` gap) → audit reports them `unchecked`; **N9** text output hid a stale record's denials → every line ends with the judgement; **N10** claimed per-closure attribution is not real because `pending()` is never drained between ecosystems → withdrawn: `project.rs` calls `policy::clear()` at the end of every closure write. Reviewer confirmed correct: `--policy` cannot loosen (end-to-end); no store open/lease/process/network on the audit path; exit codes; stdout results-only and `--quiet`; JSON shape; malformed records error rather than pass; test isolation. r2: all eleven confirmed fixed or withdrawn by re-running every round-1 repro; 3 new nits — N1 the `NotSynced` mapping test re-implemented the match (tautological) → mapping extracted to `freshness_from_state` and tested directly; N2 a stray `.json` under `.blanket/closures` aborted the audit with a message that read as corruption → message names it as a stray file, CLI.md says so; N3 two audit unit tests read `HOME`/`BLANKET_POLICY` while a policy test mutates them unguarded → shared `policy::test_env_lock()` held by all three. Owner decisions D1–D3 (toolchain-only pass, unchecked strictness on adoption, no authentication of the record) recorded in FOLLOW-UPS.md Flag 3. | ✅ reviewed and fixes rechecked; nit fixes verified by the author only (suite green); Mac gate not run |

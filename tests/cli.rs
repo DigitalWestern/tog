@@ -1278,3 +1278,252 @@ fn x_cleanup_revalidates_explicit_or_legacy_origin() {
         );
     }
 }
+
+// --- CLI.md: `blanket audit`, the CI admission gate over recorded exceptions ---
+
+/// A python closure with recorded inputs, a projection, and one recorded
+/// exception of `kind`, so `status` reports it synced and `audit` has
+/// something to judge. Returns the closure path.
+fn synced_python_closure_with_exception(project: &Path, kind: &str) -> PathBuf {
+    std::fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let env = project.join("env-object");
+    std::fs::create_dir_all(env.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&env, project.join(".venv")).unwrap();
+    let requirements = hex::encode(Sha256::digest(
+        std::fs::read(project.join("requirements.txt")).unwrap(),
+    ));
+    let platform = blanket::platform::Platform::host().unwrap();
+    let closures = project.join(".blanket/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    let path = closures.join("python.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": platform.triple(),
+            "projected_at": 1,
+            "body": {
+                "env_object": env,
+                "python": {"version": "3.12.14"},
+                "plan": {"packages": []},
+                "inputs": [{"path": "requirements.txt", "sha256": requirements}],
+                "exceptions": [{
+                    "kind": kind,
+                    "subject": "left-pad",
+                    "detail": "git+https://example.invalid/left-pad",
+                }],
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
+    let home = TempDir::new("audit-home");
+    let project = TempDir::new("audit-project");
+
+    // Nothing synced: a failure with a next step, exit 1.
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("nothing synced"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // Usage errors exit 2.
+    let out = blanket(&project.0, &home.0, &["audit", "--policy"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("--policy needs a file path"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = blanket(&project.0, &home.0, &["audit", "--strict"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = blanket(&project.0, &home.0, &["help", "audit"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stdout).contains("policy-company.toml"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    synced_python_closure_with_exception(&project.0, "git-dependency");
+    // No policy anywhere: the recorded exception is permitted and counted.
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("python  clean      closure "), "{stdout}");
+    assert!(stdout.contains("permitted: git-dependency 1"), "{stdout}");
+    // The audit never created a store.
+    assert!(!home.0.join("store").exists());
+
+    // --policy denies it: exit 1, the exception named with subject and detail.
+    let company = home.0.join("company.toml");
+    std::fs::write(&company, "deny = [\"git-dependency\"]\n").unwrap();
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", company.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("python  denied     closure "), "{stdout}");
+    assert!(
+        stdout.contains("git-dependency  left-pad  git+https://example.invalid/left-pad"),
+        "{stdout}"
+    );
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &[
+            "audit",
+            "--json",
+            &format!("--policy={}", company.display()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["passed"], false);
+    assert_eq!(value["policy"]["deny"][0], "git-dependency");
+    assert_eq!(value["closures"][0]["freshness"], "current");
+    assert_eq!(value["closures"][0]["denied"][0]["subject"], "left-pad");
+    assert_eq!(
+        value["closures"][0]["record_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+
+    // The shipped template denies git dependencies too.
+    let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/human/policy-company.toml");
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", template.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+
+    // The project policy denies it; a permissive --policy file cannot loosen.
+    std::fs::write(
+        project.0.join(".blanket/policy.toml"),
+        "deny = [\"git-dependency\"]\n",
+    )
+    .unwrap();
+    let permissive = home.0.join("permissive.toml");
+    std::fs::write(&permissive, "deny = []\n").unwrap();
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", permissive.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stdout).contains("denied"),
+        "{}",
+        text(&out.stdout)
+    );
+    std::fs::remove_file(project.0.join(".blanket/policy.toml")).unwrap();
+
+    // A missing or malformed --policy file is an operator mistake, exit 2,
+    // so CI can tell it from a denied build; the gate never runs under a
+    // policy the caller did not get.
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", "/nonexistent/p.toml"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("nonexistent"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    let typo = home.0.join("typo.toml");
+    std::fs::write(&typo, "deny = [\"git-dependecy\"]\n").unwrap();
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", typo.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("unknown deny kind"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = blanket(&project.0, &home.0, &["audit", "--policy", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("--policy needs a file path"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // An exception kind this binary does not know is never permitted, under
+    // any policy, and cannot be named in one either.
+    let unknown = TempDir::new("audit-unknown");
+    synced_python_closure_with_exception(&unknown.0, "kind-from-a-newer-blanket");
+    let out = blanket(&unknown.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("python  unknown    closure "), "{stdout}");
+    assert!(
+        stdout.contains("unknown  kind-from-a-newer-blanket  left-pad"),
+        "{stdout}"
+    );
+    let out = blanket(&unknown.0, &home.0, &["audit", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["passed"], false);
+    assert_eq!(
+        value["closures"][0]["unknown"][0]["kind"],
+        "kind-from-a-newer-blanket"
+    );
+    assert!(value["closures"][0]["denied"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // A closure named for one ecosystem but claiming another is refused.
+    let mismatch = TempDir::new("audit-mismatch");
+    let path = synced_python_closure_with_exception(&mismatch.0, "git-dependency");
+    let body = std::fs::read_to_string(&path).unwrap().replacen(
+        "\"ecosystem\": \"python\"",
+        "\"ecosystem\": \"rustfmt\"",
+        1,
+    );
+    assert!(body.contains("\"ecosystem\": \"rustfmt\""), "{body}");
+    std::fs::write(&path, body).unwrap();
+    let out = blanket(&mismatch.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("claims ecosystem 'rustfmt' but is named 'python'"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // A stale closure never audits clean, even under no policy at all.
+    std::fs::write(project.0.join("requirements.txt"), "six==1.16.0\n").unwrap();
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["passed"], false);
+    assert_eq!(value["closures"][0]["freshness"], "stale");
+    assert!(value["closures"][0]["freshness_detail"]
+        .as_str()
+        .unwrap()
+        .contains("requirements.txt"));
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert!(
+        text(&out.stdout).contains("python  stale      closure "),
+        "{}",
+        text(&out.stdout)
+    );
+}

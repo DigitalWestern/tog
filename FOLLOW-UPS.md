@@ -86,3 +86,29 @@ F3 report accounting, F4 acceptance tests).
 7. **Grammar-table drift for the 21st (kind,schema) pair** — adding a pair
    requires extending `objmeta::grammar_for`; unlisted pairs fail closed
    (refusal), but a listed pair with a wrong grammar needs its own drift test.
+
+## Flag 3 — `blanket audit`: three product decisions the reviewer asked the owner to make
+
+Raised in the 2026-09-11 round-2 review of `blanket audit` (REVIEW.md entry
+7). Each has a defensible default implemented; none was guessed at beyond
+that default, and none blocks the feature.
+
+- **D1 — toolchain-only records pass with no comparison.** An inputs-free
+  `rustfmt.json` (what `blanket fmt` writes) is the one record shape that
+  passes with no tie to the project: it has no inputs, so freshness is
+  `toolchain-only` and only its exceptions are judged. Options: keep it
+  (current, documented in CLI.md); report it `unchecked` unless a flag opts
+  in; or bind it to the pinned rustfmt version so there is something to
+  compare. Keeping it is reasonable; it should be a conscious call because
+  it is the last unconditional pass.
+- **D2 — `unchecked` fails, and round 2 made it stricter.** A closure with
+  no `platform` field, no recorded inputs, or no `exceptions` array exits 1.
+  Every project synced before the Linux-port envelope field therefore fails
+  the gate on first adoption until one `blanket sync`. Correct for a gate;
+  confirm the rollout story is acceptable.
+- **D3 — the gate authenticates nothing.** The record sha256 names a file
+  in the working tree; it does not prove who wrote it. Against a hostile
+  branch, editing `body.exceptions[]` audits clean. Documented in
+  LIMITATIONS.md. If `audit` is meant to gate untrusted branches, the
+  evidence has to come from a signature or from store/attestation records,
+  which is a feature decision, not a fix.

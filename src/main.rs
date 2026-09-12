@@ -1,7 +1,7 @@
 use blanket::{
-    activity::ActivityMode, cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest, npm,
-    npm_lock_import, platform::Platform, policy, project, pypi, pyselect, python, ruby, rustfmt,
-    sbom, store, supervise, types, ui, xrun,
+    activity::ActivityMode, audit, cargo, cli, deps, dotnet, elixir, gc, golang, inspect, manifest,
+    npm, npm_lock_import, platform::Platform, policy, project, pypi, pyselect, python, ruby,
+    rustfmt, sbom, store, supervise, types, ui, xrun,
 };
 
 use std::io;
@@ -189,6 +189,47 @@ fn dispatch(command: cli::Command) -> io::Result<i32> {
             print!("{}", cli::completions(shell));
             return Ok(0);
         }
+        // The admission gate is read-only over the project's records: no
+        // store open (that would create the store tree), no lease, no
+        // realization, no network. It needs the host platform only to tell
+        // a foreign-platform closure from a current one, as `status` does.
+        Audit { ref policy, json } => {
+            let platform = Platform::host()?;
+            let dir = project_dir();
+            // A --policy file that cannot be read or parsed is an operator
+            // mistake (exit 2), so CI can tell it from a denied build (exit 1).
+            let extra = match policy {
+                Some(path) => match audit::read_policy_file(path) {
+                    Ok(extra) => Some(extra),
+                    Err(error) => {
+                        eprint!(
+                            "{}",
+                            cli::render_usage_error(&format!("audit: {error}"), Some("audit"))
+                        );
+                        return Ok(cli::EXIT_USAGE);
+                    }
+                },
+                None => None,
+            };
+            let report = audit::audit(platform, &dir, extra.as_ref())?;
+            ui::note(&format!(
+                "audit: policy strict={} deny=[{}]",
+                report.policy.strict,
+                report
+                    .policy
+                    .deny
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            print!("{}", audit::render(&dir, &report, json)?);
+            return Ok(if report.passes() {
+                0
+            } else {
+                cli::EXIT_FAILURE
+            });
+        }
         Doctor { json } => {
             let store = store::Store::open()?;
             let _activity = store.activity(ActivityMode::Shared)?;
@@ -334,7 +375,13 @@ fn dispatch(command: cli::Command) -> io::Result<i32> {
             }
             Ok(0)
         }
-        Gc(_) | StorePath | StoreRoots | Completions { .. } | Doctor { .. } | Ls { .. } => {
+        Gc(_)
+        | StorePath
+        | StoreRoots
+        | Completions { .. }
+        | Doctor { .. }
+        | Ls { .. }
+        | Audit { .. } => {
             unreachable!("handled above")
         }
     }

@@ -79,6 +79,12 @@ pub enum Command {
     Status {
         json: bool,
     },
+    /// `audit [--policy <file>] [--json]`: judge the recorded closures
+    /// against the policy chain unioned with `policy`.
+    Audit {
+        policy: Option<PathBuf>,
+        json: bool,
+    },
     Ls {
         ecosystem: Option<String>,
         json: bool,
@@ -398,6 +404,31 @@ closure was synced on another platform. Offline and read-only. Exit status
 0 only when everything is synced, so CI can use it as a 'did you commit the
 lock' gate.",
         options: &[JSON_OPTION, HELP_OPTION],
+        words: &[],
+    },
+    Spec {
+        name: "audit",
+        group: Group::Inspect,
+        summary: "would the synced closures pass a policy? (CI admission gate)",
+        usage: "blanket audit [--policy <file>] [--json]",
+        description: "\
+Reads the exceptions every sync recorded in .blanket/closures/*.json and
+judges them against the policy chain (BLANKET_POLICY or
+~/.blanket/policy.toml, every ancestor's .blanket/policy.toml, BLANKET_STRICT)
+unioned with --policy <file>. Union only tightens: the file can add denials
+but never loosen what the machine or project policy says. Per closure:
+clean, denied (each denied exception's kind, subject, and detail, plus a
+count of permitted ones by kind), stale (its inputs changed since the sync,
+the same check 'blanket status' makes), or unchecked (the closure predates
+input or exception recording). Only clean passes: an audit of a stale or
+unchecked record proves nothing. Offline, read-only, no store access, no
+sandbox needed. Exit status 0 when every closure is clean, 1 otherwise.
+A company deny list to start from ships as docs/human/policy-company.toml.",
+        options: &[
+            ("--policy <file>", "also deny what this policy file denies"),
+            JSON_OPTION,
+            HELP_OPTION,
+        ],
         words: &[],
     },
     Spec {
@@ -734,6 +765,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         "add" | "remove" | "update" => parse_deps(rest, name)?,
         "x" => parse_x(rest)?,
         "status" => parse_json_only(rest, "status")?.map(|json| Command::Status { json }),
+        "audit" => parse_audit(rest)?,
         "ls" => parse_ls(rest)?,
         "doctor" => parse_json_only(rest, "doctor")?.map(|json| Command::Doctor { json }),
         "gc" => parse_gc(rest)?,
@@ -877,6 +909,38 @@ fn parse_json_only(args: &[String], name: &'static str) -> Result<Option<bool>, 
         }
     }
     Ok(Some(json))
+}
+
+fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut policy = None;
+    let mut json = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index).map(String::as_str) {
+        match arg {
+            "--json" => json = true,
+            "-h" | "--help" => return Ok(None),
+            // A mistyped flag (`--policy --json`) is a usage error, not a
+            // file name; the same rule every value-taking flag here applies.
+            "--policy" => {
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| UsageError::new("--policy needs a file path", Some("audit")))?;
+                policy = Some(non_empty(value, "--policy", Some("audit"))?);
+                index += 1;
+            }
+            _ if arg.starts_with("--policy=") => {
+                let value = &arg["--policy=".len()..];
+                if value.starts_with('-') {
+                    return Err(UsageError::new("--policy needs a file path", Some("audit")));
+                }
+                policy = Some(non_empty(value, "--policy", Some("audit"))?);
+            }
+            other => return Err(reject("audit", other)),
+        }
+        index += 1;
+    }
+    Ok(Some(Command::Audit { policy, json }))
 }
 
 fn parse_ls(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1974,6 +2038,49 @@ mod tests {
             Command::Status { json: true }
         );
         assert_eq!(message(&["status", "-j"]), "status: unknown option '-j'");
+        assert_eq!(
+            command(&["audit"]),
+            Command::Audit {
+                policy: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            command(&["audit", "--policy", "company.toml", "--json"]),
+            Command::Audit {
+                policy: Some("company.toml".into()),
+                json: true
+            }
+        );
+        assert_eq!(
+            command(&["audit", "--policy=company.toml"]),
+            Command::Audit {
+                policy: Some("company.toml".into()),
+                json: false
+            }
+        );
+        assert_eq!(
+            message(&["audit", "--policy"]),
+            "--policy needs a file path"
+        );
+        assert_eq!(message(&["audit", "--policy="]), "--policy= needs a value");
+        assert_eq!(
+            message(&["audit", "--policy", "--json"]),
+            "--policy needs a file path"
+        );
+        assert_eq!(
+            message(&["audit", "--policy=--json"]),
+            "--policy needs a file path"
+        );
+        assert_eq!(
+            message(&["audit", "--strict"]),
+            "audit: unknown option '--strict'"
+        );
+        assert_eq!(
+            message(&["audit", "python"]),
+            "audit: unexpected argument 'python'"
+        );
+        assert!(printed(&["audit", "-h"]).contains("blanket audit [--policy <file>] [--json]"));
         assert_eq!(
             command(&["doctor", "--json"]),
             Command::Doctor { json: true }

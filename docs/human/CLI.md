@@ -25,6 +25,7 @@ EVERYDAY:
 
 INSPECT:
   status       is the projection current with the manifest and the lock?
+  audit        would the synced closures pass a policy? (CI admission gate)
   ls           list what is installed, per ecosystem
   plan         print the locked plan(s) as JSON
   sbom         CycloneDX 1.5 SBOM of the synced closures
@@ -172,7 +173,31 @@ mix.exs, `*.csproj`) is found from here upward — name it when several are.
 
 **status** compares each closure's recorded inputs against the files on disk
 and checks the projection is in place, naming the changed file otherwise.
-Offline, read-only, exit 0 only when everything is synced. **ls** reads
+Offline, read-only, exit 0 only when everything is synced. **audit** is the
+CI admission gate: it reads the exceptions every sync recorded in
+`.blanket/closures/*.json` and judges them against the policy chain
+(`BLANKET_POLICY` or `~/.blanket/policy.toml`, every ancestor's
+`.blanket/policy.toml`, `BLANKET_STRICT`) unioned with `--policy <file>`.
+Union only tightens, so the flag can add denials but never loosen the
+machine or project policy; a `--policy` file that is missing or malformed is
+a usage error (exit 2), never ignored, so CI can tell an operator mistake
+from a denied build. Per closure it prints the ecosystem, the record (sha256
+of the closure envelope), and one of `clean` (permitted exceptions counted
+by kind), `denied` (each denied exception's kind, subject, and detail),
+`unknown` (an exception kind this binary cannot judge), `stale` (the same
+inputs-changed / projection-missing / other-platform checks `status` makes,
+made per closure file from that file's own record), or `unchecked` (the
+closure predates input, platform, or exception recording; run `blanket
+sync` once). Only `clean` passes, because an audit of a stale or unchecked
+record proves nothing; the toolchain-only `rustfmt` closure has no inputs
+to compare and is judged on its exceptions alone. A closure file whose
+`ecosystem` field disagrees with its name (a stray or renamed `.json` under
+`.blanket/closures`) is refused, not judged. No rebuild, no store
+access, no network, no sandbox: it works on a machine without bubblewrap.
+`--json` writes the report to stdout. Exit 0 when every closure is clean, 1
+otherwise. A company deny list to start from
+ships as [policy-company.toml](policy-company.toml); every kind it names is
+checked against the binary's kind list by a unit test. **ls** reads
 `.blanket/closures/*.json` (no store access): name, version, and toolchain
 per package, `-v` adds artifact and store object; the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`, `rustfmt`.

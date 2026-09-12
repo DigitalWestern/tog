@@ -60,6 +60,11 @@ pub struct ClosureFile {
     pub platform: Option<String>,
     pub projected_at: Option<u64>,
     pub body: Value,
+    /// Where the envelope was read from.
+    pub path: PathBuf,
+    /// sha256 of the envelope bytes as read: names the exact record an
+    /// audit verdict was computed over.
+    pub record_sha256: String,
 }
 
 /// Every closure written here, in display order. Foreign-platform closures
@@ -81,8 +86,8 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
         if stem.starts_with('.') {
             continue;
         }
-        let text = fs::read_to_string(entry.path())?;
-        let value: Value = serde_json::from_str(&text).map_err(|error| {
+        let bytes = fs::read(entry.path())?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: {error}; run 'blanket sync'", entry.path().display()),
@@ -93,6 +98,8 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
             platform: value["platform"].as_str().map(str::to_string),
             projected_at: value["projected_at"].as_u64(),
             body: value["body"].clone(),
+            path: entry.path(),
+            record_sha256: hex::encode(Sha256::digest(&bytes)),
         });
     }
     out.sort_by_key(|closure| rank(&closure.ecosystem));
@@ -510,82 +517,90 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             });
             continue;
         };
-        let listing = listing(closure);
-        let summary = format!(
-            "{}; {} package{}",
-            listing
-                .toolchain
-                .iter()
-                .map(|(name, version)| format!("{name} {version}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            listing.packages.len(),
-            if listing.packages.len() == 1 { "" } else { "s" }
-        );
-        if let Some(recorded) = &closure.platform {
-            if recorded != platform.triple() {
-                rows.push(EcosystemStatus {
-                    ecosystem: ecosystem.into(),
-                    state: State::ForeignPlatform(recorded.clone()),
-                    summary,
-                });
-                continue;
-            }
-        }
-        let body = &closure.body;
-        let state = match ecosystem {
-            "python" => {
-                let venv = dir.join(".venv");
-                let env_object = string(&body["env_object"]);
-                let target = symlink_target(&venv);
-                if target.as_deref() != Some(Path::new(&env_object)) || !venv.join("bin").is_dir() {
-                    State::ProjectionMissing(".venv".into())
-                } else {
-                    recorded_inputs_state(dir, body)?
-                }
-            }
-            "node" => {
-                let projection = node_projection_state(dir, body);
-                if matches!(&projection, State::Synced | State::Unchecked(_)) {
-                    match recorded_inputs_state(dir, body)? {
-                        State::Synced if matches!(projection, State::Unchecked(_)) => projection,
-                        State::Synced => State::Synced,
-                        other => other,
-                    }
-                } else {
-                    projection
-                }
-            }
-            "cargo" => {
-                if !dir.join(".blanket/cargo-home").is_dir() {
-                    State::ProjectionMissing(".blanket/cargo-home".into())
-                } else {
-                    lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
-                }
-            }
-            "go" => go_status(platform, dir, body)?,
-            "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(
-                lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?,
-            ),
-            "elixir" => object_liveness_state(body, &["beam_object", "deps_object"]).unwrap_or(
-                lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?,
-            ),
-            "dotnet" => object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(
-                lock_state(
-                    dir,
-                    "packages.lock.json",
-                    &string(&body["packages_lock_sha256"]),
-                )?,
-            ),
-            _ => State::Unchecked("unknown ecosystem".into()),
-        };
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
-            state,
-            summary,
+            state: closure_state(platform, dir, closure)?,
+            summary: summary(closure),
         });
     }
     Ok(rows)
+}
+
+/// Toolchain and package count, for the synced line.
+pub fn summary(closure: &ClosureFile) -> String {
+    let listing = listing(closure);
+    format!(
+        "{}; {} package{}",
+        listing
+            .toolchain
+            .iter()
+            .map(|(name, version)| format!("{name} {version}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        listing.packages.len(),
+        if listing.packages.len() == 1 { "" } else { "s" }
+    )
+}
+
+/// Whether one closure record still describes the project: recorded
+/// platform, projection, and inputs or lock hash, judged from that record's
+/// own body. `status` calls this for the closure of each detected ecosystem;
+/// `audit` calls it for every closure file, so two files claiming the same
+/// ecosystem are each judged on their own contents. Never `NotSynced`.
+pub fn closure_state(platform: Platform, dir: &Path, closure: &ClosureFile) -> io::Result<State> {
+    if let Some(recorded) = &closure.platform {
+        if recorded != platform.triple() {
+            return Ok(State::ForeignPlatform(recorded.clone()));
+        }
+    }
+    let body = &closure.body;
+    let state = match closure.ecosystem.as_str() {
+        "python" => {
+            let venv = dir.join(".venv");
+            let env_object = string(&body["env_object"]);
+            let target = symlink_target(&venv);
+            if target.as_deref() != Some(Path::new(&env_object)) || !venv.join("bin").is_dir() {
+                State::ProjectionMissing(".venv".into())
+            } else {
+                recorded_inputs_state(dir, body)?
+            }
+        }
+        "node" => {
+            let projection = node_projection_state(dir, body);
+            if matches!(&projection, State::Synced | State::Unchecked(_)) {
+                match recorded_inputs_state(dir, body)? {
+                    State::Synced if matches!(projection, State::Unchecked(_)) => projection,
+                    State::Synced => State::Synced,
+                    other => other,
+                }
+            } else {
+                projection
+            }
+        }
+        "cargo" => {
+            if !dir.join(".blanket/cargo-home").is_dir() {
+                State::ProjectionMissing(".blanket/cargo-home".into())
+            } else {
+                lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
+            }
+        }
+        "go" => go_status(platform, dir, body)?,
+        "ruby" => object_liveness_state(body, &["ruby_object", "gems_object"]).unwrap_or(
+            lock_state(dir, "Gemfile.lock", &string(&body["gemfile_lock_sha256"]))?,
+        ),
+        "elixir" => object_liveness_state(body, &["beam_object", "deps_object"]).unwrap_or(
+            lock_state(dir, "mix.lock", &string(&body["mix_lock_sha256"]))?,
+        ),
+        "dotnet" => {
+            object_liveness_state(body, &["sdk_object", "packages_object"]).unwrap_or(lock_state(
+                dir,
+                "packages.lock.json",
+                &string(&body["packages_lock_sha256"]),
+            )?)
+        }
+        _ => State::Unchecked("unknown ecosystem".into()),
+    };
+    Ok(state)
 }
 
 /// Compare the selected Go version in go.mod with the one recorded in the

@@ -1,0 +1,93 @@
+# Blanket company policy — the deny list a security team enforces.
+#
+# Install as ~/.blanket/policy.toml (or point BLANKET_POLICY at it) on build
+# machines, commit it as .blanket/policy.toml at a repository root, or hand
+# it to the admission gate: `blanket audit --policy policy-company.toml`.
+# Policies union: this file can only add denials to whatever the machine and
+# project already deny. Every kind named here is one of policy::KINDS; a typo
+# is refused at parse time, never ignored.
+#
+# `strict` is deliberately not set. strict = true refuses every exception
+# kind, including the routine ones listed at the bottom, and would turn most
+# real projects red for reasons that are not security findings. Deny by
+# kind instead; use `blanket sync --strict` or BLANKET_STRICT=1 for a
+# one-off fully strict build.
+
+deny = [
+    # A package's install lifecycle script (npm postinstall, node-gyp rebuild,
+    # ...) failed but the extracted package was kept. What is on disk is not
+    # what the package's author tested, and native code may be missing or
+    # half-built. Denied: a failed build step must fail the build.
+    "install-script-failed",
+
+    # A lockfile carried only a legacy SHA-1 integrity for a package; blanket
+    # verified it, but SHA-1 collisions are practical, so the lock does not
+    # pin the bytes it claims to. Denied: re-lock to get SHA-512 integrity.
+    "weak-integrity",
+
+    # A package was projected as a writable copy-on-write clone (declared in
+    # "blanket": {"mutablePackages": [...]}) whose runtime contents blanket
+    # cannot attest. Denied: what runs is not what the closure recorded.
+    "unattested-mutable-state",
+
+    # A manifest named a private index or an index-like option (a Poetry or
+    # uv source, --extra-index-url, --find-links). blanket records the option
+    # but does not follow it: every package still resolves from the public
+    # registry. A package the project meant to take from its private index
+    # was therefore taken from the public one instead, which is the
+    # dependency-confusion shape. Denied until the private index is either
+    # removed from the manifest or served through an approved mirror that
+    # blanket resolves from.
+    "unattested_index",
+
+    # A dependency was taken from a git repository rather than a registry:
+    # no registry provenance, no published artifact hash. Denied: vendor a
+    # release or publish it to an approved registry.
+    "git-dependency",
+
+    # The lock's recorded content digest did not match its source manifest:
+    # the lock was produced from a different manifest than the one being
+    # built. Denied: re-lock so the lock and the manifest agree.
+    "lock_disagreement",
+
+    # A package's install-time download did not happen: either the project
+    # did not declare the artifact (url + sha256) so its download was
+    # skipped, or blanket tried to provision a declared artifact and failed.
+    # Either way the package is present but the binary it wanted is not in
+    # the closure. Denied: declare (or fix) the artifact so it is fetched
+    # through the verified cache, or drop the package.
+    "artifact_not_provisioned",
+]
+
+# Deliberately NOT denied. These kinds are recorded so the audit can count
+# them, but they are not security findings:
+#
+#   file-collision                   two wheels shipped the same path; the
+#                                    later one won. Both are locked and
+#                                    hash-verified; this is a packaging
+#                                    hygiene issue, not a provenance gap.
+#   requirement-skipped              a project-local or direct-reference
+#                                    requirement was left to the project;
+#                                    nothing unverified entered the store.
+#   skipped_optional                 an optional group or extra was not
+#                                    requested; fewer packages, not unknown
+#                                    ones.
+#   built_from_source                a package that ships prebuilt binaries
+#                                    was compiled from its (hash-verified)
+#                                    source in the network-denied sandbox;
+#                                    strictly more reproducible, not less.
+#   artifact_provisioned             blanket itself fetched an install-time
+#                                    artifact and verified it against the
+#                                    package's own manifest (trust on first
+#                                    use). Teams that require a project-
+#                                    declared sha256 for every binary may add
+#                                    this kind to the list above.
+#   toolchain-component-unavailable  a requested toolchain component (for
+#                                    example rustfmt at sync time) is not in
+#                                    the pinned toolchain; nothing else was
+#                                    substituted for it.
+#   unattested_cargo_lock            Cargo.lock was generated by the store's
+#                                    pinned cargo because the source shipped
+#                                    none; every crate in it is still
+#                                    hash-verified. Commit the lock to make
+#                                    this disappear.

@@ -169,7 +169,11 @@ Sync records recoverable verification gaps in each closure and continues;
 `git-dependency`, ...). User and project policies are unioned; deny entries
 are only added. `BLANKET_STRICT=1` or `blanket sync --strict` denies every
 exception. Object-affecting exceptions are written into store metadata and
-rechecked on cache hits, so `--fresh` cannot bypass one.
+rechecked on cache hits, so `--fresh` cannot bypass one. `blanket audit`
+(`src/audit.rs`) is the CI admission gate: it re-judges the exceptions the
+closures already record against the policy chain plus an optional
+`--policy` file (union, so it can only tighten), refuses to pass a stale or
+unchecked closure, and touches neither the store nor the network.
 
 ## Hermetic install scripts and native libraries
 
@@ -248,6 +252,7 @@ Command surface:
     src/main.rs     dispatcher + per-ecosystem orchestration
     src/ui.rs       output conventions: quiet/verbose/color, error channel
     src/inspect.rs  status / ls / doctor: read-only views over closures + store
+    src/audit.rs    blanket audit: recorded exceptions judged against a policy
     src/deps.rs     add / remove / update, delegated to each ecosystem's tool
     src/xrun.rs     blanket x: run a registry tool without adding it to a project
 

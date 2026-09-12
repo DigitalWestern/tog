@@ -1,0 +1,1072 @@
+//! `blanket audit` — the CI admission gate over recorded policy exceptions.
+//!
+//! Every sync records the exceptions it waved through in the project's
+//! `.blanket/closures/<ecosystem>.json` (`body.exceptions[]`, kinds in
+//! `policy::KINDS`). This module answers "would those closures pass policy
+//! P?" from the records alone: no rebuild, no store access, no network, no
+//! sandbox. It is read-only over the project directory (plus the same
+//! read-only object-liveness probes `blanket status` makes).
+//!
+//! Two rules keep the answer honest:
+//!
+//! - A verdict is only computed over a record that still describes the
+//!   project. Freshness reuses `inspect::closure_state`, the per-record
+//!   check behind `blanket status`, applied to every closure file from its
+//!   own body: a closure whose inputs changed, whose projection is missing,
+//!   that was synced on another platform, or whose inputs are no longer
+//!   found here is reported `stale`; one that predates input, platform, or
+//!   exception recording is reported `unchecked`. Neither passes — an audit
+//!   of a stale record proves nothing.
+//! - The policy under test is the ordinary chain (`policy::load`) unioned
+//!   with the optional `--policy` file. Union only tightens, so the flag can
+//!   add denials but never remove what the machine or project policy says.
+//! - An exception kind this binary does not know (a record written by a
+//!   newer blanket, or by hand) is `unknown`, never permitted: no policy
+//!   file can name it, so no policy file can be said to have allowed it.
+
+use crate::inspect::{self, ClosureFile, State};
+use crate::platform::Platform;
+use crate::policy::{self, Exception, Policy};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::io;
+use std::path::Path;
+
+/// Whether the record a verdict was computed over still describes the
+/// project. Only `Current` and `ToolchainOnly` records can pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Freshness {
+    /// Recorded inputs match the files on disk and the projection is in place.
+    Current,
+    /// Inputs changed, projection missing, or synced on another platform.
+    Stale(String),
+    /// The record cannot be compared with the project (pre-field closure).
+    Unchecked(String),
+    /// A toolchain-only closure (`blanket fmt`) has no project inputs to
+    /// compare; `status` ignores it too. Its exceptions are still judged.
+    ToolchainOnly,
+}
+
+#[derive(Debug, Clone)]
+pub struct Verdict {
+    pub ecosystem: String,
+    /// sha256 of the closure envelope bytes: the exact record audited.
+    pub record_sha256: String,
+    pub path: std::path::PathBuf,
+    pub freshness: Freshness,
+    /// Recorded exceptions the policy refuses, in recorded order.
+    pub denied: Vec<Exception>,
+    /// Recorded exceptions of a kind this binary does not know, in recorded
+    /// order. Never permitted: the gate cannot judge them.
+    pub unknown: Vec<Exception>,
+    /// Recorded exceptions the policy permits, counted by kind.
+    pub permitted: BTreeMap<String, usize>,
+}
+
+impl Verdict {
+    /// Passes only when the record is current (or toolchain-only) and no
+    /// recorded exception is denied or unknown.
+    pub fn passes(&self) -> bool {
+        self.denied.is_empty()
+            && self.unknown.is_empty()
+            && matches!(
+                self.freshness,
+                Freshness::Current | Freshness::ToolchainOnly
+            )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub policy: Policy,
+    pub verdicts: Vec<Verdict>,
+}
+
+impl Report {
+    pub fn passes(&self) -> bool {
+        self.verdicts.iter().all(Verdict::passes)
+    }
+}
+
+/// Read and validate a `--policy` file on its own, before it is unioned in,
+/// so the dispatcher can report a missing or malformed file as a usage
+/// error rather than a failed audit.
+pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+    })?;
+    policy::parse_file(path, &text)
+}
+
+/// The policy an audit judges against: the ordinary chain for `dir`
+/// (BLANKET_POLICY or ~/.blanket/policy.toml, every ancestor's
+/// .blanket/policy.toml, BLANKET_STRICT) unioned with `extra`. Union only
+/// tightens: `extra` can add denials or strictness, never remove either.
+pub fn effective_policy(dir: &Path, extra: Option<&Policy>) -> io::Result<Policy> {
+    let mut policy = policy::load(dir, false)?;
+    if let Some(extra) = extra {
+        policy::union(&mut policy, extra);
+    }
+    Ok(policy)
+}
+
+/// Freshness of one closure file, from its own record. `present` is what
+/// `inspect::detected` found in the directory: a closure for an ecosystem
+/// whose inputs are gone describes a project that no longer exists here.
+fn freshness(
+    platform: Platform,
+    dir: &Path,
+    closure: &ClosureFile,
+    present: &[&str],
+) -> io::Result<Freshness> {
+    // The toolchain-only closure `blanket fmt` writes records no project
+    // inputs, so there is nothing to compare; `status` ignores it too. A
+    // record under that name that does carry inputs is judged like any
+    // other, so the name alone cannot buy a pass.
+    if closure.ecosystem == "rustfmt" && closure.body.get("inputs").is_none() {
+        return Ok(Freshness::ToolchainOnly);
+    }
+    if !present.contains(&closure.ecosystem.as_str()) {
+        return Ok(Freshness::Stale(format!(
+            "no {} inputs found here; the closure is orphaned",
+            closure.ecosystem
+        )));
+    }
+    if closure.platform.is_none() {
+        // Envelopes without a platform predate the Linux port; `status`
+        // cannot tell whether such a record was made on this host.
+        return Ok(Freshness::Unchecked(
+            "closure records no platform; run 'blanket sync' once to record it".into(),
+        ));
+    }
+    Ok(freshness_from_state(inspect::closure_state(
+        platform, dir, closure,
+    )?))
+}
+
+/// The `status` state of a record, as the gate reads it: only `Synced` is
+/// current; every other state fails.
+fn freshness_from_state(state: State) -> Freshness {
+    match state {
+        State::Synced => Freshness::Current,
+        State::NotSynced => Freshness::Stale("no closure for these inputs".into()),
+        State::Changed(files) => {
+            Freshness::Stale(format!("{} changed since the last sync", files.join(", ")))
+        }
+        State::ProjectionMissing(what) => {
+            Freshness::Stale(format!("{what} is not the synced projection"))
+        }
+        State::ForeignPlatform(platform) => {
+            Freshness::Stale(format!("synced on {platform}, not this host"))
+        }
+        State::Unchecked(why) => Freshness::Unchecked(why),
+    }
+}
+
+/// A closure file must be named for the ecosystem it claims, as
+/// `project::read_closure` requires; a mismatch is a record `sync` would
+/// refuse, and the gate refuses it too rather than judging it under either
+/// name.
+fn check_name(closure: &ClosureFile) -> io::Result<()> {
+    let stem = closure
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if stem != closure.ecosystem {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: closure claims ecosystem '{}' but is named '{stem}'; a stray or renamed file under .blanket/closures is refused, not judged: remove it or run 'blanket sync'",
+                closure.path.display(),
+                closure.ecosystem
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The recorded exceptions, or `None` when the closure carries no exception
+/// record at all (absence is not evidence of a clean sync).
+fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception>>> {
+    match closure.body.get("exceptions") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{}: malformed exception record: {error}; run 'blanket sync'",
+                        closure.path.display()
+                    ),
+                )
+            }),
+    }
+}
+
+/// Judge every closure file against `policy`, each from its own record.
+/// `present` is what `inspect::detected` found in `dir`.
+pub fn evaluate(
+    platform: Platform,
+    dir: &Path,
+    policy: &Policy,
+    closures: &[ClosureFile],
+    present: &[&str],
+) -> io::Result<Vec<Verdict>> {
+    let mut verdicts = Vec::new();
+    for closure in closures {
+        check_name(closure)?;
+        let mut freshness = freshness(platform, dir, closure, present)?;
+        let mut denied = Vec::new();
+        let mut unknown = Vec::new();
+        let mut permitted = BTreeMap::new();
+        match recorded_exceptions(closure)? {
+            Some(exceptions) => {
+                for exception in exceptions {
+                    if !policy::KINDS.contains(&exception.kind.as_str()) {
+                        unknown.push(exception);
+                    } else if policy::denied(policy, &exception.kind) {
+                        denied.push(exception);
+                    } else {
+                        *permitted.entry(exception.kind).or_insert(0) += 1;
+                    }
+                }
+            }
+            None => {
+                if !matches!(freshness, Freshness::Stale(_)) {
+                    freshness = Freshness::Unchecked(
+                        "no exception record in this closure; run 'blanket sync' once to record one"
+                            .into(),
+                    );
+                }
+            }
+        }
+        verdicts.push(Verdict {
+            ecosystem: closure.ecosystem.clone(),
+            record_sha256: closure.record_sha256.clone(),
+            path: closure.path.clone(),
+            freshness,
+            denied,
+            unknown,
+            permitted,
+        });
+    }
+    Ok(verdicts)
+}
+
+/// Audit the project in `dir` under the policy chain unioned with `extra`
+/// (an already-parsed `--policy` file). `Err(NotFound)` when nothing is
+/// synced. Read-only: no store open, no lease, no process, no network.
+pub fn audit(platform: Platform, dir: &Path, extra: Option<&Policy>) -> io::Result<Report> {
+    let policy = effective_policy(dir, extra)?;
+    let closures = inspect::closures(dir)?;
+    if closures.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "nothing synced in {}; run 'blanket sync' first",
+                dir.display()
+            ),
+        ));
+    }
+    let present = inspect::detected(dir)?;
+    let verdicts = evaluate(platform, dir, &policy, &closures, &present)?;
+    Ok(Report { policy, verdicts })
+}
+
+pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
+    if json {
+        let value = json!({
+            "project": dir,
+            "policy": {
+                "strict": report.policy.strict,
+                "deny": report.policy.deny,
+            },
+            "passed": report.passes(),
+            "closures": report.verdicts.iter().map(|verdict| {
+                let (freshness, detail): (&str, Value) = match &verdict.freshness {
+                    Freshness::Current => ("current", Value::Null),
+                    Freshness::Stale(why) => ("stale", json!(why)),
+                    Freshness::Unchecked(why) => ("unchecked", json!(why)),
+                    Freshness::ToolchainOnly => ("toolchain-only", Value::Null),
+                };
+                json!({
+                    "ecosystem": verdict.ecosystem,
+                    "record_sha256": verdict.record_sha256,
+                    "path": verdict.path,
+                    "passed": verdict.passes(),
+                    "freshness": freshness,
+                    "freshness_detail": detail,
+                    "denied": verdict.denied,
+                    "unknown": verdict.unknown,
+                    "permitted": verdict.permitted,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        return Ok(serde_json::to_string_pretty(&value)? + "\n");
+    }
+    let width = report
+        .verdicts
+        .iter()
+        .map(|verdict| verdict.ecosystem.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for verdict in &report.verdicts {
+        let record = &verdict.record_sha256[..16];
+        let permitted = if verdict.permitted.is_empty() {
+            "no exceptions".to_string()
+        } else {
+            verdict
+                .permitted
+                .iter()
+                .map(|(kind, count)| format!("{kind} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        // What the policy says about the record's exceptions, independent
+        // of whether the record is current; shown on every line so a stale
+        // record's denials are not hidden behind its staleness.
+        let judged = match (verdict.denied.len(), verdict.unknown.len()) {
+            (0, 0) => format!("permitted: {permitted}"),
+            (denied, 0) => format!("{denied} denied; permitted: {permitted}"),
+            (0, unknown) => format!("{unknown} of unknown kind; permitted: {permitted}"),
+            (denied, unknown) => {
+                format!("{denied} denied, {unknown} of unknown kind; permitted: {permitted}")
+            }
+        };
+        let line = match &verdict.freshness {
+            Freshness::Stale(why) => format!(
+                "stale      closure {record}: {why}; run 'blanket sync', then audit again ({judged})"
+            ),
+            Freshness::Unchecked(why) => format!("unchecked  closure {record}: {why} ({judged})"),
+            _ if !verdict.denied.is_empty() => format!("denied     closure {record}: {judged}"),
+            _ if !verdict.unknown.is_empty() => format!("unknown    closure {record}: {judged}"),
+            _ => format!("clean      closure {record}: {judged}"),
+        };
+        out.push_str(&format!("{:width$}  {line}\n", verdict.ecosystem));
+        for exception in &verdict.denied {
+            out.push_str(&format!(
+                "{:width$}    denied   {}  {}  {}\n",
+                "", exception.kind, exception.subject, exception.detail
+            ));
+        }
+        for exception in &verdict.unknown {
+            out.push_str(&format!(
+                "{:width$}    unknown  {}  {}  {}\n",
+                "", exception.kind, exception.subject, exception.detail
+            ));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blanket-audit-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn host() -> Platform {
+        Platform::host().unwrap()
+    }
+
+    fn exception(kind: &str, subject: &str) -> Exception {
+        Exception {
+            kind: kind.into(),
+            subject: subject.into(),
+            detail: format!("{kind} on {subject}"),
+        }
+    }
+
+    /// A python project with a projection and recorded inputs, so a closure
+    /// written by `python_closure` is current until `requirements.txt`
+    /// changes.
+    fn python_project(label: &str) -> TempDir {
+        let temp = TempDir::new(label);
+        let dir = &temp.0;
+        fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        let env = dir.join("env-object");
+        fs::create_dir_all(env.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
+        temp
+    }
+
+    /// The body `python_project`'s closure needs to be current.
+    fn python_body(dir: &Path) -> Value {
+        json!({
+            "env_object": dir.join("env-object"),
+            "python": {"version": "3.12.14"},
+            "plan": {"packages": []},
+            "inputs": [{
+                "path": "requirements.txt",
+                "sha256": inspect::sha256_file(&dir.join("requirements.txt")).unwrap(),
+            }],
+        })
+    }
+
+    /// Write `.blanket/closures/<name>.json` and return it as `closures`
+    /// would read it.
+    fn write_closure(
+        dir: &Path,
+        name: &str,
+        ecosystem: &str,
+        platform: Option<&str>,
+        body: Value,
+    ) -> ClosureFile {
+        let closures = dir.join(".blanket/closures");
+        fs::create_dir_all(&closures).unwrap();
+        let mut envelope = json!({
+            "schema": "closure/1",
+            "ecosystem": ecosystem,
+            "projected_at": 1,
+            "body": body,
+        });
+        if let Some(platform) = platform {
+            envelope["platform"] = json!(platform);
+        }
+        let path = closures.join(format!("{name}.json"));
+        fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
+        inspect::closures(dir)
+            .unwrap()
+            .into_iter()
+            .find(|closure| closure.path == path)
+            .unwrap()
+    }
+
+    fn with_exceptions(dir: &Path, exceptions: &[Exception]) -> ClosureFile {
+        let mut body = python_body(dir);
+        body["exceptions"] = serde_json::to_value(exceptions).unwrap();
+        write_closure(dir, "python", "python", Some(host().triple()), body)
+    }
+
+    fn deny(kinds: &[&str]) -> Policy {
+        Policy {
+            strict: false,
+            deny: kinds.iter().map(|kind| kind.to_string()).collect(),
+        }
+    }
+
+    fn judge(dir: &Path, policy: &Policy, closures: &[ClosureFile]) -> Vec<Verdict> {
+        let present = inspect::detected(dir).unwrap();
+        evaluate(host(), dir, policy, closures, &present).unwrap()
+    }
+
+    fn record(verdict: &Verdict) -> String {
+        verdict.record_sha256[..16].to_string()
+    }
+
+    #[test]
+    fn clean_when_every_recorded_exception_is_permitted() {
+        let temp = python_project("clean");
+        let closures = [with_exceptions(
+            &temp.0,
+            &[
+                exception(SKIPPED_OPTIONAL, "dev"),
+                exception(SKIPPED_OPTIONAL, "docs"),
+            ],
+        )];
+        let verdicts = judge(&temp.0, &deny(&[GIT_DEPENDENCY]), &closures);
+        assert_eq!(verdicts.len(), 1);
+        assert!(verdicts[0].passes());
+        assert!(verdicts[0].denied.is_empty());
+        assert!(verdicts[0].unknown.is_empty());
+        assert_eq!(verdicts[0].permitted.get(SKIPPED_OPTIONAL), Some(&2));
+        assert_eq!(verdicts[0].freshness, Freshness::Current);
+        assert_eq!(verdicts[0].record_sha256.len(), 64);
+        let record = record(&verdicts[0]);
+        let report = Report {
+            policy: deny(&[GIT_DEPENDENCY]),
+            verdicts,
+        };
+        assert!(report.passes());
+        let text = render(&temp.0, &report, false).unwrap();
+        assert_eq!(
+            text,
+            format!("python  clean      closure {record}: permitted: skipped_optional 2\n")
+        );
+        let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], true);
+        assert_eq!(value["closures"][0]["passed"], true);
+        assert_eq!(value["closures"][0]["freshness"], "current");
+        assert_eq!(value["closures"][0]["permitted"][SKIPPED_OPTIONAL], 2);
+        assert_eq!(
+            value["closures"][0]["record_sha256"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert_eq!(value["policy"]["deny"][0], GIT_DEPENDENCY);
+        assert_eq!(value["policy"]["strict"], false);
+    }
+
+    #[test]
+    fn denied_exceptions_are_listed_with_subject_and_detail() {
+        let temp = python_project("denied");
+        let closures = [with_exceptions(
+            &temp.0,
+            &[
+                exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0"),
+                exception(SKIPPED_OPTIONAL, "fsevents"),
+                exception(WEAK_INTEGRITY, "left-pad@1.0.0"),
+            ],
+        )];
+        let policy = deny(&[INSTALL_SCRIPT_FAILED, WEAK_INTEGRITY]);
+        let verdicts = judge(&temp.0, &policy, &closures);
+        assert!(!verdicts[0].passes());
+        assert_eq!(
+            verdicts[0].denied,
+            vec![
+                exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0"),
+                exception(WEAK_INTEGRITY, "left-pad@1.0.0"),
+            ]
+        );
+        assert_eq!(verdicts[0].permitted.get(SKIPPED_OPTIONAL), Some(&1));
+        let record = record(&verdicts[0]);
+        let report = Report { policy, verdicts };
+        assert!(!report.passes());
+        let text = render(&temp.0, &report, false).unwrap();
+        assert!(
+            text.contains(&format!(
+                "python  denied     closure {record}: 2 denied; permitted: skipped_optional 1\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("    denied   install-script-failed  sharp@0.33.0  install-script-failed on sharp@0.33.0\n"),
+            "{text}"
+        );
+        let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["closures"][0]["denied"][1]["kind"], WEAK_INTEGRITY);
+        assert_eq!(
+            value["closures"][0]["denied"][1]["subject"],
+            "left-pad@1.0.0"
+        );
+    }
+
+    #[test]
+    fn strict_policy_denies_every_kind() {
+        let temp = python_project("strict");
+        let closures = [with_exceptions(
+            &temp.0,
+            &[exception(SKIPPED_OPTIONAL, "dev")],
+        )];
+        let strict = Policy {
+            strict: true,
+            deny: BTreeSet::new(),
+        };
+        let verdicts = judge(&temp.0, &strict, &closures);
+        assert_eq!(verdicts[0].denied.len(), 1);
+        assert!(!verdicts[0].passes());
+    }
+
+    #[test]
+    fn unknown_kind_is_never_permitted_and_no_policy_can_name_it() {
+        let temp = python_project("unknown");
+        let closures = [with_exceptions(
+            &temp.0,
+            &[
+                exception("kind-from-a-newer-blanket", "left-pad"),
+                exception(SKIPPED_OPTIONAL, "dev"),
+            ],
+        )];
+        // Neither an empty policy nor one that denies everything it knows
+        // permits it; only strict catches it, by denying everything.
+        for policy in [Policy::default(), deny(policy::KINDS)] {
+            let verdicts = judge(&temp.0, &policy, &closures);
+            assert!(!verdicts[0].passes(), "{policy:?}");
+            assert_eq!(
+                verdicts[0].unknown,
+                vec![exception("kind-from-a-newer-blanket", "left-pad")]
+            );
+            assert!(!verdicts[0]
+                .permitted
+                .contains_key("kind-from-a-newer-blanket"));
+        }
+        let verdicts = judge(&temp.0, &Policy::default(), &closures);
+        assert!(verdicts[0].denied.is_empty());
+        let record = record(&verdicts[0]);
+        let report = Report {
+            policy: Policy::default(),
+            verdicts,
+        };
+        let text = render(&temp.0, &report, false).unwrap();
+        assert!(
+            text.contains(&format!(
+                "python  unknown    closure {record}: 1 of unknown kind; permitted: skipped_optional 1\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("    unknown  kind-from-a-newer-blanket  left-pad  "),
+            "{text}"
+        );
+        let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+        assert_eq!(
+            value["closures"][0]["unknown"][0]["kind"],
+            "kind-from-a-newer-blanket"
+        );
+        // And a policy file cannot name it, so it cannot be "allowed" either.
+        assert!(policy::parse_file(
+            Path::new("p.toml"),
+            "deny = [\"kind-from-a-newer-blanket\"]"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn extra_policy_denies_what_the_chain_permits() {
+        let temp = python_project("extra");
+        let extra = temp.0.join("company.toml");
+        fs::write(&extra, "deny = [\"install-script-failed\"]\n").unwrap();
+        let closures = [with_exceptions(
+            &temp.0,
+            &[exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0")],
+        )];
+        let mut chain = Policy::default();
+        assert!(judge(&temp.0, &chain, &closures)[0].passes());
+        policy::union(&mut chain, &read_policy_file(&extra).unwrap());
+        let verdicts = judge(&temp.0, &chain, &closures);
+        assert!(!verdicts[0].passes());
+        assert_eq!(verdicts[0].denied[0].kind, INSTALL_SCRIPT_FAILED);
+    }
+
+    #[test]
+    fn extra_policy_cannot_loosen_the_chain() {
+        let temp = python_project("loosen");
+        let extra = temp.0.join("permissive.toml");
+        fs::write(&extra, "strict = false\ndeny = []\n").unwrap();
+        let closures = [with_exceptions(
+            &temp.0,
+            &[exception(GIT_DEPENDENCY, "left-pad")],
+        )];
+        let permissive = read_policy_file(&extra).unwrap();
+        let mut chain = deny(&[GIT_DEPENDENCY]);
+        policy::union(&mut chain, &permissive);
+        assert!(chain.deny.contains(GIT_DEPENDENCY));
+        assert!(!judge(&temp.0, &chain, &closures)[0].passes());
+        // Nor can it lift strict.
+        let mut strict = Policy {
+            strict: true,
+            deny: BTreeSet::new(),
+        };
+        policy::union(&mut strict, &permissive);
+        assert!(strict.strict);
+        // A file with an unknown kind is refused, not silently ignored; so
+        // is a missing one, so the gate never runs under a policy the
+        // caller did not get.
+        fs::write(&extra, "deny = [\"typo\"]\n").unwrap();
+        assert!(read_policy_file(&extra).is_err());
+        assert!(read_policy_file(&temp.0.join("absent.toml")).is_err());
+    }
+
+    #[test]
+    fn effective_policy_unions_the_project_chain_with_the_extra_file() {
+        // The chain also reads BLANKET_POLICY or $HOME, which other tests
+        // and the developer's machine own; assert only that this project's
+        // ancestor policy and the extra file both land (superset), never
+        // that nothing else did.
+        let temp = python_project("chain");
+        let root = temp.0.join("workspace");
+        let member = root.join("member");
+        fs::create_dir_all(root.join(".blanket")).unwrap();
+        fs::create_dir_all(&member).unwrap();
+        fs::write(
+            root.join(".blanket/policy.toml"),
+            "deny = [\"weak-integrity\"]\n",
+        )
+        .unwrap();
+        let extra = Policy {
+            strict: false,
+            deny: [GIT_DEPENDENCY.to_string()].into_iter().collect(),
+        };
+        let _env = policy::test_env_lock();
+        let policy = effective_policy(&member, Some(&extra)).unwrap();
+        assert!(policy.deny.contains(WEAK_INTEGRITY));
+        assert!(policy.deny.contains(GIT_DEPENDENCY));
+        let without = effective_policy(&member, None).unwrap();
+        assert!(without.deny.contains(WEAK_INTEGRITY));
+    }
+
+    #[test]
+    fn stale_closure_never_audits_clean() {
+        let temp = python_project("stale");
+        let dir = &temp.0;
+        // Inputs changed since the record was written.
+        let closures = [with_exceptions(dir, &[])];
+        fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert_eq!(
+            verdicts[0].freshness,
+            Freshness::Stale("requirements.txt changed since the last sync".into())
+        );
+        assert!(!verdicts[0].passes());
+        // Projection missing.
+        fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        fs::remove_file(dir.join(".venv")).unwrap();
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert_eq!(
+            verdicts[0].freshness,
+            Freshness::Stale(".venv is not the synced projection".into())
+        );
+        assert!(!verdicts[0].passes());
+        std::os::unix::fs::symlink(dir.join("env-object"), dir.join(".venv")).unwrap();
+        // Synced on another platform.
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        let foreign = [write_closure(
+            dir,
+            "python",
+            "python",
+            Some("other-platform"),
+            body,
+        )];
+        let verdicts = judge(dir, &Policy::default(), &foreign);
+        assert_eq!(
+            verdicts[0].freshness,
+            Freshness::Stale("synced on other-platform, not this host".into())
+        );
+        assert!(!verdicts[0].passes());
+        // Inputs gone from the directory: the closure is orphaned.
+        let closures = [with_exceptions(dir, &[])];
+        fs::remove_file(dir.join("requirements.txt")).unwrap();
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert_eq!(
+            verdicts[0].freshness,
+            Freshness::Stale("no python inputs found here; the closure is orphaned".into())
+        );
+        assert!(!verdicts[0].passes());
+        let record = record(&verdicts[0]);
+        let report = Report {
+            policy: Policy::default(),
+            verdicts,
+        };
+        assert!(!report.passes());
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains(&format!(
+                "python  stale      closure {record}: no python inputs"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("run 'blanket sync', then audit again (permitted: no exceptions)"),
+            "{text}"
+        );
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["closures"][0]["freshness"], "stale");
+        // A stale record's denials are still shown, not hidden behind the
+        // staleness.
+        fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        let closures = [with_exceptions(
+            dir,
+            &[exception(GIT_DEPENDENCY, "left-pad")],
+        )];
+        fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
+        let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &closures);
+        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
+        assert_eq!(verdicts[0].denied.len(), 1);
+        let report = Report {
+            policy: deny(&[GIT_DEPENDENCY]),
+            verdicts,
+        };
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains("(1 denied; permitted: no exceptions)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    denied   git-dependency  left-pad"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn every_status_state_but_synced_fails() {
+        // The mapping the gate applies to a record's `status` state:
+        // `NotSynced` is unreachable per record, and must still not pass.
+        assert_eq!(freshness_from_state(State::Synced), Freshness::Current);
+        for state in [
+            State::NotSynced,
+            State::Changed(vec!["a".into()]),
+            State::ProjectionMissing("x".into()),
+            State::ForeignPlatform("p".into()),
+            State::Unchecked("why".into()),
+        ] {
+            let freshness = freshness_from_state(state.clone());
+            match state {
+                State::Unchecked(_) => assert!(matches!(freshness, Freshness::Unchecked(_))),
+                _ => assert!(matches!(freshness, Freshness::Stale(_)), "{state:?}"),
+            }
+            let verdict = Verdict {
+                ecosystem: "python".into(),
+                record_sha256: "0".repeat(64),
+                path: PathBuf::from("python.json"),
+                freshness,
+                denied: Vec::new(),
+                unknown: Vec::new(),
+                permitted: BTreeMap::new(),
+            };
+            assert!(!verdict.passes(), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn unchecked_closure_is_reported_unchecked_not_clean() {
+        let temp = python_project("unchecked");
+        let dir = &temp.0;
+        // Pre-field closure: no recorded inputs, status says synced (unchecked).
+        let mut body = python_body(dir);
+        body.as_object_mut().unwrap().remove("inputs");
+        body["exceptions"] = json!([]);
+        let closures = [write_closure(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body,
+        )];
+        assert_eq!(
+            inspect::closure_state(host(), dir, &closures[0]).unwrap(),
+            State::Unchecked(
+                "inputs were not recorded by this sync; run 'blanket sync' once to enable checks"
+                    .into()
+            )
+        );
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert!(
+            matches!(verdicts[0].freshness, Freshness::Unchecked(ref why) if why.contains("inputs were not recorded")),
+            "{:?}",
+            verdicts[0]
+        );
+        assert!(!verdicts[0].passes());
+        // No recorded platform: status cannot tell which host made it.
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        let closures = [write_closure(dir, "python", "python", None, body)];
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert!(
+            matches!(verdicts[0].freshness, Freshness::Unchecked(ref why) if why.contains("records no platform")),
+            "{:?}",
+            verdicts[0]
+        );
+        assert!(!verdicts[0].passes());
+        // A current closure without an exception record is unchecked too:
+        // absence of the record is not evidence of a clean sync.
+        let closures = [write_closure(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            python_body(dir),
+        )];
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert!(
+            matches!(verdicts[0].freshness, Freshness::Unchecked(ref why) if why.contains("no exception record")),
+            "{:?}",
+            verdicts[0]
+        );
+        assert!(!verdicts[0].passes());
+        let record = record(&verdicts[0]);
+        let report = Report {
+            policy: Policy::default(),
+            verdicts,
+        };
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains(&format!(
+                "python  unchecked  closure {record}: no exception record"
+            )),
+            "{text}"
+        );
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert_eq!(value["closures"][0]["freshness"], "unchecked");
+        assert_eq!(value["passed"], false);
+        // A stale closure without a record stays stale (the stronger verdict).
+        fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
+    }
+
+    #[test]
+    fn toolchain_only_closure_is_judged_but_not_compared() {
+        let temp = python_project("rustfmt");
+        let dir = &temp.0;
+        let closures = [write_closure(
+            dir,
+            "rustfmt",
+            "rustfmt",
+            Some(host().triple()),
+            json!({
+                "rust_version": "1.96.1",
+                "rust_object": {"id": "rust-id"},
+                "rustfmt_object": {"id": "rustfmt-id"},
+                "exceptions": [exception(policy::TOOLCHAIN_COMPONENT_UNAVAILABLE, "clippy")],
+            }),
+        )];
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert_eq!(verdicts[0].freshness, Freshness::ToolchainOnly);
+        assert!(verdicts[0].passes());
+        let verdicts = judge(
+            dir,
+            &deny(&[policy::TOOLCHAIN_COMPONENT_UNAVAILABLE]),
+            &closures,
+        );
+        assert!(!verdicts[0].passes());
+        let value: Value = serde_json::from_str(
+            &render(
+                dir,
+                &Report {
+                    policy: Policy::default(),
+                    verdicts,
+                },
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["closures"][0]["freshness"], "toolchain-only");
+        // A record under that name that does carry inputs is compared like
+        // any other; the name alone buys nothing.
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        let closures = [write_closure(
+            dir,
+            "rustfmt",
+            "rustfmt",
+            Some(host().triple()),
+            body,
+        )];
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        assert!(
+            matches!(verdicts[0].freshness, Freshness::Stale(_)),
+            "{:?}",
+            verdicts[0]
+        );
+        assert!(!verdicts[0].passes());
+    }
+
+    #[test]
+    fn closure_named_for_another_ecosystem_is_refused() {
+        let temp = python_project("mismatch");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        // Named python.json, claims rustfmt: `sync` would refuse to read it,
+        // and the gate must not judge it under either name.
+        let closures = [write_closure(
+            dir,
+            "python",
+            "rustfmt",
+            Some(host().triple()),
+            body,
+        )];
+        let present = inspect::detected(dir).unwrap();
+        let error = evaluate(host(), dir, &Policy::default(), &closures, &present).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("claims ecosystem 'rustfmt' but is named 'python'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn malformed_exception_record_is_an_error() {
+        let temp = python_project("malformed");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([{"kind": "x"}]);
+        let closures = [write_closure(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body,
+        )];
+        let present = inspect::detected(dir).unwrap();
+        let error = evaluate(host(), dir, &Policy::default(), &closures, &present).unwrap_err();
+        assert!(
+            error.to_string().contains("malformed exception record"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn audit_reads_the_project_without_a_store() {
+        let temp = python_project("audit");
+        let dir = &temp.0;
+        with_exceptions(dir, &[exception(GIT_DEPENDENCY, "left-pad")]);
+        let extra = deny(&[GIT_DEPENDENCY]);
+        // The chain part of the policy is whatever this machine has (see
+        // `effective_policy_unions...`); the extra file is under test here.
+        let _env = policy::test_env_lock();
+        let report = audit(host(), dir, Some(&extra)).unwrap();
+        assert_eq!(report.verdicts.len(), 1);
+        assert_eq!(report.verdicts[0].denied.len(), 1);
+        assert!(!report.passes());
+        assert!(!dir.join("store").exists());
+        // Nothing synced: a NotFound with a next step.
+        let empty = TempDir::new("empty");
+        let error = audit(host(), &empty.0, None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("run 'blanket sync' first"));
+    }
+
+    #[test]
+    fn company_policy_template_parses_and_names_only_known_kinds() {
+        let text = include_str!("../docs/human/policy-company.toml");
+        let template = policy::parse_file(Path::new("docs/human/policy-company.toml"), text)
+            .expect("the shipped template must parse against policy::KINDS");
+        assert!(!template.strict, "the template must not set strict");
+        let expected: BTreeSet<String> = [
+            INSTALL_SCRIPT_FAILED,
+            WEAK_INTEGRITY,
+            policy::UNATTESTED_MUTABLE_STATE,
+            policy::UNATTESTED_INDEX,
+            GIT_DEPENDENCY,
+            policy::LOCK_DISAGREEMENT,
+            policy::ARTIFACT_NOT_PROVISIONED,
+        ]
+        .iter()
+        .map(|kind| kind.to_string())
+        .collect();
+        assert_eq!(template.deny, expected);
+        // Every kind the template deliberately leaves permitted is named in
+        // its comments, so the file cannot silently fall behind KINDS.
+        for kind in policy::KINDS {
+            assert!(text.contains(kind), "template does not mention {kind}");
+        }
+    }
+}

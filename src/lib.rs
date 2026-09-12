@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod archive;
 pub mod artifacts;
+pub mod audit;
 pub mod build;
 pub(crate) mod build_requires;
 pub mod cargo;

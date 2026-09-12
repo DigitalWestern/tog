@@ -102,7 +102,8 @@ fn with_recorded<R>(f: impl FnOnce(&mut Vec<Exception>) -> R) -> R {
     }
 }
 
-fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
+/// Parse one policy file, refusing unknown keys and unknown deny kinds.
+pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
     let policy: Policy = toml::from_str(text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -141,9 +142,17 @@ fn merge_file(policy: &mut Policy, path: &Path, required: bool) -> io::Result<()
         }
     };
     let other = parse_file(path, &text)?;
-    policy.strict |= other.strict;
-    policy.deny.extend(other.deny);
+    union(policy, &other);
     Ok(())
+}
+
+/// Union `other` into `policy`. Union only tightens: the result denies
+/// everything `policy` denied plus everything `other` denies, and is strict
+/// if either is. Used by `blanket audit --policy`, so a file handed to the
+/// gate can never loosen the machine or project policy.
+pub fn union(policy: &mut Policy, other: &Policy) {
+    policy.strict |= other.strict;
+    policy.deny.extend(other.deny.iter().cloned());
 }
 
 /// Load the user and project policies once, unioning all deny entries.
@@ -180,7 +189,8 @@ fn current() -> &'static Policy {
     POLICY.get_or_init(Policy::default)
 }
 
-fn denied(policy: &Policy, kind: &str) -> bool {
+/// Whether `policy` refuses an exception of `kind`.
+pub fn denied(policy: &Policy, kind: &str) -> bool {
     policy.strict || policy.deny.contains(kind)
 }
 
@@ -276,6 +286,15 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
             denied_kinds.join(", ")
         ),
     ))
+}
+
+/// Tests that read or set `HOME` / `BLANKET_POLICY` hold this lock: the
+/// environment is process-global, so a test that mutates it would otherwise
+/// redirect a concurrent `load` (the same hazard as `store::STORE_ENV_LOCK`).
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -380,6 +399,7 @@ deny = ["git-dependency"]"#,
             "strict = true\ndeny = [\"file-collision\"]\n",
         )
         .unwrap();
+        let _env = test_env_lock();
         let old_home = std::env::var_os("HOME");
         let old_policy = std::env::var_os("BLANKET_POLICY");
         std::env::set_var("HOME", &home);
