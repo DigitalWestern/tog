@@ -14,7 +14,7 @@ apps with native wheels. Cargo, Go, Ruby, Elixir, and .NET all landed
 (adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+build),
 npm ~1015, cargo ~690, go ~600, ruby ~540, elixir ~620, dotnet ~540. The
 kernel thesis holds. pnpm v9/v6 and Yarn classic lockfile importers shipped
-2026-09-06 (`src/tailors/node/lock_import.rs`). Current version: blanket 0.1.0.
+2026-09-06 (`src/tailors/node/lock_import/`). Current version: blanket 0.1.0.
 
 ## The model
 
@@ -77,22 +77,22 @@ touching the store or the network.
 
 ## The tailors
 
-**Python** (`pypi.rs`, `manifest.rs`, `wheel.rs`, `python.rs`,
-`pyselect.rs`). Resolution of ranged requirements is delegated to the
+**Python** (`tailors/python/`: `pypi.rs`, `manifest/`, `wheel.rs`, `mod.rs`,
+`pyselect.rs`, `env.rs`). Resolution of ranged requirements is delegated to the
 store-pinned uv (`uv pip compile --generate-hashes`); hash-pinned
 requirements and `pyproject.toml` dependencies are locked directly, choosing
 the best wheel per platform (native arm64 > abi3 > universal2 > pure >
 sdist). CPython comes from astral-sh/python-build-standalone with sha256s
-pinned in `python.rs`; interpreter selection happens before locking
+pinned in `python/mod.rs`; interpreter selection happens before locking
 (`.python-version` wins, then `requires-python`). Wheels install into the
 env object; sdists build in a network-denied sandbox (legacy setuptools
 records keep `sdist-build/2`, PEP 517 uses `sdist-build/3` with an immutable
 build environment). Environments are immutable: no activate scripts, pip
 cannot mutate them.
 
-**npm** (`npm.rs`, `npm_lock_import.rs`). `package-lock.json` is parsed
+**npm** (`tailors/node/`: `plan.rs`, `realize.rs`, `project.rs`, `lock_import/`). `package-lock.json` is parsed
 locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
-`npm_lock_import.rs` (dependency-free strict YAML for pnpm, `lock_source`
+`lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
 `npm install --package-lock-only`. Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over

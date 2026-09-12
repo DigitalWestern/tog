@@ -11,7 +11,7 @@ when they were ported to the `Tailor` trait on 2026-09-12.
 |---|---|
 | `mod.rs` | The pinned toolchain (per-platform rows with sha256s, verified at pin time), `preflight_platform`, `ensure_<toolchain>_for`, `plan_*`, `realize_*`, `project_*_env`, and `build_sandboxed` if the ecosystem builds. Declares the sibling modules. |
 | `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `listing`, `closure_state`, `doctor`, `sbom_components`, `fmt*`, `object_kinds`. Only implement what the ecosystem has; the defaults say "not supported". |
-| `objects.rs` | `pub static KINDS: &[KindAdapter]`: one row per (kind, schema) pair the tailor commits to the store, with the identity grammar its producer writes and the function that recovers a legacy record's dependencies. A kind without a row is refused by GC, never certified. |
+| `objects.rs` | `pub static KINDS: &[KindAdapter]`: one row per (kind, schema) pair the tailor commits to the store, with the identity grammar its producer writes and the function that recovers a legacy record's dependencies. A kind without a row is refused by GC, never certified. The registry hands every tailor's rows to the kernel at startup (`tailors::install_kinds`, called by `commands::dispatch`); nothing to wire by hand. |
 | `inputs.rs` (optional) | Project-inputs-to-plan loaders when they are more than a few lines. |
 
 Rules the tailor must keep:

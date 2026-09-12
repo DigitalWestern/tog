@@ -2,7 +2,7 @@
 
 *Written 2026-09-10. Replaces the 2026-09-06 plan at the repo root: what it
 promised is shipped, so this file describes only what exists. The help screen
-below is the spec, generated from the command table in `src/cli.rs`; if this
+below is the spec, generated from the command table in `src/cli/spec.rs`; if this
 file and the binary differ, fix this file.*
 
 ```
