@@ -19,7 +19,8 @@ use std::rc::Rc;
 use sha2::{Digest, Sha224, Sha256, Sha512};
 
 use crate::comforter;
-use crate::inspect;
+use crate::commands::context::Context;
+use crate::commands::inspect;
 use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
@@ -1810,7 +1811,17 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
     Ok(())
 }
 
-pub fn run(
+/// `blanket x`: `x` has its own cached projection path and therefore does
+/// not pass through sync's policy initialization. Load the cwd policy,
+/// including all applicable ancestors, before realization or any cache-hit
+/// checks.
+pub fn run(ctx: &Context, request: Request) -> io::Result<i32> {
+    let cwd = ctx.project_dir();
+    policy::init(&cwd, false)?;
+    launch(ctx.platform, &cwd, request, &ctx.activity)
+}
+
+pub fn launch(
     platform: Platform,
     cwd: &Path,
     request: Request,

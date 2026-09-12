@@ -21,8 +21,13 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::inspect;
+use crate::commands::context::Context;
+use crate::commands::inspect;
+use crate::commands::shared::project_dir;
+use crate::commands::sync;
+use crate::commands::x as xrun;
 use crate::kernel::platform::Platform;
+use crate::kernel::policy;
 use crate::kernel::sandbox;
 use crate::kernel::store::Store;
 use crate::kernel::ui;
@@ -35,7 +40,6 @@ use crate::tailors::python::manifest;
 use crate::tailors::python::pypi;
 use crate::tailors::python::pyselect;
 use crate::tailors::ruby;
-use crate::xrun;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
@@ -486,7 +490,7 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
 
 /// Entry point for `main`: pick the project, group the specs by ecosystem,
 /// delegate each group.
-pub fn run(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outcome> {
+pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outcome> {
     // Validate every spec before discovering the project, opening the store,
     // looking anything up in a registry, or invoking a package manager.
     for text in &request.specs {
@@ -1968,6 +1972,29 @@ fn dotnet_refuse(verb: Verb, texts: &[String]) -> io::Result<Vec<String>> {
         ),
         Verb::Update => "edit the PackageReference versions, run 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'blanket'".to_string(),
     }))
+}
+
+/// `add` / `remove` / `update`: delegate the edit, report it, then the
+/// ordinary sync in the project the edit landed in.
+pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
+    let cwd = project_dir();
+    // Dependency edits ensure pinned tools before the ordinary sync. Set the
+    // policy first so cached toolchain objects cannot initialize an empty
+    // default policy and let strict/deny settings be bypassed.
+    policy::init(&cwd, false)?;
+    let outcome = edit(ctx.platform, &cwd, request)?;
+    for line in &outcome.lines {
+        ui::note(line);
+    }
+    if no_sync {
+        ui::note("--no-sync: review the change, then run 'blanket'");
+        return Ok(());
+    }
+    if outcome.project != cwd {
+        std::env::set_current_dir(&outcome.project)?;
+        ui::trace(&format!("syncing in {}", outcome.project.display()));
+    }
+    sync::run(ctx, false, false)
 }
 
 #[cfg(test)]

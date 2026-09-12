@@ -170,7 +170,7 @@ Sync records recoverable verification gaps in each closure and continues;
 are only added. `BLANKET_STRICT=1` or `blanket sync --strict` denies every
 exception. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `blanket audit`
-(`src/audit.rs`) is the CI admission gate: it re-judges the exceptions the
+(`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
 `--policy` file (union, so it can only tighten), refuses to pass a stale or
 unchecked closure, and touches neither the store nor the network.
@@ -250,15 +250,24 @@ Folders follow the layers (see [REFACTOR.md](../../REFACTOR.md) for the
 rules and the remaining stages): `commands → tailors → kernel`. The kernel
 never names a tailor; a tailor never names another tailor.
 
-Command surface (the only layer that knows every tailor and the kernel):
+Entry point and grammar:
 
+    src/main.rs     parse argv, set up output, call commands::resolve/dispatch
     src/cli.rs      command grammar + help (pure, unit-tested; see CLI.md)
-    src/main.rs     dispatcher + per-ecosystem orchestration
-    src/inspect.rs  status / ls / doctor: read-only views over closures + store
-    src/audit.rs    blanket audit: recorded exceptions judged against a policy
-    src/deps.rs     add / remove / update, delegated to each ecosystem's tool
-    src/sbom.rs     CycloneDX 1.5 JSON from the closure envelopes
-    src/xrun.rs     blanket x: run a registry tool without adding it to a project
+
+Commands (`src/commands/`, one file per verb; the only layer that knows
+every tailor and the kernel):
+
+    mod.rs          resolve() for the implicit forms, dispatch(): one call per verb
+    context.rs      Context { platform, store, activity lease } for store-backed verbs
+    shared.rs       helpers two or more verbs share (input loaders, Python planning)
+    sync.rs  plan.rs  build.rs  run.rs  fmt.rs  gc.rs  store.rs  completions.rs
+    doctor.rs  ls.rs  status.rs   thin verbs over inspect.rs
+    inspect.rs      status / ls / doctor: read-only views over closures + store
+    audit.rs        blanket audit: recorded exceptions judged against a policy
+    deps.rs         add / remove / update, delegated to each ecosystem's tool
+    sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
+    x.rs            blanket x: run a registry tool without adding it to a project
 
 Kernel (`src/kernel/`, ecosystem-agnostic):
 

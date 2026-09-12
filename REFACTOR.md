@@ -510,3 +510,35 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   for everything that is not a file split.
 - Gate: `cargo fmt --check`, `cargo test --no-run` (all targets),
   `cargo test` (614 passed, same set as baseline).
+
+### 2026-09-12 — Stage 2 landed: `commands/` split
+
+- `main.rs` is 68 lines: parse argv, set up output, `commands::resolve`,
+  `commands::dispatch`. `dispatch` is a flat match, one call per arm.
+- `commands/context.rs`: `Context { platform, store, activity }` built once
+  by `dispatch` for every store-backed verb, with the maintenance sweep and
+  the shared lease taken in the same order and scope as before. The project
+  dir is a method that reads the cwd each time, because `add`/`remove`/
+  `update` may change directory before running the ordinary sync; that
+  behaviour is preserved rather than frozen into a field. `sync` now uses
+  the `Context`'s store handle instead of opening a second one (the same
+  store, one open fewer); `fmt` builds its own `Context` after its
+  store-free checks, exactly where it used to open the store.
+- One file per verb (`sync`, `plan`, `build`, `run`, `fmt`, `gc`, `store`,
+  `completions`, `doctor`, `ls`, `status`, `audit`, `deps`, `sbom`, `x`);
+  `deps.rs`, `inspect.rs`, `sbom.rs`, `xrun.rs` (→ `x.rs`), `audit.rs`
+  moved under `commands/` with `git mv`. `inspect` stays `pub` (it was
+  before); the rest of `commands/` is `pub(crate)`.
+- Two renames so every verb file's entry point is `run`: `deps::run` →
+  `deps::edit` (the manifest edit) and `xrun::run` → `x::launch` (the
+  realize-and-exec step); `x::run(ctx, request)` now owns the `policy::init`
+  that `dispatch` used to do inline.
+- `commands/shared.rs` (~700 lines) holds the helpers two or more verbs use,
+  including the whole Python planning stack (`read_plan` and friends). Stage
+  3 turns most of it into tailor methods.
+- `cli.rs` still calls `commands::deps::validate_spec` (an upward `cli →
+  commands` edge that predates the refactor); moving that validator into
+  `cli` is a Stage 4 item.
+- Gate: `cargo fmt --check`, `cargo build`, `cargo test` (614 passed, same
+  set as baseline). One unit test in `x.rs` failed once and passed on every
+  rerun; recorded as FOLLOW-UPS.md item 8 (pre-existing race, not the move).

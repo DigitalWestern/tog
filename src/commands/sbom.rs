@@ -4,6 +4,7 @@
 //! project has and emits one SBOM document. No network, no new inputs —
 //! the closures already carry names, versions, and pinned hashes.
 
+use crate::commands::shared::project_dir;
 use serde_json::{json, Value};
 use std::fs;
 use std::io;
@@ -417,6 +418,19 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
         },
         "components": components,
     }))
+}
+
+pub fn run(output: Option<&Path>) -> io::Result<()> {
+    let doc = generate(&project_dir())?;
+    let text = serde_json::to_string_pretty(&doc)?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, text + "\n")?;
+            eprintln!("blanket: SBOM written to {}", path.display());
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

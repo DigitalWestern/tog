@@ -86,6 +86,14 @@ F3 report accounting, F4 acceptance tests).
 7. **Grammar-table drift for the 21st (kind,schema) pair** — adding a pair
    requires extending `objmeta::grammar_for`; unlisted pairs fail closed
    (refusal), but a listed pair with a wrong grammar needs its own drift test.
+8. **Flaky unit test `x::tests::shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit`**
+   — failed once in the full `cargo test` run of 2026-09-12 (REFACTOR.md
+   Stage 2 gate) and passed on every rerun, including 5/5 in isolation and
+   the whole lib suite. The nonblocking exclusive `flock` after
+   `drop(shared)` can lose to a sibling test's fork-then-exec window (the
+   lock lives on the open file description, which a forked child shares
+   until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
+   verbatim); fix is to retry the try-lock briefly or isolate the test.
 
 ## Flag 3 — `blanket audit`: three product decisions the reviewer asked the owner to make
 
@@ -154,7 +162,7 @@ can pick it up cold.
      against untrusted branches.
   Done when the chosen design has its own review round and LIMITATIONS.md's
   audit bullet no longer says a hand-edited record audits as it says.
-- **H4 — mutation check of `src/audit.rs`.** This repo's rule is that
+- **H4 — mutation check of `src/commands/audit.rs`.** This repo's rule is that
   fixes get mutation-checked; audit has not been. Flip each arm of
   `Verdict::passes`, each `Freshness` mapping in `freshness_from_state`, the
   `KINDS` membership test, and the `check_name` comparison; every mutant

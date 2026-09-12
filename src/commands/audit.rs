@@ -24,9 +24,12 @@
 //!   newer blanket, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
 
-use crate::inspect::{self, ClosureFile, State};
+use crate::cli;
+use crate::commands::inspect::{self, ClosureFile, State};
+use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy};
+use crate::kernel::ui;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io;
@@ -360,6 +363,47 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
         }
     }
     Ok(out)
+}
+
+/// The command: judge the recorded exceptions against the policy chain plus
+/// an optional `--policy` file. Needs the host platform only to tell a
+/// foreign-platform closure from a current one, as `status` does.
+pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
+    let platform = Platform::host()?;
+    let dir = project_dir();
+    // A --policy file that cannot be read or parsed is an operator
+    // mistake (exit 2), so CI can tell it from a denied build (exit 1).
+    let extra = match policy {
+        Some(path) => match read_policy_file(path) {
+            Ok(extra) => Some(extra),
+            Err(error) => {
+                eprint!(
+                    "{}",
+                    cli::render_usage_error(&format!("audit: {error}"), Some("audit"))
+                );
+                return Ok(cli::EXIT_USAGE);
+            }
+        },
+        None => None,
+    };
+    let report = audit(platform, &dir, extra.as_ref())?;
+    ui::note(&format!(
+        "audit: policy strict={} deny=[{}]",
+        report.policy.strict,
+        report
+            .policy
+            .deny
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    print!("{}", render(&dir, &report, json)?);
+    Ok(if report.passes() {
+        0
+    } else {
+        cli::EXIT_FAILURE
+    })
 }
 
 #[cfg(test)]
@@ -1048,7 +1092,7 @@ mod tests {
 
     #[test]
     fn company_policy_template_parses_and_names_only_known_kinds() {
-        let text = include_str!("../docs/human/policy-company.toml");
+        let text = include_str!("../../docs/human/policy-company.toml");
         let template = policy::parse_file(Path::new("docs/human/policy-company.toml"), text)
             .expect("the shipped template must parse against policy::KINDS");
         assert!(!template.strict, "the template must not set strict");

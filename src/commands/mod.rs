@@ -1,0 +1,231 @@
+//! The command layer: one file per user-facing verb (REFACTOR.md §3). This
+//! is the only layer that knows about every tailor *and* the kernel; the
+//! binary parses arguments and calls `resolve` then `dispatch`.
+
+pub(crate) mod audit;
+pub(crate) mod build;
+pub(crate) mod completions;
+pub(crate) mod context;
+pub(crate) mod deps;
+pub(crate) mod doctor;
+pub(crate) mod fmt;
+pub(crate) mod gc;
+/// `pub` on purpose: the read-only closure/status views were public before
+/// the move and stay reachable as `blanket::commands::inspect`.
+pub mod inspect;
+pub(crate) mod ls;
+pub(crate) mod plan;
+pub(crate) mod run;
+pub(crate) mod sbom;
+pub(crate) mod shared;
+pub(crate) mod status;
+pub(crate) mod store;
+pub(crate) mod sync;
+pub(crate) mod x;
+
+pub use context::Context;
+
+use crate::cli;
+use crate::commands::shared::{project_dir, projected_root};
+use crate::kernel::platform::Platform;
+use crate::kernel::ui;
+use crate::tailors::node;
+use std::io;
+use std::process::exit;
+
+/// What argv asked for, once the grammar has had its say.
+pub enum Pending {
+    Command(cli::Command),
+    /// Bare `blanket`: sync inside a project, usage outside.
+    Implicit,
+    /// An unknown first word: a package.json script if one matches.
+    Script {
+        name: String,
+        args: Vec<String>,
+        message: String,
+    },
+}
+
+/// CLI.md 2.1 and 2.2: a bare `blanket` inside a project is `sync`; an
+/// unknown first word that names a package.json script runs it. Anything
+/// else is the usage error the grammar already prepared (exit 2).
+pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
+    match pending {
+        Pending::Command(command) => Ok(command),
+        Pending::Implicit => {
+            let cwd = project_dir();
+            if !inspect::detected(&cwd)?.is_empty() {
+                ui::trace("no command given inside a project: running sync");
+                return Ok(cli::Command::Sync {
+                    fresh: false,
+                    strict: false,
+                });
+            }
+            eprint!(
+                "blanket: no project in {}: nothing to sync here.\n\n{}",
+                cwd.display(),
+                cli::usage()
+            );
+            exit(cli::EXIT_USAGE);
+        }
+        Pending::Script {
+            name,
+            args,
+            message,
+        } => {
+            let cwd = project_dir();
+            let root = projected_root(&cwd);
+            let package_json = root.join("package.json");
+            let has_package_json = package_json.is_file();
+            let is_script = has_package_json
+                && std::fs::read_to_string(&package_json)
+                    .ok()
+                    .and_then(|json| node::script_commands_from_package(&json, &name, &[]).ok())
+                    .flatten()
+                    .is_some();
+            if is_script {
+                ui::trace(&format!("'{name}' is a package.json script: running it"));
+                let mut command = vec![name];
+                command.extend(args);
+                return Ok(cli::Command::Run { command });
+            }
+            let message = if has_package_json {
+                format!("{message} (no package.json script named '{name}' here)")
+            } else {
+                message
+            };
+            eprint!("{}", cli::render_usage_error(&message, None));
+            exit(cli::EXIT_USAGE);
+        }
+    }
+}
+
+/// One line per verb: every arm is a single call into the verb's file.
+pub fn dispatch(command: cli::Command) -> io::Result<i32> {
+    use cli::Command::*;
+    // Maintenance commands do not need host-platform validation. In
+    // particular, GC must remain usable when inspecting a copied store on a
+    // host that cannot realize its objects. The admission gate (`audit`) is
+    // read-only over the project's records: no store open (that would create
+    // the store tree), no lease, no realization, no network.
+    match command {
+        Gc(args) => return gc::run(&args).map(|_| 0),
+        XClean {
+            ecosystem,
+            from,
+            tool,
+        } => {
+            return x::clean(x::CleanRequest {
+                ecosystem,
+                from,
+                tool,
+            })
+            .map(|_| 0)
+        }
+        StoreRoots => return store::roots().map(|_| 0),
+        StorePath => return store::path(),
+        Completions { shell } => return completions::run(shell),
+        Audit { ref policy, json } => return audit::run(policy.as_deref(), json),
+        Doctor { json } => return doctor::run(json),
+        Ls {
+            ref ecosystem,
+            json,
+        } => return ls::run(ecosystem.as_deref(), json),
+        _ => {}
+    }
+    // Real subcommands validate the host once before any store-touching work.
+    let platform = Platform::host()?;
+    // A package.json `fmt` script is deliberately resolved before opening the
+    // store. This preserves the cheap script path for a non-Rust project.
+    if let Fmt {
+        check,
+        ref ecosystem,
+        ref args,
+    } = command
+    {
+        return fmt::run(platform, check, ecosystem.as_deref(), args);
+    }
+    let needs_maintenance = matches!(
+        &command,
+        Sync { .. }
+            | Plan
+            | Build { .. }
+            | Run { .. }
+            | Add { .. }
+            | Remove { .. }
+            | Update { .. }
+            | X { .. }
+    );
+    let ctx = Context::open(platform, needs_maintenance)?;
+    match command {
+        Sync { fresh, strict } => sync::run(&ctx, fresh, strict).map(|_| 0),
+        Plan => plan::run(&ctx).map(|_| 0),
+        Build { args } => build::run(&ctx, &args).map(|_| 0),
+        Run { command } => run::run(&ctx, &command),
+        Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),
+        Add {
+            specs,
+            dev,
+            no_sync,
+        } => deps::run(
+            &ctx,
+            deps::Request {
+                verb: deps::Verb::Add,
+                specs,
+                dev,
+            },
+            no_sync,
+        )
+        .map(|_| 0),
+        Remove {
+            names,
+            dev,
+            no_sync,
+        } => deps::run(
+            &ctx,
+            deps::Request {
+                verb: deps::Verb::Remove,
+                specs: names,
+                dev,
+            },
+            no_sync,
+        )
+        .map(|_| 0),
+        Update { names, no_sync } => deps::run(
+            &ctx,
+            deps::Request {
+                verb: deps::Verb::Update,
+                specs: names,
+                dev: false,
+            },
+            no_sync,
+        )
+        .map(|_| 0),
+        X {
+            ecosystem,
+            from,
+            tool,
+            args,
+        } => x::run(
+            &ctx,
+            x::Request {
+                ecosystem,
+                from,
+                tool,
+                args,
+            },
+        ),
+        Status { json } => status::run(ctx.platform, json),
+        Fmt { .. }
+        | Gc(_)
+        | XClean { .. }
+        | StorePath
+        | StoreRoots
+        | Completions { .. }
+        | Doctor { .. }
+        | Ls { .. }
+        | Audit { .. } => {
+            unreachable!("handled above")
+        }
+    }
+}

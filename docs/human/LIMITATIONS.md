@@ -120,7 +120,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
-  **Project-level `uv pip compile` in `src/main.rs` can still execute resolve-time metadata
+  **Project-level `uv pip compile` in `src/commands/shared.rs` can still execute resolve-time metadata
   builds outside the sandbox** — sdist build-requirement resolution rejects build-time sdists
   instead.
 

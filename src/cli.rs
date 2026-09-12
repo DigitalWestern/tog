@@ -1060,7 +1060,7 @@ fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageErr
             Some(name),
         ));
     }
-    crate::deps::validate_spec(arg)
+    crate::commands::deps::validate_spec(arg)
         .map_err(|error| UsageError::new(format!("{name}: {error}"), Some(name)))
 }
 
