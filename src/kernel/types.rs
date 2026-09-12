@@ -4,6 +4,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// A git dependency pinned to a commit (NEXT.md item 4). Realized by
+/// `kernel::gitsrc`; lives here so `types` does not depend on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSource {
+    /// Normalized: no `git+` prefix or fragment. HTTP credentials are removed
+    /// from the authority, while SSH usernames and repository paths are kept.
+    pub url: String,
+    /// Full 40-character commit hash.
+    pub commit: String,
+    /// Package subdirectory inside the repository, if the dependency names one.
+    pub subdirectory: Option<String>,
+}
+
 /// Identity of a store object: hashed canonically to produce the object id.
 /// Input-addressed (like Nix): the id commits to what the object was made FROM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +72,7 @@ pub struct LockedPackage {
     /// is the ordinary sdist path. Absent for registry packages, so plans
     /// written before this field stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git: Option<crate::kernel::gitsrc::GitSource>,
+    pub git: Option<GitSource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

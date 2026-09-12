@@ -6,6 +6,7 @@ pub mod activity;
 pub mod archive;
 pub mod context;
 pub mod cyclonedx;
+pub mod digest;
 pub mod dirhash;
 pub mod fetch;
 pub mod gc;

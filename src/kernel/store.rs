@@ -165,7 +165,7 @@ pub struct RootDiagnostic {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectDeps {
     pub objects: BTreeSet<String>,
-    pub cache: BTreeSet<crate::kernel::fetch::Digest>,
+    pub cache: BTreeSet<crate::kernel::digest::Digest>,
 }
 
 impl ObjectDeps {
@@ -184,7 +184,7 @@ impl ObjectDeps {
         Ok(self)
     }
 
-    pub fn cache_digest(&mut self, digest: crate::kernel::fetch::Digest) -> &mut Self {
+    pub fn cache_digest(&mut self, digest: crate::kernel::digest::Digest) -> &mut Self {
         self.cache.insert(digest);
         self
     }
@@ -2978,9 +2978,9 @@ fn validate_cached_dependency_evidence(
                 )
             })?;
         let digest = match algo {
-            "sha1" => crate::kernel::fetch::Digest::sha1(hex),
-            "sha256" => crate::kernel::fetch::Digest::sha256(hex),
-            "sha512" => crate::kernel::fetch::Digest::sha512(hex),
+            "sha1" => crate::kernel::digest::Digest::sha1(hex),
+            "sha256" => crate::kernel::digest::Digest::sha256(hex),
+            "sha512" => crate::kernel::digest::Digest::sha512(hex),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("object metadata {id} uses unsupported cache algorithm {other}"),

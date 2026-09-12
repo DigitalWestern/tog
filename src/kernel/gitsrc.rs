@@ -7,6 +7,7 @@
 //! never inside a build sandbox.
 
 use crate::kernel::store::Store;
+pub use crate::kernel::types::GitSource;
 use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,17 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GIT: &str = "/usr/bin/git";
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GitSource {
-    /// Normalized: no `git+` prefix or fragment. HTTP credentials are removed
-    /// from the authority, while SSH usernames and repository paths are kept.
-    pub url: String,
-    /// Full 40-character commit hash.
-    pub commit: String,
-    /// Package subdirectory inside the repository, if the dependency names one.
-    pub subdirectory: Option<String>,
-}
 
 fn err(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
