@@ -7,6 +7,8 @@
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
 
+pub mod inputs;
+
 use crate::kernel::archive::Compression;
 use crate::kernel::dirhash;
 use crate::kernel::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};

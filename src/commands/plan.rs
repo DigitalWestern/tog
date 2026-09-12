@@ -1,14 +1,18 @@
 //! `blanket plan`: print each detected ecosystem's plan as JSON without
 //! realizing anything. Needs every tailor's plan step.
 
-use crate::commands::context::Context;
-use crate::commands::shared::{
-    ensure_npm_lock, has_python_input, is_cargo_here, load_cargo_inputs, load_go_inputs,
-    load_npm_plan, no_inputs, project_dir, read_plan,
-};
+use crate::commands::shared::{no_inputs, project_dir};
+use crate::kernel::context::Context;
 use crate::kernel::policy;
+use crate::tailors::cargo::inputs::is_cargo_here;
+use crate::tailors::cargo::inputs::load_cargo_inputs;
 use crate::tailors::dotnet;
 use crate::tailors::elixir;
+use crate::tailors::go::inputs::load_go_inputs;
+use crate::tailors::node::inputs::ensure_npm_lock;
+use crate::tailors::node::inputs::load_npm_plan;
+use crate::tailors::python::inputs::has_python_input;
+use crate::tailors::python::inputs::read_plan;
 use crate::tailors::ruby;
 use std::io;
 

@@ -2,21 +2,25 @@
 //! and project each one. Needs every tailor's preflight/plan/realize/project.
 
 use crate::comforter;
-use crate::commands::context::Context;
-use crate::commands::shared::{
-    ensure_npm_lock, has_python_input, is_cargo_here, load_cargo_inputs, load_go_inputs,
-    load_npm_plan, no_inputs, project_dir, read_plan,
-};
+use crate::commands::shared::{no_inputs, project_dir};
+use crate::kernel::context::Context;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
 use crate::kernel::ui;
 use crate::tailors::cargo;
+use crate::tailors::cargo::inputs::is_cargo_here;
+use crate::tailors::cargo::inputs::load_cargo_inputs;
 use crate::tailors::dotnet;
 use crate::tailors::elixir;
 use crate::tailors::go;
+use crate::tailors::go::inputs::load_go_inputs;
 use crate::tailors::node;
+use crate::tailors::node::inputs::ensure_npm_lock;
+use crate::tailors::node::inputs::load_npm_plan;
 use crate::tailors::python;
+use crate::tailors::python::inputs::has_python_input;
+use crate::tailors::python::inputs::read_plan;
 use crate::tailors::python::manifest;
 use crate::tailors::python::pyselect;
 use crate::tailors::ruby;
@@ -203,7 +207,7 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::shared::TempDir;
+    use crate::kernel::testutil::TempDir;
 
     /// Sync ends by registering the project as a GC root, so a path no
     /// record can hold is refused before an environment is realized or

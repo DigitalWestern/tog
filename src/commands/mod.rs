@@ -5,7 +5,6 @@
 pub(crate) mod audit;
 pub(crate) mod build;
 pub(crate) mod completions;
-pub(crate) mod context;
 pub(crate) mod deps;
 pub(crate) mod doctor;
 pub(crate) mod fmt;
@@ -23,7 +22,7 @@ pub(crate) mod store;
 pub(crate) mod sync;
 pub(crate) mod x;
 
-pub use context::Context;
+pub use crate::kernel::context::Context;
 
 use crate::cli;
 use crate::commands::shared::{project_dir, projected_root};

@@ -21,11 +21,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::commands::context::Context;
 use crate::commands::inspect;
 use crate::commands::shared::project_dir;
 use crate::commands::sync;
 use crate::commands::x as xrun;
+use crate::kernel::context::Context;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::sandbox;

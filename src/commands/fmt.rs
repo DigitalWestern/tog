@@ -2,14 +2,15 @@
 //! package.json `fmt` script. Needs the cargo tailor and its rustfmt component.
 
 use crate::comforter;
-use crate::commands::context::Context;
 use crate::commands::inspect;
 use crate::commands::run;
-use crate::commands::shared::{child_status_code, locate_cargo_root, project_dir, projected_root};
+use crate::commands::shared::{child_status_code, project_dir, projected_root};
+use crate::kernel::context::Context;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::ui;
 use crate::tailors::cargo;
+use crate::tailors::cargo::inputs::locate_cargo_root;
 use crate::tailors::cargo::rustfmt;
 use crate::tailors::node;
 use std::io;

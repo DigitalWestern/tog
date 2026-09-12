@@ -2,8 +2,8 @@
 //! Needs each tailor's run-time environment (closure objects, PATH, env).
 
 use crate::comforter;
-use crate::commands::context::Context;
 use crate::commands::shared::{child_status_code, project_dir, projected_root};
+use crate::kernel::context::Context;
 use crate::tailors::dotnet;
 use crate::tailors::elixir;
 use crate::tailors::go;

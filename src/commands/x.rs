@@ -19,8 +19,8 @@ use std::rc::Rc;
 use sha2::{Digest, Sha224, Sha256, Sha512};
 
 use crate::comforter;
-use crate::commands::context::Context;
 use crate::commands::inspect;
+use crate::kernel::context::Context;
 use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;

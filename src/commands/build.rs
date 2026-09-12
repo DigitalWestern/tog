@@ -2,13 +2,16 @@
 //! build-capable ecosystem present. Needs the cargo, go, elixir, and dotnet
 //! tailors' plan/realize/project/build_sandboxed.
 
-use crate::commands::context::Context;
-use crate::commands::shared::{is_cargo_here, load_cargo_inputs, load_go_inputs, project_dir};
+use crate::commands::shared::project_dir;
+use crate::kernel::context::Context;
 use crate::kernel::policy;
 use crate::tailors::cargo;
+use crate::tailors::cargo::inputs::is_cargo_here;
+use crate::tailors::cargo::inputs::load_cargo_inputs;
 use crate::tailors::dotnet;
 use crate::tailors::elixir;
 use crate::tailors::go;
+use crate::tailors::go::inputs::load_go_inputs;
 use std::io;
 
 /// `blanket build [ecosystem] [args...]`: explicit ecosystem, or inferred

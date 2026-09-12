@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod archive;
+pub mod context;
 pub mod dirhash;
 pub mod fetch;
 pub mod gc;
@@ -14,5 +15,7 @@ pub mod policy;
 pub mod sandbox;
 pub mod store;
 pub mod supervise;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod types;
 pub mod ui;

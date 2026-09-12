@@ -1,6 +1,7 @@
 //! What every store-backed command needs: the validated host platform, an
 //! opened store, and the shared activity lease that keeps GC from racing
-//! the command (REFACTOR.md §4 Stage 2 step 1).
+//! the command (REFACTOR.md §4 Stage 2 step 1). Kernel layer, so that a
+//! tailor can take a `&Context` without naming the command layer.
 
 use crate::kernel::activity::{ActivityMode, StoreActivity};
 use crate::kernel::gc;
@@ -43,6 +44,11 @@ impl Context {
     /// asked for: `add`/`remove`/`update` may change directory to the
     /// project the edit landed in before running the ordinary sync.
     pub fn project_dir(&self) -> PathBuf {
-        super::shared::project_dir()
+        project_dir()
     }
+}
+
+/// The project directory: the current directory, as every command reads it.
+pub fn project_dir() -> PathBuf {
+    std::env::current_dir().expect("cwd")
 }
