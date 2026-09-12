@@ -272,6 +272,261 @@ fn existing_ancestor(
     }
 }
 
+/// A dependency the lockfile could not resolve to a package. Returning `Ok`
+/// means the traversal skips it (optional dependencies are recorded as a
+/// policy exception first); a required one is fatal.
+fn skip_external_dependency(dependency: &Dependency, detail: &str) -> io::Result<()> {
+    if !dependency.optional {
+        return Err(err(format!("{}: {detail}", dependency.name)));
+    }
+    if detail.starts_with("npm_git_dep:") {
+        crate::kernel::policy::record(
+            crate::kernel::policy::GIT_DEPENDENCY,
+            &dependency.name,
+            detail,
+        )?;
+    }
+    Ok(())
+}
+
+/// The graph node this dependency names, once it is known to be realizable on
+/// this host. `Ok(None)` means the traversal skips it: an optional package
+/// that is platform-incompatible, unresolvable, or carries no integrity.
+fn realizable_node<'a>(
+    platform: Platform,
+    nodes: &'a BTreeMap<String, Node>,
+    node_key: &str,
+    dependency: &Dependency,
+    lock_source: &str,
+) -> io::Result<Option<&'a Node>> {
+    let node = nodes.get(node_key).ok_or_else(|| {
+        err(format!(
+            "{}: missing graph node {node_key}",
+            dependency.name
+        ))
+    })?;
+    if !node_compatible(platform, node) {
+        if dependency.optional || node.optional {
+            // pnpm records every platform variant in one lockfile;
+            // incompatible optional packages are omitted.
+            return Ok(None);
+        }
+        return Err(err(format!(
+            "{}@{}: required dependency does not support host {} (os={:?}, cpu={:?}, libc={:?})",
+            node.name,
+            node.version,
+            platform.triple(),
+            node.os,
+            node.cpu,
+            node.libc
+        )));
+    }
+    if let Some(detail) = &node.external {
+        if dependency.optional || node.optional {
+            if detail.starts_with("npm_git_dep:") {
+                crate::kernel::policy::record(
+                    crate::kernel::policy::GIT_DEPENDENCY,
+                    &node.name,
+                    detail,
+                )?;
+            }
+            return Ok(None);
+        }
+        return Err(err(format!("{}@{}: {detail}", node.name, node.version)));
+    }
+    // A git source is verified by its commit, so it legitimately
+    // has no tarball integrity (item 4).
+    let node_git = lock_git_source(&node.url, !node.integrity.is_empty());
+    if node.integrity.is_empty() && node_git.is_none() {
+        if dependency.optional || node.optional {
+            return Ok(None);
+        }
+        return Err(err(format!(
+            "{}@{}: pnpm package has no resolution.integrity",
+            node.name, node.version
+        )));
+    }
+    // Git sources carry `git:<commit>` instead of an SRI.
+    if node_git.is_none() {
+        integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
+    }
+    Ok(Some(node))
+}
+
+/// npm's hoisting decision for one package: reuse the nearest ancestor that
+/// already holds this exact target, else the root when it is free or holds the
+/// same target, else a nested placement under the parent.
+#[allow(clippy::too_many_arguments)]
+fn place_node_package(
+    node_key: &str,
+    node: &Node,
+    dependency: &Dependency,
+    parent: &str,
+    in_workspace: bool,
+    occupied: &mut BTreeMap<String, Occupied>,
+    nodes: &BTreeMap<String, Node>,
+    workspace_paths: &BTreeSet<String>,
+) -> io::Result<String> {
+    let ancestor = existing_ancestor(
+        parent,
+        &dependency.name,
+        &dependency.target,
+        occupied,
+        nodes,
+        workspace_paths,
+    );
+    if let Ok(Some(path)) = &ancestor {
+        return Ok(path.clone());
+    }
+    let blocked_by_nearer_conflict = ancestor.is_err();
+    let root = dependency_path("", &dependency.name);
+    let path = if let Some(existing) = occupied.get(&root) {
+        if !blocked_by_nearer_conflict && same_target(existing, &dependency.target, nodes) {
+            root
+        } else if in_workspace {
+            dependency_path(parent, &dependency.name)
+        } else if parent.is_empty() {
+            return Err(err(format!(
+                "{}: root dependencies conflict between {} and {}",
+                dependency.name,
+                occupied_description(existing),
+                format!("{}@{}", node.name, node.version)
+            )));
+        } else {
+            dependency_path(parent, &dependency.name)
+        }
+    } else {
+        root
+    };
+    if let Some(existing) = occupied.get(&path) {
+        if !same_target(existing, &dependency.target, nodes) {
+            return Err(err(format!(
+                "{}: two versions conflict at {} ({} and {})",
+                dependency.name,
+                path,
+                occupied_description(existing),
+                format!("{}@{}", node.name, node.version)
+            )));
+        }
+    } else {
+        occupied.insert(
+            path.clone(),
+            Occupied::Package {
+                node_key: node_key.to_string(),
+                name: node.name.clone(),
+                version: node.version.clone(),
+            },
+        );
+    }
+    Ok(path)
+}
+
+/// Placement for a workspace link. Same hoisting shape as a package, except
+/// the claim also registers the `NpmLink` the projection plants.
+fn place_workspace_link(
+    target: &str,
+    dependency: &Dependency,
+    parent: &str,
+    in_workspace: bool,
+    occupied: &mut BTreeMap<String, Occupied>,
+    links: &mut BTreeMap<String, NpmLink>,
+    nodes: &BTreeMap<String, Node>,
+) -> io::Result<String> {
+    let claim = |occupied: &mut BTreeMap<String, Occupied>,
+                 links: &mut BTreeMap<String, NpmLink>,
+                 path: &str| {
+        occupied.insert(
+            path.to_string(),
+            Occupied::Link {
+                target: target.to_string(),
+                name: dependency.name.clone(),
+            },
+        );
+        links.insert(
+            path.to_string(),
+            NpmLink {
+                path: path.to_string(),
+                target: target.to_string(),
+            },
+        );
+    };
+    let root = dependency_path("", &dependency.name);
+    let Some(existing) = occupied.get(&root) else {
+        let path = if in_workspace {
+            dependency_path(parent, &dependency.name)
+        } else {
+            root.clone()
+        };
+        claim(occupied, links, &path);
+        return Ok(path);
+    };
+    if same_target(existing, &dependency.target, nodes) {
+        return Ok(root);
+    }
+    if in_workspace {
+        let path = dependency_path(parent, &dependency.name);
+        if let Some(existing) = occupied.get(&path) {
+            if !same_target(existing, &dependency.target, nodes) {
+                return Err(err(format!(
+                    "{}: two workspace versions conflict at {} ({} and link:{})",
+                    dependency.name,
+                    path,
+                    occupied_description(existing),
+                    target
+                )));
+            }
+        } else {
+            claim(occupied, links, &path);
+        }
+        return Ok(path);
+    }
+    if parent.is_empty() {
+        return Err(err(format!(
+            "{}: workspace hoisting conflict between {} and link:{}",
+            dependency.name,
+            occupied_description(existing),
+            target
+        )));
+    }
+    let path = dependency_path(parent, &dependency.name);
+    claim(occupied, links, &path);
+    Ok(path)
+}
+
+/// Turn the settled placement map into the plan's package list.
+fn resolved_packages(
+    occupied: BTreeMap<String, Occupied>,
+    nodes: &BTreeMap<String, Node>,
+) -> io::Result<Vec<NpmPackage>> {
+    let mut packages = Vec::new();
+    for (path, occupied) in occupied {
+        crate::tailors::node::validate_lock_path(&path)?;
+        let Occupied::Package { node_key, .. } = occupied else {
+            continue;
+        };
+        let node = nodes
+            .get(&node_key)
+            .ok_or_else(|| err(format!("internal: no package for {path}")))?;
+        let git = lock_git_source(&node.url, !node.integrity.is_empty());
+        packages.push(NpmPackage {
+            path,
+            name: node.name.clone(),
+            version: node.version.clone(),
+            url: node.url.clone(),
+            integrity: match &git {
+                Some(source) => format!("git:{}", source.commit),
+                None => node.integrity.clone(),
+            },
+            bin: Vec::new(),
+            patch: node.patch.clone(),
+            git,
+            optional: node.optional,
+        });
+    }
+    packages.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(packages)
+}
+
 fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result<NpmPlan> {
     let workspace_paths = graph.workspace_paths.clone();
     let mut occupied = BTreeMap::<String, Occupied>::new();
@@ -297,207 +552,38 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
             workspace.is_some() || (!parent.is_empty() && !parent.starts_with("node_modules/"));
         let (path, should_expand) = match &dependency.target {
             Target::External(detail) => {
-                if dependency.optional {
-                    if detail.starts_with("npm_git_dep:") {
-                        crate::kernel::policy::record(
-                            crate::kernel::policy::GIT_DEPENDENCY,
-                            &dependency.name,
-                            detail,
-                        )?;
-                    }
-                    continue;
-                }
-                return Err(err(format!("{}: {detail}", dependency.name)));
+                skip_external_dependency(&dependency, detail)?;
+                continue;
             }
             Target::Node(node_key) => {
-                let node = graph.nodes.get(node_key).ok_or_else(|| {
-                    err(format!(
-                        "{}: missing graph node {node_key}",
-                        dependency.name
-                    ))
-                })?;
-                if !node_compatible(platform, node) {
-                    if dependency.optional || node.optional {
-                        // pnpm records every platform variant in one lockfile;
-                        // incompatible optional packages are omitted.
-                        continue;
-                    }
-                    return Err(err(format!(
-                        "{}@{}: required dependency does not support host {} (os={:?}, cpu={:?}, libc={:?})",
-                        node.name,
-                        node.version,
-                        platform.triple(),
-                        node.os,
-                        node.cpu,
-                        node.libc
-                    )));
-                }
-                if let Some(detail) = &node.external {
-                    if dependency.optional || node.optional {
-                        if detail.starts_with("npm_git_dep:") {
-                            crate::kernel::policy::record(
-                                crate::kernel::policy::GIT_DEPENDENCY,
-                                &node.name,
-                                detail,
-                            )?;
-                        }
-                        continue;
-                    }
-                    return Err(err(format!("{}@{}: {detail}", node.name, node.version)));
-                }
-                // A git source is verified by its commit, so it legitimately
-                // has no tarball integrity (item 4).
-                let node_git = lock_git_source(&node.url, !node.integrity.is_empty());
-                if node.integrity.is_empty() && node_git.is_none() {
-                    if dependency.optional || node.optional {
-                        continue;
-                    }
-                    return Err(err(format!(
-                        "{}@{}: pnpm package has no resolution.integrity",
-                        node.name, node.version
-                    )));
-                }
-                // Git sources carry `git:<commit>` instead of an SRI.
-                if node_git.is_none() {
-                    integrity_policy(&format!("{lock_source}/{node_key}"), &node.integrity)?;
-                }
-                let ancestor = existing_ancestor(
+                let Some(node) =
+                    realizable_node(platform, &graph.nodes, node_key, &dependency, lock_source)?
+                else {
+                    continue;
+                };
+                let path = place_node_package(
+                    node_key,
+                    node,
+                    &dependency,
                     &parent,
-                    &dependency.name,
-                    &dependency.target,
-                    &occupied,
+                    in_workspace,
+                    &mut occupied,
                     &graph.nodes,
                     &workspace_paths,
-                );
-                if let Ok(Some(path)) = &ancestor {
-                    (path.clone(), true)
-                } else {
-                    let blocked_by_nearer_conflict = ancestor.is_err();
-                    let root = dependency_path("", &dependency.name);
-                    let path = if let Some(existing) = occupied.get(&root) {
-                        if !blocked_by_nearer_conflict
-                            && same_target(existing, &dependency.target, &graph.nodes)
-                        {
-                            root
-                        } else if in_workspace {
-                            dependency_path(&parent, &dependency.name)
-                        } else if parent.is_empty() {
-                            return Err(err(format!(
-                                "{}: root dependencies conflict between {} and {}",
-                                dependency.name,
-                                occupied_description(existing),
-                                format!("{}@{}", node.name, node.version)
-                            )));
-                        } else {
-                            dependency_path(&parent, &dependency.name)
-                        }
-                    } else {
-                        root
-                    };
-                    if let Some(existing) = occupied.get(&path) {
-                        if !same_target(existing, &dependency.target, &graph.nodes) {
-                            return Err(err(format!(
-                                "{}: two versions conflict at {} ({} and {})",
-                                dependency.name,
-                                path,
-                                occupied_description(existing),
-                                format!("{}@{}", node.name, node.version)
-                            )));
-                        }
-                    } else {
-                        occupied.insert(
-                            path.clone(),
-                            Occupied::Package {
-                                node_key: node_key.clone(),
-                                name: node.name.clone(),
-                                version: node.version.clone(),
-                            },
-                        );
-                    }
-                    (path, true)
-                }
+                )?;
+                (path, true)
             }
             Target::Link(target) => {
-                let root = dependency_path("", &dependency.name);
-                if let Some(existing) = occupied.get(&root) {
-                    if same_target(existing, &dependency.target, &graph.nodes) {
-                        (root, false)
-                    } else if in_workspace {
-                        let path = dependency_path(&parent, &dependency.name);
-                        if let Some(existing) = occupied.get(&path) {
-                            if !same_target(existing, &dependency.target, &graph.nodes) {
-                                return Err(err(format!(
-                                    "{}: two workspace versions conflict at {} ({} and link:{})",
-                                    dependency.name,
-                                    path,
-                                    occupied_description(existing),
-                                    target
-                                )));
-                            }
-                        } else {
-                            occupied.insert(
-                                path.clone(),
-                                Occupied::Link {
-                                    target: target.clone(),
-                                    name: dependency.name.clone(),
-                                },
-                            );
-                            links.insert(
-                                path.clone(),
-                                NpmLink {
-                                    path: path.clone(),
-                                    target: target.clone(),
-                                },
-                            );
-                        }
-                        (path, false)
-                    } else if parent.is_empty() {
-                        return Err(err(format!(
-                            "{}: workspace hoisting conflict between {} and link:{}",
-                            dependency.name,
-                            occupied_description(existing),
-                            target
-                        )));
-                    } else {
-                        let path = dependency_path(&parent, &dependency.name);
-                        occupied.insert(
-                            path.clone(),
-                            Occupied::Link {
-                                target: target.clone(),
-                                name: dependency.name.clone(),
-                            },
-                        );
-                        links.insert(
-                            path.clone(),
-                            NpmLink {
-                                path: path.clone(),
-                                target: target.clone(),
-                            },
-                        );
-                        (path, false)
-                    }
-                } else {
-                    let path = if in_workspace {
-                        dependency_path(&parent, &dependency.name)
-                    } else {
-                        root.clone()
-                    };
-                    occupied.insert(
-                        path.clone(),
-                        Occupied::Link {
-                            target: target.clone(),
-                            name: dependency.name.clone(),
-                        },
-                    );
-                    links.insert(
-                        path.clone(),
-                        NpmLink {
-                            path: path.clone(),
-                            target: target.clone(),
-                        },
-                    );
-                    (path, false)
-                }
+                let path = place_workspace_link(
+                    target,
+                    &dependency,
+                    &parent,
+                    in_workspace,
+                    &mut occupied,
+                    &mut links,
+                    &graph.nodes,
+                )?;
+                (path, false)
             }
         };
         if should_expand {
@@ -522,33 +608,7 @@ fn build_plan(platform: Platform, graph: Graph, lock_source: &str) -> io::Result
         }
     }
 
-    let mut packages = Vec::new();
-    for (path, occupied) in occupied {
-        crate::tailors::node::validate_lock_path(&path)?;
-        let Occupied::Package { node_key, .. } = occupied else {
-            continue;
-        };
-        let node = graph
-            .nodes
-            .get(&node_key)
-            .ok_or_else(|| err(format!("internal: no package for {path}")))?;
-        let git = lock_git_source(&node.url, !node.integrity.is_empty());
-        packages.push(NpmPackage {
-            path,
-            name: node.name.clone(),
-            version: node.version.clone(),
-            url: node.url.clone(),
-            integrity: match &git {
-                Some(source) => format!("git:{}", source.commit),
-                None => node.integrity.clone(),
-            },
-            bin: Vec::new(),
-            patch: node.patch.clone(),
-            git,
-            optional: node.optional,
-        });
-    }
-    packages.sort_by(|a, b| a.path.cmp(&b.path));
+    let packages = resolved_packages(occupied, &graph.nodes)?;
     for link in links.values() {
         crate::tailors::node::validate_lock_path(&link.path)?;
     }
@@ -695,6 +755,91 @@ snapshots:
             .packages
             .iter()
             .any(|package| package.name == "mac-only"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Characterization: the whole placement result for one graph that
+    /// exercises hoisting, a nearer-conflict nesting, a workspace link and an
+    /// optional platform skip — every package field pinned, so a refactor of
+    /// the traversal cannot quietly move a value.
+    #[test]
+    fn build_plan_characterization_pins_the_whole_placement() {
+        let dir = project();
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+settings: {{}}
+importers:
+  .:
+    dependencies:
+      a:
+        specifier: 1.0.0
+        version: 1.0.0
+      b:
+        specifier: 1.0.0
+        version: 1.0.0
+      lib:
+        specifier: workspace:*
+        version: link:packages/lib
+    optionalDependencies:
+      mac-only:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  a@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: https://r/a.tgz}}
+  b@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: https://r/b.tgz}}
+  c@1.0.0:
+    resolution: {{integrity: {SRI}, tarball: https://r/c1.tgz}}
+  c@2.0.0:
+    resolution: {{integrity: {SRI}, tarball: https://r/c2.tgz}}
+  mac-only@1.0.0:
+    resolution: {{integrity: {SRI}}}
+    os: [darwin]
+snapshots:
+  a@1.0.0:
+    dependencies:
+      c: 1.0.0
+  b@1.0.0:
+    dependencies:
+      c: 2.0.0
+  c@1.0.0: {{}}
+  c@2.0.0: {{}}
+  mac-only@1.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        let placed: Vec<(&str, &str, &str)> = plan
+            .packages
+            .iter()
+            .map(|p| (p.path.as_str(), p.version.as_str(), p.url.as_str()))
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                ("node_modules/a", "1.0.0", "https://r/a.tgz"),
+                ("node_modules/b", "1.0.0", "https://r/b.tgz"),
+                ("node_modules/b/node_modules/c", "2.0.0", "https://r/c2.tgz"),
+                ("node_modules/c", "1.0.0", "https://r/c1.tgz"),
+            ],
+            "the optional darwin package is dropped, c@1 hoists and the \
+             nearer conflict nests c@2 under its dependent"
+        );
+        for package in &plan.packages {
+            assert_eq!(package.integrity, SRI);
+            assert!(package.bin.is_empty());
+            assert!(package.patch.is_none());
+            assert!(package.git.is_none());
+            assert!(!package.optional);
+        }
+        let links: Vec<(&str, &str)> = plan
+            .links
+            .iter()
+            .map(|l| (l.path.as_str(), l.target.as_str()))
+            .collect();
+        assert_eq!(links, vec![("node_modules/lib", "packages/lib")]);
+        assert_eq!(plan.lock_source, "pnpm-lock.yaml");
+        assert!(plan.workspaces.is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
