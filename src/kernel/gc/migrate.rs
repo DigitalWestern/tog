@@ -1,0 +1,413 @@
+//! Automatic maintenance and legacy metadata migration (kernel gc, D.3):
+//! additive upgrades under the exclusive lease, never a deletion permission.
+
+use super::*;
+
+// ===========================================================================
+// D.3 — automatic maintenance and legacy migration.
+//
+// Migration is additive maintenance, never a deletion permission. It runs
+// under the exclusive activity lease and the publication lock, upgrades only
+// records whose exact dependency set an adapter could reconstruct, and leaves
+// everything else untouched. A store that still holds one unresolved record
+// simply does not sweep — `validate` refuses on the legacy evidence itself.
+// ===========================================================================
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationReport {
+    pub upgraded: usize,
+    pub unresolved: usize,
+}
+
+/// Upgrade provable legacy object metadata under an exclusive activity lease.
+pub fn migrate_metadata<W: Write>(
+    store: &Store,
+    activity: &StoreActivity,
+    dry_run: bool,
+    out: &mut W,
+) -> io::Result<MigrationReport> {
+    store.require_exclusive_activity(activity, "metadata migration")?;
+    migrate_metadata_locked(store, activity, dry_run, out, false).map(|(report, _)| report)
+}
+
+/// The compatibility transition every eligible writable command runs before
+/// it takes its long-lived shared token.
+///
+/// There is deliberately no shared preflight: a presence check is itself a
+/// store read, and taking a shared token first would either have to be
+/// dropped before the exclusive attempt anyway or become the lock upgrade
+/// D.3 forbids. Going straight for the exclusive lease is the same decision
+/// with one fewer window.
+///
+/// If another job owns the store the transition is announced as deferred and
+/// the caller proceeds with ordinary non-destructive work; it never weakens
+/// the sweep, which refuses on unresolved evidence regardless.
+pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result<MigrationReport> {
+    let Some(activity) = store.try_activity_exclusive()? else {
+        writeln!(
+            out,
+            "metadata maintenance deferred: a Blanket job is using this store"
+        )?;
+        return Ok(MigrationReport::default());
+    };
+    let report = match migrate_metadata_locked(store, &activity, false, out, true) {
+        Ok((report, _)) => report,
+        Err(error) => {
+            // A malformed historical record must not stop a non-destructive
+            // shared job from using an otherwise valid cached projection. The
+            // destructive path stays fail-closed, and the explicit migration
+            // command still surfaces this error.
+            writeln!(
+                out,
+                "metadata maintenance deferred: {error}; retry after resolving the record"
+            )?;
+            return Ok(MigrationReport::default());
+        }
+    };
+    if report.unresolved != 0 {
+        writeln!(
+            out,
+            "metadata maintenance deferred: {} record(s) remain unresolved; GC stays blocked \
+             until they are resolved",
+            report.unresolved
+        )?;
+    }
+    Ok(report)
+}
+
+pub(super) fn migrate_metadata_locked<W: Write>(
+    store: &Store,
+    activity: &StoreActivity,
+    dry_run: bool,
+    out: &mut W,
+    automatic: bool,
+) -> io::Result<(MigrationReport, BTreeMap<String, serde_json::Value>)> {
+    store.require_exclusive_activity(activity, "metadata migration")?;
+    let _publish = store.publish_lock()?;
+    // Every migration input is re-read here, under the exclusive token. An
+    // earlier probe is a hint about whether to bother, never a snapshot to
+    // write from.
+    let index = crate::kernel::objmeta::MetaIndex::read(store)?;
+    let mut report = MigrationReport::default();
+    if !index.has_legacy() {
+        return Ok((report, BTreeMap::new()));
+    }
+    let cached = present_cache_entries(store)?;
+
+    let mut proposals: BTreeMap<String, ObjectDeps> = BTreeMap::new();
+    let mut unresolved: BTreeMap<String, String> = BTreeMap::new();
+    for (id, record) in index.iter() {
+        if record.evidence != crate::kernel::objmeta::Evidence::Legacy {
+            continue;
+        }
+        match crate::kernel::objmeta::adapt(record, &index) {
+            crate::kernel::objmeta::Adaptation::Proven(deps) => {
+                proposals.insert(id.clone(), deps);
+            }
+            crate::kernel::objmeta::Adaptation::Unresolved(reason) => {
+                unresolved.insert(id.clone(), reason);
+            }
+        }
+    }
+
+    // The containment guard. Migration may make retention more precise; it
+    // may never make it narrower. A record whose certified closure would drop
+    // something the pre-object-meta/2 reader retained stays legacy and keeps
+    // its old protection, because certifying it would license a deletion the
+    // evidence does not support.
+    //
+    // Dropping one record can change another's closure, so this runs to a
+    // fixpoint. It is monotone — records only ever move to unresolved — so it
+    // terminates in at most one round per legacy record.
+    loop {
+        let mut rejected = Vec::new();
+        for (id, deps) in &proposals {
+            let record = index.get(id).expect("proposals come from the index");
+            if let Err(reason) =
+                certification_covers_legacy_retention(record, deps, &proposals, &index, &cached)
+            {
+                rejected.push((id.clone(), format!("{}: {reason}", record.describe())));
+            }
+        }
+        if rejected.is_empty() {
+            break;
+        }
+        for (id, reason) in rejected {
+            proposals.remove(&id);
+            unresolved.insert(id, reason);
+        }
+    }
+
+    let mut upgrades: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for (id, deps) in &proposals {
+        let record = index.get(id).expect("proposals come from the index");
+        upgrades.insert(id.clone(), upgraded_record(record, deps)?);
+    }
+    for (id, reason) in &unresolved {
+        writeln!(
+            out,
+            "metadata migration unresolved: object {id} — {reason}. The record keeps its \
+             conservative legacy retention and no sweep will run until it is resolved."
+        )?;
+    }
+    report.unresolved = unresolved.len();
+
+    if dry_run {
+        for id in upgrades.keys() {
+            writeln!(out, "would migrate metadata for object {id}")?;
+        }
+        report.upgraded = upgrades.len();
+    } else {
+        // Only records actually written are reported as upgraded.
+        for (id, value) in &upgrades {
+            store.replace_metadata(id, &serde_json::to_vec_pretty(value)?)?;
+            report.upgraded += 1;
+        }
+    }
+    writeln!(
+        out,
+        "metadata migration: {} upgraded, {} unresolved{}",
+        report.upgraded,
+        report.unresolved,
+        if dry_run {
+            " (dry run)"
+        } else if automatic && report.unresolved != 0 {
+            " (deferred)"
+        } else {
+            ""
+        }
+    )?;
+    Ok((report, upgrades))
+}
+
+/// Rewrite one legacy record as `object-meta/2`, preserving its identity, id,
+/// creation timestamp and exceptions exactly as stored.
+pub(super) fn upgraded_record(
+    record: &crate::kernel::objmeta::Record,
+    deps: &ObjectDeps,
+) -> io::Result<serde_json::Value> {
+    let mut value = record.value.clone();
+    let object = value.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("object {} metadata is not a JSON object", record.id),
+        )
+    })?;
+    // The v1 `refs` array was a guess. It is dropped, never carried forward
+    // and never treated as completeness evidence.
+    object.remove("refs");
+    object.insert("schema".into(), serde_json::json!("object-meta/2"));
+    object.insert(
+        "dependencies".into(),
+        serde_json::Value::Array(
+            deps.objects
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "cache_digests".into(),
+        serde_json::Value::Array(
+            deps.cache
+                .iter()
+                .map(|digest| serde_json::json!({"algo": digest.algo(), "hex": digest.hex()}))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "evidence".into(),
+        serde_json::json!(format!(
+            "adapted:{}@{}",
+            record.identity.kind,
+            crate::kernel::objmeta::adapter_version(&record.identity.kind)
+        )),
+    );
+    if !record.had_legacy_refs {
+        object.insert("legacy_retention".into(), serde_json::json!(true));
+    }
+    Ok(value)
+}
+
+/// Every `algo:hex` the cache actually holds. The containment guard needs to
+/// tell a digest that names a retained file from one that names nothing: the
+/// pre-D reader scanned identity inputs for any 64-hex token, and plenty of
+/// those tokens — inner Hex checksums, manifest digests, content hashes —
+/// were never cache addresses and so retained nothing at all.
+pub(super) fn present_cache_entries(store: &Store) -> io::Result<BTreeSet<String>> {
+    let mut present = BTreeSet::new();
+    for (algo, _) in CACHE_ALGORITHMS {
+        let directory = store.root.join("cache").join(algo);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            present.insert(format!(
+                "{algo}:{}",
+                entry.file_name().to_string_lossy().to_ascii_lowercase()
+            ));
+        }
+    }
+    Ok(present)
+}
+
+/// The proposed post-migration dependency set for `id`: its own upgrade if it
+/// has one, otherwise whatever it already proves.
+pub(super) fn effective_deps<'a>(
+    id: &str,
+    proposals: &'a BTreeMap<String, ObjectDeps>,
+    index: &'a crate::kernel::objmeta::MetaIndex,
+) -> Option<(&'a BTreeSet<String>, Vec<String>)> {
+    if let Some(deps) = proposals.get(id) {
+        return Some((
+            &deps.objects,
+            deps.cache
+                .iter()
+                .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+                .collect(),
+        ));
+    }
+    let record = index.get(id)?;
+    Some((
+        &record.dependencies,
+        record
+            .cache
+            .iter()
+            .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+            .collect(),
+    ))
+}
+
+/// Does the proposed certification retain at least everything the pre-D
+/// reader retained for this record?
+///
+/// The old sweep protected two things it found by scanning identity inputs:
+/// any embedded object id, and any 64-hex token, which it treated as a
+/// sha256 cache address. Both are checked against the *transitive* closure of
+/// the proposed evidence, because retaining an object that itself retains the
+/// artifact loses nothing — a Python environment now names the built wheel's
+/// object, and that object names the sdist tarball the environment used to
+/// name directly.
+pub(super) fn certification_covers_legacy_retention(
+    record: &crate::kernel::objmeta::Record,
+    deps: &ObjectDeps,
+    proposals: &BTreeMap<String, ObjectDeps>,
+    index: &crate::kernel::objmeta::MetaIndex,
+    cached: &BTreeSet<String>,
+) -> Result<(), String> {
+    let identity_value = serde_json::to_value(&record.identity)
+        .map_err(|error| format!("identity is not serializable: {error}"))?;
+    let Some(inputs) = identity_value.get("inputs") else {
+        return Ok(());
+    };
+
+    // Transitive closure of the proposed evidence.
+    let mut reachable_objects: BTreeSet<String> = BTreeSet::new();
+    let mut reachable_cache: BTreeSet<String> = deps
+        .cache
+        .iter()
+        .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+        .collect();
+    let mut queue: VecDeque<String> = deps.objects.iter().cloned().collect();
+    while let Some(id) = queue.pop_front() {
+        if !reachable_objects.insert(id.clone()) {
+            continue;
+        }
+        if let Some((objects, cache)) = effective_deps(&id, proposals, index) {
+            reachable_cache.extend(cache);
+            for next in objects {
+                if !reachable_objects.contains(next) {
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+    }
+
+    let mut legacy_ids = BTreeSet::new();
+    collect_object_ids_from_value(inputs, &mut legacy_ids);
+    for id in &legacy_ids {
+        if !reachable_objects.contains(id) {
+            return Err(format!(
+                "the pre-object-meta/2 reader retained object {id} through this record's identity \
+                 inputs, and the reconstructed evidence does not reach it"
+            ));
+        }
+    }
+    for hash in legacy_cache_hashes(inputs) {
+        let key = format!("sha256:{hash}");
+        // A 64-hex token that addresses no cached file retained nothing, so
+        // not carrying it forward narrows nothing.
+        if !cached.contains(&key) {
+            continue;
+        }
+        if !reachable_cache.contains(&key) {
+            return Err(format!(
+                "the pre-object-meta/2 reader retained cached artifact sha256:{hash} through this \
+                 record's identity inputs, and the reconstructed evidence does not reach it"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Object ids embedded anywhere in a legacy identity's inputs. This is the
+/// pre-D `store::object_refs` scan, kept only to define what the old reader
+/// retained; it is never used as evidence of completeness.
+pub(super) fn collect_object_ids_from_value(value: &serde_json::Value, ids: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some(id) = store::object_id_token(text) {
+                ids.insert(id);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_object_ids_from_value(value, ids);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_object_ids_from_value(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The pre-D `gc::cache_hashes_from_value` heuristic: every 64-hex token in
+/// the identity inputs, which the old sweep treated as a sha256 cache
+/// address. Kept for the same reason as the scan above.
+pub(super) fn legacy_cache_hashes(value: &serde_json::Value) -> BTreeSet<String> {
+    let mut hashes = BTreeSet::new();
+    fn walk(value: &serde_json::Value, hashes: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                for token in text.split(|c: char| !c.is_ascii_hexdigit()) {
+                    if token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        hashes.insert(token.to_ascii_lowercase());
+                    }
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    walk(value, hashes);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    walk(value, hashes);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, &mut hashes);
+    hashes
+}
