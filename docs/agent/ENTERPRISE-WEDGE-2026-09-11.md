@@ -60,7 +60,7 @@ Full detail in [HITRATE.md](HITRATE.md) (2026-09-11 section). Raw:
 | ecosystem | permissive | company-policy | strict |
 |---|---|---|---|
 | python | 26/30 | 24/30 | 8/30 |
-| npm | 20/30 → 23/30 with the `plan_npm` workspace fix in this branch | 13/30 → 16/30 | 12/30 → 15/30 |
+| npm | 20/30 → 23/30 with the `plan_npm` workspace fix in this branch | 13/30 → 14/30 | 12/30 → 13/30 |
 
 Two things the fresh run taught that the 09-05 data could not:
 

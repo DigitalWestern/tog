@@ -349,7 +349,7 @@ prints them; `COMPANY_DENY` in `tests/hitrate.py` and
 | ecosystem | permissive | company-policy | strict | 2026-09-05 permissive |
 |---|---|---|---|---|
 | python | **26/30** | 24/30 | 8/30 | 16/30 |
-| npm | **20/30** (23/30 with the `plan_npm` fix below) | 13/30 (16/30) | 12/30 (15/30) | 21/30 |
+| npm | **20/30** (23/30 with the `plan_npm` fix below) | 13/30 (14/30) | 12/30 (13/30) | 21/30 |
 
 ### Python: 16 → 26
 
@@ -406,11 +406,17 @@ throwaway store), permissive and `--strict`:
 | repo | permissive | strict | note |
 |---|---|---|---|
 | google-gemini/gemini-cli | ok, 0 exceptions, 290 s | ok | workspace-local packages under `packages/a2a-server/node_modules` now present |
-| react/create-react-app | pending | pending | |
-| earendil-works/pi | pending | pending | |
+| react/create-react-app | ok, 163 s, 435 exceptions (434 `weak-integrity`: sha1 lock entries; 1 `artifact_not_provisioned`) | policy_denied (`weak-integrity`) | `docusaurus/website/node_modules` workspace-local packages now present; company-policy miss |
+| earendil-works/pi | ok, 90 s, 2 exceptions (`built_from_source` canvas@3.2.3, `install-script-failed`) | policy_denied (`built_from_source`) | `packages/agent/node_modules` workspace-local packages now present; company-policy miss (`install-script-failed`) |
 
-(The literal `--strict` pass over all 60 with the unfixed binary was still
-running when this section was written; rows are appended when it finishes.)
+A second create-react-app sync with a fresh store confirmed that the 435
+exceptions printed to stderr are exactly the 435 in `.blanket/closures/node.json`:
+the closure is a truthful record of what strict would refuse.
+
+The literal `--strict` pass over all 60 with the unfixed binary: **python
+8/30, exactly the derived number** (20 `policy_denied`, 4 the same misses as
+permissive). The npm half was still running when this was written; it is
+confirmation only.
 
 ### What the run says
 
