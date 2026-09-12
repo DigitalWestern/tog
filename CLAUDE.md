@@ -9,6 +9,14 @@ ledger — check it before trusting a recent feature. docs/agent/NEXT.md is
 a frozen index of shipped item numbers (code comments cite it; do not
 rename or reuse numbers). Run `cargo fmt --check` before committing.
 
+- Layers point one way: `commands → tailors → comforter → kernel`; `cli` is
+  pure grammar. The kernel never names a tailor; a tailor never names another
+  tailor or a command. `tests/architecture.rs` fails the build otherwise.
+- One folder per PR (`kernel/`, `comforter/`, one `tailors/<eco>/`, or
+  `commands/`) unless the change is a shared-layer review; the allow-list in
+  `tests/architecture.rs` is where cross-layer exceptions are documented.
+- Adding an ecosystem: implement the `Tailor` trait and register it, see
+  docs/human/ADDING-A-TAILOR.md.
 - Build: `cargo build` · unit tests: `cargo test` (offline)
 - Heavy integration tests (network + real PyPI): `cargo test -- --ignored`
   or the full checklist: `bash tests/acceptance.sh`
