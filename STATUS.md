@@ -40,8 +40,9 @@ committed as a clean series on `wp-gc-safety` (see `git log` and
 2. **Decide and merge `blanket audit`** — answer FOLLOW-UPS.md Flag 3
    (D1 toolchain-only records pass uncompared; D2 unchecked exits 1 on
    first adoption; D3 the gate does not authenticate the record), merge the
-   PR, then work the Flag 4 hardening plan, whose first two items are an
-   independent recheck of the round-2 nit fixes and the Mac gate.
+   PR, then work the Flag 4 hardening plan, starting with an independent
+   recheck of the round-2 nit fixes; the Mac gate is deliberately its last
+   item.
 3. **Follow-up PRs** — see [FOLLOW-UPS.md](FOLLOW-UPS.md) for the list:
    C.10 test matrix (20 missing tests), B.5 lease threading, `fsroot.rs`,
    `Store::has` lock order, M05 mutation survivor.

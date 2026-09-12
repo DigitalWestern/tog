@@ -115,9 +115,10 @@ that default, and none blocks the feature.
 
 ## Flag 4 — `blanket audit` hardening plan
 
-Ordered by what buys the most trust per hour. H1–H3 are verification the
-feature already owes under this repo's rules; H4 is the one real design
-piece; the rest are small. Each item names its exit criterion so a session
+Ordered by what buys the most trust per hour, except that the Mac gate is
+last by the owner's choice. H1–H2 are verification the feature already
+owes under this repo's rules; H3 is the one real design piece; the rest
+are small. Each item names its exit criterion so a session
 can pick it up cold.
 
 - **H1 — independent recheck of the round-2 nit fixes.** N1 (mapping
@@ -126,19 +127,14 @@ can pick it up cold.
   env-reading tests) were verified by the author only. Done when a reviewer
   who did not write them re-runs the three and the REVIEW.md entry-7 row
   drops its "nit fixes verified by the author only" clause.
-- **H2 — Mac gate.** `cargo test` and `cargo test --test cli audit` on
-  Darwin. The `inspect::status` → `closure_state` split touches every
-  `status` path, and Darwin identity goldens must stay byte-identical (no
-  identity input changed, so they should). Done when the LINUX_PORT.md
-  2026-09-1x entry records the run.
-- **H3 — acceptance coverage.** Add `blanket audit` to
+- **H2 — acceptance coverage.** Add `blanket audit` to
   `tests/acceptance.sh`: after a real Python and npm sync, run it under the
   offline check (`unshare -rn` on Linux) with `--policy
   docs/human/policy-company.toml`, assert exit 0 on the clean fixtures and
   exit 1 after planting one denied exception; assert `~/.blanket/store` mtime
   is unchanged across the run. Done when the checklist has the rows and they
   pass on Linux.
-- **H4 — make the evidence harder to forge (Flag 3 D3).** Two designs,
+- **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
   pick one after the owner answers D3:
   1. *Store cross-check, opt-in.* Object-affecting exceptions
      (`policy::object_exceptions`: file-collision, install-script-failed,
@@ -158,26 +154,31 @@ can pick it up cold.
      against untrusted branches.
   Done when the chosen design has its own review round and LIMITATIONS.md's
   audit bullet no longer says a hand-edited record audits as it says.
-- **H5 — mutation check of `src/audit.rs`.** This repo's rule is that
+- **H4 — mutation check of `src/audit.rs`.** This repo's rule is that
   fixes get mutation-checked; audit has not been. Flip each arm of
   `Verdict::passes`, each `Freshness` mapping in `freshness_from_state`, the
   `KINDS` membership test, and the `check_name` comparison; every mutant
   must turn at least one test red. Done when the survivors (if any) are
   listed here or in REVIEW.md.
-- **H6 — policy provenance in the report.** `policy::load` unions silently;
+- **H5 — policy provenance in the report.** `policy::load` unions silently;
   the JSON report says what is denied but not which file said so. Return
   the contributing sources from `load` (path → deny entries, strict) and
   emit them under `policy.sources`, so a CI log shows whether a denial came
   from the machine, the repository, or `--policy`. Done when the CLI test
   asserts the sources for a project-plus-flag case.
-- **H7 — per-closure attribution guard.** Attribution of exceptions to a
+- **H6 — per-closure attribution guard.** Attribution of exceptions to a
   closure relies on sync realizing and publishing one ecosystem at a time
   (`project.rs` clears the pending list after each write). Add a debug
   assertion, or a test, that the pending list is empty when each
   ecosystem's realization begins, so a future concurrent sync cannot
   silently cross-attribute. Done when the assertion exists and the suite is
   green.
-- **H8 — Flag 3 D1 and D2 outcomes.** Whatever the owner decides for the
+- **H7 — Flag 3 D1 and D2 outcomes.** Whatever the owner decides for the
   toolchain-only pass and the unchecked strictness, encode it in CLI.md, the
   `audit` help text, and one test each. Done when the two decisions are no
   longer open in Flag 3.
+- **H8 — Mac gate (deliberately last; the owner does not want to deal with it until the rest is done).** `cargo test` and `cargo test --test cli audit` on
+  Darwin. The `inspect::status` → `closure_state` split touches every
+  `status` path, and Darwin identity goldens must stay byte-identical (no
+  identity input changed, so they should). Done when the LINUX_PORT.md
+  2026-09-1x entry records the run.
