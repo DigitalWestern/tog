@@ -94,6 +94,15 @@ F3 report accounting, F4 acceptance tests).
    lock lives on the open file description, which a forked child shares
    until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
    verbatim); fix is to retry the try-lock briefly or isolate the test.
+9. **`tests/python_select.rs::unpinned_patch_request_fails_closed_before_opening_store`
+   fails at HEAD, before the refactor.** Verified 2026-09-12 on `a341b32`
+   (the last pre-refactor commit): `blanket sync` opens the store in
+   `dispatch` before `preflight_sync` refuses the unpinned patch request,
+   so the store tree exists when the test checks it. The refusal itself is
+   still correct (exit 1, message intact); only the "before opening the
+   store" half of the test is false. Either move the store open after the
+   preflight (a behavior change: `sync` would preflight before the
+   maintenance sweep) or relax the test. Not touched by the refactor.
 
 ## Flag 3 — `blanket audit`: three product decisions the reviewer asked the owner to make
 

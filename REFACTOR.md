@@ -547,3 +547,10 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   line-range by line-range; 18 cli unit tests before and after;
   `tests/cli.rs` (33 tests) untouched and green. Three private helpers
   became `pub(super)`; git records the rename as `cli.rs → cli/parse.rs`.
+- Stage 1 `--ignored` gate (Linux, `BLANKET_SANDBOX_TESTS=required`,
+  `--test-threads=1`, temp `BLANKET_STORE`): 39 passed, 2 failed.
+  `python_select::unpinned_patch_request_fails_closed_before_opening_store`
+  fails identically on the pre-refactor commit `a341b32` (FOLLOW-UPS.md
+  item 9). `native_libs::linux_native_libs_pkg_config_sdist_and_runtime`
+  failed only because the gate shell exported `CARGO_TARGET_DIR`, which the
+  test's own Rust probe build inherited; see the rerun note below.
