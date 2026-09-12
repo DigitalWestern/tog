@@ -109,6 +109,16 @@ F3 report accounting, F4 acceptance tests).
    `Tailor::registry_tool` method with "unsupported" defaults would make
    both registry-driven; each is its own design review (deps edits user
    manifests; x has its own cache and root registration).
+11. **Two cross-tailor edges, allow-listed in `tests/architecture.rs`.**
+   `tailors/python/build.rs` uses the cargo tailor's pinned toolchain to
+   build sdists with Rust extensions, and `tailors/node/mod.rs` uses the
+   Python tailor's CPython pin, `artifacts` (download/provision) and
+   `nativelibs` (shared-library env) for node-gyp install scripts. Both
+   `artifacts` and `nativelibs` are ecosystem-neutral in practice; a
+   kernel-level toolchain/artifact provider would remove both edges. Each
+   move is its own PR: relocate the module, keep the object ids
+   byte-identical (identity inputs must not change), then delete the
+   allow-list row.
 
 ## Flag 3 — `blanket audit`: three product decisions the reviewer asked the owner to make
 

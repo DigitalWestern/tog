@@ -609,3 +609,12 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
 - Gate: `cargo fmt --check`, `cargo build`, `cargo test --no-fail-fast`
   (614 passed, same set as baseline). Heavy gate recorded in the next
   entry. `docs/human/ADDING-A-TAILOR.md` written.
+
+### 2026-09-12 — Stage 3 heavy gate
+
+- `cargo test --no-fail-fast -- --ignored --test-threads=1` on Linux with
+  `BLANKET_SANDBOX_TESTS=required` and a temp `BLANKET_STORE`: 43 ok,
+  1 failed. The failure is
+  `python_select::unpinned_patch_request_fails_closed_before_opening_store`,
+  the same pre-existing failure as at the Stage 1 gate (FOLLOW-UPS.md
+  item 9); it fails identically on the pre-refactor commit a341b32.
