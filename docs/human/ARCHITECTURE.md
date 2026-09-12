@@ -247,13 +247,16 @@ collision-proof names.
 ## Layout
 
 Folders follow the layers (see [REFACTOR.md](../../REFACTOR.md) for the
-rules and the remaining stages): `commands → tailors → kernel`. The kernel
-never names a tailor; a tailor never names another tailor.
+rules and the change log): `commands → tailors → comforter → kernel`. The
+kernel never names a tailor; a tailor never names another tailor;
+`tests/architecture.rs` fails the build otherwise (its allow-list is where
+the few documented exceptions live).
 
 Entry point and grammar:
 
     src/main.rs     parse argv, set up output, call commands::resolve/dispatch
-    src/cli.rs      command grammar + help (pure, unit-tested; see CLI.md)
+    src/cli/        command grammar + help (pure, unit-tested; see CLI.md):
+                    mod.rs types, spec.rs the table, parse.rs, completions.rs
 
 Commands (`src/commands/`, one file per verb; the only layer that knows
 every tailor and the kernel):
@@ -270,26 +273,33 @@ every tailor and the kernel):
 
 Kernel (`src/kernel/`, ecosystem-agnostic):
 
-    types.rs        Identity, Plan, LockedPackage
+    types.rs        Identity, Plan, LockedPackage, GitSource
+    digest.rs       validated content digests (sha1/sha256/sha512)
     context.rs      Context { platform, store, activity lease } for store-backed verbs
     cyclonedx.rs    CycloneDX component builders every tailor's sbom uses
-    store.rs        immutable store: stage/commit/cache, roots, BLANKET_STORE
+    store/          immutable store: mod.rs Store and locks, objects.rs
+                    stage/commit/cache, roots.rs the root registry,
+                    projection.rs projection refs, env.rs BLANKET_STORE,
+                    fsops.rs descriptor-level filesystem helpers
     fetch.rs        verified downloads
     archive.rs      archive validation and delegated extraction
     dirhash.rs      Go module dirhash verification
     gitsrc.rs       git sources realized by commit
     policy.rs       permissive/strict exception policy
-    gc.rs           store garbage collection
-    objmeta.rs      object-meta/2 records and legacy adapters
+    gc/             store garbage collection: read.rs snapshot, plan.rs
+                    validate + plan, sweep.rs execute, migrate.rs maintenance
+    objmeta.rs      object-meta/2 records; the tailors' kind rows are
+                    installed at startup (tailors::install_kinds)
     activity.rs     store activity leases
     supervise.rs    supervised child processes
     platform.rs     the only module that knows the host
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
     ui.rs           output conventions: quiet/verbose/color, error channel
 
-Comforter (`src/comforter/`): environment realization + projection into
-the project directory (`mod.rs`; today still Python-aware, see REFACTOR.md)
-and `status.rs`, the projection-currency checks `blanket status` is built from.
+Comforter (`src/comforter/`): ecosystem-neutral closure records, projection
+symlinks, clone-tree and backup helpers (`mod.rs`) and `status.rs`, the
+projection-currency checks `blanket status` is built from. It names no
+tailor; Python environment realization lives in `tailors/python/env.rs`.
 
 Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
 folder has `tailor.rs` (its `impl Tailor`, the one blueprint every
@@ -305,14 +315,19 @@ commands iterate. See docs/human/ADDING-A-TAILOR.md.
     python/wheel.rs        PEP 427 wheel installer
     python/pyselect.rs     CPython constraint parsing and selection
     python/pep440.rs       PEP 440 versions and specifiers
-    python/manifest.rs     Python manifest discovery and normalization
+    python/manifest/       manifest discovery (discovery.rs), poetry.rs, uv.rs,
+                           requirements.rs, setup.rs, markers.rs
+    python/env.rs          venv-shaped env object realization and projection
     python/build.rs        sandboxed sdist-to-wheel builds
     python/build_requires.rs  PEP 517 build requirements
     python/nativelibs.rs   pinned, relocatable native libraries for Linux builds
     python/artifacts.rs    install-time artifact policy
-    node/mod.rs            npm planner, projection, lifecycle scripts
+    node/mod.rs            pins, plan types, scripts, path helpers
+    node/plan.rs           package-lock.json planning
+    node/realize.rs        env realization and sandboxed install scripts
+    node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
-    node/lock_import.rs    pnpm and Yarn classic lockfile importers
+    node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
     cargo/mod.rs           Cargo.lock importer + registry vendor realization
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
     cargo/rustfmt.rs       pinned formatter component for `blanket fmt`
