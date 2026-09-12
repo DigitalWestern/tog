@@ -7,20 +7,15 @@
 
 pub mod status;
 
-use crate::kernel::fetch::download_verified_held;
-use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::platform::Platform;
 use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};
-use crate::kernel::types::{ArtifactKind, Identity, Plan};
-use crate::tailors::python;
-use crate::tailors::python::pyselect;
-use crate::tailors::python::wheel;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -870,267 +865,6 @@ pub fn closure_object(
     Ok(path)
 }
 
-/// Realize the environment object for `plan`. Downloads/validates all
-/// artifacts, assembles the venv shape in a staging dir, commits atomically.
-/// Cache hit if the identical env already exists.
-pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
-    realize_env_at_depth(store, platform, plan, 0)
-}
-
-/// Canonical package order and duplicate rejection shared by planning and
-/// realization.
-fn canonical_packages<'a>(
-    plan: &'a Plan,
-) -> io::Result<Vec<&'a crate::kernel::types::LockedPackage>> {
-    let mut packages: Vec<&crate::kernel::types::LockedPackage> = plan.packages.iter().collect();
-    packages.sort_by(|a, b| a.name.cmp(&b.name));
-    for w in packages.windows(2) {
-        if w[0].name == w[1].name {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("duplicate package in plan: {}", w[0].name),
-            ));
-        }
-    }
-    Ok(packages)
-}
-
-/// Build the one canonical environment identity used by both planning and
-/// realization. `cpython_id` is pure during planning and is the realized
-/// interpreter object's id during execution; every other input is shared.
-fn environment_identity(
-    store: &Store,
-    platform: Platform,
-    plan: &Plan,
-    cpython_id: &str,
-) -> io::Result<Identity> {
-    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
-        no_pin(
-            &format!("cpython {}", plan.python_version),
-            platform,
-            "stage 2",
-        )
-    })?;
-    let packages = canonical_packages(plan)?;
-    let mut inputs = BTreeMap::new();
-    inputs.insert("schema".to_string(), "python-env/2".to_string());
-    inputs.insert(
-        "store_root".to_string(),
-        store.root.to_string_lossy().into_owned(),
-    );
-    inputs.insert("cpython".to_string(), cpython_id.to_string());
-    let mut native_libs_id = None;
-    for p in packages {
-        let value = match p.kind {
-            ArtifactKind::Wheel => format!("Wheel:{}", p.sha256),
-            ArtifactKind::Sdist => {
-                // A git dependency is packed into a deterministic sdist first,
-                // so its identity is the ordinary sdist derivation over that
-                // archive's hash (a pure function of the commit's tree).
-                let owned;
-                let p = if p.git.is_some() {
-                    owned = crate::tailors::python::build::git_sdist_package(store, platform, p)?;
-                    &owned
-                } else {
-                    p
-                };
-                let sdist = crate::tailors::python::build::plan_sdist_identity_input(
-                    store,
-                    platform,
-                    p,
-                    &pin.version,
-                    Some(plan),
-                )?;
-                if native_libs_id.is_none() {
-                    native_libs_id = sdist.native_libs_id;
-                }
-                sdist.input
-            }
-        };
-        inputs.insert(format!("pkg:{}", p.name), value);
-    }
-    if let Some(native_libs_id) = native_libs_id {
-        inputs.insert("native_libs".into(), native_libs_id);
-    }
-    Ok(Identity {
-        kind: "python-env".into(),
-        name: "env".into(),
-        version: plan.python_version.clone(),
-        inputs,
-    })
-}
-
-/// Compute an environment object id without realizing its files. Build
-/// planning uses this so an isolated sdist can commit its schema-3 identity
-/// into the parent before the parent cache lookup.
-pub(crate) fn planned_env_object_id(
-    store: &Store,
-    platform: Platform,
-    plan: &Plan,
-) -> io::Result<String> {
-    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
-        no_pin(
-            &format!("cpython {}", plan.python_version),
-            platform,
-            "stage 2",
-        )
-    })?;
-    let cpython_id = python::object_id_for(platform, &pin.version)?;
-    Ok(environment_identity(store, platform, plan, &cpython_id)?.object_id())
-}
-
-/// Internal realization entry point used by sdist build environments. The
-/// depth is carried through nested build-requirement sdists so a malicious or
-/// pathological chain cannot recurse forever.
-pub(crate) fn realize_env_at_depth(
-    store: &Store,
-    platform: Platform,
-    plan: &Plan,
-    sdist_depth: usize,
-) -> io::Result<PathBuf> {
-    crate::kernel::platform::require_host(platform, "Python environment", "stage 2")?;
-    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
-        no_pin(
-            &format!("cpython {}", plan.python_version),
-            platform,
-            "stage 2",
-        )
-    })?;
-    let python_obj = python::ensure_python_for(store, pin, platform)?;
-
-    // Identity planning and realization use exactly the same input builder.
-    // In particular, native sdist requirements contribute the pure libset id;
-    // the libset itself is realized only by a build that actually runs.
-    let cpython_id = python_obj
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let identity = environment_identity(store, platform, plan, &cpython_id)?;
-    let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
-        return Ok(store.object_path(&id));
-    }
-
-    // Canonical package order + duplicate rejection: identity uses the same
-    // helper, and this borrowed list drives deterministic installation.
-    let packages = canonical_packages(plan)?;
-
-    // Fetch everything first (all-or-nothing before assembly starts).
-    let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
-    // Keep verified cache leases alive until every wheel has been extracted.
-    let mut _cache_leases = Vec::new();
-    for &p in &packages {
-        let wheel_file = match p.kind {
-            ArtifactKind::Wheel => {
-                let lease = download_verified_held(store, &p.url, &p.sha256)?;
-                let path = lease.to_path_buf();
-                drop(lease);
-                path
-            }
-            // sdist -> wheel via sandboxed derivation (network denied).
-            ArtifactKind::Sdist => {
-                let owned;
-                let source = if p.git.is_some() {
-                    owned = crate::tailors::python::build::git_sdist_package(store, platform, p)?;
-                    &owned
-                } else {
-                    p
-                };
-                crate::tailors::python::build::build_sdist_wheel_at_depth(
-                    store,
-                    platform,
-                    source,
-                    &pin.version,
-                    Some(plan),
-                    sdist_depth + 1,
-                )?
-            }
-        };
-        artifacts.push((p, wheel_file));
-    }
-    // Sdist realization may recursively fetch toolchains. Re-verify all
-    // wheel inputs only after that work, then hold their leases through wheel
-    // extraction and publication.
-    for (p, path) in &mut artifacts {
-        if p.kind == ArtifactKind::Wheel {
-            let lease = download_verified_held(store, &p.url, &p.sha256)?;
-            *path = lease.to_path_buf();
-            _cache_leases.push(lease);
-        }
-    }
-
-    let minor = pin.version.split('.').take(2).collect::<Vec<_>>().join(".");
-    let staged = store.stage()?;
-    let bin = staged.join("bin");
-    let site = staged.join(format!("lib/python{minor}/site-packages"));
-    fs::create_dir_all(&bin)?;
-    fs::create_dir_all(&site)?;
-
-    // Standard venv shape: symlinked interpreter + pyvenv.cfg. CPython finds
-    // pyvenv.cfg next to the symlink, so store-side python resolves this env.
-    let py_target = python_obj.join("bin/python3");
-    symlink(&py_target, bin.join("python"))?;
-    symlink("python", bin.join("python3"))?;
-    symlink("python", bin.join(format!("python{minor}")))?;
-    fs::write(
-        staged.join("pyvenv.cfg"),
-        format!(
-            "home = {}\ninclude-system-site-packages = false\nversion = {}\n",
-            python_obj.join("bin").display(),
-            pin.version
-        ),
-    )?;
-
-    // The env's python path — as it will exist after commit — for shebangs.
-    let final_python = store.object_path(&id).join("bin/python");
-    let mut installed = BTreeMap::new();
-    for (_p, wheel_file) in &artifacts {
-        wheel::install_wheel(
-            wheel_file,
-            &site,
-            &bin,
-            &minor,
-            &final_python,
-            &mut installed,
-        )?;
-    }
-
-    let candidate = crate::kernel::policy::object_exceptions();
-    let mut deps = crate::kernel::store::ObjectDeps::new();
-    deps.object_id(&crate::kernel::store::object_id_from_path(&python_obj)?)?;
-    if let Some(native_id) = identity.inputs.get("native_libs") {
-        deps.object_id(native_id)?;
-    }
-    for (package, wheel_file) in &artifacts {
-        match package.kind {
-            ArtifactKind::Wheel => {
-                deps.cache_digest(crate::kernel::fetch::Digest::sha256(&package.sha256)?);
-            }
-            ArtifactKind::Sdist => {
-                let object = wheel_file.parent().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "sdist wheel path has no object parent: {}",
-                            wheel_file.display()
-                        ),
-                    )
-                })?;
-                deps.object_id(&crate::kernel::store::object_id_from_path(object)?)?;
-            }
-        }
-    }
-    let (object, applied) = store.commit_with_deps(&identity, &staged, &candidate, &deps)?;
-    for exception in applied {
-        if !candidate.contains(&exception) {
-            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
-        }
-    }
-    Ok(object)
-}
-
 /// If `path` is a real directory (a pre-blanket install), move it out of the
 /// project into `<blanket-home>/backups/` so no tool (tsc, vitest, eslint)
 /// ever crawls it again. blanket-home is derived from the env object's store
@@ -1393,12 +1127,6 @@ pub(crate) fn store_from_object_path(path: &Path) -> Option<Store> {
     Some(Store { root })
 }
 
-/// Project an env into a project directory: `.venv` symlink (atomic swap)
-/// plus closure-envelope provenance (.blanket/closures/python.json).
-pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, None, &[])
-}
-
 /// A project file the plan was computed from, recorded in the closure so
 /// `blanket status` can tell whether the projection is still current
 /// without re-planning. Additive closure field (`inputs`).
@@ -1439,107 +1167,13 @@ pub fn input_records(project_dir: &Path, candidates: &[PathBuf]) -> io::Result<V
     Ok(records)
 }
 
-/// `project_env_with_selection` plus the input files recorded for status.
-pub fn project_env_with_inputs(
-    project_dir: &Path,
-    env_obj: &Path,
-    plan: &Plan,
-    selection: &pyselect::PythonSelection,
-    inputs: &[InputRecord],
-) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, Some(selection), inputs)
-}
-
-/// Project a Python env and retain the exact interpreter constraint that led
-/// to the selected pin. This is separate from `project_env` to keep the
-/// existing kernel-facing helper compatible with hand-built Plans.
-pub fn project_env_with_selection(
-    project_dir: &Path,
-    env_obj: &Path,
-    plan: &Plan,
-    selection: &pyselect::PythonSelection,
-) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, Some(selection), &[])
-}
-
-fn project_env_inner(
-    project_dir: &Path,
-    env_obj: &Path,
-    plan: &Plan,
-    selection: Option<&pyselect::PythonSelection>,
-    inputs: &[InputRecord],
-) -> io::Result<()> {
-    let venv = project_dir.join(".venv");
-    let store = store_from_object_path(env_obj)
-        .ok_or_else(|| io::Error::other("environment object is not in a Blanket store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let env_obj = env_obj.canonicalize()?;
-    let project_lock = store.project_lock(project_dir)?;
-    let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
-    let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
-    let mut refs = ClosureRefs::new();
-    refs.object_path(&store, &activity, &env_obj)?;
-    if let Some(native_reference) = native_reference.as_ref() {
-        let native_id = native_reference["id"].as_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "native library closure reference has no object id",
-            )
-        })?;
-        refs.object_id(&store, &activity, native_id)?;
-    }
-    if let Some(backup) = backup.as_ref() {
-        refs.backup(&store, &activity, backup)?;
-    }
-    // Durable protection precedes both the user-data move and the visible
-    // .venv switch. A failed later step therefore over-retains safely.
-    persist_root_for_refs_with_project_lock(project_dir, &store, &activity, &refs, &project_lock)?;
-    if let Some(backup) = backup.as_ref() {
-        move_reserved_backup(&venv, backup)?;
-    }
-    // replace_project_symlink makes and renames its own temporary link; an
-    // extra one here would be left behind in the user's project on every
-    // sync.
-    replace_project_symlink(&venv, &env_obj, ".venv")?;
-
-    let python = selection
-        .map(|selection| {
-            serde_json::json!({
-                "version": selection.pin.version,
-                "constraint": selection.constraint,
-                "constraint_source": selection.constraint_source,
-            })
-        })
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "version": plan.python_version,
-                "constraint": serde_json::Value::Null,
-                "constraint_source": serde_json::Value::Null,
-            })
-        });
-    write_closure_with_project_lock(
-        project_dir,
-        "python",
-        serde_json::json!({
-            "env_object": env_obj,
-            "native_libs": native_reference,
-            "backup_path": backup,
-            "plan": plan,
-            "python": python,
-            "inputs": inputs,
-        }),
-        &store,
-        &activity,
-        refs,
-        &project_lock,
-    )
-}
-
 #[cfg(test)]
 mod closure_platform_tests {
     use super::*;
     use crate::kernel::types::LockedPackage;
+    use crate::kernel::types::{ArtifactKind, Plan};
     use sha2::Digest as _;
+    use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt as _;
 
     fn test_store(label: &str) -> Store {
@@ -1663,9 +1297,6 @@ mod closure_platform_tests {
         fs::write(dir.join(".blanket/closures/python.json"), v.to_string()).unwrap();
     }
 
-    /// A project whose path no root record can hold exactly is refused
-    /// before anything is written into it. Closures for a project GC cannot
-    /// protect are provenance for an environment the next sweep deletes.
     #[test]
     fn closures_are_refused_for_a_project_that_cannot_be_registered() {
         let dir = std::env::temp_dir().join(format!("blanket-unrecordable-{}", std::process::id()));
@@ -1720,9 +1351,6 @@ mod closure_platform_tests {
         serde_json::json!({"store_object": store.object_path("closure-test")})
     }
 
-    /// Publish a complete object so `ClosureRefs::object_id` accepts it.
-    /// Self-leases its own shared activity, so callers must not hold the
-    /// exclusive lease across it.
     fn complete_object(store: &Store, name: &str) -> String {
         let identity = crate::kernel::types::Identity {
             kind: "test".into(),
@@ -1748,11 +1376,6 @@ mod closure_platform_tests {
         id
     }
 
-    /// Strict publication must write the durable root record — the thing a
-    /// crash between it and the visible closure relies on for protection.
-    /// Removing the root publication (while the closure still lands) must
-    /// fail this test: the closure is provenance, the record is the
-    /// deletion authority.
     #[test]
     fn strict_publication_writes_the_durable_root_record() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
@@ -1893,108 +1516,5 @@ mod closure_platform_tests {
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(store.root);
-    }
-
-    #[test]
-    fn fast_sdist_parent_input_keeps_the_legacy_identity() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("fast-golden");
-        let fast = local_sdist(&store, "fast-golden", "\"setuptools>=40.8\"");
-        let plan = Plan {
-            ecosystem: "python".into(),
-            python_version: "3.12.14".into(),
-            packages: vec![fast.clone()],
-        };
-        let actual = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
-        let expected = Identity {
-            kind: "python-env".into(),
-            name: "env".into(),
-            version: "3.12.14".into(),
-            inputs: BTreeMap::from([
-                ("schema".into(), "python-env/2".into()),
-                (
-                    "store_root".into(),
-                    store.root.to_string_lossy().into_owned(),
-                ),
-                (
-                    "cpython".into(),
-                    python::object_id_for(Platform::host().unwrap(), "3.12.14").unwrap(),
-                ),
-                (
-                    "pkg:fast-golden".into(),
-                    format!(
-                        "Sdist:{}:{}",
-                        fast.sha256,
-                        crate::tailors::python::build::derivation_fingerprint()
-                    ),
-                ),
-            ]),
-        }
-        .object_id();
-        assert_eq!(actual, expected);
-        let _ = fs::remove_dir_all(&store.root);
-    }
-
-    #[test]
-    fn isolated_sdist_build_environment_changes_parent_identity() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("isolated-input");
-        let isolated = local_sdist(&store, "isolated-input", "\"setuptools~=83.1\"");
-        let fast = local_sdist(&store, "fast-input", "\"setuptools>=40.8\"");
-        let plan = Plan {
-            ecosystem: "python".into(),
-            python_version: "3.12.14".into(),
-            packages: vec![fast, isolated],
-        };
-        let key = cached_build_plan(&store, "setuptools~=83.1", &"a".repeat(64));
-        let first = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
-        cached_build_plan(&store, "setuptools~=83.1", &"b".repeat(64));
-        let second = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
-        assert_ne!(
-            first, second,
-            "schema-3 build-env input must affect parent id"
-        );
-        assert_eq!(
-            key,
-            crate::tailors::python::build_requires::lock_cache_key(
-                Platform::host().unwrap(),
-                "3.12.14",
-                &["setuptools~=83.1".into()],
-                None,
-            )
-        );
-        let _ = fs::remove_dir_all(&store.root);
-    }
-
-    #[test]
-    fn planned_and_realized_env_id_match_for_a_native_sdist() {
-        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let store = test_store("native-sdist-identity");
-        let platform = Platform::host().unwrap();
-        let native = local_native_sdist(&store, "native-sdist-identity");
-        let plan = Plan {
-            ecosystem: "python".into(),
-            python_version: "3.12.14".into(),
-            packages: vec![native],
-        };
-        let planned = planned_env_object_id(&store, platform, &plan).unwrap();
-        let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
-        let realized = environment_identity(&store, platform, &plan, &cpython_id).unwrap();
-        assert_eq!(planned, realized.object_id());
-        if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-            let native_id =
-                crate::tailors::python::nativelibs::object_id_for(&store, platform).unwrap();
-            assert_eq!(
-                realized.inputs.get("native_libs").map(String::as_str),
-                Some(native_id.as_str())
-            );
-        }
-        let _ = fs::remove_dir_all(&store.root);
     }
 }

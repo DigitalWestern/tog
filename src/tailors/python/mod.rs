@@ -5,6 +5,7 @@
 pub mod artifacts;
 pub mod build;
 pub(crate) mod build_requires;
+pub mod env;
 pub mod inputs;
 pub mod manifest;
 pub mod nativelibs;

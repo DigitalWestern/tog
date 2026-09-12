@@ -1,7 +1,6 @@
 //! The Python tailor's `Tailor` implementation: what `sync`, `plan`, `run`,
 //! `ls`, `status`, and `sbom` do for a Python project.
 
-use crate::comforter;
 use crate::comforter::status::{recorded_inputs_state, string, symlink_target, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
@@ -43,8 +42,8 @@ impl Tailor for Python {
         let platform = ctx.platform;
         let store = &ctx.store;
         let (plan, selection, inputs) = inputs::read_plan(platform, dir, store)?;
-        let env = comforter::realize_env(store, platform, &plan)?;
-        comforter::project_env_with_inputs(dir, &env, &plan, &selection, &inputs)?;
+        let env = super::env::realize_env(store, platform, &plan)?;
+        super::env::project_env_with_inputs(dir, &env, &plan, &selection, &inputs)?;
         ui::synced(".venv", &env);
         Ok(true)
     }

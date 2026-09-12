@@ -1,7 +1,6 @@
 //! Sandboxed sdist to wheel builds. PEP 517 build dependencies are inspected
 //! without execution and, when needed, realized as a separate Python env.
 
-use crate::comforter;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::Sandbox;
@@ -256,7 +255,7 @@ pub(crate) fn plan_sdist_identity_input(
     // Planning the nested environment may inspect more sdists and acquire
     // the same GC lock.
     drop(sdist);
-    let build_env_id = crate::comforter::planned_env_object_id(store, platform, &build_plan)?;
+    let build_env_id = super::env::planned_env_object_id(store, platform, &build_plan)?;
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
@@ -698,7 +697,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // The nested build environment may fetch its own artifacts. Do not hold
     // this sdist's cache lease while it acquires the same GC lock.
     drop(sdist);
-    let build_env = comforter::realize_env_at_depth(store, platform, &build_plan, depth)?;
+    let build_env = super::env::realize_env_at_depth(store, platform, &build_plan, depth)?;
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
@@ -1119,5 +1118,5 @@ pub fn ensure_build_environment(
     platform: Platform,
     python_version: &str,
 ) -> io::Result<PathBuf> {
-    comforter::realize_env(store, platform, &build_toolchain_plan(python_version))
+    super::env::realize_env(store, platform, &build_toolchain_plan(python_version))
 }

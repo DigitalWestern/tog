@@ -3,7 +3,6 @@
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
 
-use blanket::comforter;
 use blanket::kernel::platform::Platform;
 use blanket::kernel::store::Store;
 use blanket::kernel::types::*;
@@ -27,7 +26,8 @@ fn realize_env_and_run_python() {
         }],
     };
 
-    let env = comforter::realize_env(&store, Platform::host().unwrap(), &plan).expect("realize");
+    let env = blanket::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
+        .expect("realize");
     assert!(env.join("bin/python").exists());
     assert!(env.join("pyvenv.cfg").is_file());
 
@@ -47,7 +47,7 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 =
-        comforter::realize_env(&store, Platform::host().unwrap(), &plan).expect("realize again");
+    let env2 = blanket::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
+        .expect("realize again");
     assert_eq!(env, env2);
 }

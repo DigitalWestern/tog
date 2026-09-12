@@ -2186,8 +2186,8 @@ fn realize_python(
     }
     let text = fs::read_to_string(&output)?;
     let plan = pypi::plan_python(platform, &text, pin.version)?;
-    let env = comforter::realize_env(store, platform, &plan)?;
-    comforter::project_env_with_selection(root, &env, &plan, &selection)?;
+    let env = crate::tailors::python::env::realize_env(store, platform, &plan)?;
+    crate::tailors::python::env::project_env_with_selection(root, &env, &plan, &selection)?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())
 }

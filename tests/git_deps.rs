@@ -267,7 +267,7 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         python_version: "3.12.14".into(),
         packages,
     };
-    let env = blanket::comforter::realize_env(&store, platform, &plan).expect("realize");
+    let env = blanket::tailors::python::env::realize_env(&store, platform, &plan).expect("realize");
     let site = env.join("lib/python3.12/site-packages/gitdep/__init__.py");
     assert_eq!(
         std::fs::read_to_string(&site).unwrap(),
@@ -275,7 +275,8 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     );
 
     // The commit determines the environment: realizing again is a cache hit.
-    let again = blanket::comforter::realize_env(&store, platform, &plan).expect("second realize");
+    let again = blanket::tailors::python::env::realize_env(&store, platform, &plan)
+        .expect("second realize");
     assert_eq!(env, again);
 }
 
