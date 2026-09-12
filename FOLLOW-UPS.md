@@ -182,3 +182,44 @@ can pick it up cold.
   `status` path, and Darwin identity goldens must stay byte-identical (no
   identity input changed, so they should). Done when the LINUX_PORT.md
   2026-09-1x entry records the run.
+
+## npm regressions found by the 2026-09-11 hit-rate run (each its own PR)
+
+All at the pinned 2026-09-05 commits, all `ok` on 2026-09-05, all failing at
+`fb8b1d6`; full error text in `docs/agent/HITRATE.md` (2026-09-11 section)
+and `tests/fixtures/hitrate-linux-2026-09-11.csv`. The three
+workspace-local-package failures (gemini-cli, create-react-app, pi) are
+fixed on this branch; these five are not:
+
+8. **vitejs/vite — checked-in `node_modules` inside a workspace member.**
+   `packages/vite/src/node/__tests__/plugins/fixtures/license/dep-license-mit/node_modules`
+   is a real, git-tracked directory; the pnpm importer lists that fixture as
+   a workspace and projection now refuses to overwrite a real directory
+   (`replace_project_symlink`, src/project.rs). Decide: a fixture path that
+   already owns a real `node_modules` is not a workspace to project, or the
+   pnpm importer's workspace list is too broad. Loud, correct refusal; needs
+   a rule.
+9. **microsoft/playwright — `commit env: cache dependency sha256:… is
+   unavailable`.** The env commit names a cache object that is not there.
+   Likely object-meta/2 cache-dependency recording vs. the harness pruning
+   `cache/` between repos — but the prune happens *between* repos, so the
+   object was missing during a single sync. Reproduce with a fresh store
+   before assuming anything.
+10. **mermaid-js/mermaid — `pnpm patch fastdom has no package@version
+    identity`.** pnpm `patchedDependencies` keyed by bare package name
+    (applies to every version). New fail-closed row; decide whether to
+    support name-only patches by applying to each locked version.
+11. **paperclipai/paperclip — pnpm patch hash mismatch.** Expected value is
+    pnpm's base32 (`fymctidcjqjhi4cj72qtivlxry`), computed is sha256 hex.
+    pnpm 9+ stores patch hashes as base32-encoded truncated sha256; blanket
+    compares the wrong encoding. Verify against pnpm source before fixing.
+12. **ChatGPTNextWeb/NextChat — git source checkout `unable to read tree`.**
+    item-4 git realization of `Azure-Samples/aoai-realtime-audio-sdk` at
+    `abf2e9a8…`: the fetch is too shallow/partial for the checkout. Check
+    whether the commit is on a non-default branch or the tree needs a full
+    fetch.
+
+Also noted, not a regression: tailwindcss fails because its pnpm lock marks
+`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`; the
+harness labels it `py_no_wheel`, which is wrong — add an
+`npm_platform_required` class when touching the classifier next.

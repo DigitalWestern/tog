@@ -507,6 +507,11 @@ fn previous_workspace_set(project_dir: &Path) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|workspace| workspace.as_str().map(str::to_string))
+        // Closures written before 2026-09-11 listed workspace-local packages
+        // ("packages/lib/node_modules/c") as workspaces. Nothing under a
+        // node_modules can be a workspace; reconciling such an entry would
+        // stat and back up a path inside the old read-only forest.
+        .filter(|workspace| !workspace.contains("/node_modules/"))
         .collect()
 }
 
@@ -800,11 +805,18 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
     let mut out = Vec::new();
     let mut links = Vec::new();
     // Workspace source dirs appear as lock entries whose path is NOT under
-    // node_modules/ (e.g. "packages/lib"). They are the user's own source,
-    // not installed content.
+    // any node_modules/ (e.g. "packages/lib"). They are the user's own
+    // source, not installed content. A package nested inside a workspace
+    // ("packages/lib/node_modules/c", npm's placement on a version conflict)
+    // is installed content and must be realized like any other package;
+    // treating it as a workspace both dropped it from the plan and made
+    // projection try to plant a node_modules symlink beneath the workspace's
+    // own node_modules symlink (hit-rate 2026-09-11, google-gemini/gemini-cli).
     let workspace_dirs: Vec<&str> = packages
         .keys()
-        .filter(|p| !p.is_empty() && !p.starts_with("node_modules/"))
+        .filter(|p| {
+            !p.is_empty() && !p.starts_with("node_modules/") && !p.contains("/node_modules/")
+        })
         .map(String::as_str)
         .collect();
     // Sorted so parents precede children ("a/node_modules/b" sorts after
@@ -2960,6 +2972,67 @@ mod tests {
         assert_eq!(plan.packages[1].path, "node_modules/b/node_modules/c");
         // deterministic order
         assert!(plan.packages[0].path < plan.packages[1].path);
+    }
+
+    #[test]
+    fn workspace_local_packages_are_packages_not_workspaces() {
+        // package-lock v3 monorepo: "packages/lib" is a workspace source dir;
+        // "packages/lib/node_modules/c" is c@2 installed inside that
+        // workspace because the root hoists c@1. The nested entry is a
+        // package to realize, not a second workspace.
+        // "tools/node_modules-shim" is a workspace whose directory name merely
+        // contains the word: only a "/node_modules/" segment marks installed
+        // content, so it must stay a workspace.
+        let l = lock(&format!(
+            r#""node_modules/c":{{"version":"1.0.0","resolved":"https://r/c1.tgz","integrity":"{TEST_SRI}"}},
+               "node_modules/lib":{{"resolved":"packages/lib","link":true}},
+               "packages/lib":{{"name":"lib","version":"0.0.0"}},
+               "packages/lib/node_modules/c":{{"version":"2.0.0","resolved":"https://r/c2.tgz","integrity":"{TEST_SRI}"}},
+               "tools/node_modules-shim":{{"name":"shim","version":"0.0.0"}},
+               "tools/node_modules-shim/node_modules/c":{{"version":"3.0.0","resolved":"https://r/c3.tgz","integrity":"{TEST_SRI}"}}"#
+        ));
+        let plan = plan_npm(Platform::X86_64UnknownLinuxGnu, &l).unwrap();
+        assert_eq!(
+            plan.workspaces,
+            vec![
+                "packages/lib".to_string(),
+                "tools/node_modules-shim".to_string()
+            ]
+        );
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "node_modules/c",
+                "packages/lib/node_modules/c",
+                "tools/node_modules-shim/node_modules/c"
+            ]
+        );
+        assert_eq!(plan.packages[1].name, "c");
+        assert_eq!(plan.packages[1].version, "2.0.0");
+        assert_eq!(plan.packages[2].version, "3.0.0");
+        assert_eq!(plan.links.len(), 1);
+        assert_eq!(plan.links[0].target, "packages/lib");
+    }
+
+    #[test]
+    fn previous_workspace_set_drops_workspace_local_package_entries() {
+        let dir = std::env::temp_dir().join(format!("blanket-prev-ws-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        fs::write(
+            dir.join(".blanket/closures/node.json"),
+            r#"{"body":{"workspaces":["packages/lib","packages/lib/node_modules/c","tools/node_modules-shim"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            previous_workspace_set(&dir),
+            vec![
+                "packages/lib".to_string(),
+                "tools/node_modules-shim".to_string()
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
