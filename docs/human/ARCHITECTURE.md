@@ -14,7 +14,7 @@ apps with native wheels. Cargo, Go, Ruby, Elixir, and .NET all landed
 (adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+build),
 npm ~1015, cargo ~690, go ~600, ruby ~540, elixir ~620, dotnet ~540. The
 kernel thesis holds. pnpm v9/v6 and Yarn classic lockfile importers shipped
-2026-09-06 (`src/npm_lock_import.rs`). Current version: blanket 0.1.0.
+2026-09-06 (`src/tailors/node/lock_import.rs`). Current version: blanket 0.1.0.
 
 ## The model
 
@@ -67,7 +67,7 @@ Your `.venv` and `node_modules` are comforters.
 
 ## Platforms
 
-`src/platform.rs` defines `Platform` (`aarch64-apple-darwin`,
+`src/kernel/platform.rs` defines `Platform` (`aarch64-apple-darwin`,
 `x86_64-unknown-linux-gnu`) and is the only module that knows the host. Every
 pin table has one row per platform; every toolchain identity carries the
 triple, so a store shared between a Mac and a Linux box never confuses
@@ -158,7 +158,7 @@ must be an exact pin with `rollForward = "disable"`.
 ## Toolchain lock
 
 Every ecosystem has a pinned toolchain table with exact selection rules;
-the tables and selectors live in `src/platform.rs` and the per-ecosystem
+the tables and selectors live in `src/kernel/platform.rs` and the per-ecosystem
 modules. The committed `blanket-toolchain.toml` lock design (WP2, 2026-09-06)
 and its implementation history are archived in `docs/agent/PLAN-2026-09-09.md`.
 
@@ -213,7 +213,7 @@ it, so preview and sweep are the same phases over the same snapshot.
 Whether an object may be deleted is decided by `meta/<id>.json`
 (`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
 digests, and an `evidence` marker, `"explicit"` or `"adapted:<kind>@<n>"`.
-Adapters in `src/objmeta.rs` upgrade legacy records to this form; each is a
+Adapters in `src/kernel/objmeta.rs` upgrade legacy records to this form; each is a
 pure function of one record plus a read-only index, dispatched on the
 (kind, schema) pair, and never guesses from a current default pin. Unknown
 or incomplete metadata blocks deletion. A legacy record whose evidence cannot
@@ -236,61 +236,70 @@ filesystems where `flock` is advisory in name only.
 Publication and incomplete-object sweeping serialize on a cross-process file
 lock (`tmp/.publish.lock`), so a concurrent `has()` never mistakes a
 mid-publication object for a crashed one. Store-consuming operations hold an
-activity lease (`src/activity.rs`), shared or exclusive, with a fixed
+activity lease (`src/kernel/activity.rs`), shared or exclusive, with a fixed
 ordering: activity, then x-root, then project transaction, then cache, then
 publication. Each process supervises at most one awaited store-consuming
-child (`src/supervise.rs`) and forwards TERM to it. Contention is a named
+child (`src/kernel/supervise.rs`) and forwards TERM to it. Contention is a named
 outcome, not a hang: GC acquires exclusive activity and skips safely while a
 managed job holds the shared lease. Stage dirs and download temps use
 collision-proof names.
 
 ## Layout
 
-Command surface:
+Folders follow the layers (see [REFACTOR.md](../../REFACTOR.md) for the
+rules and the remaining stages): `commands → tailors → kernel`. The kernel
+never names a tailor; a tailor never names another tailor.
+
+Command surface (the only layer that knows every tailor and the kernel):
 
     src/cli.rs      command grammar + help (pure, unit-tested; see CLI.md)
     src/main.rs     dispatcher + per-ecosystem orchestration
-    src/ui.rs       output conventions: quiet/verbose/color, error channel
     src/inspect.rs  status / ls / doctor: read-only views over closures + store
     src/audit.rs    blanket audit: recorded exceptions judged against a policy
     src/deps.rs     add / remove / update, delegated to each ecosystem's tool
+    src/sbom.rs     CycloneDX 1.5 JSON from the closure envelopes
     src/xrun.rs     blanket x: run a registry tool without adding it to a project
 
-Kernel:
+Kernel (`src/kernel/`, ecosystem-agnostic):
 
-    src/types.rs    Identity, Plan, LockedPackage
-    src/store.rs    immutable store: stage/commit/cache
-    src/fetch.rs    verified downloads
-    src/gitsrc.rs   git sources realized by commit
-    src/project.rs  env realization + projection
-    src/policy.rs   permissive/strict exception policy
-    src/gc.rs       store garbage collection
-    src/objmeta.rs  object-meta/2 records and legacy adapters
-    src/activity.rs store activity leases
-    src/supervise.rs supervised child processes
-    src/sbom.rs     CycloneDX 1.5 JSON from the closure envelopes
-    src/platform.rs the only module that knows the host
-    src/sandbox.rs  hermetic build sandbox (Seatbelt / bubblewrap)
-    src/build.rs    sandboxed sdist-to-wheel builds
-    src/nativelibs.rs  pinned, relocatable native libraries for Linux builds
+    types.rs        Identity, Plan, LockedPackage
+    store.rs        immutable store: stage/commit/cache, roots, BLANKET_STORE
+    fetch.rs        verified downloads
+    archive.rs      archive validation and delegated extraction
+    dirhash.rs      Go module dirhash verification
+    gitsrc.rs       git sources realized by commit
+    policy.rs       permissive/strict exception policy
+    gc.rs           store garbage collection
+    objmeta.rs      object-meta/2 records and legacy adapters
+    activity.rs     store activity leases
+    supervise.rs    supervised child processes
+    platform.rs     the only module that knows the host
+    sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
+    ui.rs           output conventions: quiet/verbose/color, error channel
 
-Python:
+Comforter (`src/comforter/`): environment realization + projection into
+the project directory (`mod.rs`; today still Python-aware, see REFACTOR.md).
 
-    src/pypi.rs     Python planner (adapter)
-    src/wheel.rs    PEP 427 wheel installer
-    src/python.rs   pinned CPython provisioning
-    src/pyselect.rs CPython constraint parsing and selection
-    src/manifest.rs Python manifest discovery and normalization
+Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph):
 
-Ecosystem tailors:
-
-    src/npm.rs             npm planner, projection, lifecycle scripts
-    src/npm_lock_import.rs pnpm and Yarn classic lockfile importers
-    src/cargo.rs           Cargo.lock importer + registry vendor realization
-    src/golang.rs          module closure via the pinned Go toolchain
-    src/ruby.rs            Bundler-delegated planning, blanket-verified gems
-    src/elixir.rs          Mix/Hex, AST-validated lockfile
-    src/dotnet.rs          NuGet packages.lock.json (blanket-mandatory)
+    python/mod.rs          pinned CPython provisioning
+    python/pypi.rs         Python planner (adapter)
+    python/wheel.rs        PEP 427 wheel installer
+    python/pyselect.rs     CPython constraint parsing and selection
+    python/pep440.rs       PEP 440 versions and specifiers
+    python/manifest.rs     Python manifest discovery and normalization
+    python/build.rs        sandboxed sdist-to-wheel builds
+    python/build_requires.rs  PEP 517 build requirements
+    python/nativelibs.rs   pinned, relocatable native libraries for Linux builds
+    python/artifacts.rs    install-time artifact policy
+    node/mod.rs            npm planner, projection, lifecycle scripts
+    node/lock_import.rs    pnpm and Yarn classic lockfile importers
+    cargo/mod.rs           Cargo.lock importer + registry vendor realization
+    cargo/rustfmt.rs       pinned formatter component for `blanket fmt`
+    go/mod.rs              module closure via the pinned Go toolchain
+    ruby/mod.rs            Bundler-delegated planning, blanket-verified gems
+    elixir/mod.rs          Mix/Hex, AST-validated lockfile
+    dotnet/mod.rs          NuGet packages.lock.json (blanket-mandatory)
 
 ## Where the rest lives
 

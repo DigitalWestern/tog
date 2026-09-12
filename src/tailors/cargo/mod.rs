@@ -1,5 +1,7 @@
 //! The Cargo tailor: Cargo.lock importer and registry vendor realization.
 
+pub mod rustfmt;
+
 use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;

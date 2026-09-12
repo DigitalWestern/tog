@@ -16,6 +16,8 @@
 //! hostile lockfile is a network capability. A registry allowlist is the
 //! M5 control for that.
 
+pub mod lock_import;
+
 use crate::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;

@@ -3,7 +3,8 @@
 Rust workspace: universal package-manager kernel. Start with STATUS.md
 (where the project is, what is next) and docs/human/ARCHITECTURE.md (how
 it works). Design history lives in blanket-notes.md; the full archived
-plan is docs/agent/PLAN-2026-09-09.md. docs/agent/REVIEW.md is the review
+plan is docs/agent/PLAN-2026-09-09.md. REFACTOR.md is the structural refactor plan and
+change log (read it before touching module layout). docs/agent/REVIEW.md is the review
 ledger — check it before trusting a recent feature. docs/agent/NEXT.md is
 a frozen index of shipped item numbers (code comments cite it; do not
 rename or reuse numbers). Run `cargo fmt --check` before committing.
@@ -23,10 +24,10 @@ rename or reuse numbers). Run `cargo fmt --check` before committing.
 - Store objects are immutable and input-addressed; changing what goes INTO
   an object (inputs map in `Identity`) changes its id — never mutate an
   existing object's semantics without a new identity field.
-- Pinned artifacts (CPython in src/python.rs, build toolchain in
-  src/build.rs) carry sha256s verified at pin time; update the hash whenever
+- Pinned artifacts (CPython in src/tailors/python/mod.rs, build toolchain
+  in src/tailors/python/build.rs) carry sha256s verified at pin time; update the hash whenever
   you update a pin.
-- Platforms: macOS arm64 and Linux x86_64. `src/platform.rs` is the only
+- Platforms: macOS arm64 and Linux x86_64. `src/kernel/platform.rs` is the only
   place that knows the host; pins are per-platform rows; helpers take an
   explicit `Platform`. Darwin identity goldens must stay byte-identical.
 - Linux: sandbox is bubblewrap (`dnf install bubblewrap`); run e2e gates

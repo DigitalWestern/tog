@@ -9,7 +9,7 @@ taken during the GC-safety work, with the reason recorded.
 
 **Current behavior (kept on purpose).** One supervised child per process; a
 second supervisory session in the same process is rejected with a named
-`WouldBlock` busy error (`src/supervise.rs`, `Session::new`, the `try_lock`
+`WouldBlock` busy error (`src/kernel/supervise.rs`, `Session::new`, the `try_lock`
 arm). Production entry points run children sequentially through one lease, so
 the rejection only fires on a programming error.
 
@@ -195,7 +195,7 @@ fixed on this branch; these five are not:
    `packages/vite/src/node/__tests__/plugins/fixtures/license/dep-license-mit/node_modules`
    is a real, git-tracked directory; the pnpm importer lists that fixture as
    a workspace and projection now refuses to overwrite a real directory
-   (`replace_project_symlink`, src/project.rs). Decide: a fixture path that
+   (`replace_project_symlink`, src/comforter/mod.rs). Decide: a fixture path that
    already owns a real `node_modules` is not a workspace to project, or the
    pnpm importer's workspace list is too broad. Loud, correct refusal; needs
    a rule.

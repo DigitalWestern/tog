@@ -1,3 +1,17 @@
+//! The Python tailor: the pinned CPython toolchain (this file) and, in the
+//! sibling modules, PyPI locking, wheel installs, manifest discovery, and
+//! sandboxed sdist builds.
+
+pub mod artifacts;
+pub mod build;
+pub(crate) mod build_requires;
+pub mod manifest;
+pub mod nativelibs;
+pub mod pep440;
+pub mod pypi;
+pub mod pyselect;
+pub mod wheel;
+
 use crate::fetch::{download_verified_held, Digest};
 use crate::platform::{no_pin, Platform};
 use crate::store::Store;

@@ -1,39 +1,34 @@
-pub mod activity;
-pub mod archive;
-pub mod artifacts;
-pub mod audit;
-pub mod build;
-pub(crate) mod build_requires;
-pub mod cargo;
+//! blanket: a universal package-manager kernel.
+//!
+//! Layers point one way, `commands → tailors → kernel` (REFACTOR.md §2):
+//! `kernel/` is the ecosystem-agnostic core, `tailors/` holds one adapter
+//! per ecosystem, `comforter/` realizes and projects environments, and the
+//! command implementations at the top level are what the binary calls.
+
 pub mod cli;
+pub mod comforter;
+pub mod kernel;
+pub mod tailors;
+
+pub mod audit;
 pub mod deps;
-pub mod dirhash;
-pub mod dotnet;
-pub mod elixir;
-pub mod fetch;
-pub mod gc;
-pub mod gitsrc;
-pub mod golang;
 pub mod inspect;
-pub mod manifest;
-pub mod nativelibs;
-pub mod npm;
-pub mod npm_lock_import;
-pub mod objmeta;
-pub mod pep440;
-pub mod platform;
-pub mod policy;
-pub mod project;
-pub mod pypi;
-pub mod pyselect;
-pub mod python;
-pub mod ruby;
-pub mod rustfmt;
-pub mod sandbox;
 pub mod sbom;
-pub mod store;
-pub mod supervise;
-pub mod types;
-pub mod ui;
-pub mod wheel;
 pub mod xrun;
+
+// Stage 1 compatibility shims (REFACTOR.md §4, Stage 1 step 4): every
+// pre-move module name keeps resolving so call sites and in-flight branches
+// compile unchanged. The follow-up sweep PR deletes these.
+pub use comforter as project;
+pub use kernel::{
+    activity, archive, dirhash, fetch, gc, gitsrc, objmeta, platform, policy, sandbox, store,
+    supervise, types, ui,
+};
+pub use tailors::cargo::{self, rustfmt};
+pub use tailors::go as golang;
+pub use tailors::node::{self as npm, lock_import as npm_lock_import};
+pub(crate) use tailors::python::build_requires;
+pub use tailors::python::{
+    self, artifacts, build, manifest, nativelibs, pep440, pypi, pyselect, wheel,
+};
+pub use tailors::{dotnet, elixir, ruby};

@@ -1,3 +1,6 @@
+//! The content-addressed object store (kernel layer): object paths, atomic
+//! commit, root records, projection bases, and the `BLANKET_STORE` override.
+
 use crate::activity::{ActivityMode, StoreActivity};
 use crate::policy::Exception;
 use crate::types::Identity;

@@ -473,3 +473,27 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
   `commands` / `cli`, matching the architecture doc.
 - Not yet done: nothing has moved. STATUS.md and CLAUDE.md do not yet
   reference this file; add a pointer when Stage 1 is scheduled.
+
+### 2026-09-12 — Stage 1 landed: files moved into folders
+
+- Every `src/*.rs` except the entry points and the command implementations
+  (`cli`, `deps`, `inspect`, `sbom`, `xrun`, `audit`) moved into
+  `kernel/`, `tailors/<ecosystem>/`, or `comforter/` with `git mv`; no
+  file was split. `audit.rs` (landed after the plan's baseline) is a
+  command implementation and moves with the others in Stage 2.
+- `lib.rs` re-exports every old module name (the compatibility shim), so
+  no call site changed. The six modules without a `//!` line (`fetch`,
+  `platform`, `policy`, `store`, `types`, `python`) got one; `kernel/mod.rs`
+  and `tailors/mod.rs` state their layer.
+- `tools/modgraph.py` is the §1 metric script (pure standard library). It
+  counts non-test code only and resolves grouped `use crate::{..}` imports.
+  On this basis the pre-move tree has **4** cycles (`build↔project`,
+  `fetch↔store`, `gitsrc↔types`, `policy↔store`), not the 7 in §1: the
+  other three (`activity↔store`, `elixir↔objmeta`, `nativelibs↔objmeta`)
+  are one-way in non-test code. Stage 4's target is still zero.
+- Gate: `cargo fmt --check`, `cargo build`, `cargo test` (614 passed, 0
+  failed, same test set as baseline once module prefixes are normalized).
+  The `--ignored` run is recorded in the next entry.
+- Not runnable as-is: `docs/agent/review-fixtures/gc-a/mutations.py` is
+  pinned to commit `9b11e05` and asserts that HEAD; it is evidence of a past
+  review, not a live check, so its `src/gc.rs` paths were left alone.

@@ -1,3 +1,7 @@
+//! Policy loading and exception recording (kernel layer): the machine and
+//! project policy chain, the exception kinds a sync may wave through, and
+//! the collision checks the store consults at commit time.
+
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

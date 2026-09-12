@@ -1,3 +1,6 @@
+//! Base data types shared by every layer (kernel layer): object identity,
+//! locked packages, and plans.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

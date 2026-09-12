@@ -1,3 +1,6 @@
+//! Verified downloads into the store (kernel layer): fetch a URL, check
+//! its digest, and hold the bytes as a store object.
+
 use crate::store::{self, Store};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha512};

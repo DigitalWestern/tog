@@ -188,7 +188,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
 ## Elixir
 
 - **Two OTP steps run outside the sandbox on Linux**: the `Install -cross -minimal` relocation
-  and the OTP runtime probe (`src/elixir.rs`). They touch only the staged object — the one
+  and the OTP runtime probe (`src/tailors/elixir/mod.rs`). They touch only the staged object — the one
   non-sandboxed build step in the kernel. **OTP cache hits skip the runtime probe**: the OTP
   object was built on Fedora 44 (glibc 2.43 floor, OpenSSL 3.x); a store copied to an
   incompatible host fails only at execution time. Loud, but late.

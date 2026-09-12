@@ -1,3 +1,6 @@
+//! Host platform detection (kernel layer): the only place that knows what
+//! machine blanket is running on. Everything else takes an explicit `Platform`.
+
 use std::env::consts::{ARCH, OS};
 use std::io;
 use std::path::Path;

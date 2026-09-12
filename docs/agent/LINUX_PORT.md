@@ -1098,3 +1098,11 @@ disposable `BLANKET_STORE`. Findings, in the order they surfaced:
   prints a warning that `xcrun` could not write its SDK-lookup cache under
   the read-only `TMPDIR`; harmless, but it is noise the sandbox could avoid
   by pointing `TMPDIR` at a writable scratch dir.
+
+## 2026-09-12 — layout move (REFACTOR.md Stage 1)
+
+No platform behavior changed. Paths cited in earlier entries moved:
+`src/platform.rs` → `src/kernel/platform.rs`, `src/sandbox.rs` →
+`src/kernel/sandbox.rs`, `src/nativelibs.rs` → `src/tailors/python/nativelibs.rs`,
+`src/store.rs` / `src/gc.rs` → `src/kernel/`. The Mac gate for this stage
+is owed (see REFACTOR.md change log).
