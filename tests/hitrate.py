@@ -14,7 +14,9 @@ store between repos so the run fits in a few GB of disk.
 import argparse, csv, glob, json, os, re, shutil, signal, stat, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BLANKET = os.path.join(ROOT, "target/release/blanket")
+# BLANKET_BIN overrides the binary under test (e.g. a fix built into another
+# CARGO_TARGET_DIR while a long run still needs the original release binary).
+BLANKET = os.environ.get("BLANKET_BIN") or os.path.join(ROOT, "target/release/blanket")
 TOOLCHAIN = ("-cpython-", "-nodejs-", "-uv-")
 SKIP_NAMES = re.compile(
     r"awesome|interview|cheat|roadmap|tutorial|book|course|system-design|"
@@ -25,7 +27,11 @@ SKIP_NAMES = re.compile(
 
 # (class, regex over the combined stderr tail); first match wins.
 CLASSES = [
+    # --strict: any exception the permissive run would have recorded is a
+    # refusal; the err column keeps the "policy denies <kind>" line.
+    ("policy_denied", r"policy denies [a-z_-]+"),
     ("platform_unsupported", r"LINUX_PORT\.md"),
+    ("rust_toolchain_unpinned", r"unsupported Rust toolchain"),
     ("no_manifest", r"\bno_manifest\b"),
     ("unreadable_manifest", r"unreadable_manifest"),
     ("py_editable", r"editable requirements"),
@@ -47,6 +53,16 @@ CLASSES = [
     ("npm_too_big", r"expands past 1 GiB"),
     ("fetch_failed", r"fetch .*: |sha256 mismatch|hash mismatch"),
 ]
+
+# Exception kinds a company policy would deny (docs/agent/ENTERPRISE-WEDGE-2026-09-11.md
+# §0). An ok that carried only other kinds (file-collision, requirement-skipped,
+# built_from_source, ...) still counts as a company-policy ok; strict counts
+# only oks with zero exceptions.
+COMPANY_DENY = {
+    "install-script-failed", "weak-integrity", "unattested-mutable-state",
+    "unattested_index", "git-dependency", "lock_disagreement",
+    "artifact_not_provisioned",
+}
 
 CSV_COLUMNS = [
     "lang", "repo", "stars", "status", "class", "seconds", "inputs", "error",
@@ -325,7 +341,7 @@ def read_rows(path):
     return list(csv.DictReader(lines)) if lines else []
 
 
-def dry_run(targets, work):
+def dry_run(targets, work, strict=False):
     print(f"work: {work}")
     for lang, full, _stars, commit in targets:
         clone = os.path.join(work, "repo")
@@ -339,7 +355,7 @@ def dry_run(targets, work):
             )
         print(f"{lang}\t{full}\t{commit}")
         print(f"  {git}")
-        print(f"  BLANKET_STORE={os.path.join(work, 'store')} {BLANKET} sync")
+        print(f"  BLANKET_STORE={os.path.join(work, 'store')} {BLANKET} sync{' --strict' if strict else ''}")
 
 
 def classify(rc, out):
@@ -363,6 +379,8 @@ def main():
     ap.add_argument("--repos", help="tab-separated '<ecosystem>\t<owner/name>\t<commit>' file")
     ap.add_argument("--dry-run", action="store_true", help="print planned commands without touching disk or network")
     ap.add_argument("--keep", action="store_true", help="retain failed clones under WORK/failures")
+    ap.add_argument("--strict", action="store_true",
+                    help="run `blanket sync --strict`: a repo that needs any policy exception fails as policy_denied")
     a = ap.parse_args()
 
     manifests = {
@@ -393,7 +411,7 @@ def main():
     targets = limited
 
     if a.dry_run:
-        dry_run(targets, a.work)
+        dry_run(targets, a.work, a.strict)
         return
 
     if not os.path.exists(BLANKET):
@@ -415,7 +433,8 @@ def main():
     fout = open(a.out, "a", newline="")
     w = csv.writer(fout)
     if new:
-        fout.write(f"# platform={run_platform} blanket_commit={tool_commit}\n")
+        mode = "strict" if a.strict else "permissive"
+        fout.write(f"# platform={run_platform} blanket_commit={tool_commit} mode={mode}\n")
         w.writerow(CSV_COLUMNS)
 
     for lang, full, stars, commit in targets:
@@ -441,7 +460,8 @@ def main():
                                 "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]
                     if os.path.exists(os.path.join(clone, n))
                 )
-                rc, out, secs = run_timed([BLANKET, "sync"], clone, env, a.timeout)
+                sync = [BLANKET, "sync"] + (["--strict"] if a.strict else [])
+                rc, out, secs = run_timed(sync, clone, env, a.timeout)
                 cls = classify(rc, out)
                 err = ""
                 if cls != "ok":
@@ -472,6 +492,7 @@ def main():
     rows = read_rows(a.out)
     print(f"\nplatform: {run_platform}")
     print(f"blanket_commit: {tool_commit}")
+    print(f"mode: {'strict' if a.strict else 'permissive'}")
     for lang in ("python", "npm"):
         rs = [r for r in rows if r["lang"] == lang]
         if not rs:
@@ -480,9 +501,15 @@ def main():
         ok_with_exceptions = sum(
             r["status"] == "ok" and int(r.get("exceptions", 0) or 0) > 0 for r in rs
         )
+        company_ok = sum(
+            r["status"] == "ok"
+            and not (set(filter(None, r.get("exception_kinds", "").split(","))) & COMPANY_DENY)
+            for r in rs
+        )
         print(f"\n{lang}: {ok + ok_with_exceptions}/{len(rs)} syncs ok ({100 * (ok + ok_with_exceptions) // len(rs)}%)")
         print(f"  ok: {ok}")
         print(f"  ok_with_exceptions: {ok_with_exceptions}")
+        print(f"  permissive ok: {ok + ok_with_exceptions}/{len(rs)}   company-policy ok: {company_ok}/{len(rs)}   strict ok: {ok}/{len(rs)}")
         counts = {}
         for r in rs:
             for kind in filter(None, r.get("exception_kinds", "").split(",")):
