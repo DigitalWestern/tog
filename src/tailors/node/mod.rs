@@ -1055,6 +1055,131 @@ mod tests {
         );
     }
 
+    /// Characterization: one projection with a package, a workspace-local
+    /// package, a workspace link and a recorded input, pinning both the
+    /// symlink layout and every field of the closure record so a refactor of
+    /// the projection cannot quietly move a value or reorder a step.
+    #[test]
+    fn project_node_env_recorded_characterization_pins_the_closure() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("blanket-npm-projection-{nonce}"));
+        let project = root.join("project");
+        let env = root.join("home/store/objects/env");
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        fs::create_dir_all(env.join("node_modules/c")).unwrap();
+        fs::create_dir_all(env.join("workspaces/packages%2Flib/node_modules/c")).unwrap();
+        fs::write(env.join("node_modules/c/package.json"), "{}").unwrap();
+        fs::write(
+            env.join("workspaces/packages%2Flib/node_modules/c/package.json"),
+            "{}",
+        )
+        .unwrap();
+
+        let package = |path: &str, version: &str| NpmPackage {
+            path: path.into(),
+            name: "c".into(),
+            version: version.into(),
+            url: "https://example.invalid/c.tgz".into(),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![
+                package("node_modules/c", "1.0.0"),
+                package("packages/lib/node_modules/c", "2.0.0"),
+            ],
+            links: vec![NpmLink {
+                path: "node_modules/lib".into(),
+                target: "packages/lib".into(),
+            }],
+            workspaces: Vec::new(),
+            lock_source: "pnpm-lock.yaml".into(),
+        };
+        let inputs = vec![crate::comforter::InputRecord {
+            path: "package.json".into(),
+            sha256: "abc".into(),
+        }];
+        project_node_env_recorded(
+            &project,
+            &env,
+            Platform::host().unwrap(),
+            &plan,
+            &[],
+            false,
+            &inputs,
+        )
+        .unwrap();
+
+        // Both node_modules entries are symlinks into a forest outside the
+        // project, and the workspace link points back at the source dir.
+        for nm in [
+            project.join("node_modules"),
+            project.join("packages/lib/node_modules"),
+        ] {
+            assert!(
+                fs::symlink_metadata(&nm).unwrap().file_type().is_symlink(),
+                "{} is not a symlink",
+                nm.display()
+            );
+        }
+        let forest = fs::read_link(project.join("node_modules")).unwrap();
+        assert_eq!(forest.file_name().unwrap(), "node_modules");
+        assert!(fs::symlink_metadata(forest.join("lib"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let envelope: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project.join(".blanket/closures/node.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["schema"], "closure/1");
+        assert_eq!(envelope["ecosystem"], "node");
+        let closure = &envelope["body"];
+        assert_eq!(closure["projection_schema"], "node-forest/2");
+        assert_eq!(closure["node_version"], "24.20.0");
+        assert_eq!(closure["lock_source"], "pnpm-lock.yaml");
+        assert_eq!(closure["mutable_state"], "none");
+        assert_eq!(closure["mutable_scope"], "none");
+        assert_eq!(closure["mutable_packages"], serde_json::json!([]));
+        assert_eq!(closure["mutable_paths"], serde_json::json!([]));
+        assert_eq!(closure["backup_paths"], serde_json::json!([]));
+        assert_eq!(
+            closure["workspaces"],
+            serde_json::json!(["packages/lib"]),
+            "the workspace is inferred from the package-local placement"
+        );
+        assert_eq!(
+            closure["workspace_links"],
+            serde_json::json!([{"path": "node_modules/lib", "target": "packages/lib"}])
+        );
+        assert_eq!(
+            closure["packages"],
+            serde_json::json!([
+                {"path": "node_modules/c", "version": "1.0.0", "integrity": TEST_SRI},
+                {"path": "packages/lib/node_modules/c", "version": "2.0.0", "integrity": TEST_SRI},
+            ])
+        );
+        assert_eq!(
+            closure["inputs"],
+            serde_json::json!([{"path": "package.json", "sha256": "abc"}])
+        );
+        assert_eq!(closure["env_object"], env.to_string_lossy().into_owned());
+        assert!(closure["native_libs"].is_null());
+        assert_eq!(
+            closure["forest_path"].as_str().unwrap(),
+            forest.to_string_lossy()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn stale_workspace_projection_is_removed_when_dependency_aligns() {
         let nonce = std::time::SystemTime::now()

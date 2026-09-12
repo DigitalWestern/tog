@@ -196,6 +196,378 @@ pub fn project_node_env(
     project_node_env_recorded(project_dir, env_obj, platform, plan, mutable, fresh, &[])
 }
 
+/// The object id inside a native-library closure reference, checked because
+/// the id becomes a closure root reference.
+fn native_reference_id(reference: &Option<serde_json::Value>) -> io::Result<Option<&str>> {
+    reference
+        .as_ref()
+        .map(|reference| {
+            reference["id"].as_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native library closure reference has no object id",
+                )
+            })
+        })
+        .transpose()
+}
+
+/// The per-project transaction lock held across durable root publication and
+/// the visible closure rename.
+///
+/// Synthetic unit fixtures use placeholder object paths and the legacy
+/// closure writer. It acquires the transaction lock itself, so do not hold a
+/// second descriptor for that test-only path (Linux flock descriptors are
+/// independently blocking even within one process).
+fn projection_project_lock(
+    store: &Store,
+    project_dir: &Path,
+    strict_refs: bool,
+) -> io::Result<Option<fs::File>> {
+    if !strict_refs {
+        #[cfg(not(test))]
+        {
+            return Err(err(
+                "Node closure references must name complete store objects",
+            ));
+        }
+    }
+    #[cfg(test)]
+    {
+        if strict_refs {
+            Ok(Some(store.project_lock(project_dir)?))
+        } else {
+            Ok(None)
+        }
+    }
+    #[cfg(not(test))]
+    {
+        Ok(Some(store.project_lock(project_dir)?))
+    }
+}
+
+/// Reserve a backup name for every real (npm-made) node_modules the new
+/// projection is about to replace, plus the managed projections of workspaces
+/// that have left the lockfile.
+///
+/// A workspace can disappear from the imported lockfile (or stop having
+/// package-local dependencies) while its old managed projection remains in the
+/// source tree. Reconcile the previous closure before projecting the new set.
+/// Real directories are user state and retain backup_real_dir semantics; only
+/// symlinks proven to target blanket-owned roots are removed automatically.
+///
+/// Returns (backup paths, pending moves) — nothing is moved yet.
+#[allow(clippy::type_complexity)]
+fn reserve_projection_backups(
+    project_dir: &Path,
+    nm: &Path,
+    store: &Store,
+    home: &Path,
+    previous_workspaces: &[String],
+    workspaces: &[String],
+) -> io::Result<(Vec<PathBuf>, Vec<(PathBuf, PathBuf)>)> {
+    let mut backup_paths = Vec::new();
+    let mut pending_backups = Vec::new();
+    for workspace in previous_workspaces {
+        if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
+            continue;
+        }
+        let workspace_nm = project_dir.join(workspace).join("node_modules");
+        if !managed_projection_symlink_for_store(
+            &workspace_nm,
+            project_dir,
+            home,
+            Some(&store.root),
+        ) {
+            if let Some(backup) =
+                crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, store)?
+            {
+                pending_backups.push((workspace_nm, backup.clone()));
+                backup_paths.push(backup);
+            }
+        }
+    }
+    // A real (npm-made) node_modules is moved aside automatically so
+    // pointing blanket at an existing project is one command. Workspace
+    // importers get the same treatment in their source directories.
+    if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(nm, store)? {
+        pending_backups.push((nm.to_path_buf(), backup.clone()));
+        backup_paths.push(backup);
+    }
+    for workspace in workspaces {
+        let workspace_nm = project_dir.join(workspace).join("node_modules");
+        if let Some(backup) =
+            crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, store)?
+        {
+            pending_backups.push((workspace_nm, backup.clone()));
+            backup_paths.push(backup);
+        }
+    }
+    Ok((backup_paths, pending_backups))
+}
+
+/// Where this projection lives: its id and the forest paths derived from it.
+struct ForestPaths {
+    proj_id: String,
+    nm_root: PathBuf,
+    proj_dir: PathBuf,
+    /// The projected tree must itself be NAMED node_modules: Node's module
+    /// resolution only treats a directory as a package root when its
+    /// basename is node_modules, and cloned packages realpath to this tree.
+    forest: PathBuf,
+}
+
+/// Projection id: env object + mutable declarations + layout schema.
+///
+/// Forests live OUTSIDE the project (under the blanket home, keyed by project
+/// path): anything inside the project gets crawled by test runners and type
+/// checkers, and the forest links into store packages whose own test files
+/// must never be picked up.
+fn forest_paths(
+    project_dir: &Path,
+    env_obj: &Path,
+    store: &Store,
+    plan: &NpmPlan,
+    mutable: &[String],
+    workspaces: &[String],
+) -> io::Result<ForestPaths> {
+    use sha2::{Digest as _, Sha256};
+    let env_name = env_obj.file_name().unwrap().to_string_lossy().into_owned();
+    let link_key: String = plan
+        .links
+        .iter()
+        .map(|l| format!("{}={};", l.path, l.target))
+        .collect();
+    let workspace_key = workspaces.join(",");
+    let proj_id = hex::encode(Sha256::digest(
+        format!(
+            "node-forest/2\x00{env_name}\x00{}\x00{workspace_key}\x00{link_key}",
+            mutable.join(",")
+        )
+        .as_bytes(),
+    ))[..32]
+        .to_string();
+    let project_key = &hex::encode(Sha256::digest(
+        project_dir.canonicalize()?.as_os_str().as_bytes(),
+    ))[..32];
+    let nm_root = store.root.join("forests").join(project_key);
+    let proj_dir = nm_root.join(&proj_id);
+    let forest = proj_dir.join("node_modules");
+    Ok(ForestPaths {
+        proj_id,
+        nm_root,
+        proj_dir,
+        forest,
+    })
+}
+
+/// Managed projections of workspaces that have left the lockfile: only
+/// symlinks proven to target blanket-owned roots are removed automatically.
+fn remove_stale_workspace_links(
+    project_dir: &Path,
+    store: &Store,
+    home: &Path,
+    previous_workspaces: &[String],
+    workspaces: &[String],
+) -> io::Result<()> {
+    for workspace in previous_workspaces {
+        if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
+            continue;
+        }
+        let workspace_nm = project_dir.join(workspace).join("node_modules");
+        if managed_projection_symlink_for_store(&workspace_nm, project_dir, home, Some(&store.root))
+        {
+            fs::remove_file(workspace_nm)?;
+        }
+    }
+    Ok(())
+}
+
+/// Materialize the forest (root plus one per workspace) when it is missing or
+/// incomplete. Built in a sibling temp dir and renamed into place, so a
+/// concurrent reader never sees a half-built tree.
+#[allow(clippy::too_many_arguments)]
+fn build_project_forest(
+    store: &Store,
+    platform: Platform,
+    env_obj: &Path,
+    paths: &ForestPaths,
+    workspaces: &[String],
+    mutable: &[String],
+    fresh: bool,
+) -> io::Result<()> {
+    let ForestPaths {
+        proj_id,
+        nm_root,
+        proj_dir,
+        forest,
+    } = paths;
+    if fresh && proj_dir.exists() {
+        crate::kernel::store::remove_tree(proj_dir)?;
+    }
+    let workspace_forests_ready = workspaces.iter().all(|workspace| {
+        proj_dir
+            .join("workspaces")
+            .join(encode_workspace_path(workspace))
+            .join("node_modules")
+            .is_dir()
+    });
+    if !forest.exists() || !workspace_forests_ready {
+        fs::create_dir_all(nm_root)?;
+        let tmp = nm_root.join(format!(".{proj_id}.tmp.{}", std::process::id()));
+        if tmp.exists() {
+            crate::kernel::store::remove_tree(&tmp)?;
+        }
+        fs::create_dir_all(&tmp)?;
+        let src = env_obj.join("node_modules");
+        if mutable.is_empty() {
+            build_forest(&src, &tmp.join("node_modules"))?;
+        } else {
+            crate::comforter::clone_tree_for_store(
+                store,
+                &src,
+                &tmp.join("node_modules"),
+                platform,
+            )?;
+        }
+        for workspace in workspaces {
+            let src = env_obj
+                .join("workspaces")
+                .join(encode_workspace_path(workspace))
+                .join("node_modules");
+            let dest = tmp
+                .join("workspaces")
+                .join(encode_workspace_path(workspace))
+                .join("node_modules");
+            if mutable.is_empty() {
+                build_forest(&src, &dest)?;
+            } else {
+                crate::comforter::clone_tree_for_store(store, &src, &dest, platform)?;
+            }
+        }
+        fs::rename(&tmp, proj_dir)?;
+    }
+    Ok(())
+}
+
+/// Workspace links: symlinks into the project's own source dirs. The targets
+/// are user-owned and writable by nature. Idempotent — the projection id
+/// covers the link set, so a changed set is a new forest.
+fn link_workspace_sources(
+    project_dir: &Path,
+    plan: &NpmPlan,
+    proj_dir: &Path,
+    forest: &Path,
+) -> io::Result<()> {
+    for l in &plan.links {
+        let link_root = workspace_path(&l.path)
+            .map(|(workspace, _)| {
+                proj_dir
+                    .join("workspaces")
+                    .join(encode_workspace_path(workspace))
+                    .join("node_modules")
+            })
+            .unwrap_or_else(|| forest.to_path_buf());
+        let rel = importer_relative_path(&l.path).trim_start_matches("node_modules/");
+        let link = link_root.join(rel);
+        if let Some(parent) = link.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if link.symlink_metadata().is_err() {
+            let target = relative_path(
+                link.parent()
+                    .ok_or_else(|| err("workspace link has no parent"))?,
+                &project_dir.join(&l.target),
+            )?;
+            std::os::unix::fs::symlink(target, &link)?;
+        }
+    }
+    Ok(())
+}
+
+/// iCloud/Drive-synced folders resurrect each replaced symlink as a
+/// "node_modules 2"-style duplicate. Ones that are symlinks into
+/// blanket-owned paths are ours from earlier projections: remove them (test
+/// runners crawl through them otherwise). Anything else is only warned
+/// about — never delete what we didn't create.
+fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
+    let Ok(entries) = fs::read_dir(project_dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("node_modules ") {
+            continue;
+        }
+        let p = e.path();
+        // Only targets under blanket-owned roots count as ours — never
+        // delete a user's own symlink on a loose match.
+        let is_ours = fs::read_link(&p)
+            .map(|t| {
+                t.starts_with(home.join("forests"))
+                    || t.starts_with(store.root.join("forests"))
+                    || t.starts_with(home.join("store"))
+                    || t.starts_with(project_dir.join(".blanket/nm"))
+            })
+            .unwrap_or(false);
+        if is_ours {
+            let _ = fs::remove_file(&p);
+            eprintln!("blanket: removed stale sync-duplicate symlink {name:?}");
+        } else {
+            eprintln!(
+                "blanket: warning: {name:?} looks like a cloud-sync duplicate \
+                 of node_modules; consider removing it"
+            );
+        }
+    }
+}
+
+/// The closure record `blanket status` and `blanket gc` read.
+#[allow(clippy::too_many_arguments)]
+fn node_closure_body(
+    env_obj: &Path,
+    native_reference: &Option<serde_json::Value>,
+    paths: &ForestPaths,
+    backup_paths: &[PathBuf],
+    plan: &NpmPlan,
+    workspaces: &[String],
+    mutable: &[String],
+    inputs: &[crate::comforter::InputRecord],
+) -> serde_json::Value {
+    // Mutable declarations expand to every matching physical lockfile path.
+    let mutable_paths: Vec<&str> = plan
+        .packages
+        .iter()
+        .filter(|p| mutable.iter().any(|m| *m == p.name))
+        .map(|p| p.path.as_str())
+        .collect();
+    serde_json::json!({
+        "env_object": env_obj,
+        "native_libs": native_reference,
+        "projection_schema": "node-forest/2",
+        "projection_id": paths.proj_id,
+        "forest_path": paths.forest,
+        "backup_paths": backup_paths,
+        "node_version": plan.node_version,
+        "workspaces": workspaces,
+        "mutable_packages": mutable,
+        "mutable_paths": mutable_paths,
+        "mutable_state": if mutable.is_empty() { "none" } else { "unattested" },
+        // Honest scope: clone mode makes the WHOLE projected tree writable
+        // (path coherence requires it); mutable_paths lists only where
+        // writes are expected, not where they are possible.
+        "mutable_scope": if mutable.is_empty() { "none" } else { "whole-tree-clone" },
+        "workspace_links": plan.links.iter().map(|l| {
+            serde_json::json!({"path": l.path, "target": l.target})
+        }).collect::<Vec<_>>(),
+        "lock_source": plan.lock_source,
+        "inputs": inputs,
+        "packages": plan.packages.iter().map(|p| {
+            serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
+        }).collect::<Vec<_>>(),
+    })
+}
+
 /// `project_node_env` plus the input files recorded for `blanket status`
 /// (package.json and the lockfile the plan came from).
 pub fn project_node_env_recorded(
@@ -226,17 +598,7 @@ pub fn project_node_env_recorded(
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
-    let native_id = native_reference
-        .as_ref()
-        .map(|reference| {
-            reference["id"].as_str().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "native library closure reference has no object id",
-                )
-            })
-        })
-        .transpose()?;
+    let native_id = native_reference_id(&native_reference)?;
     let valid_env = env_obj
         .file_name()
         .and_then(|name| name.to_str())
@@ -245,111 +607,24 @@ pub fn project_node_env_recorded(
         .map(crate::kernel::store::is_object_id)
         .unwrap_or(true);
     let strict_refs = valid_env && valid_native;
-    if !strict_refs {
-        #[cfg(not(test))]
-        {
-            return Err(err(
-                "Node closure references must name complete store objects",
-            ));
-        }
-    }
-    // Synthetic unit fixtures use placeholder object paths and the legacy
-    // closure writer. It acquires the transaction lock itself, so do not hold
-    // a second descriptor for that test-only path (Linux flock descriptors
-    // are independently blocking even within one process).
-    let project_lock = {
-        #[cfg(test)]
-        {
-            if strict_refs {
-                Some(store.project_lock(project_dir)?)
-            } else {
-                None
-            }
-        }
-        #[cfg(not(test))]
-        {
-            Some(store.project_lock(project_dir)?)
-        }
-    };
+    let project_lock = projection_project_lock(&store, project_dir, strict_refs)?;
     let home = store
         .root
         .parent()
         .ok_or_else(|| err("cannot locate blanket home for legacy forests"))?;
-    let mut backup_paths = Vec::new();
-    let mut pending_backups = Vec::new();
-    // A workspace can disappear from the imported lockfile (or stop having
-    // package-local dependencies) while its old managed projection remains
-    // in the source tree. Reconcile the previous closure before projecting
-    // the new set. Real directories are user state and retain backup_real_dir
-    // semantics; only symlinks proven to target blanket-owned roots are
-    // removed automatically.
-    for workspace in &previous_workspaces {
-        if workspaces.contains(&workspace) || !safe_workspace_path(&workspace) {
-            continue;
-        }
-        let workspace_nm = project_dir.join(&workspace).join("node_modules");
-        if !managed_projection_symlink_for_store(
-            &workspace_nm,
-            project_dir,
-            &home,
-            Some(&store.root),
-        ) {
-            if let Some(backup) =
-                crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, &store)?
-            {
-                pending_backups.push((workspace_nm, backup.clone()));
-                backup_paths.push(backup);
-            }
-        }
-    }
-    // A real (npm-made) node_modules is moved aside automatically so
-    // pointing blanket at an existing project is one command. Workspace
-    // importers get the same treatment in their source directories.
-    if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(&nm, &store)? {
-        pending_backups.push((nm.clone(), backup.clone()));
-        backup_paths.push(backup);
-    }
-    for workspace in &workspaces {
-        let workspace_nm = project_dir.join(workspace).join("node_modules");
-        if let Some(backup) =
-            crate::comforter::reserve_backup_real_dir_for_store(&workspace_nm, &store)?
-        {
-            pending_backups.push((workspace_nm, backup.clone()));
-            backup_paths.push(backup);
-        }
-    }
+    let (backup_paths, pending_backups) = reserve_projection_backups(
+        project_dir,
+        &nm,
+        &store,
+        home,
+        &previous_workspaces,
+        &workspaces,
+    )?;
 
-    // Projection id: env object + mutable declarations + layout schema.
-    use sha2::{Digest as _, Sha256};
-    let env_name = env_obj.file_name().unwrap().to_string_lossy().into_owned();
-    let link_key: String = plan
-        .links
-        .iter()
-        .map(|l| format!("{}={};", l.path, l.target))
-        .collect();
-    let workspace_key = workspaces.join(",");
-    let proj_id = hex::encode(Sha256::digest(
-        format!(
-            "node-forest/2\x00{env_name}\x00{}\x00{workspace_key}\x00{link_key}",
-            mutable.join(",")
-        )
-        .as_bytes(),
-    ))[..32]
-        .to_string();
-
-    // Forests live OUTSIDE the project (under the blanket home, keyed by
-    // project path): anything inside the project gets crawled by test
-    // runners and type checkers, and the forest links into store packages
-    // whose own test files must never be picked up.
-    let project_key = &hex::encode(Sha256::digest(
-        project_dir.canonicalize()?.as_os_str().as_bytes(),
-    ))[..32];
-    let nm_root = store.root.join("forests").join(project_key);
-    let proj_dir = nm_root.join(&proj_id);
-    // The projected tree must itself be NAMED node_modules: Node's module
-    // resolution only treats a directory as a package root when its
-    // basename is node_modules, and cloned packages realpath to this tree.
-    let forest = proj_dir.join("node_modules");
+    let paths = forest_paths(project_dir, &env_obj, &store, plan, mutable, &workspaces)?;
+    let ForestPaths {
+        proj_dir, forest, ..
+    } = &paths;
     store.ensure_namespace(Path::new("forests"))?;
     store.ensure_namespace(Path::new("backups"))?;
     let mut refs = crate::comforter::ClosureRefs::new();
@@ -358,7 +633,7 @@ pub fn project_node_env_recorded(
         if let Some(native_id) = native_id {
             refs.object_id(&store, &activity, native_id)?;
         }
-        refs.forest(&store, &activity, &forest)?;
+        refs.forest(&store, &activity, forest)?;
         for backup in &backup_paths {
             refs.backup(&store, &activity, backup)?;
         }
@@ -380,131 +655,24 @@ pub fn project_node_env_recorded(
     for (source, backup) in pending_backups {
         crate::comforter::move_reserved_backup(&source, &backup)?;
     }
-    for workspace in &previous_workspaces {
-        if workspaces.contains(workspace) || !safe_workspace_path(workspace) {
-            continue;
-        }
-        let workspace_nm = project_dir.join(workspace).join("node_modules");
-        if managed_projection_symlink_for_store(
-            &workspace_nm,
-            project_dir,
-            &home,
-            Some(&store.root),
-        ) {
-            fs::remove_file(workspace_nm)?;
-        }
-    }
-    if fresh && proj_dir.exists() {
-        crate::kernel::store::remove_tree(&proj_dir)?;
-    }
-    let workspace_forests_ready = workspaces.iter().all(|workspace| {
-        proj_dir
-            .join("workspaces")
-            .join(encode_workspace_path(workspace))
-            .join("node_modules")
-            .is_dir()
-    });
-    if !forest.exists() || !workspace_forests_ready {
-        fs::create_dir_all(&nm_root)?;
-        let tmp = nm_root.join(format!(".{proj_id}.tmp.{}", std::process::id()));
-        if tmp.exists() {
-            crate::kernel::store::remove_tree(&tmp)?;
-        }
-        fs::create_dir_all(&tmp)?;
-        let src = env_obj.join("node_modules");
-        if mutable.is_empty() {
-            build_forest(&src, &tmp.join("node_modules"))?;
-        } else {
-            crate::comforter::clone_tree_for_store(
-                &store,
-                &src,
-                &tmp.join("node_modules"),
-                platform,
-            )?;
-        }
-        for workspace in &workspaces {
-            let src = env_obj
-                .join("workspaces")
-                .join(encode_workspace_path(workspace))
-                .join("node_modules");
-            let dest = tmp
-                .join("workspaces")
-                .join(encode_workspace_path(workspace))
-                .join("node_modules");
-            if mutable.is_empty() {
-                build_forest(&src, &dest)?;
-            } else {
-                crate::comforter::clone_tree_for_store(&store, &src, &dest, platform)?;
-            }
-        }
-        fs::rename(&tmp, &proj_dir)?;
-    }
-    // Workspace links: symlinks into the project's own source dirs. The
-    // targets are user-owned and writable by nature. Idempotent — the
-    // projection id covers the link set, so a changed set is a new forest.
-    for l in &plan.links {
-        let link_root = workspace_path(&l.path)
-            .map(|(workspace, _)| {
-                proj_dir
-                    .join("workspaces")
-                    .join(encode_workspace_path(workspace))
-                    .join("node_modules")
-            })
-            .unwrap_or_else(|| forest.clone());
-        let rel = importer_relative_path(&l.path).trim_start_matches("node_modules/");
-        let link = link_root.join(rel);
-        if let Some(parent) = link.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if link.symlink_metadata().is_err() {
-            let target = relative_path(
-                link.parent()
-                    .ok_or_else(|| err("workspace link has no parent"))?,
-                &project_dir.join(&l.target),
-            )?;
-            std::os::unix::fs::symlink(target, &link)?;
-        }
-    }
+    remove_stale_workspace_links(project_dir, &store, home, &previous_workspaces, &workspaces)?;
+    build_project_forest(
+        &store,
+        platform,
+        &env_obj,
+        &paths,
+        &workspaces,
+        mutable,
+        fresh,
+    )?;
+    link_workspace_sources(project_dir, plan, proj_dir, forest)?;
     // Old forests are deliberately NOT pruned here (Sol review 3): a dev
     // server may still be running from one, and pruning would break it
     // mid-session. They are cheap symlink trees; explicit `blanket gc`
     // with liveness checks is the collection path (M5).
+    remove_sync_duplicate_links(project_dir, &store, home);
 
-    // iCloud/Drive-synced folders resurrect each replaced symlink as a
-    // "node_modules 2"-style duplicate. Ones that are symlinks into
-    // blanket-owned paths are ours from earlier projections: remove them
-    // (test runners crawl through them otherwise). Anything else is only
-    // warned about — never delete what we didn't create.
-    if let Ok(entries) = fs::read_dir(project_dir) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !name.starts_with("node_modules ") {
-                continue;
-            }
-            let p = e.path();
-            // Only targets under blanket-owned roots count as ours — never
-            // delete a user's own symlink on a loose match.
-            let is_ours = fs::read_link(&p)
-                .map(|t| {
-                    t.starts_with(home.join("forests"))
-                        || t.starts_with(store.root.join("forests"))
-                        || t.starts_with(home.join("store"))
-                        || t.starts_with(project_dir.join(".blanket/nm"))
-                })
-                .unwrap_or(false);
-            if is_ours {
-                let _ = fs::remove_file(&p);
-                eprintln!("blanket: removed stale sync-duplicate symlink {name:?}");
-            } else {
-                eprintln!(
-                    "blanket: warning: {name:?} looks like a cloud-sync duplicate \
-                     of node_modules; consider removing it"
-                );
-            }
-        }
-    }
-
-    replace_with_symlink(&nm, &forest, "node_modules")?;
+    replace_with_symlink(&nm, forest, "node_modules")?;
     for workspace in &workspaces {
         let workspace_dir = project_dir.join(workspace);
         let workspace_nm = workspace_dir.join("node_modules");
@@ -515,40 +683,18 @@ pub fn project_node_env_recorded(
         replace_with_symlink(&workspace_nm, &workspace_forest, "workspace-node_modules")?;
     }
 
-    // Mutable declarations expand to every matching physical lockfile path.
-    let mutable_paths: Vec<&str> = plan
-        .packages
-        .iter()
-        .filter(|p| mutable.iter().any(|m| *m == p.name))
-        .map(|p| p.path.as_str())
-        .collect();
     let meta_dir = project_dir.join(".blanket");
     fs::create_dir_all(&meta_dir)?;
-    let body = serde_json::json!({
-        "env_object": env_obj,
-        "native_libs": native_reference,
-        "projection_schema": "node-forest/2",
-        "projection_id": proj_id,
-        "forest_path": forest,
-        "backup_paths": backup_paths,
-        "node_version": plan.node_version,
-        "workspaces": workspaces,
-        "mutable_packages": mutable,
-        "mutable_paths": mutable_paths,
-        "mutable_state": if mutable.is_empty() { "none" } else { "unattested" },
-        // Honest scope: clone mode makes the WHOLE projected tree writable
-        // (path coherence requires it); mutable_paths lists only where
-        // writes are expected, not where they are possible.
-        "mutable_scope": if mutable.is_empty() { "none" } else { "whole-tree-clone" },
-        "workspace_links": plan.links.iter().map(|l| {
-            serde_json::json!({"path": l.path, "target": l.target})
-        }).collect::<Vec<_>>(),
-        "lock_source": plan.lock_source,
-        "inputs": inputs,
-        "packages": plan.packages.iter().map(|p| {
-            serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
-        }).collect::<Vec<_>>(),
-    });
+    let body = node_closure_body(
+        &env_obj,
+        &native_reference,
+        &paths,
+        &backup_paths,
+        plan,
+        &workspaces,
+        mutable,
+        inputs,
+    );
     #[cfg(test)]
     if !strict_refs {
         return crate::comforter::write_closure_legacy(project_dir, "node", body);
