@@ -405,25 +405,80 @@ pub(super) fn poetry_lock_requirements(
                 "poetry.lock has no [[package]] entries",
             )
         })?;
-    let deps = pyproject
-        .get("tool")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("poetry"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("dependencies"))
-        .and_then(toml::Value::as_table)
+    let deps = poetry_section(pyproject, "dependencies")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Poetry dependencies missing"))?;
-    let extras = pyproject
-        .get("tool")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("poetry"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("extras"))
-        .and_then(toml::Value::as_table)
+    let extras = poetry_section(pyproject, "extras")
         .cloned()
         .unwrap_or_default();
     let requested = &cfg.extras;
     let roots = poetry_root_dependencies(deps, &extras, requested, python_version, platform)?;
+    let by_name = index_poetry_packages(packages)?;
+    // A package variant can change after a later root contributes a
+    // constraint. Rebuild the graph from the roots until the selected
+    // variants stop changing; this retracts descendants of discarded
+    // variants instead of leaving them in `reachable` forever.
+    let mut previous_selected = BTreeMap::<String, toml::Value>::new();
+    let mut final_reachable = BTreeSet::new();
+    let max_iterations = packages.len().saturating_mul(4).max(8);
+    let mut stabilized = false;
+    for _ in 0..max_iterations {
+        let (selected, reachable) = resolve_poetry_round(
+            &roots,
+            &by_name,
+            &previous_selected,
+            python_version,
+            platform,
+        )?;
+        final_reachable = reachable;
+        if selected == previous_selected {
+            stabilized = true;
+            previous_selected = selected;
+            break;
+        }
+        previous_selected = selected;
+    }
+    if !stabilized {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "poetry.lock package graph did not stabilize",
+        ));
+    }
+    let mut output = Vec::new();
+    for name in final_reachable {
+        let Some(package) = previous_selected.get(&name).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        if !poetry_package_is_main(package) {
+            continue;
+        }
+        if record_poetry_source_exceptions(&name, package)? {
+            continue;
+        }
+        output.push(poetry_requirement_line(lock, package, &name)?);
+    }
+    output.sort();
+    Ok(output)
+}
+
+/// The `[tool.poetry.<key>]` table, if the pyproject declares one.
+fn poetry_section<'a>(
+    pyproject: &'a toml::Value,
+    key: &str,
+) -> Option<&'a toml::map::Map<String, toml::Value>> {
+    pyproject
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|t| t.get("poetry"))
+        .and_then(toml::Value::as_table)
+        .and_then(|t| t.get(key))
+        .and_then(toml::Value::as_table)
+}
+
+/// Group the lock's `[[package]]` entries by normalized name; a name may
+/// have several variants, each conditioned on the Python version.
+fn index_poetry_packages(
+    packages: &[toml::Value],
+) -> io::Result<BTreeMap<String, Vec<&toml::Value>>> {
     let mut by_name: BTreeMap<String, Vec<&toml::Value>> = BTreeMap::new();
     for package in packages {
         let table = package.as_table().ok_or_else(|| {
@@ -446,175 +501,179 @@ pub(super) fn poetry_lock_requirements(
             .or_default()
             .push(package);
     }
-    // A package variant can change after a later root contributes a
-    // constraint. Rebuild the graph from the roots until the selected
-    // variants stop changing; this retracts descendants of discarded
-    // variants instead of leaving them in `reachable` forever.
-    let mut previous_selected = BTreeMap::<String, toml::Value>::new();
-    let mut final_reachable = BTreeSet::new();
-    let max_iterations = packages.len().saturating_mul(4).max(8);
-    let mut stabilized = false;
-    for _ in 0..max_iterations {
-        let mut incoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut requested_extras: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut reachable = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        for root in &roots {
+    Ok(by_name)
+}
+
+/// One pass of the fixpoint: walk the graph from the roots, preferring the
+/// variant the previous pass chose, and return what this pass selected
+/// along with the set of names it reached.
+#[allow(clippy::type_complexity)]
+fn resolve_poetry_round(
+    roots: &[PoetryDependency],
+    by_name: &BTreeMap<String, Vec<&toml::Value>>,
+    previous_selected: &BTreeMap<String, toml::Value>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<(BTreeMap<String, toml::Value>, BTreeSet<String>)> {
+    let mut incoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut requested_extras: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for root in roots {
+        add_poetry_edge(
+            &mut incoming,
+            &mut requested_extras,
+            &mut reachable,
+            &mut queue,
+            root.clone(),
+        );
+    }
+    let mut selected = BTreeMap::<String, toml::Value>::new();
+    while let Some(name) = queue.pop_front() {
+        let constraints = incoming.get(&name).map(Vec::as_slice).unwrap_or(&[]);
+        let Some(package) = select_poetry_package(
+            by_name.get(&name),
+            python_version,
+            platform,
+            Some(constraints),
+            previous_selected.get(&name),
+        )?
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "poetry.lock has no package variant for {name} satisfying {} on Python {python_version}",
+                    format_poetry_constraints(constraints),
+                ),
+            ));
+        };
+        selected.insert(name.clone(), package.clone());
+        let package = package.as_table().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "poetry.lock package is not a table",
+            )
+        })?;
+        let mut dependencies = package
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+            .map(|dependencies| {
+                poetry_active_dependencies(
+                    dependencies,
+                    python_version,
+                    platform,
+                    requested_extras.get(&name),
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+        dependencies.extend(poetry_lock_extra_dependencies(
+            package,
+            requested_extras.get(&name),
+            python_version,
+            platform,
+        )?);
+        for dependency in dependencies {
             add_poetry_edge(
                 &mut incoming,
                 &mut requested_extras,
                 &mut reachable,
                 &mut queue,
-                root.clone(),
+                dependency,
             );
         }
-        let mut selected = BTreeMap::<String, toml::Value>::new();
-        while let Some(name) = queue.pop_front() {
-            let constraints = incoming.get(&name).map(Vec::as_slice).unwrap_or(&[]);
-            let Some(package) = select_poetry_package(
-                by_name.get(&name),
-                python_version,
-                platform,
-                Some(constraints),
-                previous_selected.get(&name),
-            )?
-            else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "poetry.lock has no package variant for {name} satisfying {} on Python {python_version}",
-                        format_poetry_constraints(constraints),
-                    ),
-                ));
-            };
-            selected.insert(name.clone(), package.clone());
-            let package = package.as_table().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "poetry.lock package is not a table",
-                )
-            })?;
-            let mut dependencies = package
-                .get("dependencies")
-                .and_then(toml::Value::as_table)
-                .map(|dependencies| {
-                    poetry_active_dependencies(
-                        dependencies,
-                        python_version,
-                        platform,
-                        requested_extras.get(&name),
-                    )
-                })
-                .transpose()?
-                .unwrap_or_default();
-            dependencies.extend(poetry_lock_extra_dependencies(
-                package,
-                requested_extras.get(&name),
-                python_version,
-                platform,
-            )?);
-            for dependency in dependencies {
-                add_poetry_edge(
-                    &mut incoming,
-                    &mut requested_extras,
-                    &mut reachable,
-                    &mut queue,
-                    dependency,
-                );
-            }
-        }
-        final_reachable = reachable;
-        if selected == previous_selected {
-            stabilized = true;
-            previous_selected = selected;
-            break;
-        }
-        previous_selected = selected;
     }
-    if !stabilized {
+    Ok((selected, reachable))
+}
+
+/// Whether a locked package belongs to the main group. Poetry 2.x lists
+/// `groups`; 1.x carried a single `category` instead.
+fn poetry_package_is_main(package: &toml::map::Map<String, toml::Value>) -> bool {
+    if package
+        .get("category")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|v| v != "main")
+    {
+        return false;
+    }
+    !package
+        .get("groups")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|groups| {
+            !groups
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .any(|group| group == "main")
+        })
+}
+
+/// Record what this package's source costs us in attestation. Returns true
+/// when the source has no locked registry artifact and must be skipped.
+fn record_poetry_source_exceptions(
+    name: &str,
+    package: &toml::map::Map<String, toml::Value>,
+) -> io::Result<bool> {
+    let Some(source) = package.get("source").and_then(toml::Value::as_table) else {
+        return Ok(false);
+    };
+    let source_type = source
+        .get("type")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default();
+    if matches!(source_type, "directory" | "git" | "url") {
+        crate::kernel::policy::record(
+            crate::kernel::policy::REQUIREMENT_SKIPPED,
+            name,
+            &format!("Poetry lock package uses unsupported {source_type} source"),
+        )?;
+        return Ok(true);
+    }
+    let url = source
+        .get("url")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default();
+    if !is_public_pypi_url(url)
+        && source.get("reference").and_then(toml::Value::as_str) != Some("pypi")
+    {
+        crate::kernel::policy::record(
+            crate::kernel::policy::UNATTESTED_INDEX,
+            name,
+            "Poetry lock package has a non-default source",
+        )?;
+    }
+    Ok(false)
+}
+
+/// The pinned requirement line for one locked package, hashes and all.
+fn poetry_requirement_line(
+    lock: &toml::Value,
+    package: &toml::map::Map<String, toml::Value>,
+    name: &str,
+) -> io::Result<String> {
+    let hashes = poetry_package_hashes(lock, package, name)?;
+    if hashes.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "poetry.lock package graph did not stabilize",
+            format!("poetry.lock package {name} has no sha256 file hash"),
         ));
     }
-    let mut output = Vec::new();
-    for name in final_reachable {
-        let Some(package) = previous_selected.get(&name).and_then(toml::Value::as_table) else {
-            continue;
-        };
-        if package
-            .get("category")
-            .and_then(toml::Value::as_str)
-            .is_some_and(|v| v != "main")
-        {
-            continue;
-        }
-        if package
-            .get("groups")
-            .and_then(toml::Value::as_array)
-            .is_some_and(|groups| {
-                !groups
-                    .iter()
-                    .filter_map(toml::Value::as_str)
-                    .any(|group| group == "main")
-            })
-        {
-            continue;
-        }
-        if let Some(source) = package.get("source").and_then(toml::Value::as_table) {
-            let source_type = source
-                .get("type")
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default();
-            if matches!(source_type, "directory" | "git" | "url") {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::REQUIREMENT_SKIPPED,
-                    &name,
-                    &format!("Poetry lock package uses unsupported {source_type} source"),
-                )?;
-                continue;
-            }
-            let url = source
-                .get("url")
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default();
-            if !is_public_pypi_url(url)
-                && source.get("reference").and_then(toml::Value::as_str) != Some("pypi")
-            {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::UNATTESTED_INDEX,
-                    &name,
-                    "Poetry lock package has a non-default source",
-                )?;
-            }
-        }
-        let hashes = poetry_package_hashes(lock, package, &name)?;
-        if hashes.is_empty() {
-            return Err(io::Error::new(
+    let version = package
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("poetry.lock package {name} has no sha256 file hash"),
-            ));
-        }
-        let version = package
-            .get("version")
-            .and_then(toml::Value::as_str)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("poetry.lock package {name} has no version"),
-                )
-            })?;
-        output.push(format!(
-            "{name}=={version} {}",
-            hashes
-                .iter()
-                .map(|hash| format!("--hash=sha256:{hash}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-    }
-    output.sort();
-    Ok(output)
+                format!("poetry.lock package {name} has no version"),
+            )
+        })?;
+    Ok(format!(
+        "{name}=={version} {}",
+        hashes
+            .iter()
+            .map(|hash| format!("--hash=sha256:{hash}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ))
 }
 
 pub(super) fn select_poetry_package<'a>(

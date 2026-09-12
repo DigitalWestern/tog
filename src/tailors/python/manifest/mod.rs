@@ -701,6 +701,88 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
     }
 
     #[test]
+    fn poetry_lock_filters_legacy_categories_and_unsupported_sources() {
+        let project: toml::Value = toml::from_str(
+            r#"[tool.poetry.dependencies]
+six = "^1.0"
+devtool = "*"
+vendored = "*"
+"#,
+        )
+        .unwrap();
+        // Poetry 1.x labelled groups with `category` instead of `groups`, and
+        // a directory/git/url source has no registry artifact to lock.
+        let lock: toml::Value = toml::from_str(
+            r#"[[package]]
+name = "six"
+version = "1.17.0"
+category = "main"
+files = [{ file = "six.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+
+[[package]]
+name = "devtool"
+version = "2.0.0"
+category = "dev"
+files = [{ file = "devtool.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
+
+[[package]]
+name = "vendored"
+version = "0.1.0"
+category = "main"
+source = { type = "directory", url = "../vendored" }
+files = [{ file = "vendored.whl", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
+"#,
+        )
+        .unwrap();
+        let requirements = poetry_lock_requirements(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &lock,
+            &BlanketPythonConfig::default(),
+            "3.12.14",
+        )
+        .unwrap();
+        assert_eq!(requirements.len(), 1);
+        assert!(
+            requirements[0].starts_with("six==1.17.0"),
+            "{requirements:?}"
+        );
+        crate::kernel::policy::clear();
+    }
+
+    #[test]
+    fn poetry_lock_package_without_a_hash_is_an_error() {
+        let project: toml::Value = toml::from_str(
+            r#"[tool.poetry.dependencies]
+six = "^1.0"
+"#,
+        )
+        .unwrap();
+        let lock: toml::Value = toml::from_str(
+            r#"[[package]]
+name = "six"
+version = "1.17.0"
+groups = ["main"]
+files = []
+"#,
+        )
+        .unwrap();
+        let error = poetry_lock_requirements(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &lock,
+            &BlanketPythonConfig::default(),
+            "3.12.14",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "poetry.lock package six has no sha256 file hash"
+        );
+    }
+
+    #[test]
     fn constraints_remain_constraint_only_after_flattening() {
         let dir = temp_project("constraints");
         fs::write(dir.join("requirements.txt"), "-c constraints.txt\nsix>=1\n").unwrap();
