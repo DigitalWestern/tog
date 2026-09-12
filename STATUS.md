@@ -33,10 +33,11 @@ committed as a clean series on `wp-gc-safety` (see `git log` and
 ## What is next (in order)
 
 A structural refactor is in progress alongside the items below; see
-[REFACTOR.md](REFACTOR.md) for the stages and the change log. Stage 1
-(files moved into `kernel/`, `tailors/`, `comforter/`) landed 2026-09-12;
-in-flight branches rebase cleanly if they did not touch moved files, and
-old `crate::<module>` paths keep resolving until the sweep PR lands.
+[REFACTOR.md](REFACTOR.md) for the stages and the change log. Stages 1 and 2
+(files moved into `kernel/`, `tailors/`, `comforter/`; the entry point split
+into `commands/` and `cli/`) landed 2026-09-12. Old `crate::<module>` paths
+are gone, so an in-flight branch that touched a moved file rebases by
+re-pointing its imports at the folder paths in ARCHITECTURE.md's layout.
 
 1. **Land the Mac-gate fixes** — commit the 2026-09-10 working-tree fixes
    (Darwin compile errors, symlinked-`TMPDIR` fixtures, APFS test skips,

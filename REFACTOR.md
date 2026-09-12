@@ -542,3 +542,8 @@ Append-only. One entry per landed PR or per decision. Newest at the bottom.
 - Gate: `cargo fmt --check`, `cargo build`, `cargo test` (614 passed, same
   set as baseline). One unit test in `x.rs` failed once and passed on every
   rerun; recorded as FOLLOW-UPS.md item 8 (pre-existing race, not the move).
+- Stage 2 step 5 (same day, separate commit `8258f82`, merged): `cli.rs`
+  split into `cli/{mod,spec,parse,completions}.rs`, pure move verified
+  line-range by line-range; 18 cli unit tests before and after;
+  `tests/cli.rs` (33 tests) untouched and green. Three private helpers
+  became `pub(super)`; git records the rename as `cli.rs → cli/parse.rs`.
