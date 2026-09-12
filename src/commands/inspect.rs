@@ -401,9 +401,10 @@ fn count_entries(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-pub fn doctor(dir: &Path) -> Vec<Check> {
-    let mut checks = Vec::new();
-    let platform = match Platform::host() {
+/// The host triple, or the failure that makes every platform-dependent
+/// probe below unanswerable.
+fn host_platform_check(checks: &mut Vec<Check>) -> Option<Platform> {
+    match Platform::host() {
         Ok(platform) => {
             checks.push(check("platform", Level::Ok, platform.triple()));
             Some(platform)
@@ -416,82 +417,100 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
             ));
             None
         }
-    };
+    }
+}
 
+/// Prove the store is writable without leaving anything behind.
+fn store_writable_check(store: &Store, checks: &mut Vec<Check>) {
+    let probe = store.root.join("tmp").join(format!(
+        ".doctor-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    // create_new is deliberate: fs::write follows a pre-existing
+    // symlink, allowing a hostile or stale probe name to redirect
+    // doctor’s write outside the store.
+    let writable = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|mut file| {
+            file.write_all(b"ok")?;
+            drop(file);
+            fs::remove_file(&probe)
+        });
+    match writable {
+        Ok(()) => checks.push(check(
+            "store",
+            Level::Ok,
+            format!(
+                "{} ({} objects, {} cached artifacts)",
+                store.root.display(),
+                count_entries(&store.root.join("objects")),
+                count_entries(&store.root.join("cache/sha256"))
+            ),
+        )),
+        Err(error) => checks.push(check(
+            "store",
+            Level::Fail,
+            format!(
+                "{} is not writable: {error}; set BLANKET_STORE to a directory you own",
+                store.root.display()
+            ),
+        )),
+    }
+}
+
+/// Free space under the store; a warning below the headroom a toolchain
+/// realization needs.
+fn disk_check(store: &Store, checks: &mut Vec<Check>) {
+    match free_bytes(&store.root) {
+        Ok(bytes) => {
+            let gib = bytes as f64 / (1u64 << 30) as f64;
+            let level = if bytes < 5 * (1u64 << 30) {
+                Level::Warn
+            } else {
+                Level::Ok
+            };
+            let hint = if level == Level::Warn {
+                "; toolchains and native library sets need several GiB, 'blanket gc' frees space"
+            } else {
+                ""
+            };
+            checks.push(check(
+                "disk",
+                level,
+                format!("{gib:.1} GiB free under the store{hint}"),
+            ));
+        }
+        Err(error) => checks.push(check("disk", Level::Warn, error.to_string())),
+    }
+}
+
+/// What this store has already realized, from its records only.
+fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
+    match realized_toolchains(store) {
+        Ok(toolchains) if toolchains.is_empty() => checks.push(check(
+            "toolchains",
+            Level::Ok,
+            "none realized yet; the first 'blanket sync' downloads what the project needs",
+        )),
+        Ok(toolchains) => checks.push(check("toolchains", Level::Ok, toolchains.join(", "))),
+        Err(error) => checks.push(check("toolchains", Level::Warn, error.to_string())),
+    }
+}
+
+/// The store block: opening it is the only thing `doctor` does that could
+/// fail for the whole group, so the three probes below hang off the `Ok`.
+fn store_checks(checks: &mut Vec<Check>) {
     match Store::open() {
         Ok(store) => {
-            let probe = store.root.join("tmp").join(format!(
-                ".doctor-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            // create_new is deliberate: fs::write follows a pre-existing
-            // symlink, allowing a hostile or stale probe name to redirect
-            // doctor’s write outside the store.
-            let writable = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&probe)
-                .and_then(|mut file| {
-                    file.write_all(b"ok")?;
-                    drop(file);
-                    fs::remove_file(&probe)
-                });
-            match writable {
-                Ok(()) => checks.push(check(
-                    "store",
-                    Level::Ok,
-                    format!(
-                        "{} ({} objects, {} cached artifacts)",
-                        store.root.display(),
-                        count_entries(&store.root.join("objects")),
-                        count_entries(&store.root.join("cache/sha256"))
-                    ),
-                )),
-                Err(error) => checks.push(check(
-                    "store",
-                    Level::Fail,
-                    format!(
-                        "{} is not writable: {error}; set BLANKET_STORE to a directory you own",
-                        store.root.display()
-                    ),
-                )),
-            }
-            match free_bytes(&store.root) {
-                Ok(bytes) => {
-                    let gib = bytes as f64 / (1u64 << 30) as f64;
-                    let level = if bytes < 5 * (1u64 << 30) {
-                        Level::Warn
-                    } else {
-                        Level::Ok
-                    };
-                    let hint = if level == Level::Warn {
-                        "; toolchains and native library sets need several GiB, 'blanket gc' frees space"
-                    } else {
-                        ""
-                    };
-                    checks.push(check(
-                        "disk",
-                        level,
-                        format!("{gib:.1} GiB free under the store{hint}"),
-                    ));
-                }
-                Err(error) => checks.push(check("disk", Level::Warn, error.to_string())),
-            }
-            match realized_toolchains(&store) {
-                Ok(toolchains) if toolchains.is_empty() => checks.push(check(
-                    "toolchains",
-                    Level::Ok,
-                    "none realized yet; the first 'blanket sync' downloads what the project needs",
-                )),
-                Ok(toolchains) => {
-                    checks.push(check("toolchains", Level::Ok, toolchains.join(", ")))
-                }
-                Err(error) => checks.push(check("toolchains", Level::Warn, error.to_string())),
-            }
+            store_writable_check(&store, checks);
+            disk_check(&store, checks);
+            toolchains_check(&store, checks);
         }
         Err(error) => checks.push(check(
             "store",
@@ -499,55 +518,65 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
             format!("cannot open the store: {error}; set BLANKET_STORE to a writable directory"),
         )),
     }
+}
 
-    if let Some(platform) = platform {
-        for tailor in tailors::registry() {
-            for probe in tailor.doctor(platform, dir) {
-                let level = if probe.ok { Level::Ok } else { Level::Fail };
-                checks.push(check(probe.name, level, probe.detail));
+/// The host C toolchain the native build paths need.
+fn c_toolchain_check(platform: Platform, checks: &mut Vec<Check>) {
+    let required: &[&str] = match platform {
+        Platform::X86_64UnknownLinuxGnu => &["cc", "c++", "make", "pkg-config", "patch"],
+        Platform::Aarch64AppleDarwin => &["cc", "c++", "make"],
+    };
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|program| on_path(program).is_none())
+        .collect();
+    if missing.is_empty() {
+        checks.push(check(
+            "c-toolchain",
+            Level::Ok,
+            format!("{} on PATH", required.join(", ")),
+        ));
+    } else {
+        let hint = match platform {
+            Platform::X86_64UnknownLinuxGnu => {
+                "Fedora: sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel"
             }
-        }
-        match sandbox::probe(platform) {
-            Ok(detail) => checks.push(check("sandbox", Level::Ok, detail)),
-            Err(error) => checks.push(check(
-                "sandbox",
-                Level::Fail,
-                format!("{error}; sdists, npm install scripts, and 'blanket build' need it"),
-            )),
-        }
-        let required: &[&str] = match platform {
-            Platform::X86_64UnknownLinuxGnu => &["cc", "c++", "make", "pkg-config", "patch"],
-            Platform::Aarch64AppleDarwin => &["cc", "c++", "make"],
+            Platform::Aarch64AppleDarwin => "xcode-select --install",
         };
-        let missing: Vec<&str> = required
-            .iter()
-            .copied()
-            .filter(|program| on_path(program).is_none())
-            .collect();
-        if missing.is_empty() {
-            checks.push(check(
-                "c-toolchain",
-                Level::Ok,
-                format!("{} on PATH", required.join(", ")),
-            ));
-        } else {
-            let hint = match platform {
-                Platform::X86_64UnknownLinuxGnu => {
-                    "Fedora: sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel"
-                }
-                Platform::Aarch64AppleDarwin => "xcode-select --install",
-            };
-            checks.push(check(
-                "c-toolchain",
-                Level::Warn,
-                format!(
-                    "missing {}; pure wheels and lockfile installs work, native builds will not ({hint})",
-                    missing.join(", ")
-                ),
-            ));
+        checks.push(check(
+            "c-toolchain",
+            Level::Warn,
+            format!(
+                "missing {}; pure wheels and lockfile installs work, native builds will not ({hint})",
+                missing.join(", ")
+            ),
+        ));
+    }
+}
+
+/// Everything that needs a known host: the per-tailor probes in registry
+/// order, then the sandbox, then the C toolchain.
+fn platform_checks(platform: Platform, dir: &Path, checks: &mut Vec<Check>) {
+    for tailor in tailors::registry() {
+        for probe in tailor.doctor(platform, dir) {
+            let level = if probe.ok { Level::Ok } else { Level::Fail };
+            checks.push(check(probe.name, level, probe.detail));
         }
     }
+    match sandbox::probe(platform) {
+        Ok(detail) => checks.push(check("sandbox", Level::Ok, detail)),
+        Err(error) => checks.push(check(
+            "sandbox",
+            Level::Fail,
+            format!("{error}; sdists, npm install scripts, and 'blanket build' need it"),
+        )),
+    }
+    c_toolchain_check(platform, checks);
+}
 
+/// Which policy sources are in force, in the order they are consulted.
+fn policy_check(dir: &Path, checks: &mut Vec<Check>) {
     let strict = std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
     let policy_file = std::env::var_os("BLANKET_POLICY")
         .map(PathBuf::from)
@@ -575,7 +604,11 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
             policy.join(", ")
         },
     ));
+}
 
+/// What is here and whether it has been synced. Detection is the same test
+/// `sync` uses, so this never disagrees with what a sync would do.
+fn project_check(dir: &Path, checks: &mut Vec<Check>) {
     match detected(dir) {
         Ok(found) if found.is_empty() => checks.push(check(
             "project",
@@ -610,9 +643,22 @@ pub fn doctor(dir: &Path) -> Vec<Check> {
         }
         Err(error) => checks.push(check("project", Level::Warn, error.to_string())),
     }
-    checks
 }
 
+/// The order the checks are pushed in is the order they print in, and that
+/// order is the contract: host, then store, then everything that needs a
+/// known host, then the two project-local answers.
+pub fn doctor(dir: &Path) -> Vec<Check> {
+    let mut checks = Vec::new();
+    let platform = host_platform_check(&mut checks);
+    store_checks(&mut checks);
+    if let Some(platform) = platform {
+        platform_checks(platform, dir, &mut checks);
+    }
+    policy_check(dir, &mut checks);
+    project_check(dir, &mut checks);
+    checks
+}
 pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
     if json {
         let value = json!({
@@ -1128,5 +1174,96 @@ mod tests {
         assert!(text.contains("  platform  "));
         let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
         assert!(value["checks"].as_array().unwrap().len() >= 8);
+    }
+    /// Characterization (REFACTOR.md Stage 4 step 3): `doctor`'s value is
+    /// the order and the wording of what it prints, so pin both. The
+    /// existing `doctor_reports_host_and_project` only asserts that the
+    /// names are present.
+    #[test]
+    fn doctor_check_order_and_wording_are_fixed() {
+        let _lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new("doctor-order");
+        let store = temp.0.join("store");
+        fs::write(temp.0.join("go.mod"), "module example.com/m\n\ngo 1.27.0\n").unwrap();
+        fs::create_dir_all(temp.0.join(".blanket")).unwrap();
+        fs::write(temp.0.join(".blanket/policy.toml"), "").unwrap();
+        let old_store = std::env::var_os("BLANKET_STORE");
+        std::env::set_var("BLANKET_STORE", &store);
+        let checks = doctor(&temp.0);
+        match old_store {
+            Some(value) => std::env::set_var("BLANKET_STORE", value),
+            None => std::env::remove_var("BLANKET_STORE"),
+        }
+
+        let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
+        // The store block is first and in this order; the per-tailor probes
+        // follow it; the sandbox and C-toolchain probes close the
+        // platform section; policy and project are always last.
+        assert_eq!(
+            &names[..4],
+            &["platform", "store", "disk", "toolchains"],
+            "{names:?}"
+        );
+        assert_eq!(
+            &names[names.len() - 2..],
+            &["policy", "project"],
+            "{names:?}"
+        );
+        let sandbox_at = names.iter().position(|name| *name == "sandbox").unwrap();
+        assert_eq!(names[sandbox_at + 1], "c-toolchain", "{names:?}");
+        assert_eq!(names.len() - 2, sandbox_at + 2, "{names:?}");
+        assert!(names[4..sandbox_at].contains(&"go-toolchain"), "{names:?}");
+
+        let detail = |name: &str| {
+            checks
+                .iter()
+                .find(|check| check.name == name)
+                .unwrap_or_else(|| panic!("no {name} check"))
+        };
+        assert_eq!(detail("platform").level, Level::Ok);
+        assert_eq!(
+            detail("platform").detail,
+            Platform::host().unwrap().triple()
+        );
+        assert_eq!(detail("store").level, Level::Ok);
+        assert_eq!(
+            detail("store").detail,
+            format!(
+                "{} (0 objects, 0 cached artifacts)",
+                store.canonicalize().unwrap().display()
+            )
+        );
+        assert!(
+            detail("disk").detail.contains("GiB free under the store"),
+            "{}",
+            detail("disk").detail
+        );
+        assert_eq!(
+            detail("toolchains").detail,
+            "none realized yet; the first 'blanket sync' downloads what the project needs"
+        );
+        assert_eq!(detail("policy").level, Level::Ok);
+        assert!(
+            detail("policy").detail.ends_with(".blanket/policy.toml"),
+            "{}",
+            detail("policy").detail
+        );
+        assert_eq!(detail("project").level, Level::Ok);
+        assert_eq!(
+            detail("project").detail,
+            "go found; not synced yet: go (run 'blanket sync')"
+        );
+
+        let text = render_doctor(&checks, false).unwrap();
+        assert!(
+            text.lines().next().unwrap().starts_with("ok    platform"),
+            "{text}"
+        );
+        assert!(
+            text.trim_end().ends_with(&detail("project").detail),
+            "{text}"
+        );
     }
 }
