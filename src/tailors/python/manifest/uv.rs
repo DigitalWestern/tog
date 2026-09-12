@@ -279,203 +279,52 @@ pub(super) fn uv_lock_manifest(
         .iter()
         .any(|package| is_uv_project_root(&package.source));
     let explicit_requirements = !requirements.is_empty();
-    let mut incoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut requested_extras: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut reachable = BTreeSet::new();
-    let mut queue = VecDeque::new();
+    let mut frontier = UvFrontier::default();
     for requirement in requirements {
         let edge = parse_uv_requirement(requirement)?;
-        if edge.marker.as_deref().map_or(Ok(true), |marker| {
-            marker_matches(marker, python_version, platform)
-        })? {
-            add_uv_edge(
-                &mut incoming,
-                &mut requested_extras,
-                &mut reachable,
-                &mut queue,
-                edge,
-            );
-        }
+        frontier.push_if_applicable(edge, python_version, platform)?;
     }
     if !explicit_requirements {
         // A uv lock normally carries an editable/virtual package for the
         // project itself. Its dependencies are the default (non-dev) roots;
         // development groups remain unreachable from this package graph.
-        for package in packages
-            .iter()
-            .filter(|package| is_uv_project_root(&package.source))
-        {
-            let legacy_edges;
-            let dependency_edges = if package.dependency_edges.is_empty() {
-                legacy_edges = package
-                    .dependencies
-                    .iter()
-                    .map(|name| UvDependency {
-                        name: name.clone(),
-                        marker: None,
-                        version: None,
-                        extras: BTreeSet::new(),
-                    })
-                    .collect::<Vec<_>>();
-                &legacy_edges
-            } else {
-                &package.dependency_edges
-            };
-            for dependency in dependency_edges {
-                if dependency.marker.as_deref().map_or(Ok(true), |marker| {
-                    marker_matches(marker, python_version, platform)
-                })? {
-                    add_uv_edge(
-                        &mut incoming,
-                        &mut requested_extras,
-                        &mut reachable,
-                        &mut queue,
-                        dependency.clone(),
-                    );
-                }
-            }
-        }
+        seed_project_roots(&mut frontier, packages, python_version, platform)?;
     }
-    let selected_names = if reachable.is_empty() && !explicit_requirements && !has_project_root {
-        // Older/minimal uv locks may omit the project root. Preserve useful
-        // behavior for those files by considering every registry package.
-        packages
-            .iter()
-            .map(|package| package.name.clone())
-            .collect()
-    } else {
-        while let Some(name) = queue.pop_front() {
-            let constraints = incoming.get(&name).map(Vec::as_slice).unwrap_or(&[]);
-            let Some(package) =
-                select_uv_package(by_name.get(&name), python_version, platform, constraints)?
-            else {
-                if !constraints.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "uv.lock package {name} cannot satisfy incoming constraints: {}",
-                            constraints.join(" and "),
-                        ),
-                    ));
-                }
-                eprintln!(
-                    "blanket: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
-                );
-                continue;
-            };
-            let legacy_edges;
-            let dependency_edges = if package.dependency_edges.is_empty() {
-                legacy_edges = package
-                    .dependencies
-                    .iter()
-                    .map(|name| UvDependency {
-                        name: name.clone(),
-                        marker: None,
-                        version: None,
-                        extras: BTreeSet::new(),
-                    })
-                    .collect::<Vec<_>>();
-                &legacy_edges
-            } else {
-                &package.dependency_edges
-            };
-            let mut edges = dependency_edges.clone();
-            if let Some(extras) = requested_extras.get(&name) {
-                for extra in extras {
-                    if let Some(optional) = package.optional_dependencies.get(extra) {
-                        edges.extend(optional.iter().cloned());
-                    }
-                }
-            }
-            for dependency in &edges {
-                if dependency.marker.as_deref().map_or(Ok(true), |marker| {
-                    marker_matches(marker, python_version, platform)
-                })? {
-                    add_uv_edge(
-                        &mut incoming,
-                        &mut requested_extras,
-                        &mut reachable,
-                        &mut queue,
-                        dependency.clone(),
-                    );
-                }
-            }
-        }
-        reachable
-    };
+    let selected_names =
+        if frontier.reachable.is_empty() && !explicit_requirements && !has_project_root {
+            // Older/minimal uv locks may omit the project root. Preserve useful
+            // behavior for those files by considering every registry package.
+            packages
+                .iter()
+                .map(|package| package.name.clone())
+                .collect()
+        } else {
+            walk_uv_graph(&mut frontier, &by_name, python_version, platform)?;
+            std::mem::take(&mut frontier.reachable)
+        };
     let mut selected_packages = BTreeMap::new();
     for name in &selected_names {
-        let constraints = incoming.get(name).map(Vec::as_slice).unwrap_or(&[]);
-        let Some(package) =
-            select_uv_package(by_name.get(name), python_version, platform, constraints)?
+        let Some(package) = resolve_uv_package(
+            name,
+            &by_name,
+            python_version,
+            platform,
+            frontier.constraints(name),
+        )?
         else {
-            if !constraints.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "uv.lock package {name} cannot satisfy incoming constraints: {}",
-                        constraints.join(" and "),
-                    ),
-                ));
-            }
-            eprintln!(
-                "blanket: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
-            );
             return Ok(None);
         };
         selected_packages.insert(name.clone(), package);
     }
     let mut output = Vec::new();
     for package in selected_packages.into_values() {
-        if is_local_uv_source(&package.source) {
-            if !is_uv_project_root(&package.source) {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::REQUIREMENT_SKIPPED,
-                    &package.name,
-                    "uv lock package is a local or VCS source, not a locked registry artifact",
-                )?;
-            }
+        if record_uv_source_exceptions(package)? {
             continue;
         }
-        if package.source != "registry"
-            && package.source.contains("registry")
-            && !package.source.contains("pypi.org")
-            && !package.source.contains("files.pythonhosted.org")
-        {
-            crate::kernel::policy::record(
-                crate::kernel::policy::UNATTESTED_INDEX,
-                &package.name,
-                "uv lock package names a non-public registry source",
-            )?;
-        }
-        let candidates: Vec<_> = package
-            .files
-            .iter()
-            .map(|f| pypi::FileCandidate {
-                filename: f.filename.clone(),
-                url: f.url.clone(),
-                sha256: f.hash.clone(),
-            })
-            .collect();
-        let Some((file, _)) = pypi::select_file(&candidates, &tag, platform, glibc) else {
-            eprintln!("blanket: uv.lock has no file compatible with the host for {}; falling back to uv resolution", package.name);
+        let Some(locked) = locked_from_uv_package(package, &tag, platform, glibc) else {
             return Ok(None);
         };
-        let kind = package
-            .files
-            .iter()
-            .find(|f| f.url == file.url)
-            .map(|f| f.kind)
-            .unwrap_or(ArtifactKind::Wheel);
-        output.push(LockedPackage {
-            name: package.name.clone(),
-            version: package.version.clone(),
-            filename: file.filename.clone(),
-            url: file.url.clone(),
-            sha256: file.sha256.clone(),
-            kind,
-            git: None,
-        });
+        output.push(locked);
     }
     if output.is_empty() {
         return if explicit_requirements {
@@ -486,6 +335,210 @@ pub(super) fn uv_lock_manifest(
     }
     output.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Some(output))
+}
+
+/// The breadth-first frontier of the uv package graph: which packages are
+/// reachable, the version constraints their incoming edges carry, and the
+/// extras that were requested of them.
+#[derive(Default)]
+struct UvFrontier {
+    incoming: BTreeMap<String, Vec<String>>,
+    requested_extras: BTreeMap<String, BTreeSet<String>>,
+    reachable: BTreeSet<String>,
+    queue: VecDeque<String>,
+}
+
+impl UvFrontier {
+    /// Enqueue `edge` unless its marker rules this host out.
+    fn push_if_applicable(
+        &mut self,
+        edge: UvDependency,
+        python_version: &str,
+        platform: Platform,
+    ) -> io::Result<()> {
+        if edge.marker.as_deref().map_or(Ok(true), |marker| {
+            marker_matches(marker, python_version, platform)
+        })? {
+            add_uv_edge(
+                &mut self.incoming,
+                &mut self.requested_extras,
+                &mut self.reachable,
+                &mut self.queue,
+                edge,
+            );
+        }
+        Ok(())
+    }
+
+    fn constraints(&self, name: &str) -> &[String] {
+        self.incoming.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// A package's dependency edges, synthesised from the legacy `dependencies`
+/// name list when the richer edge table is absent.
+fn uv_dependency_edges(package: &UvPackage) -> Vec<UvDependency> {
+    if !package.dependency_edges.is_empty() {
+        return package.dependency_edges.clone();
+    }
+    package
+        .dependencies
+        .iter()
+        .map(|name| UvDependency {
+            name: name.clone(),
+            marker: None,
+            version: None,
+            extras: BTreeSet::new(),
+        })
+        .collect()
+}
+
+/// Seed the frontier from the lock's editable/virtual project packages.
+fn seed_project_roots(
+    frontier: &mut UvFrontier,
+    packages: &[UvPackage],
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<()> {
+    for package in packages
+        .iter()
+        .filter(|package| is_uv_project_root(&package.source))
+    {
+        for dependency in uv_dependency_edges(package) {
+            frontier.push_if_applicable(dependency, python_version, platform)?;
+        }
+    }
+    Ok(())
+}
+
+/// Drain the queue, following each selected package's edges (plus the edges
+/// of any extra that was requested of it) until the graph closes.
+fn walk_uv_graph(
+    frontier: &mut UvFrontier,
+    by_name: &BTreeMap<String, Vec<&UvPackage>>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<()> {
+    while let Some(name) = frontier.queue.pop_front() {
+        let Some(package) = resolve_uv_package(
+            &name,
+            by_name,
+            python_version,
+            platform,
+            frontier.constraints(&name),
+        )?
+        else {
+            continue;
+        };
+        let mut edges = uv_dependency_edges(package);
+        if let Some(extras) = frontier.requested_extras.get(&name) {
+            for extra in extras {
+                if let Some(optional) = package.optional_dependencies.get(extra) {
+                    edges.extend(optional.iter().cloned());
+                }
+            }
+        }
+        for dependency in edges {
+            frontier.push_if_applicable(dependency, python_version, platform)?;
+        }
+    }
+    Ok(())
+}
+
+/// Pick the variant of `name` this host can use. `Ok(None)` means the lock
+/// is unusable here and the caller should fall back to uv's own resolver;
+/// an unsatisfiable constraint is an error instead, since that is the lock
+/// contradicting itself rather than a host mismatch.
+fn resolve_uv_package<'a>(
+    name: &str,
+    by_name: &BTreeMap<String, Vec<&'a UvPackage>>,
+    python_version: &str,
+    platform: Platform,
+    constraints: &[String],
+) -> io::Result<Option<&'a UvPackage>> {
+    if let Some(package) =
+        select_uv_package(by_name.get(name), python_version, platform, constraints)?
+    {
+        return Ok(Some(package));
+    }
+    if !constraints.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "uv.lock package {name} cannot satisfy incoming constraints: {}",
+                constraints.join(" and "),
+            ),
+        ));
+    }
+    eprintln!(
+        "blanket: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
+    );
+    Ok(None)
+}
+
+/// Record what this package's source costs us in attestation. Returns true
+/// when the package carries no locked registry artifact and must be skipped.
+fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
+    if is_local_uv_source(&package.source) {
+        if !is_uv_project_root(&package.source) {
+            crate::kernel::policy::record(
+                crate::kernel::policy::REQUIREMENT_SKIPPED,
+                &package.name,
+                "uv lock package is a local or VCS source, not a locked registry artifact",
+            )?;
+        }
+        return Ok(true);
+    }
+    if package.source != "registry"
+        && package.source.contains("registry")
+        && !package.source.contains("pypi.org")
+        && !package.source.contains("files.pythonhosted.org")
+    {
+        crate::kernel::policy::record(
+            crate::kernel::policy::UNATTESTED_INDEX,
+            &package.name,
+            "uv lock package names a non-public registry source",
+        )?;
+    }
+    Ok(false)
+}
+
+/// Choose the host-compatible file for `package`. `None` means the lock has
+/// nothing this host can install.
+fn locked_from_uv_package(
+    package: &UvPackage,
+    tag: &str,
+    platform: Platform,
+    glibc: pypi::Glibc,
+) -> Option<LockedPackage> {
+    let candidates: Vec<_> = package
+        .files
+        .iter()
+        .map(|f| pypi::FileCandidate {
+            filename: f.filename.clone(),
+            url: f.url.clone(),
+            sha256: f.hash.clone(),
+        })
+        .collect();
+    let Some((file, _)) = pypi::select_file(&candidates, tag, platform, glibc) else {
+        eprintln!("blanket: uv.lock has no file compatible with the host for {}; falling back to uv resolution", package.name);
+        return None;
+    };
+    let kind = package
+        .files
+        .iter()
+        .find(|f| f.url == file.url)
+        .map(|f| f.kind)
+        .unwrap_or(ArtifactKind::Wheel);
+    Some(LockedPackage {
+        name: package.name.clone(),
+        version: package.version.clone(),
+        filename: file.filename.clone(),
+        url: file.url.clone(),
+        sha256: file.sha256.clone(),
+        kind,
+        git: None,
+    })
 }
 
 pub(super) fn select_uv_package<'a>(

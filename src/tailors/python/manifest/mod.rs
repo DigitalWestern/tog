@@ -581,6 +581,53 @@ dependencies = [{ name = "six" }]
     }
 
     #[test]
+    fn uv_lock_without_a_project_root_takes_every_non_local_package() {
+        let package = |name: &str, source: &str| UvPackage {
+            name: name.into(),
+            version: "1.0.0".into(),
+            source: source.into(),
+            files: vec![UvFile {
+                url: format!("https://files.example/{name}-1.0.0.tar.gz"),
+                hash: "a".repeat(64),
+                filename: format!("{name}-1.0.0.tar.gz"),
+                kind: ArtifactKind::Sdist,
+            }],
+            dependencies: Vec::new(),
+            resolution_markers: Vec::new(),
+            dependency_edges: Vec::new(),
+            optional_dependencies: BTreeMap::new(),
+        };
+        // No editable/virtual root and no explicit requirements: the whole
+        // lock is in scope, minus the local/VCS sources, which are recorded
+        // as skipped requirements instead.
+        let packages = vec![
+            package("six", "registry"),
+            package("vendored", "{ directory = \"vendor/local\" }"),
+            package(
+                "private",
+                "{ registry = \"https://private.invalid/simple\" }",
+            ),
+        ];
+        let selected = uv_lock_manifest(
+            &packages,
+            &[],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|package| package.name.as_str())
+                .collect::<Vec<_>>(),
+            ["private", "six"]
+        );
+        crate::kernel::policy::clear();
+    }
+
+    #[test]
     fn setup_cfg_multiline_and_comments() {
         let cfg = pyselect::parse_setup_cfg(
             "[options]\ninstall_requires =\n  six>=1 # comment\n  markupsafe\n",
