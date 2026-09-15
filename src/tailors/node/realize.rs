@@ -2,6 +2,11 @@
 //! the env object's identity, staging, and the sandboxed install scripts.
 
 use super::*;
+use sha2::Digest as _;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 pub(super) fn tarball_has_binding_gyp(store: &Store, path: &Path) -> io::Result<bool> {
     let mut command = Command::new("/usr/bin/tar");
@@ -283,18 +288,23 @@ pub(super) fn node_env_identity(
         // bin mappings change the realized tree, so they are identity inputs.
         let mut bins: Vec<String> = p.bin.iter().map(|(k, v)| format!("{k}={v}")).collect();
         bins.sort();
+        let patch_identity = match p.patch.as_ref() {
+            None => "patch[]".to_string(),
+            Some(patch) => match patch.content_sha256.as_deref() {
+                Some(content_sha256) => {
+                    format!("patch[{};sha256:{content_sha256}]", patch.hash)
+                }
+                None => format!("patch[{}]", patch.hash),
+            },
+        };
         if inputs
             .insert(
                 format!("pkg:{}", p.path),
                 format!(
-                    "{}:{}@{}:patch[{}]:bin[{}]",
+                    "{}:{}@{}:{patch_identity}:bin[{}]",
                     content,
                     p.name,
                     p.version,
-                    p.patch
-                        .as_ref()
-                        .map(|patch| patch.hash.as_str())
-                        .unwrap_or(""),
                     bins.join(",")
                 ),
             )
@@ -435,13 +445,9 @@ fn stage_env_skeleton(store: &Store, workspaces: &[String]) -> io::Result<PathBu
 }
 
 /// A pnpm patch, re-verified against the hash the lock attested before it is
-/// applied: the file on disk can have changed since lock verification.
-fn apply_verified_patch(
-    store: &Store,
-    package_path: &str,
-    patch: &NpmPatch,
-    dest: &Path,
-) -> io::Result<()> {
+/// applied: the file on disk can have changed since lock verification. A
+/// normalized match also rechecks the raw-byte identity binding.
+fn read_verified_patch(package_path: &str, patch: &NpmPatch) -> io::Result<Vec<u8>> {
     let patch_path = Path::new(&patch.path);
     let patch_bytes = fs::read(patch_path).map_err(|e| {
         io::Error::new(
@@ -449,34 +455,126 @@ fn apply_verified_patch(
             format!("{}: read verified patch {}: {e}", package_path, patch.path),
         )
     })?;
-    use sha2::Digest as _;
-    let actual = hex::encode(sha2::Sha256::digest(&patch_bytes));
-    let expected = patch.hash.strip_prefix("sha256-").unwrap_or(&patch.hash);
-    if expected.len() != 64 || !expected.eq_ignore_ascii_case(&actual) {
-        return Err(err(format!(
-            "{}: patch {} changed after lock verification (expected {}, got {})",
-            package_path, patch.path, patch.hash, actual
-        )));
+    // Same acceptance set as the lock-time check, from the same function, so a
+    // pnpm 9 base32 hash cannot pass one gate and fail the other.
+    let matched =
+        super::lock_import::check_patch_hash(&patch.hash, &patch_bytes).map_err(|actual| {
+            err(format!(
+                "{}: patch {} changed after lock verification (expected {}, got {})",
+                package_path, patch.path, patch.hash, actual
+            ))
+        })?;
+    match patch.content_sha256.as_deref() {
+        // The lock matched the raw bytes, so the identity carries no separate
+        // raw digest: the declared hash is the only binding, and it only binds
+        // raw bytes when the match is raw. A file rewritten so that it matches
+        // only after lossy UTF-8 normalization (a U+FFFD sequence replaced by
+        // the invalid byte it stands for) would otherwise reach `patch` with
+        // different bytes under an unchanged object id.
+        None => {
+            if matched != super::lock_import::PatchMatch::Raw {
+                return Err(err(format!(
+                    "{}: patch {} changed after lock verification (the lock hash matched the \
+                     raw bytes at lock time but only their normalized form now)",
+                    package_path, patch.path
+                )));
+            }
+        }
+        Some(expected) => {
+            let actual = hex::encode(sha2::Sha256::digest(&patch_bytes));
+            if actual != expected {
+                return Err(err(format!(
+                    "{}: patch {} changed after lock verification (expected sha256 {}, got {})",
+                    package_path, patch.path, expected, actual
+                )));
+            }
+        }
     }
-    let file = fs::File::open(patch_path)?;
+    Ok(patch_bytes)
+}
+
+struct PatchSnapshot {
+    root: PathBuf,
+    path: PathBuf,
+    source: PathBuf,
+}
+
+impl PatchSnapshot {
+    fn open(&self) -> io::Result<fs::File> {
+        fs::File::open(&self.path)
+    }
+}
+
+impl Drop for PatchSnapshot {
+    fn drop(&mut self) {
+        let _ = crate::kernel::store::remove_tree(&self.root);
+    }
+}
+
+/// Write the verified bytes to a fresh private stage directory under
+/// `store/tmp`. If a process is killed before the guard runs, the leftover
+/// `stage-*` directory is enumerated by `kernel::gc::read::read_stages` and
+/// reclaimed by the stale-stage plan; ordinary success and error paths remove
+/// the whole directory through `PatchSnapshot::drop`.
+fn snapshot_verified_patch(
+    store: &Store,
+    package_path: &str,
+    patch: &NpmPatch,
+) -> io::Result<PatchSnapshot> {
+    let patch_bytes = read_verified_patch(package_path, patch)?;
+    let root = store.stage()?;
+    let path = root.join("patch");
+    let snapshot = PatchSnapshot {
+        root,
+        path,
+        source: PathBuf::from(&patch.path),
+    };
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&snapshot.path)?;
+    file.write_all(&patch_bytes)?;
+    drop(file);
+    Ok(snapshot)
+}
+
+fn apply_verified_patch(
+    store: &Store,
+    package_path: &str,
+    snapshot: &PatchSnapshot,
+    dest: &Path,
+) -> io::Result<()> {
+    let snapshot_file = snapshot.open().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "{}: open patch snapshot for {}: {e}",
+                package_path,
+                snapshot.source.display()
+            ),
+        )
+    })?;
     let mut command = Command::new("/usr/bin/patch");
     command
         .args(["-p1", "--batch", "--forward"])
         .current_dir(dest)
-        .stdin(file);
+        .stdin(snapshot_file);
     let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
                 "{}: spawn /usr/bin/patch for {}: {e}",
-                package_path, patch.path
+                package_path,
+                snapshot.source.display()
             ),
         )
     })?;
     if !status.success() {
         return Err(err(format!(
             "{}: applying patch {} failed",
-            package_path, patch.path
+            package_path,
+            snapshot.source.display()
         )));
     }
     normalize_modes(dest).map_err(|e| {
@@ -525,7 +623,8 @@ fn extract_tarball_packages(
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {
-            apply_verified_patch(store, &p.path, patch, &dest)?;
+            let snapshot = snapshot_verified_patch(store, &p.path, patch)?;
+            apply_verified_patch(store, &p.path, &snapshot, &dest)?;
         }
         if p.bin.is_empty() {
             if let Ok(manifest) = fs::read_to_string(dest.join("package.json")) {
@@ -1303,4 +1402,129 @@ pub(super) fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Re
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod patch_snapshot_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    struct StoreEnv(Option<std::ffi::OsString>);
+
+    impl Drop for StoreEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("BLANKET_STORE", value),
+                None => std::env::remove_var("BLANKET_STORE"),
+            }
+        }
+    }
+
+    /// A raw-sha256 lock match binds the raw bytes only through the declared
+    /// hash. If the file is rewritten so that the same declaration matches
+    /// only after lossy UTF-8 normalization, the bytes `patch` would apply
+    /// have changed while the object id has not, so realization must refuse.
+    #[test]
+    fn raw_lock_match_refuses_a_normalized_only_match_at_realization() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let path = temp.0.join("swap.patch");
+        // U+FFFD encoded, then the invalid byte that normalizes to it.
+        let original: &[u8] = b"diff --git a/x b/x\n+\xef\xbf\xbd\n";
+        let swapped: &[u8] = b"diff --git a/x b/x\n+\xff\n";
+        fs::write(&path, original).unwrap();
+        let patch = NpmPatch {
+            path: path.to_string_lossy().into_owned(),
+            hash: hex::encode(sha2::Sha256::digest(original)),
+            content_sha256: None,
+        };
+        assert_eq!(
+            read_verified_patch("node_modules/example", &patch).unwrap(),
+            original
+        );
+        fs::write(&path, swapped).unwrap();
+        // The declared hash still matches after normalization ...
+        assert_eq!(
+            super::super::lock_import::check_patch_hash(&patch.hash, swapped),
+            Ok(super::super::lock_import::PatchMatch::Normalized)
+        );
+        // ... and that is exactly what realization must not accept.
+        let error = read_verified_patch("node_modules/example", &patch).unwrap_err();
+        assert!(
+            error.to_string().contains("only their normalized form now"),
+            "{error}"
+        );
+        // A patch whose identity does carry the raw digest is judged by it.
+        let bound = NpmPatch {
+            content_sha256: Some(hex::encode(sha2::Sha256::digest(swapped))),
+            ..patch.clone()
+        };
+        assert_eq!(
+            read_verified_patch("node_modules/example", &bound).unwrap(),
+            swapped
+        );
+        // ... and the reverse swap under that binding is caught by the digest
+        // comparison, not by the match mode: the declaration matches the
+        // original bytes raw, but the bound raw digest is the swapped file's.
+        fs::write(&path, original).unwrap();
+        let error = read_verified_patch("node_modules/example", &bound).unwrap_err();
+        assert!(error.to_string().contains("expected sha256"), "{error}");
+    }
+
+    #[test]
+    fn production_patch_snapshot_survives_in_place_source_overwrite() {
+        if !Path::new("/usr/bin/patch").is_file() {
+            eprintln!("skipping production patch snapshot test: /usr/bin/patch is absent");
+            return;
+        }
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = crate::kernel::testutil::TempDir::new();
+        let old_store = std::env::var_os("BLANKET_STORE");
+        std::env::set_var("BLANKET_STORE", temp.0.join("store"));
+        let _store_env = StoreEnv(old_store);
+        let store = Store::open().unwrap();
+
+        let dest = temp.0.join("dest/node_modules/example");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("index.js"), b"before\n").unwrap();
+
+        let original_path = temp.0.join("original.patch");
+        let original_patch = b"diff --git a/index.js b/index.js\n--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-before\n+after verified\n";
+        fs::write(&original_path, original_patch).unwrap();
+        let original_inode = fs::metadata(&original_path).unwrap().ino();
+        let patch = NpmPatch {
+            path: original_path.to_string_lossy().into_owned(),
+            hash: hex::encode(sha2::Sha256::digest(original_patch)),
+            content_sha256: None,
+        };
+
+        let snapshot_root;
+        {
+            let snapshot = snapshot_verified_patch(&store, "node_modules/example", &patch).unwrap();
+            snapshot_root = snapshot.root.clone();
+
+            let tampered_patch =
+                b"diff --git a/index.js b/index.js\n--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-before\n+after tampered\n";
+            let mut original = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&original_path)
+                .unwrap();
+            original.write_all(tampered_patch).unwrap();
+            original.flush().unwrap();
+            drop(original);
+            assert_eq!(fs::metadata(&original_path).unwrap().ino(), original_inode);
+
+            apply_verified_patch(&store, "node_modules/example", &snapshot, &dest).unwrap();
+        }
+        assert!(!snapshot_root.exists(), "snapshot stage leaked");
+        assert_eq!(
+            fs::read(dest.join("index.js")).unwrap(),
+            b"after verified\n"
+        );
+    }
 }
