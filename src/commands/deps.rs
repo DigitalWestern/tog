@@ -1977,6 +1977,7 @@ fn dotnet_refuse(verb: Verb, texts: &[String]) -> io::Result<Vec<String>> {
 /// `add` / `remove` / `update`: delegate the edit, report it, then the
 /// ordinary sync in the project the edit landed in.
 pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
+    let edit_scope = edit_attribution()?;
     let cwd = project_dir();
     // Dependency edits ensure pinned tools before the ordinary sync. Set the
     // policy first so cached toolchain objects cannot initialize an empty
@@ -1994,13 +1995,29 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
         std::env::set_current_dir(&outcome.project)?;
         ui::trace(&format!("syncing in {}", outcome.project.display()));
     }
+    // The edit owns its exceptions. Sync must open a fresh ecosystem scope.
+    edit_scope.discard();
     sync::run(ctx, false, false)
+}
+
+/// Open the dependency edit's attribution scope before the edit can record.
+///
+/// `edit` records exceptions of its own, outside any ecosystem's closure: a
+/// `rust-toolchain.toml` naming `clippy` makes `cargo_delegate`'s
+/// `cargo::resolve_toolchain` record `toolchain-component-unavailable`, and
+/// on a warm store every `ensure_*_for` replays cached-object exceptions
+/// through `policy::check_cached`. Those belong to the edit, not to whichever
+/// ecosystem `sync` happens to realize first. `discard` clears them before
+/// sync; `Drop` covers errors, panics, and `--no-sync`. Enforcement already
+/// happened during the edit, and the owning tailor re-records the applicable
+/// exception inside its own scope during the sync that follows.
+fn edit_attribution() -> io::Result<policy::AttributionScope> {
+    policy::begin_attribution("dependency-edit")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn spec(text: &str) -> Spec {
         parse_spec(text)
     }
@@ -2887,5 +2904,32 @@ mod tests {
             upgrade_flags(Verb::Update, &["a".into(), "b".into()]),
             vec!["--upgrade-package", "a", "--upgrade-package", "b"]
         );
+    }
+
+    #[test]
+    fn dependency_edit_scope_clears_exceptions_before_sync() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        let edit_scope = edit_attribution().unwrap();
+        policy::record_with(
+            &policy::Policy::default(),
+            policy::SKIPPED_OPTIONAL,
+            "dependency-edit fixture",
+            "optional dependency was not requested",
+        )
+        .unwrap();
+        edit_scope.discard();
+        assert!(
+            policy::pending().is_empty(),
+            "dependency edit left an exception queued: {:?}",
+            policy::pending()
+        );
+        let next = policy::begin_attribution("python").unwrap();
+        drop(next);
     }
 }

@@ -333,12 +333,14 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let store = store_at(&dir);
     policy::init(&dir, false).unwrap();
     let plan = plan_for(&tarball, &sri);
+    let attribution = policy::begin_attribution("test").expect("test attribution scope");
     let env = node::realize_node_env(&store, platform, &plan, &[]).expect("permissive realize");
     let package_dir = env.join("node_modules/fixture-pkg");
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
     node::project_node_env(&dir, &env, platform, &plan, &[], false).expect("project");
+    attribution.finish().expect("test closure attribution");
     let closure = comforter::read_closure(&dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
     assert_eq!(exceptions.len(), 1);

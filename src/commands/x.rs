@@ -1867,6 +1867,7 @@ pub fn launch(
             "python" => {
                 let venv = root.join(".venv");
                 let executable = venv.join("bin").join(bin);
+                let scope = policy::begin_attribution("python")?;
                 // A pre-state x-request/1 root has no marker but can still
                 // be a complete legacy cache. Preserve that cache path only
                 // when its projected executable already exists.
@@ -1881,6 +1882,7 @@ pub fn launch(
                         "realizing",
                     )?;
                     realize_python(&store, activity, platform, &root, package, version)?;
+                    scope.finish()?;
                     write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
                 } else {
                     // `x_request_is_ready` already validated this projection
@@ -1892,6 +1894,7 @@ pub fn launch(
                             &root, &store, ecosystem, package, version, "ready",
                         )?;
                     }
+                    scope.discard();
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
@@ -1907,6 +1910,7 @@ pub fn launch(
             _ => {
                 let node_modules = root.join("node_modules");
                 let executable = node_modules.join(".bin").join(bin);
+                let scope = policy::begin_attribution("node")?;
                 let ready = x_request_is_ready(&store, &root, "node", &executable)?;
                 if !ready {
                     write_x_request_for_store(
@@ -1918,6 +1922,7 @@ pub fn launch(
                         "realizing",
                     )?;
                     realize_node(&store, activity, platform, &root, package, version)?;
+                    scope.finish()?;
                     write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
                 } else {
                     // Already validated by `x_request_is_ready`; see above.
@@ -1926,6 +1931,7 @@ pub fn launch(
                             &root, &store, ecosystem, package, version, "ready",
                         )?;
                     }
+                    scope.discard();
                 }
                 if !executable.is_file() {
                     return Err(other(format!(

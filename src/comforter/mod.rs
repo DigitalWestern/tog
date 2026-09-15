@@ -305,7 +305,10 @@ fn write_closure_inner(
             dir.display()
         )));
     }
-    let pending = crate::kernel::policy::pending();
+    // Claim before writing the closure. If a later write step fails, these
+    // exceptions are already gone; the scope's `Drop` would clear them on
+    // that error path anyway.
+    let pending = crate::kernel::policy::claim_for_closure()?;
     if let Some(body) = body.as_object_mut() {
         body.insert("exceptions".into(), serde_json::to_value(&pending)?);
     }
@@ -390,7 +393,6 @@ fn write_closure_inner(
     if !durable_root {
         store.register_root_with_activity(activity, &project_dir)?;
     }
-    crate::kernel::policy::clear();
     Ok(())
 }
 
@@ -1299,6 +1301,8 @@ mod closure_platform_tests {
 
     #[test]
     fn closures_are_refused_for_a_project_that_cannot_be_registered() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let dir = std::env::temp_dir().join(format!("blanket-unrecordable-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let project = dir.join("project ");
@@ -1321,6 +1325,7 @@ mod closure_platform_tests {
             !project.join(".blanket").exists(),
             "wrote into a project no record can name"
         );
+        attribution.finish().unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1381,6 +1386,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let project = std::env::temp_dir().join(format!(
             "blanket-closure-durable-{}-{}",
             std::process::id(),
@@ -1411,6 +1418,7 @@ mod closure_platform_tests {
             refs,
         )
         .unwrap();
+        attribution.finish().unwrap();
         drop(activity);
 
         // The closure envelope is provenance...
@@ -1430,6 +1438,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let project = std::env::temp_dir().join(format!(
             "blanket-closure-normal-{}-{}",
             std::process::id(),
@@ -1442,6 +1452,7 @@ mod closure_platform_tests {
         fs::create_dir_all(&project).unwrap();
 
         super::write_closure_legacy(&project, "python", closure_test_body(&store)).unwrap();
+        attribution.finish().unwrap();
 
         let closure: serde_json::Value = serde_json::from_slice(
             &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
@@ -1463,6 +1474,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let root = std::env::temp_dir().join(format!(
             "blanket-closure-blanket-symlink-{}-{}",
             std::process::id(),
@@ -1484,6 +1497,7 @@ mod closure_platform_tests {
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
+        attribution.finish().unwrap();
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(store.root);
     }
@@ -1493,6 +1507,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let root = std::env::temp_dir().join(format!(
             "blanket-closure-closures-symlink-{}-{}",
             std::process::id(),
@@ -1514,6 +1530,7 @@ mod closure_platform_tests {
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
+        attribution.finish().unwrap();
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(store.root);
     }

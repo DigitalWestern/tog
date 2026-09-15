@@ -1289,6 +1289,8 @@ mod tests {
     /// the projection cannot quietly move a value or reorder a step.
     #[test]
     fn project_node_env_recorded_characterization_pins_the_closure() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1344,6 +1346,7 @@ mod tests {
             &inputs,
         )
         .unwrap();
+        attribution.finish().unwrap();
 
         // Both node_modules entries are symlinks into a forest outside the
         // project, and the workspace link points back at the source dir.
@@ -1410,6 +1413,8 @@ mod tests {
 
     #[test]
     fn stale_workspace_projection_is_removed_when_dependency_aligns() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1482,6 +1487,7 @@ mod tests {
         )
         .unwrap();
         assert!(fs::symlink_metadata(&workspace_nm).is_err());
+        attribution.finish().unwrap();
         let _ = fs::remove_dir_all(root);
     }
 

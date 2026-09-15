@@ -227,12 +227,192 @@ pub fn drain() -> Vec<Exception> {
     with_recorded(std::mem::take)
 }
 
+/// Inspect the pending exceptions for diagnostics and tests.
+///
+/// Closure publication must use `claim_for_closure`, which checks the active
+/// attribution scope and owning thread before draining the queue.
 pub fn pending() -> Vec<Exception> {
     with_recorded(|recorded| recorded.clone())
 }
 
+/// Clear pending exceptions for diagnostics and test cleanup.
+///
+/// Production closure publication must use `claim_for_closure` so ownership
+/// and attribution are enforced at the publication boundary.
 pub fn clear() {
     with_recorded(|recorded| recorded.clear())
+}
+
+/// Ownership of the pending-exception queue for the span of one ecosystem's
+/// realization. Held by `commands::sync` across the whole `Tailor::sync`
+/// call; see `begin_attribution`.
+///
+/// The guard is what makes attribution sound, so it must outlive the
+/// realization it names: binding it to `_` would drop it immediately and
+/// reopen the hole.
+#[must_use = "the attribution scope must be held across the realization it owns"]
+#[derive(Debug)]
+pub struct AttributionScope {
+    ecosystem: String,
+    // Dropped after `Drop::drop` runs, so the queue is cleared while this
+    // process still owns it.
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+impl AttributionScope {
+    /// The ecosystem this scope attributes exceptions to.
+    pub fn ecosystem(&self) -> &str {
+        &self.ecosystem
+    }
+
+    /// Finish a successful realization after its closure has been published.
+    ///
+    /// This is the success path. A non-empty queue means the tailor either
+    /// published no closure or recorded an exception after publication, so
+    /// report the unclaimed exceptions. Consuming `self` then runs `Drop`,
+    /// which releases ownership and clears the queue even on that error path.
+    pub fn finish(self) -> io::Result<()> {
+        let pending = pending();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        Err(io::Error::other(format!(
+            "{} realization ended with {} exception(s) never claimed by a closure: {}",
+            self.ecosystem,
+            pending.len(),
+            format_exception_list(&pending)
+        )))
+    }
+
+    /// Explicitly discard exceptions that belong to an operation with no
+    /// closure, such as a dependency-file edit.
+    pub fn discard(self) {
+        clear();
+    }
+}
+
+impl Drop for AttributionScope {
+    fn drop(&mut self) {
+        // Cleanup for error and panic paths. Successful realizations call
+        // `finish`, and operations with no closure call `discard`.
+        clear();
+        clear_attribution_owner();
+    }
+}
+
+fn attribution_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
+fn attribution_owner() -> &'static std::sync::Mutex<Option<std::thread::ThreadId>> {
+    static OWNER: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+    &OWNER
+}
+
+fn clear_attribution_owner() {
+    let mut owner = attribution_owner()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *owner = None;
+}
+
+fn format_exception_list(exceptions: &[Exception]) -> String {
+    exceptions
+        .iter()
+        .map(|exception| {
+            format!(
+                "{}: {}: {}",
+                exception.kind, exception.subject, exception.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Take ownership of the pending-exception queue for `ecosystem`'s
+/// realization, refusing if anyone else already owns it or if the queue is
+/// not empty.
+///
+/// The queue is process-wide and a closure claims all of it through
+/// `claim_for_closure`. Attribution is therefore only sound while exactly one
+/// ecosystem is realizing. `blanket audit` reads that attribution as
+/// authority, so a silent cross-attribution is a correctness hole, not a
+/// cosmetic one (FOLLOW-UPS H6).
+///
+/// Checking for an empty queue alone could not deliver that: two realizations
+/// could both observe an empty queue and then record into it, and a closure
+/// could claim exceptions from a different realization. The mutex is what
+/// makes the check mean something; the emptiness check is what catches a leak
+/// from whatever ran before.
+///
+/// Contention is a named `WouldBlock` error rather than a wait, the same
+/// convention `supervise::Session::new` uses for process-wide signal
+/// dispositions: no production path realizes two ecosystems at once, so
+/// contention is a programming error to report, never a race to absorb.
+///
+/// This is a real runtime check rather than a `debug_assert!` because the
+/// failure is invisible in the release build users actually run.
+pub fn begin_attribution(ecosystem: &str) -> io::Result<AttributionScope> {
+    let serial = match attribution_lock().try_lock() {
+        Ok(guard) => guard,
+        // A poisoned lock means a previous scope's owner panicked. `Drop`
+        // cleared the queue on the way out either way, so adopt the guard
+        // rather than refusing every later realization in this process.
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "another ecosystem's attribution scope is already open in this \
+                     process, so {ecosystem} cannot start realizing: the pending \
+                     exception queue is process-wide and one closure claims all of it"
+                ),
+            ));
+        }
+    };
+    let leaked = pending();
+    if !leaked.is_empty() {
+        return Err(io::Error::other(format!(
+            "{} exception(s) were still queued when {ecosystem} realization began; \
+             the {ecosystem} closure would claim exceptions it did not cause: {}",
+            leaked.len(),
+            format_exception_list(&leaked)
+        )));
+    }
+    *attribution_owner()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::thread::current().id());
+    Ok(AttributionScope {
+        ecosystem: ecosystem.to_string(),
+        _serial: serial,
+    })
+}
+
+/// Claim all exceptions for the closure being published by the active
+/// realization. This is the only production publication boundary: it refuses
+/// a missing scope or a caller on a different thread, then returns and clears
+/// the queue for the owning scope.
+pub fn claim_for_closure() -> io::Result<Vec<Exception>> {
+    let current = std::thread::current().id();
+    let owner = attribution_owner()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match owner.as_ref() {
+        None => {
+            return Err(io::Error::other(
+                "closure publication outside an attribution scope: no scope is active",
+            ));
+        }
+        Some(owner) if *owner != current => {
+            return Err(io::Error::other(
+                "closure publication outside an attribution scope: the active scope belongs to another thread",
+            ));
+        }
+        Some(_) => {}
+    }
+    drop(owner);
+    Ok(drain())
 }
 
 /// Exceptions that change the bytes of the object being built.
@@ -301,6 +481,25 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Tests that open an `AttributionScope` queue here, then start from an empty
+/// pending list. When a test also needs the environment, supervision, and
+/// store guards, acquire them in this order: env, supervision, store,
+/// attribution.
+///
+/// `begin_attribution` reports contention as an error instead of waiting, so
+/// two overlapping tests would fail each other rather than serialize. This is
+/// deliberately not the tests' own `exception_guard`: the scope lock is a
+/// production primitive and attribution tests live in more than one module
+/// (`kernel::policy` and `commands::deps`), so they need one lock they can
+/// all name.
+#[cfg(test)]
+pub(crate) fn attribution_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear();
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +556,184 @@ deny = ["git-dependency"]"#,
         .is_err());
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
+    }
+
+    /// Clears the pending list on every exit path, a panic included. A test
+    /// that left an exception queued would hand it to the next test on this
+    /// thread, and the guard under test is exactly the thing that turns a
+    /// stray queued exception into a failure.
+    struct ClearOnDrop;
+    impl Drop for ClearOnDrop {
+        fn drop(&mut self) {
+            clear();
+        }
+    }
+
+    /// Attribution of an exception to a closure depends on the queue being
+    /// empty when each ecosystem starts realizing; `commands::sync` opens a
+    /// scope per ecosystem so a future concurrent sync cannot cross-attribute
+    /// in silence (FOLLOW-UPS H6).
+    #[test]
+    fn pending_exceptions_refuse_the_next_ecosystem_realization() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        record_with(
+            &Policy::default(),
+            INSTALL_SCRIPT_FAILED,
+            "left-pad@1.3.0",
+            "postinstall exited 1",
+        )
+        .unwrap();
+        let error = begin_attribution("cargo").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let text = error.to_string();
+        assert!(text.contains(INSTALL_SCRIPT_FAILED), "{text}");
+        assert!(text.contains("left-pad@1.3.0"), "{text}");
+        assert!(text.contains("cargo"), "{text}");
+    }
+
+    #[test]
+    fn finish_succeeds_after_a_closure_claims_every_exception() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        assert!(pending().is_empty());
+        let scope = begin_attribution("python").unwrap();
+        assert_eq!(scope.ecosystem(), "python");
+        assert!(claim_for_closure().unwrap().is_empty());
+        scope.finish().unwrap();
+        let next = begin_attribution("node").unwrap();
+        next.discard();
+    }
+
+    #[test]
+    fn finish_reports_unclaimed_exceptions_and_clears_them() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        let scope = begin_attribution("python").unwrap();
+        record_with(
+            &Policy::default(),
+            SKIPPED_OPTIONAL,
+            "[dependency-groups]",
+            "excluded by default",
+        )
+        .unwrap();
+        let error = scope.finish().unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains(
+                "python realization ended with 1 exception(s) never claimed by a closure"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(SKIPPED_OPTIONAL), "{text}");
+        assert!(text.contains("[dependency-groups]"), "{text}");
+        assert!(pending().is_empty());
+        let next = begin_attribution("node").unwrap();
+        next.discard();
+    }
+
+    #[test]
+    fn discard_clears_exceptions_for_an_operation_without_a_closure() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        let scope = begin_attribution("dependency-edit").unwrap();
+        record_with(
+            &Policy::default(),
+            SKIPPED_OPTIONAL,
+            "dependency-edit",
+            "fixture",
+        )
+        .unwrap();
+        scope.discard();
+        assert!(pending().is_empty());
+        let next = begin_attribution("node").unwrap();
+        next.discard();
+    }
+
+    /// Closure publication is the only production code that clears the queue,
+    /// so a tailor that records an allowed exception and then fails would
+    /// leave it behind for the next ecosystem. `Drop` is the cleanup that
+    /// covers the error and panic paths (Sol review, should #3).
+    #[test]
+    fn dropping_a_scope_clears_exceptions_the_closure_never_claimed() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        let scope = begin_attribution("python").unwrap();
+        record_with(
+            &Policy::default(),
+            SKIPPED_OPTIONAL,
+            "[dependency-groups]",
+            "excluded by default",
+        )
+        .unwrap();
+        assert_eq!(pending().len(), 1);
+        drop(scope);
+        assert!(
+            pending().is_empty(),
+            "a scope that ended without a closure write left its exceptions queued"
+        );
+        // And the next ecosystem can therefore start.
+        let _next = begin_attribution("node").unwrap();
+    }
+
+    #[test]
+    fn closure_claim_requires_an_active_scope_on_the_calling_thread() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        let error = claim_for_closure().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("closure publication outside an attribution scope"));
+
+        let scope = begin_attribution("python").unwrap();
+        record_with(
+            &Policy::default(),
+            SKIPPED_OPTIONAL,
+            "thread-check",
+            "fixture",
+        )
+        .unwrap();
+        let error = std::thread::spawn(claim_for_closure)
+            .join()
+            .unwrap()
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("closure publication outside an attribution scope"));
+        let claimed = claim_for_closure().unwrap();
+        assert_eq!(claimed.len(), 1);
+        scope.finish().unwrap();
+    }
+
+    /// The emptiness check alone could not stop two realizations from both
+    /// observing an empty queue and then recording into it. The scope is
+    /// exclusive, and contention is a named error rather than a wait — the
+    /// same convention `supervise::Session::new` uses (Sol review, blocker
+    /// #2).
+    #[test]
+    fn a_second_attribution_scope_is_refused_while_the_first_is_open() {
+        let _guard = attribution_test_lock();
+        let _clear = ClearOnDrop;
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        // The scope holds a `MutexGuard`, so it is `!Send`: the owning thread
+        // has to build it and drop it itself.
+        let owner = std::thread::spawn(move || {
+            let scope = begin_attribution("python").unwrap();
+            opened_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(scope);
+        });
+        opened_rx.recv().unwrap();
+        let error = begin_attribution("node").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let text = error.to_string();
+        assert!(text.contains("attribution scope"), "{text}");
+        assert!(text.contains("node"), "{text}");
+        release_tx.send(()).unwrap();
+        owner.join().unwrap();
+        // Once the first scope is gone the next ecosystem may start.
+        let _next = begin_attribution("node").unwrap();
     }
 
     #[test]

@@ -2041,6 +2041,8 @@ checksum = "{hash_b}"
 
     #[test]
     fn projects_cargo_config_wrapper_and_closure() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let attribution = crate::kernel::policy::begin_attribution("test").unwrap();
         let temp = TempDir::new("blanket-cargo-project");
         let project = temp.path().join("project");
         let rust = temp.path().join("objects/rust-id");
@@ -2056,6 +2058,7 @@ checksum = "{hash_b}"
         };
         let digest = lock_digest("version = 4\n");
         project_cargo_env(&project, &rust, &vendor, &plan, &digest).unwrap();
+        attribution.finish().unwrap();
 
         let home = project.join(".blanket/cargo-home").canonicalize().unwrap();
         let vendor = vendor.canonicalize().unwrap();
