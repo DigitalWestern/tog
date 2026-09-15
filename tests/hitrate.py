@@ -27,6 +27,14 @@ SKIP_NAMES = re.compile(
 
 # (class, regex over the combined stderr tail); first match wins.
 CLASSES = [
+    # npm: a *required* (non-optional) lock entry whose os/cpu/libc excludes
+    # the host (src/tailors/node/plan.rs, src/tailors/node/lock_import/mod.rs).
+    # First on purpose: the message interpolates the package path and the
+    # host triple, so any row below could steal it (py_sdist_build_failed
+    # via "glibc", py_no_wheel/npm_platform via the triple, no_manifest or
+    # unreadable_manifest via a package literally named that). The quoted
+    # phrase is invariant and appears in no other emitter.
+    ("npm_platform_required", r"required dependency does not support host"),
     # --strict: any exception the permissive run would have recorded is a
     # refusal; the err column keeps the "policy denies <kind>" line.
     ("policy_denied", r"policy denies [a-z_-]+"),
