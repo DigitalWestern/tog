@@ -1,17 +1,21 @@
-//! Object kinds the Python tailor produces, with the identity grammar each
-//! producer writes and how a legacy record's dependencies are recovered from
-//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
-//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+//! Object kinds the Python tailor produces. Each row has a migration grammar
+//! for legacy records and a separate live grammar for current commits, plus
+//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
+//! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
     add_digest, add_object, artifact_sha256, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
 };
 use crate::kernel::store::{self, ObjectDeps};
+use std::collections::BTreeMap;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "cpython",
         schema: None,
+        live_required: &["artifact_sha256", "platform"],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["artifact_sha256"],
             optional: &["platform"],
@@ -22,6 +26,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "uv",
         schema: None,
+        live_required: &["artifact_sha256", "platform"],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["artifact_sha256"],
             optional: &["platform"],
@@ -32,6 +39,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "native-libs",
         schema: None,
+        live_required: &["platform", "manifest_sha256", "store_root"],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["platform", "manifest_sha256"],
             optional: &["store_root"],
@@ -42,6 +52,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "python-env",
         schema: Some("python-env/2"),
+        live_required: &["schema", "store_root", "cpython"],
+        live_optional: &["native_libs", "pkg:"],
+        live_relations: Some(python_env_relations),
         grammar: Grammar {
             required: &["schema", "cpython"],
             optional: &["store_root", "native_libs"],
@@ -52,6 +65,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "sdist-build",
         schema: Some("sdist-build/2"),
+        live_required: &["schema", "sdist_sha256", "python", "platform", "toolchain"],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["schema", "sdist_sha256", "python", "platform", "toolchain"],
             optional: &[],
@@ -62,6 +78,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "sdist-build",
         schema: Some("sdist-build/3"),
+        live_required: &["schema", "sdist_sha256", "python", "platform", "build_env"],
+        live_optional: &["rust", "vendor", "native_libs", "native_linker"],
+        live_relations: Some(sdist_build_v3_relations),
         grammar: Grammar {
             required: &["schema", "sdist_sha256", "python", "platform", "build_env"],
             optional: &["rust", "vendor", "native_libs", "native_linker"],
@@ -70,6 +89,33 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: sdist_build_v3,
     },
 ];
+
+fn python_env_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
+    if inputs.contains_key("native_libs") && !inputs.keys().any(|key| key.starts_with("pkg:")) {
+        return Err(
+            "Python environment native_libs/pkg relation: native_libs requires a pkg: input".into(),
+        );
+    }
+    Ok(())
+}
+
+fn sdist_build_v3_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
+    for (left, right, relation) in [
+        ("rust", "vendor", "sdist Rust/vendor relation"),
+        (
+            "native_libs",
+            "native_linker",
+            "sdist native_libs/native_linker relation",
+        ),
+    ] {
+        if inputs.contains_key(left) != inputs.contains_key(right) {
+            return Err(format!(
+                "{relation}: {left} and {right} must appear together"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// `native-libs`: the identity commits to a *digest of the package manifest*,
 /// never to the individual library digests, so they cannot be read out of the

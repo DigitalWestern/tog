@@ -158,9 +158,10 @@ pub trait Tailor: Sync {
         out: &mut Vec<Value>,
     ) -> io::Result<()>;
 
-    /// The store object kinds this tailor produces: their identity grammar
-    /// and legacy-metadata adapters (`objmeta`). Every kind a tailor commits
-    /// must have a row here or GC refuses to certify its records.
+    /// The store object kinds this tailor produces: their live and
+    /// legacy-migration identity grammars plus metadata adapters (`objmeta`).
+    /// Every kind a tailor commits must have a row here or GC refuses to
+    /// certify its records.
     fn object_kinds(&self) -> &'static [KindAdapter] {
         &[]
     }
@@ -225,9 +226,25 @@ pub fn kind_adapters() -> impl Iterator<Item = &'static KindAdapter> {
         .flat_map(|tailor| tailor.object_kinds().iter())
 }
 
+/// Test-only view of the identities produced by every tailor's real identity
+/// constructor. The kernel's live-grammar matrix uses these cases instead of
+/// synthesizing an identity from the row it is supposed to check.
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<crate::kernel::types::Identity> {
+    let mut cases = Vec::new();
+    cases.extend(cargo::live_identity_cases(platform));
+    cases.extend(dotnet::live_identity_cases(platform));
+    cases.extend(elixir::live_identity_cases(platform));
+    cases.extend(go::live_identity_cases(platform));
+    cases.extend(node::live_identity_cases(platform));
+    cases.extend(python::live_identity_cases(platform));
+    cases.extend(ruby::live_identity_cases(platform));
+    cases
+}
+
 /// Hand the kernel every tailor's object-kind rows. `commands::dispatch`
-/// calls this once before any command runs; tests that adapt tailor kinds
-/// through `objmeta` or `gc` call it in their setup. Idempotent.
+/// calls this before any command runs, and public tailor realization entry
+/// points call it before they can publish. Idempotent.
 pub fn install_kinds() {
     crate::kernel::objmeta::install_kinds(kind_adapters());
 }

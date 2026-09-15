@@ -1,18 +1,22 @@
-//! Object kinds the Node tailor produces, with the identity grammar each
-//! producer writes and how a legacy record's dependencies are recovered from
-//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
-//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+//! Object kinds the Node tailor produces. Each row has a migration grammar
+//! for legacy records and a separate live grammar for current commits, plus
+//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
+//! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
     add_digest, add_object, artifact_sha256, input, parse_digest, Algo, Grammar, KindAdapter,
     MetaIndex, Record,
 };
 use crate::kernel::store::ObjectDeps;
+use std::collections::BTreeMap;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "nodejs",
         schema: None,
+        live_required: &["artifact_sha256", "platform"],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["artifact_sha256"],
             optional: &["platform"],
@@ -23,6 +27,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "node-env",
         schema: Some("node-env/3"),
+        live_required: &["schema", "store_root", "nodejs", "workspaces"],
+        live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
+        live_relations: Some(node_env_relations),
         grammar: Grammar {
             required: &["schema", "nodejs"],
             optional: &["store_root", "layout", "workspaces", "native_libs"],
@@ -31,6 +38,30 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: node_env_v3,
     },
 ];
+
+fn node_env_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
+    let has_packages = inputs.keys().any(|key| key.starts_with("pkg:"));
+    let has_layout = inputs.contains_key("layout");
+    for key in inputs.keys().filter(|key| key.starts_with("provisioned:")) {
+        let suffix = &key["provisioned:".len()..];
+        let package_key = format!("pkg:{suffix}");
+        if !inputs.contains_key(&package_key) {
+            return Err(format!(
+                "Node provisioned/pkg relation: {key} requires {package_key}"
+            ));
+        }
+    }
+    if inputs.contains_key("native_libs") && !has_packages {
+        return Err("Node native_libs/pkg relation: native_libs requires a pkg: input".into());
+    }
+    if has_layout == has_packages {
+        return Err(
+            "Node layout/package relation: layout is present exactly when no pkg: input exists"
+                .into(),
+        );
+    }
+    Ok(())
+}
 
 /// `node-env/3`: Node and the native library set are direct object ids; a
 /// registry package contributes the SRI digest embedded in its `pkg:` entry

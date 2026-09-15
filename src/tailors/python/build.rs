@@ -571,6 +571,7 @@ pub fn build_sdist_wheel(
     pkg: &LockedPackage,
     python_version: &str,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     build_sdist_wheel_at_depth(store, platform, pkg, python_version, None, 0)
 }
 
@@ -584,6 +585,7 @@ pub fn build_sdist_wheel_with_runtime_plan(
     python_version: &str,
     runtime_plan: &Plan,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     build_sdist_wheel_at_depth(store, platform, pkg, python_version, Some(runtime_plan), 0)
 }
 
@@ -654,6 +656,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     runtime_plan: Option<&Plan>,
     depth: usize,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     let pin = admit_sdist_build(platform, pkg, python_version, depth)?;
 
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
@@ -868,6 +871,48 @@ fn sdist_build_identity(
         None,
         native_libs_id,
     ))
+}
+
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let pin = crate::tailors::python::lookup(platform, "3.12.14")
+        .expect("pinned CPython for test platform");
+    let pkg = LockedPackage {
+        name: "example".into(),
+        version: "1.0.0".into(),
+        filename: "example-1.0.0.tar.gz".into(),
+        url: "https://files.pythonhosted.org/example.tar.gz".into(),
+        sha256: "a".repeat(64),
+        kind: ArtifactKind::Sdist,
+        git: None,
+    };
+    let schema_two = sdist_identity(platform, &pkg, pin);
+    let schema_three =
+        isolated_sdist_identity_from_ids(platform, &pkg, pin, "build-env-object", None, None, None);
+    let schema_three_rust = isolated_sdist_identity_from_ids(
+        platform,
+        &pkg,
+        pin,
+        "build-env-object",
+        Some("rust-object"),
+        Some("vendor-object"),
+        None,
+    );
+    let schema_three_native = isolated_sdist_identity_from_ids(
+        platform,
+        &pkg,
+        pin,
+        "build-env-object",
+        None,
+        None,
+        Some("native-libs-object"),
+    );
+    vec![
+        schema_two,
+        schema_three,
+        schema_three_rust,
+        schema_three_native,
+    ]
 }
 
 /// A Cargo.lock we generated ourselves is not what the sdist attested to.
@@ -1242,5 +1287,6 @@ pub fn ensure_build_environment(
     platform: Platform,
     python_version: &str,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     super::env::realize_env(store, platform, &build_toolchain_plan(python_version))
 }

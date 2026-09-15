@@ -577,6 +577,11 @@ fn identity(store: &Store, platform: Platform) -> io::Result<Identity> {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn live_identity_for_test(store: &Store, platform: Platform) -> io::Result<Identity> {
+    identity(store, platform)
+}
+
 /// Return the object id for the pinned native library set without realizing
 /// it. The canonical store root, manifest, and platform are identity inputs.
 pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
@@ -584,6 +589,7 @@ pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
 }
 
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "native library set", "stage 3")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(store, platform)?;

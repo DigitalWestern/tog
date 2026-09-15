@@ -14,6 +14,10 @@
 //! object id (`store::object_refs`), so it can be both incomplete (an
 //! indirect reference recorded as a fingerprint) and over-broad. Adapters
 //! reconstruct the set from the producer's own input grammar instead.
+//!
+//! Each row also carries a separate live grammar used only by debug builds at
+//! publication time. The migration grammar remains compatible with records
+//! made by older producers.
 
 use crate::kernel::fetch::Digest;
 use crate::kernel::store::{self, ObjectDeps};
@@ -63,9 +67,16 @@ pub struct Record {
     pub value: serde_json::Value,
 }
 
+/// The `schema` input an identity dispatches on, if it wrote one. The
+/// migration path (`Record::schema_input`) and the commit-time drift check
+/// share this one reader so a pair can never be looked up two different ways.
+pub(crate) fn schema_input_of(identity: &Identity) -> Option<&str> {
+    identity.inputs.get("schema").map(String::as_str)
+}
+
 impl Record {
     pub fn schema_input(&self) -> Option<&str> {
-        self.identity.inputs.get("schema").map(String::as_str)
+        schema_input_of(&self.identity)
     }
 
     /// The kind/schema pair used for adapter dispatch and for diagnostics.
@@ -419,7 +430,7 @@ pub fn adapt(record: &Record, index: &MetaIndex) -> Adaptation {
     }
 }
 
-/// The input grammar one producer writes for a (kind, schema) pair.
+/// The migration input grammar for a (kind, schema) pair.
 ///
 /// `required` inputs are written unconditionally at every commit; `optional`
 /// inputs are written only in some shapes. Anything else must match one of
@@ -438,12 +449,22 @@ pub struct Grammar {
     pub groups: &'static [(&'static str, Option<&'static [&'static str]>)],
 }
 
-/// One (kind, schema) pair a producer writes: its grammar and the function
-/// that recovers a legacy record's dependency set. Tailors own their rows
-/// (`Tailor::object_kinds`); the kernel owns `git-source`.
+/// One (kind, schema) pair a producer writes: its live publication grammar,
+/// migration grammar, and the function that recovers a legacy record's
+/// dependency set. Tailors own their rows (`Tailor::object_kinds`); the kernel
+/// owns `git-source`.
 pub struct KindAdapter {
     pub kind: &'static str,
     pub schema: Option<&'static str>,
+    /// Inputs required from the current producer at every commit. These are
+    /// separate from `grammar.required`, which preserves legacy compatibility.
+    pub live_required: &'static [&'static str],
+    /// Inputs the current producer may add conditionally. Entries ending in
+    /// `:` are recognized prefixes, such as `pkg:` for variable package keys.
+    pub live_optional: &'static [&'static str],
+    /// Relationships between live inputs that the names and whitelist alone
+    /// cannot express, such as paired prefixes or conditional fields.
+    pub live_relations: Option<fn(&BTreeMap<String, String>) -> Result<(), String>>,
     pub grammar: Grammar,
     pub adapt: fn(&Record, &MetaIndex) -> Result<ObjectDeps, String>,
 }
@@ -452,9 +473,30 @@ pub struct KindAdapter {
 static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
     kind: "git-source",
     schema: Some("git-source/2"),
+    live_required: &["schema", "url", "commit"],
+    live_optional: &[],
+    live_relations: None,
     grammar: Grammar {
         required: &["schema", "url", "commit"],
         optional: &[],
+        groups: &[],
+    },
+    adapt: no_dependencies,
+}];
+
+/// Synthetic objects are useful to kernel and comforter unit tests, but an
+/// arbitrary kind must never pass the live publication check. Keep their
+/// registration test-only so production can only commit a shipped row.
+#[cfg(test)]
+static TEST_KINDS: &[KindAdapter] = &[KindAdapter {
+    kind: "test",
+    schema: None,
+    live_required: &[],
+    live_optional: &["input"],
+    live_relations: None,
+    grammar: Grammar {
+        required: &[],
+        optional: &["input"],
         groups: &[],
     },
     adapt: no_dependencies,
@@ -473,20 +515,43 @@ fn no_dependencies(_record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, S
 /// `commands::dispatch`). A kind that was never installed has no adapter,
 /// which fails closed: gc refuses to sweep a store whose records it cannot
 /// read, exactly as for an unknown kind.
+fn registered_kinds() -> impl Iterator<Item = &'static KindAdapter> {
+    let rows = KERNEL_KINDS.iter().chain(installed_kinds().iter().copied());
+    #[cfg(test)]
+    {
+        rows.chain(TEST_KINDS.iter())
+    }
+    #[cfg(not(test))]
+    {
+        rows
+    }
+}
+
 fn adapter_for(kind: &str, schema: Option<&str>) -> Option<&'static KindAdapter> {
-    KERNEL_KINDS
-        .iter()
-        .chain(installed_kinds().iter().copied())
-        .find(|adapter| adapter.kind == kind && adapter.schema == schema)
+    registered_kinds().find(|adapter| adapter.kind == kind && adapter.schema == schema)
 }
 
 static INSTALLED_KINDS: OnceLock<Vec<&'static KindAdapter>> = OnceLock::new();
 
+fn kind_schema_set(
+    rows: &[&'static KindAdapter],
+) -> BTreeSet<(&'static str, Option<&'static str>)> {
+    rows.iter().map(|row| (row.kind, row.schema)).collect()
+}
+
 /// Install the object-kind rows the kernel may adapt beyond its own. The
-/// first call wins; later calls are ignored, so tests that install the same
-/// table from several threads are safe.
-pub fn install_kinds(rows: impl IntoIterator<Item = &'static KindAdapter>) {
-    let _ = INSTALLED_KINDS.set(rows.into_iter().collect());
+/// first call wins. A repeated identical installation is a no-op, while a
+/// different (kind, schema) set is a programming error.
+pub(crate) fn install_kinds(rows: impl IntoIterator<Item = &'static KindAdapter>) {
+    let rows: Vec<_> = rows.into_iter().collect();
+    let installed = INSTALLED_KINDS.get_or_init(|| rows.clone());
+    let installed_pairs = kind_schema_set(installed);
+    let new_pairs = kind_schema_set(&rows);
+    if installed_pairs != new_pairs {
+        panic!(
+            "object-kind rows already installed with a different (kind, schema) set: installed={installed_pairs:?}, new={new_pairs:?}"
+        );
+    }
 }
 
 fn installed_kinds() -> &'static [&'static KindAdapter] {
@@ -522,14 +587,7 @@ fn enforce_grammar(inputs: &BTreeMap<String, String>, grammar: &Grammar) -> Resu
         }
     }
     for key in inputs.keys() {
-        if grammar.required.contains(&key.as_str()) || grammar.optional.contains(&key.as_str()) {
-            continue;
-        }
-        if grammar
-            .groups
-            .iter()
-            .any(|(prefix, _)| key.starts_with(prefix))
-        {
+        if grammar_accepts_key(grammar, key) {
             continue;
         }
         return Err(format!(
@@ -555,6 +613,86 @@ fn enforce_grammar(inputs: &BTreeMap<String, String>, grammar: &Grammar) -> Resu
         }
     }
     Ok(())
+}
+
+/// Whether the migration grammar recognizes one concrete input name. This is
+/// also used by the structural live-grammar test so the test and migration
+/// path cannot disagree about exact keys versus dynamic prefixes.
+pub(crate) fn grammar_accepts_key(grammar: &Grammar, key: &str) -> bool {
+    grammar.required.contains(&key)
+        || grammar.optional.contains(&key)
+        || grammar
+            .groups
+            .iter()
+            .any(|(prefix, _)| key.starts_with(prefix))
+}
+
+/// Enforce the current producer's publication grammar. Unlike migration,
+/// this intentionally does not use `Grammar`: its required fields describe
+/// only what the live producer writes today, and its optional entries may be
+/// exact keys or dynamic prefixes.
+fn enforce_live_grammar(
+    inputs: &BTreeMap<String, String>,
+    adapter: &KindAdapter,
+) -> Result<(), String> {
+    for key in adapter.live_required {
+        if !inputs.contains_key(*key) {
+            return Err(format!(
+                "identity has no live-required {key} input; the current producer writes it on every commit"
+            ));
+        }
+    }
+    for key in inputs.keys() {
+        let allowed = adapter.live_required.contains(&key.as_str())
+            || adapter.live_optional.contains(&key.as_str())
+            || adapter
+                .live_optional
+                .iter()
+                .any(|prefix| prefix.ends_with(':') && key.starts_with(prefix));
+        if !allowed {
+            return Err(format!(
+                "unrecognized live identity input {key}; the current producer's live grammar does not write it"
+            ));
+        }
+    }
+    if let Some(relations) = adapter.live_relations {
+        relations(inputs)?;
+    }
+    Ok(())
+}
+
+/// Check a *live* identity against its producer's grammar row.
+///
+/// Each row describes what its producer builds today, but until now the only
+/// reader of a row was `adapt_inner`, the legacy-record migration path. A
+/// producer that started writing a new input, or stopped writing a required
+/// one, committed fine; the stale row bit much later, during a migration, on
+/// a store nobody could re-create. This closes that gap by reading the row at
+/// commit time (FOLLOW-UPS item 7).
+///
+/// A kind absent from every row is refused. This closes the typo path where a
+/// producer can commit a kind such as `cpythno` without any grammar at all.
+pub(crate) fn check_identity_grammar(identity: &Identity) -> Result<(), String> {
+    let schema = schema_input_of(identity);
+    match adapter_for(&identity.kind, schema) {
+        Some(adapter) => enforce_live_grammar(&identity.inputs, adapter),
+        None => {
+            let rows: Vec<&KindAdapter> = registered_kinds()
+                .filter(|adapter| adapter.kind == identity.kind)
+                .collect();
+            if !rows.is_empty() {
+                let schemas: Vec<Option<&str>> = rows.iter().map(|row| row.schema).collect();
+                return Err(format!(
+                    "identity kind {} has schema {:?}, but its grammar rows list schemas {:?}",
+                    identity.kind, schema, schemas
+                ));
+            }
+            Err(format!(
+                "identity kind {} has no registered object-kind grammar row",
+                identity.kind
+            ))
+        }
+    }
 }
 
 fn adapt_inner(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
@@ -682,14 +820,26 @@ pub(crate) fn adapt_identity_for_test(identity: Identity, others: Vec<Record>) -
 }
 
 #[cfg(test)]
+pub(crate) fn register_test_kinds() {
+    tests::register_test_kinds();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::platform::Platform;
 
     /// Unit tests never pass through `commands::dispatch`, so the shipped
     /// table is installed on first use. The non-test kernel names no tailor
     /// (tests/architecture.rs checks that).
     pub(super) fn install_shipped_kinds() {
         crate::tailors::install_kinds();
+    }
+
+    /// Register the synthetic kind used by kernel and comforter unit tests.
+    /// `TEST_KINDS` is included by `registered_kinds` only in test builds.
+    pub(crate) fn register_test_kinds() {
+        install_shipped_kinds();
     }
 
     fn ident(kind: &str, name: &str, version: &str, inputs: &[(&str, &str)]) -> Identity {
@@ -2080,5 +2230,348 @@ mod tests {
             adapt(&record, &index),
             Adaptation::Unresolved(reason) if reason.contains("not a migration candidate")
         ));
+    }
+
+    // -- FOLLOW-UPS item 7: commit-time grammar drift ----------------------
+
+    /// The commit-time check reads the same row the migration path reads, so
+    /// a producer that drifts from its row fails at the commit that drifts,
+    /// not at a migration years later.
+    #[test]
+    fn commit_time_grammar_check_matches_the_listed_row() {
+        let good = ident(
+            "git-source",
+            "example",
+            "abc123",
+            &[
+                ("schema", "git-source/2"),
+                ("url", "https://example.invalid/repo.git"),
+                ("commit", &sha1('c')),
+            ],
+        );
+        assert_eq!(check_identity_grammar(&good), Ok(()));
+
+        let mut missing = good.clone();
+        missing.inputs.remove("commit");
+        let reason = check_identity_grammar(&missing).unwrap_err();
+        assert!(reason.contains("commit"), "{reason}");
+
+        let mut extra = good.clone();
+        extra.inputs.insert("depth".to_string(), "1".to_string());
+        let reason = check_identity_grammar(&extra).unwrap_err();
+        assert!(reason.contains("depth"), "{reason}");
+    }
+
+    /// A kind absent from every row is rejected at commit time, including
+    /// after the shipped tailor rows have been installed.
+    #[test]
+    fn commit_time_grammar_check_rejects_an_unlisted_kind() {
+        let synthetic = ident("not-a-shipped-kind", "x", "1", &[("anything", "goes")]);
+        let reason = check_identity_grammar(&synthetic).unwrap_err();
+        assert!(
+            reason.contains("no registered object-kind grammar row"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn commit_time_grammar_check_rejects_schema_drift() {
+        let mut schema_removed = ident(
+            "git-source",
+            "example",
+            "abc123",
+            &[
+                ("schema", "git-source/2"),
+                ("url", "https://example.invalid/repo.git"),
+                ("commit", &sha1('c')),
+            ],
+        );
+        schema_removed.inputs.remove("schema");
+        let reason = check_identity_grammar(&schema_removed).unwrap_err();
+        assert!(reason.contains("git-source"), "{reason}");
+        assert!(reason.contains("None"), "{reason}");
+        assert!(reason.contains("git-source/2"), "{reason}");
+
+        let schemaless_with_schema = ident(
+            "cpython",
+            "cpython",
+            "3.12.14",
+            &[
+                ("artifact_sha256", &sha256('a')),
+                ("platform", "x86_64-unknown-linux-gnu"),
+                ("schema", "cpython/1"),
+            ],
+        );
+        let reason = check_identity_grammar(&schemaless_with_schema).unwrap_err();
+        assert!(reason.contains("cpython"), "{reason}");
+        assert!(reason.contains("Some(\"cpython/1\")"), "{reason}");
+        assert!(reason.contains("None"), "{reason}");
+
+        let unknown = ident("not-a-shipped-kind", "x", "1", &[("schema", "future/1")]);
+        let reason = check_identity_grammar(&unknown).unwrap_err();
+        assert!(
+            reason.contains("no registered object-kind grammar row"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn every_row_rejects_each_missing_live_required_input() {
+        register_test_kinds();
+        for platform in [
+            Platform::X86_64UnknownLinuxGnu,
+            Platform::Aarch64AppleDarwin,
+        ] {
+            let cases = live_identity_cases(platform);
+            for row in registered_kinds() {
+                // `test` exists only to support unrelated kernel and
+                // comforter unit tests. It has no real producer constructor.
+                if row.kind == "test" {
+                    continue;
+                }
+                // The native-library producer has no Darwin pin and refuses
+                // before constructing an identity on that platform.
+                if row.kind == "native-libs" && platform.is_macos() {
+                    continue;
+                }
+                let row_cases: Vec<_> = cases
+                    .iter()
+                    .filter(|identity| {
+                        identity.kind == row.kind && schema_input_of(identity) == row.schema
+                    })
+                    .collect();
+                assert!(
+                    !row_cases.is_empty(),
+                    "no real producer identity for {}, {:?}, {}",
+                    row.kind,
+                    row.schema,
+                    platform.triple()
+                );
+                for identity in row_cases {
+                    assert_eq!(
+                        check_identity_grammar(identity),
+                        Ok(()),
+                        "real producer identity rejected for {}, {:?}, {}",
+                        row.kind,
+                        row.schema,
+                        platform.triple()
+                    );
+                    for key in row.live_required {
+                        let mut missing = identity.clone();
+                        missing.inputs.remove(*key);
+                        let reason = check_identity_grammar(&missing).unwrap_err();
+                        assert!(
+                            reason.contains(key),
+                            "missing {key} was accepted for {}, {:?}, {}: {reason}",
+                            row.kind,
+                            row.schema,
+                            platform.triple()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+        let mut cases = vec![crate::kernel::gitsrc::live_identity_for_test()];
+        cases.extend(crate::tailors::live_identity_cases(platform));
+        cases
+    }
+
+    fn case_with_input<'a>(
+        cases: &'a [Identity],
+        kind: &str,
+        schema: Option<&str>,
+        key: &str,
+    ) -> Identity {
+        cases
+            .iter()
+            .find(|identity| {
+                identity.kind == kind
+                    && schema_input_of(identity) == schema
+                    && identity.inputs.contains_key(key)
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind}/{schema:?} case has {key}"))
+    }
+
+    fn assert_relation_breaks(mut identity: Identity, remove: &str, relation: &str) {
+        assert_eq!(check_identity_grammar(&identity), Ok(()));
+        assert!(
+            identity.inputs.remove(remove).is_some(),
+            "missing fixture key {remove}"
+        );
+        let reason = check_identity_grammar(&identity).unwrap_err();
+        assert!(
+            reason.contains(relation),
+            "relation {relation} was not named: {reason}"
+        );
+    }
+
+    #[test]
+    fn producer_relations_reject_partial_live_outputs() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let darwin = live_identity_cases(Platform::Aarch64AppleDarwin);
+
+        let nuget = case_with_input(
+            &linux,
+            "nuget-packages",
+            Some("nuget-packages/1"),
+            "pkg:newtonsoft.json@13.0.3",
+        );
+        assert_relation_breaks(
+            nuget,
+            "raw:newtonsoft.json@13.0.3",
+            "NuGet pkg/raw relation",
+        );
+
+        let go = case_with_input(
+            &linux,
+            "go-modcache",
+            Some("go-modcache/1"),
+            "mod:example.com/lib@v1.2.3",
+        );
+        assert_relation_breaks(
+            go,
+            "info:example.com/lib@v1.2.3",
+            "Go module triplet relation",
+        );
+
+        let beam = case_with_input(&linux, "beam", Some("beam-toolchain/1"), "store_root");
+        assert_relation_breaks(beam, "store_root", "BEAM relocation relation");
+
+        let node_empty = case_with_input(&linux, "node-env", Some("node-env/3"), "layout");
+        assert_relation_breaks(node_empty, "layout", "Node layout/package relation");
+        let node_native = case_with_input(&linux, "node-env", Some("node-env/3"), "native_libs");
+        assert_relation_breaks(
+            node_native,
+            "pkg:node_modules/example",
+            "Node native_libs/pkg relation",
+        );
+        let mut node_provisioned = case_with_input(
+            &linux,
+            "node-env",
+            Some("node-env/3"),
+            "pkg:node_modules/example",
+        );
+        // The real constructor reaches this branch through the Electron
+        // checksum manifest, which is network-backed. Keep the fixture's
+        // current output shape while testing the offline relation itself.
+        node_provisioned.inputs.insert(
+            "provisioned:node_modules/example".into(),
+            "electron-v1:a".into(),
+        );
+        assert_relation_breaks(
+            node_provisioned,
+            "pkg:node_modules/example",
+            "Node provisioned/pkg relation",
+        );
+
+        let mut python_env =
+            case_with_input(&linux, "python-env", Some("python-env/2"), "pkg:example");
+        // Native sdist inspection needs an archive. This closest offline
+        // fixture uses the producer's wheel-shaped environment plus the
+        // optional object input that the same constructor emits for a native
+        // sdist.
+        python_env
+            .inputs
+            .insert("native_libs".into(), "native-libs-object".into());
+        assert_relation_breaks(
+            python_env,
+            "pkg:example",
+            "Python environment native_libs/pkg relation",
+        );
+
+        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/3"), "rust");
+        assert_relation_breaks(sdist_rust, "vendor", "sdist Rust/vendor relation");
+        let sdist_native = case_with_input(
+            &linux,
+            "sdist-build",
+            Some("sdist-build/3"),
+            "native_linker",
+        );
+        assert_relation_breaks(
+            sdist_native,
+            "native_libs",
+            "sdist native_libs/native_linker relation",
+        );
+
+        // Darwin's real BEAM constructor is the other conditional shape and
+        // must pass without the Linux relocation pair.
+        let beam_darwin = case_with_input(&darwin, "beam", Some("beam-toolchain/1"), "platform");
+        assert_eq!(check_identity_grammar(&beam_darwin), Ok(()));
+    }
+
+    /// Cheap structural drift: a row whose `required` and `optional` lists
+    /// overlap, or repeat a key, is a copy-paste error that would make the
+    /// grammar say two different things about one input.
+    #[test]
+    fn every_installed_row_has_a_well_formed_grammar() {
+        install_shipped_kinds();
+        let rows = registered_kinds();
+        let mut seen_pairs: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
+        for row in rows {
+            let where_ = format!("kind {}, schema {:?}", row.kind, row.schema);
+            assert!(
+                seen_pairs.insert((row.kind, row.schema)),
+                "{where_} is listed twice; adapter_for would silently take the first"
+            );
+            for list in [row.grammar.required, row.grammar.optional] {
+                let unique: BTreeSet<&str> = list.iter().copied().collect();
+                assert_eq!(unique.len(), list.len(), "{where_} repeats an input key");
+            }
+            for key in row.grammar.required {
+                assert!(
+                    !row.grammar.optional.contains(key),
+                    "{where_} lists {key} as both required and optional"
+                );
+            }
+            for list in [row.live_required, row.live_optional] {
+                let unique: BTreeSet<&str> = list.iter().copied().collect();
+                assert_eq!(
+                    unique.len(),
+                    list.len(),
+                    "{where_} repeats a live input key"
+                );
+            }
+            for key in row.live_required {
+                assert!(
+                    !row.live_optional.contains(key),
+                    "{where_} lists {key} as both live-required and live-optional"
+                );
+            }
+            for (prefix, _) in row.grammar.groups {
+                assert!(!prefix.is_empty(), "{where_} has an empty group prefix");
+                for key in row.grammar.required.iter().chain(row.grammar.optional) {
+                    assert!(
+                        !key.starts_with(prefix),
+                        "{where_} names {key} explicitly and also covers it with group {prefix}"
+                    );
+                }
+            }
+            for key in row.live_required.iter().chain(row.live_optional) {
+                assert!(
+                    grammar_accepts_key(&row.grammar, key),
+                    "live input {key} is not accepted by migration grammar for {where_}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn installing_a_different_kind_schema_set_panics() {
+        install_shipped_kinds();
+        let result = std::panic::catch_unwind(|| install_kinds(TEST_KINDS.iter()));
+        let payload = result.expect_err("a different kind/schema set was accepted");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("different (kind, schema) set"),
+            "{message}"
+        );
     }
 }

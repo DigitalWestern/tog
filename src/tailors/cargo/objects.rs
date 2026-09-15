@@ -1,7 +1,7 @@
-//! Object kinds the Cargo tailor produces, with the identity grammar each
-//! producer writes and how a legacy record's dependencies are recovered from
-//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
-//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+//! Object kinds the Cargo tailor produces. Each row has a migration grammar
+//! for legacy records and a separate live grammar for current commits, plus
+//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
+//! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
     add_digest, add_object, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
@@ -12,6 +12,15 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "rust",
         schema: Some("rust-toolchain/1"),
+        live_required: &[
+            "schema",
+            "cargo_sha256",
+            "rust_std_sha256",
+            "rustc_sha256",
+            "platform",
+        ],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["schema", "cargo_sha256", "rust_std_sha256", "rustc_sha256"],
             optional: &["platform"],
@@ -22,6 +31,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "rustfmt",
         schema: Some("rustfmt/1"),
+        live_required: &["schema", "rust_object", "rustfmt_sha256", "platform"],
+        live_optional: &[],
+        live_relations: None,
         grammar: Grammar {
             required: &["schema", "rust_object", "rustfmt_sha256"],
             optional: &["platform"],
@@ -32,6 +44,9 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "cargo-vendor",
         schema: Some("cargo-vendor/1"),
+        live_required: &["schema"],
+        live_optional: &["crate:"],
+        live_relations: None,
         grammar: Grammar {
             required: &["schema"],
             optional: &[],

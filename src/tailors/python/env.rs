@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
 pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     realize_env_at_depth(store, platform, plan, 0)
 }
 
@@ -140,6 +141,7 @@ pub(crate) fn realize_env_at_depth(
     plan: &Plan,
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Python environment", "stage 2")?;
     let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
         no_pin(
@@ -518,6 +520,7 @@ mod tests {
     }
 
     fn complete_object(store: &Store, name: &str) -> String {
+        crate::kernel::objmeta::register_test_kinds();
         let identity = crate::kernel::types::Identity {
             kind: "test".into(),
             name: name.into(),

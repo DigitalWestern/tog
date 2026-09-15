@@ -1352,6 +1352,7 @@ mod closure_platform_tests {
     }
 
     fn complete_object(store: &Store, name: &str) -> String {
+        crate::kernel::objmeta::register_test_kinds();
         let identity = crate::kernel::types::Identity {
             kind: "test".into(),
             name: name.into(),

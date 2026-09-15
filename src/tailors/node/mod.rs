@@ -192,10 +192,12 @@ fn validate_node_layout(root: &Path) -> io::Result<()> {
 
 /// Ensure Node.js is realized in the store (interpreter at <obj>/bin/node).
 pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_node_for(store, Platform::host()?)
 }
 
 pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Node.js", "stage 2")?;
     let node = node_pin(platform)?;
     let identity = node_identity(node);
@@ -592,6 +594,80 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
 }
 
 #[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    const SRI: &str =
+        "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
+    let node = node_identity(node_pin(platform).expect("pinned Node for test platform"));
+    let store = Store {
+        root: PathBuf::from("/fixture/blanket-store"),
+    };
+    let empty_plan = NpmPlan {
+        node_version: node.version.clone(),
+        packages: Vec::new(),
+        links: Vec::new(),
+        workspaces: Vec::new(),
+        lock_source: "fixture".into(),
+    };
+    let package = NpmPackage {
+        path: "node_modules/example".into(),
+        name: "example".into(),
+        version: "1.0.0".into(),
+        url: "https://registry.example.invalid/example.tgz".into(),
+        integrity: SRI.into(),
+        bin: Vec::new(),
+        patch: None,
+        git: None,
+        optional: false,
+    };
+    let package_plan = NpmPlan {
+        packages: vec![package],
+        ..empty_plan.clone()
+    };
+    let artifact = DeclaredArtifact {
+        url: "https://artifacts.example.invalid/tool.tar.gz".into(),
+        sha256: "a".repeat(64),
+        path: ".npm/tool.tar.gz".into(),
+    };
+    let empty = realize::node_env_identity(
+        &store,
+        platform,
+        Path::new("nodejs-object"),
+        &empty_plan,
+        &[],
+        None,
+    )
+    .expect("empty Node environment identity");
+    let packages = realize::node_env_identity(
+        &store,
+        platform,
+        Path::new("nodejs-object"),
+        &package_plan,
+        &[],
+        None,
+    )
+    .expect("Node package environment identity");
+    let native = realize::node_env_identity(
+        &store,
+        platform,
+        Path::new("nodejs-object"),
+        &package_plan,
+        &[],
+        Some("native-libs-object"),
+    )
+    .expect("Node native environment identity");
+    let declared = realize::node_env_identity(
+        &store,
+        platform,
+        Path::new("nodejs-object"),
+        &empty_plan,
+        &[artifact],
+        None,
+    )
+    .expect("Node declared-artifact environment identity");
+    vec![node, empty, packages, native, declared]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -734,7 +810,18 @@ mod tests {
                     kind: "nodejs".into(),
                     name: "nodejs".into(),
                     version: "24.20.0".into(),
-                    inputs: BTreeMap::new(),
+                    // `node_identity`'s real input shape; the commit-time
+                    // grammar check refuses anything else.
+                    inputs: BTreeMap::from([
+                        ("artifact_sha256".to_string(), "b".repeat(64)),
+                        (
+                            "platform".to_string(),
+                            crate::kernel::platform::Platform::host()
+                                .unwrap()
+                                .triple()
+                                .to_string(),
+                        ),
+                    ]),
                 },
                 &node_staged,
                 &[],

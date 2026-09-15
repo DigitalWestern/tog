@@ -223,6 +223,27 @@ keeps migration sound: a proposed dependency set is checked against what the
 old reader retained, and one that would narrow retention keeps legacy
 protection instead of being published.
 
+Each row in that (kind, schema) coverage matrix declares two input grammars.
+Its `grammar` is the migration grammar, which remains compatible with legacy
+records. Its `live_required` and `live_optional` fields describe the inputs
+the current producer writes, including dynamic prefixes for conditional
+package entries. The live check validates required names, the live key
+whitelist, and the row's `live_relations` for paired or conditional inputs.
+Debug builds enforce all three at the one publication choke point,
+`Store::commit_internal_impl`, so a producer that starts writing a new input,
+drops a required one, or emits an impossible partial group fails at the commit
+that drifts rather than years later during migration.
+A panic there means the producer and its row disagree: restore the producer if
+the drift is accidental (a dropped input like `artifact_sha256` would let
+distinct artifacts share an object id); update the row only for an intentional,
+compatible addition; introduce a new schema value when identity semantics
+change. A kind or schema with no registered row is rejected at commit time and
+also fails closed at sweep time. Public tailor realization entry points call
+`tailors::install_kinds()` before they can publish, while commands call it
+through `commands::dispatch`; direct kernel callers install it explicitly.
+Release builds skip the check; it catches developer error, it is not a store
+invariant.
+
 Status, 2026-09-10: implemented and independently reviewed on Linux (the
 review ledger, [docs/agent/REVIEW.md](docs/agent/REVIEW.md), records the
 rounds); the macOS gate has not run since this work landed. The boundary:
@@ -288,8 +309,8 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
     policy.rs       permissive/strict exception policy
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, migrate.rs maintenance
-    objmeta.rs      object-meta/2 records; the tailors' kind rows are
-                    installed at startup (tailors::install_kinds)
+    objmeta.rs      object-meta/2 records; kind rows are installed by
+                    commands::dispatch or public tailor entry points
     activity.rs     store activity leases
     supervise.rs    supervised child processes
     platform.rs     the only module that knows the host
@@ -305,8 +326,8 @@ Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
 folder has `tailor.rs` (its `impl Tailor`, the one blueprint every
 ecosystem answers: detect, preflight, plan, sync, build, run_env, listing,
 closure_state, sbom_components, object_kinds) and `objects.rs` (the store
-object kinds it produces, with their identity grammar and legacy-metadata
-adapters); `src/tailors/mod.rs` holds the trait and the registry the
+object kinds it produces, with their live and migration identity grammars and
+legacy-metadata adapters); `src/tailors/mod.rs` holds the trait and the registry the
 commands iterate. See docs/human/ADDING-A-TAILOR.md.
 
     python/mod.rs          pinned CPython provisioning

@@ -152,10 +152,12 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// resolved version so a future second pin can't silently realize the
 /// wrong toolchain (only RUST_VERSION is realizable today).
 pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_rust_for(store, Platform::host()?, version)
 }
 
 pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Rust toolchain", "stage 4")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let components = rust_components(platform)?;
@@ -592,6 +594,7 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 /// showed the pairing is not a realized build input. See the deviation note
 /// in the ARCHITECTURE.md coverage matrix.
 pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     preflight_platform(Platform::host()?)?;
     realize_vendor_inner(store, plan)
 }
@@ -954,6 +957,36 @@ fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> 
 
 pub(crate) fn vendor_object_id(plan: &CargoPlan) -> io::Result<String> {
     Ok(vendor_identity(plan)?.1.object_id())
+}
+
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let components = rust_components(platform).expect("pinned Rust components for test platform");
+    let rust = rust_identity(platform, &components);
+    let rust_object_id = rust.object_id();
+    let rustfmt = rustfmt::live_identity_for_test(platform, &rust_object_id)
+        .expect("pinned rustfmt component for test platform");
+    let vendor_empty = vendor_identity(&CargoPlan {
+        rust_version: RUST_VERSION.into(),
+        crates: Vec::new(),
+        members: Vec::new(),
+    })
+    .expect("empty Cargo vendor identity")
+    .1;
+    let vendor_registry = vendor_identity(&CargoPlan {
+        rust_version: RUST_VERSION.into(),
+        crates: vec![CargoCrate {
+            name: "serde".into(),
+            version: "1.0.0".into(),
+            sha256: "a".repeat(64),
+            url: "https://crates.io/api/v1/crates/serde/1.0.0/download".into(),
+            git: None,
+        }],
+        members: Vec::new(),
+    })
+    .expect("registry Cargo vendor identity")
+    .1;
+    vec![rust, rustfmt, vendor_empty, vendor_registry]
 }
 
 #[derive(Serialize)]

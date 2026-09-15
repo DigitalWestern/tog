@@ -122,6 +122,34 @@ fn beam_identity_with(
     })
 }
 
+fn hex_deps_identity(platform: Platform, plan: &ElixirPlan) -> io::Result<Identity> {
+    let mut inputs = BTreeMap::from([
+        ("schema".to_string(), "hex-deps/1".to_string()),
+        // .hex markers are generated under the pinned toolchain; their
+        // bytes live in the object.
+        ("beam".to_string(), beam_fingerprint(platform)?),
+    ]);
+    for d in &plan.deps {
+        inputs.insert(
+            format!("dep:{}", d.app),
+            format!(
+                "{}@{}:{}:{}:{}",
+                d.package,
+                d.version,
+                d.outer_sha256,
+                d.inner_sha256,
+                d.managers.join("+")
+            ),
+        );
+    }
+    Ok(Identity {
+        kind: "hex-deps".into(),
+        name: "deps".into(),
+        version: plan.deps.len().to_string(),
+        inputs,
+    })
+}
+
 const ELIXIR_VERSION: &str = "1.20.4";
 // Platform-neutral BEAM code, keyed to the OTP major.
 const ELIXIR_URL: &str =
@@ -834,10 +862,12 @@ fn extract_otp_archive_for(
 /// roots, per Sol — never merge their trees) + archives/ (unpacked Hex) +
 /// rebar3 escript.
 pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_beam_for(store, Platform::host()?)
 }
 
 pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let pin = otp_pin(platform)?;
@@ -1319,37 +1349,12 @@ pub fn realize_deps(
     plan: &ElixirPlan,
     beam_obj: &Path,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Hex dependencies", "stage 4")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let _ = otp_pin(platform)?;
     validate_plan(plan)?;
-    let mut inputs = BTreeMap::from([
-        ("schema".to_string(), "hex-deps/1".to_string()),
-        // .hex markers are generated under the pinned toolchain; their
-        // bytes live in the object.
-        ("beam".to_string(), beam_fingerprint(platform)?),
-    ]);
-    for d in &plan.deps {
-        inputs.insert(
-            format!("dep:{}", d.app),
-            format!(
-                "{}@{}:{}:{}:{}",
-                d.package,
-                d.version,
-                d.outer_sha256,
-                d.inner_sha256,
-                // Managers shape the generated .hex marker bytes — they
-                // are object-determining inputs (Sol review 6, finding 2).
-                d.managers.join("+")
-            ),
-        );
-    }
-    let identity = Identity {
-        kind: "hex-deps".into(),
-        name: "deps".into(),
-        version: plan.deps.len().to_string(),
-        inputs,
-    };
+    let identity = hex_deps_identity(platform, plan)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
         crate::kernel::policy::check_cached(store, &id)?;
@@ -1644,6 +1649,33 @@ pub fn build_sandboxed(
         });
     let _ = crate::kernel::store::remove_tree(&scratch);
     result
+}
+
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let pin = otp_pin(platform).expect("pinned BEAM toolchain for test platform");
+    let beam =
+        beam_identity(pin, Path::new("/fixture/blanket-store")).expect("offline BEAM identity");
+    let empty_plan = ElixirPlan {
+        otp_version: OTP_VERSION.into(),
+        elixir_version: ELIXIR_VERSION.into(),
+        deps: Vec::new(),
+    };
+    let dependency_plan = ElixirPlan {
+        deps: vec![HexDep {
+            app: "jason".into(),
+            package: "jason".into(),
+            version: "1.4.4".into(),
+            inner_sha256: "a".repeat(64),
+            outer_sha256: "b".repeat(64),
+            managers: vec!["mix".into()],
+        }],
+        ..empty_plan.clone()
+    };
+    let hex_empty = hex_deps_identity(platform, &empty_plan).expect("empty Hex identity");
+    let hex_dependency =
+        hex_deps_identity(platform, &dependency_plan).expect("Hex dependency identity");
+    vec![beam, hex_empty, hex_dependency]
 }
 
 #[cfg(test)]
