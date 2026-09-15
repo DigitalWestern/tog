@@ -1,0 +1,123 @@
+# Build the two supported platforms on a version tag and attach them to a
+# GitHub Release. install.sh downloads exactly these asset names, so keep
+# them stable: blanket-<triple>.tar.gz and blanket-<triple>.tar.gz.sha256.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag must match Cargo.toml's version; the build fails otherwise.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.triple }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest glibc we build against sets the floor for every Linux user
+          # (22.04 = glibc 2.35). src/kernel/platform.rs owns the platform list.
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - os: macos-14
+            triple: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.triple }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.triple }}
+
+      # Apple Silicon refuses unsigned arm64 binaries, and `strip = true` in
+      # Cargo.toml can invalidate the linker's ad-hoc signature. Re-sign.
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - "target/${{ matrix.triple }}/release/blanket"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.triple }}/release/blanket"
+          "$bin" --version
+          "$bin" completions bash >/dev/null
+          "$bin" completions zsh >/dev/null
+          "$bin" completions fish >/dev/null
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="blanket-${{ matrix.triple }}.tar.gz"
+          mkdir -p dist/stage
+          cp "target/${{ matrix.triple }}/release/blanket" dist/stage/blanket
+          tar -C dist/stage -czf "dist/$asset" blanket
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          cat "$asset.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blanket-${{ matrix.triple }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "blanket $tag" \
+              --generate-notes
+          fi

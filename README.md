@@ -29,11 +29,40 @@ sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel \
   pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel
 ```
 
+## Install
+
+One line on Linux x86_64 or macOS arm64. It downloads the release binary
+for your machine, checks its sha256, puts it in `~/.local/bin`, adds that
+directory to PATH if it is not already there, and installs bash, zsh, and
+fish completions:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalWestern/blanket/main/install.sh | sh
+```
+
+Every new terminal has `blanket` from then on. A script cannot change the
+PATH of the terminal that ran it, so it ends by printing the one command
+that finishes the job there (`source ~/.blanket/env`). Options:
+`--dir=<path>`, `--version=<tag>`, `--no-modify-path`, `--no-completions`;
+the header of [install.sh](install.sh) lists every file it touches.
+
+From source, with a Rust toolchain (`cargo install` puts the binary in
+`~/.cargo/bin`, which rustup already added to PATH):
+
+```sh
+cargo install --git https://github.com/DigitalWestern/blanket --locked
+# or, inside a checkout:
+cargo install --path . --locked
+blanket completions zsh > ~/.zfunc/_blanket   # bash | zsh | fish; optional
+```
+
+Do not `cargo install blanket` from crates.io: that name belongs to an
+unrelated crate. Releases are built by
+[.github/workflows/release.yml](.github/workflows/release.yml) on a `v*` tag.
+
 ## Use
 
 ```sh
-cargo build --release
-
 cd your-project     # an EXISTING project works as-is:
 blanket             # realize + project -> ./.venv and/or ./node_modules
 blanket run python app.py       # run inside the projected env(s)
