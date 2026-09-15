@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -134,10 +136,16 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
     Ok(policy)
 }
 
-fn merge_file(policy: &mut Policy, path: &Path, required: bool) -> io::Result<()> {
+fn merge_file(
+    policy: &mut Policy,
+    sources: &mut Vec<PolicySource>,
+    path: &Path,
+    required: bool,
+    origin: SourceOrigin,
+) -> io::Result<bool> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(false),
         Err(e) => {
             return Err(io::Error::new(
                 e.kind(),
@@ -147,7 +155,32 @@ fn merge_file(policy: &mut Policy, path: &Path, required: bool) -> io::Result<()
     };
     let other = parse_file(path, &text)?;
     union(policy, &other);
-    Ok(())
+    // Only a file that existed and was merged is a source; the optional
+    // files that were not there contributed nothing to attribute.
+    sources.push(PolicySource::from_file(origin, path, &other));
+    Ok(true)
+}
+
+#[cfg(unix)]
+type PathIdentity = (u64, u64);
+
+#[cfg(not(unix))]
+type PathIdentity = PathBuf;
+
+/// Identify an existing path by its filesystem identity. This catches hard
+/// links and bind mounts that do not share a pathname.
+#[cfg(unix)]
+fn path_identity(path: &Path) -> Option<PathIdentity> {
+    fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// Identify a path by its canonical spelling on platforms without Unix file
+/// identity fields.
+#[cfg(not(unix))]
+fn path_identity(path: &Path) -> Option<PathIdentity> {
+    Some(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// Union `other` into `policy`. Union only tightens: the result denies
@@ -159,26 +192,145 @@ pub fn union(policy: &mut Policy, other: &Policy) {
     policy.deny.extend(other.deny.iter().cloned());
 }
 
+/// Where one contributing policy came from. The serialized names
+/// (`machine`, `project`, `flag`, `env`) are the stable strings
+/// `blanket audit --json` reports under `policy.sources`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceOrigin {
+    /// `BLANKET_POLICY`, or `$HOME/.blanket/policy.toml` when it is unset.
+    Machine,
+    /// An ancestor directory's `.blanket/policy.toml`.
+    Project,
+    /// A file named by `blanket audit --policy`. Other commands may also use
+    /// this origin for their `--strict` flag; audit uses it only for the file.
+    Flag,
+    /// `BLANKET_STRICT=1`. Not a file: `path` is absent.
+    Env,
+}
+
+impl SourceOrigin {
+    /// The same lowercase name the serializer writes; a unit test pins the
+    /// two together so the report's contract cannot drift.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceOrigin::Machine => "machine",
+            SourceOrigin::Project => "project",
+            SourceOrigin::Flag => "flag",
+            SourceOrigin::Env => "env",
+        }
+    }
+}
+
+impl std::fmt::Display for SourceOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One policy that contributed to a merged `Policy`, and what it said.
+/// `union` is silent about provenance, so a report that only shows the
+/// merged deny set cannot say which file asked for a denial; this is that
+/// missing half.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicySource {
+    pub origin: SourceOrigin,
+    /// The file that was read, absent for strictness sources.
+    pub path: Option<PathBuf>,
+    pub strict: bool,
+    pub deny: BTreeSet<String>,
+}
+
+impl PolicySource {
+    /// The entry for a policy read from `path`, including one unioned in
+    /// from outside the chain (`blanket audit --policy`).
+    pub fn from_file(origin: SourceOrigin, path: &Path, policy: &Policy) -> Self {
+        Self {
+            origin,
+            path: Some(path.to_path_buf()),
+            strict: policy.strict,
+            deny: policy.deny.clone(),
+        }
+    }
+}
+
 /// Load the user and project policies once, unioning all deny entries.
 pub fn load(project_dir: &Path, cli_strict: bool) -> io::Result<Policy> {
+    Ok(load_with_sources(project_dir, cli_strict)?.0)
+}
+
+/// `load`, plus every policy that contributed, in merge order. One loading
+/// algorithm serves both: `load` is this with the provenance discarded.
+/// Callers that pass `cli_strict=true` (currently the sync command for its
+/// strict switch) can produce a `flag` source; audit passes `false` and adds
+/// its separately parsed policy file as a source.
+pub fn load_with_sources(
+    project_dir: &Path,
+    cli_strict: bool,
+) -> io::Result<(Policy, Vec<PolicySource>)> {
     let mut policy = Policy::default();
-    if let Some(path) = std::env::var_os("BLANKET_POLICY") {
-        merge_file(&mut policy, Path::new(&path), true)?;
-    } else if let Some(home) = std::env::var_os("HOME") {
+    let mut sources = Vec::new();
+    let machine_path = if let Some(path) = std::env::var_os("BLANKET_POLICY") {
+        let path = PathBuf::from(path);
         merge_file(
             &mut policy,
-            &Path::new(&home).join(".blanket/policy.toml"),
-            false,
+            &mut sources,
+            &path,
+            true,
+            SourceOrigin::Machine,
         )?;
-    }
+        path_identity(&path)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        let path = PathBuf::from(home).join(".blanket/policy.toml");
+        let loaded = merge_file(
+            &mut policy,
+            &mut sources,
+            &path,
+            false,
+            SourceOrigin::Machine,
+        )?;
+        loaded.then(|| path_identity(&path)).flatten()
+    } else {
+        None
+    };
     // Every ancestor's project policy applies (union only tightens), so a
     // workspace-root policy governs builds started in a member directory
     // without blanket having to know each ecosystem's rooting rule.
     for dir in project_dir.ancestors() {
-        merge_file(&mut policy, &dir.join(".blanket/policy.toml"), false)?;
+        let path = dir.join(".blanket/policy.toml");
+        if machine_path
+            .as_ref()
+            .is_some_and(|machine| path_identity(&path).as_ref() == Some(machine))
+        {
+            continue;
+        }
+        merge_file(
+            &mut policy,
+            &mut sources,
+            &path,
+            false,
+            SourceOrigin::Project,
+        )?;
     }
-    policy.strict |= cli_strict || std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
-    Ok(policy)
+    let env_strict = std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
+    policy.strict |= cli_strict || env_strict;
+    if cli_strict {
+        sources.push(PolicySource {
+            origin: SourceOrigin::Flag,
+            path: None,
+            strict: true,
+            deny: BTreeSet::new(),
+        });
+    }
+    if env_strict {
+        sources.push(PolicySource {
+            origin: SourceOrigin::Env,
+            path: None,
+            strict: true,
+            deny: BTreeSet::new(),
+        });
+    }
+    Ok((policy, sources))
 }
 
 /// Initialize the process policy. Repeated calls keep the first loaded policy.
@@ -316,6 +468,52 @@ mod tests {
         guard
     }
 
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let guard = Self {
+                name,
+                previous: std::env::var_os(name),
+            };
+            std::env::set_var(name, value);
+            guard
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let guard = Self {
+                name,
+                previous: std::env::var_os(name),
+            };
+            std::env::remove_var(name);
+            guard
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn fixture_sources<'a>(sources: &'a [PolicySource], root: &Path) -> Vec<&'a PolicySource> {
+        sources
+            .iter()
+            .filter(|source| {
+                source
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(root))
+            })
+            .collect()
+    }
+
     #[test]
     fn parses_policy_and_rejects_unknown_keys() {
         let policy = toml::from_str::<Policy>(
@@ -380,6 +578,257 @@ deny = ["git-dependency"]"#,
     }
 
     #[test]
+    fn origin_strings_are_lowercase_and_match_the_serialized_name() {
+        for origin in [
+            SourceOrigin::Machine,
+            SourceOrigin::Project,
+            SourceOrigin::Flag,
+            SourceOrigin::Env,
+        ] {
+            let serialized = serde_json::to_string(&origin).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", origin.as_str()));
+            assert_eq!(origin.as_str(), origin.as_str().to_lowercase());
+        }
+    }
+
+    #[test]
+    fn load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-sources-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let parent = root.join("workspace");
+        let project = parent.join("member");
+        fs::create_dir_all(home.join(".blanket")).unwrap();
+        fs::create_dir_all(parent.join(".blanket")).unwrap();
+        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::write(
+            home.join(".blanket/policy.toml"),
+            "deny = [\"git-dependency\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".blanket/policy.toml"),
+            "strict = true\ndeny = [\"file-collision\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            parent.join(".blanket/policy.toml"),
+            "deny = [\"weak-integrity\"]\n",
+        )
+        .unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let (merged, sources) = load_with_sources(&project, false).unwrap();
+        let from_load = load(&project, false).unwrap();
+        // Ancestors above the temp root belong to the machine running the
+        // test (it may have its own policy there); only the files this test
+        // wrote are asserted on, and they must be exactly these three in
+        // merge order: machine, the project dir, then upward.
+        let ours = fixture_sources(&sources, &root);
+        let expected = [
+            (
+                SourceOrigin::Machine,
+                home.join(".blanket/policy.toml"),
+                false,
+                GIT_DEPENDENCY,
+            ),
+            (
+                SourceOrigin::Project,
+                project.join(".blanket/policy.toml"),
+                true,
+                FILE_COLLISION,
+            ),
+            (
+                SourceOrigin::Project,
+                parent.join(".blanket/policy.toml"),
+                false,
+                WEAK_INTEGRITY,
+            ),
+        ];
+        assert_eq!(ours.len(), expected.len(), "{sources:?}");
+        for (source, (origin, path, strict, kind)) in ours.iter().zip(expected) {
+            assert_eq!(source.origin, origin);
+            assert_eq!(source.path.as_deref(), Some(path.as_path()));
+            assert_eq!(source.strict, strict);
+            assert_eq!(source.deny, BTreeSet::from([kind.to_string()]));
+        }
+        // The provenance is additive: the merged policy is what `load`
+        // already returned.
+        assert_eq!(merged.strict, from_load.strict);
+        assert_eq!(merged.deny, from_load.deny);
+        assert!(merged.strict);
+        assert!(merged.deny.contains(GIT_DEPENDENCY));
+        assert!(merged.deny.contains(FILE_COLLISION));
+        assert!(merged.deny.contains(WEAK_INTEGRITY));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_without_a_file_is_recorded_as_the_flag_source() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-strict-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", root.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+        let (policy, sources) = load_with_sources(&root, true).unwrap();
+        assert!(policy.strict);
+        let flags: Vec<&PolicySource> = sources
+            .iter()
+            .filter(|source| source.origin == SourceOrigin::Flag && source.path.is_none())
+            .collect();
+        assert_eq!(flags.len(), 1, "{sources:?}");
+        let flag = flags[0];
+        assert_eq!(flag.origin, SourceOrigin::Flag);
+        assert!(flag.path.is_none());
+        assert!(flag.strict);
+        assert!(flag.deny.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_with_sources_does_not_duplicate_a_machine_policy_under_home() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let project = home.join("project");
+        let machine = home.join(".blanket/policy.toml");
+        fs::create_dir_all(home.join(".blanket")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
+
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+
+        let (merged, sources) = load_with_sources(&project, false).unwrap();
+        assert!(merged.deny.contains(GIT_DEPENDENCY));
+        let ours = fixture_sources(&sources, &root);
+        assert_eq!(ours.len(), 1, "{sources:?}");
+        assert_eq!(ours[0].origin, SourceOrigin::Machine);
+        assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
+
+        let project_policy = project.join(".blanket/policy.toml");
+        fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
+        fs::write(&project_policy, "deny = [\"weak-integrity\"]\n").unwrap();
+        let (merged, sources) = load_with_sources(&project, false).unwrap();
+        assert!(merged.deny.contains(GIT_DEPENDENCY));
+        assert!(merged.deny.contains(WEAK_INTEGRITY));
+        let ours = fixture_sources(&sources, &root);
+        assert_eq!(ours.len(), 2, "{sources:?}");
+        assert_eq!(
+            ours.iter().map(|source| source.origin).collect::<Vec<_>>(),
+            vec![SourceOrigin::Machine, SourceOrigin::Project]
+        );
+        assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
+        assert_eq!(ours[1].path.as_deref(), Some(project_policy.as_path()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_with_sources_does_not_duplicate_a_hard_linked_machine_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-hard-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        let machine = home.join(".blanket/policy.toml");
+        let project_policy = project.join(".blanket/policy.toml");
+        fs::create_dir_all(home.join(".blanket")).unwrap();
+        fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
+        fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
+        fs::hard_link(&machine, &project_policy).unwrap();
+
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+
+        let (merged, sources) = load_with_sources(&project, false).unwrap();
+
+        assert!(merged.deny.contains(GIT_DEPENDENCY));
+        let ours = fixture_sources(&sources, &root);
+        assert_eq!(ours.len(), 1, "{sources:?}");
+        assert_eq!(ours[0].origin, SourceOrigin::Machine);
+        assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_environment_and_flag_are_recorded_as_separate_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-strict-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", root.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _strict = EnvVarGuard::set("BLANKET_STRICT", "1");
+
+        let (policy, env_sources) = load_with_sources(&root, false).unwrap();
+        assert!(policy.strict);
+        let pathless: Vec<&PolicySource> = env_sources
+            .iter()
+            .filter(|source| source.path.is_none())
+            .collect();
+        assert_eq!(
+            pathless
+                .iter()
+                .map(|source| source.origin)
+                .collect::<Vec<_>>(),
+            vec![SourceOrigin::Env]
+        );
+        assert!(pathless[0].path.is_none());
+
+        let (_, both_sources) = load_with_sources(&root, true).unwrap();
+        let pathless: Vec<&PolicySource> = both_sources
+            .iter()
+            .filter(|source| source.path.is_none())
+            .collect();
+        assert_eq!(
+            pathless
+                .iter()
+                .map(|source| source.origin)
+                .collect::<Vec<_>>(),
+            vec![SourceOrigin::Flag, SourceOrigin::Env]
+        );
+        assert!(pathless.iter().all(|source| source.path.is_none()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn loads_user_and_project_policy_union_from_files() {
         let root = std::env::temp_dir().join(format!(
             "blanket-policy-test-{}-{}",
@@ -404,23 +853,13 @@ deny = ["git-dependency"]"#,
         )
         .unwrap();
         let _env = test_env_lock();
-        let old_home = std::env::var_os("HOME");
-        let old_policy = std::env::var_os("BLANKET_POLICY");
-        std::env::set_var("HOME", &home);
-        std::env::remove_var("BLANKET_POLICY");
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
         let loaded = load(&project, false).unwrap();
         // Ancestor rule: a workspace member inherits the root's policy.
         let member = project.join("crates/member");
         fs::create_dir_all(&member).unwrap();
         let from_member = load(&member, false).unwrap();
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match old_policy {
-            Some(value) => std::env::set_var("BLANKET_POLICY", value),
-            None => std::env::remove_var("BLANKET_POLICY"),
-        }
         assert!(loaded.strict);
         assert!(loaded.deny.contains(FILE_COLLISION));
         assert!(loaded.deny.contains(GIT_DEPENDENCY));

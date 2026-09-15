@@ -198,12 +198,23 @@ can pick it up cold.
   `KINDS` membership test, and the `check_name` comparison; every mutant
   must turn at least one test red. Done when the survivors (if any) are
   listed here or in REVIEW.md.
-- **H5 — policy provenance in the report.** `policy::load` unions silently;
-  the JSON report says what is denied but not which file said so. Return
-  the contributing sources from `load` (path → deny entries, strict) and
-  emit them under `policy.sources`, so a CI log shows whether a denial came
-  from the machine, the repository, or `--policy`. Done when the CLI test
-  asserts the sources for a project-plus-flag case.
+- **H5 — policy provenance in the report. Done (2026-09-15).**
+  `policy::load_with_sources` returns the merged policy plus every policy
+  that contributed, in merge order, with its origin and optional `path`,
+  `strict`, and `deny`; `load` is now a thin wrapper over it, so there is one
+  loading algorithm and no caller changed. `audit::effective_policy` appends
+  the `--policy` file after the ordinary chain. `--json` emits sources under
+  `policy.sources` with lossy UTF-8 paths, adds lowercase raw-byte
+  `path_bytes` only for non-UTF-8 paths, and omits `path` for strictness-only
+  sources (additive; every existing field is unchanged). The same lossy path
+  helper keeps `project` and closure `path` strings JSON-safe, adding sibling
+  `project_bytes` or `path_bytes` only for non-UTF-8 paths. The text report
+  prints one source line per source on stdout. File paths are always
+  Rust-Debug-quoted as `policy: <origin> "<path>" [denies ...] [(strict)]`;
+  strictness-only sources omit the path. Lines come before verdicts regardless
+  of `--quiet`; existing file sources are listed even when they deny nothing.
+  Covered by `policy::tests::load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it`
+  and `cli::audit_json_attributes_each_policy_to_its_source_file`.
 - **H6 — per-closure attribution guard.** Attribution of exceptions to a
   closure relies on sync realizing and publishing one ecosystem at a time
   (`project.rs` clears the pending list after each write). Add a debug

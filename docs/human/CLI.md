@@ -178,7 +178,7 @@ CI admission gate: it reads the exceptions every sync recorded in
 `.blanket/closures/*.json` and judges them against the policy chain
 (`BLANKET_POLICY` or `~/.blanket/policy.toml`, every ancestor's
 `.blanket/policy.toml`, `BLANKET_STRICT`) unioned with `--policy <file>`.
-Union only tightens, so the flag can add denials but never loosen the
+Union only tightens, so the supplied policy can add denials but never loosen the
 machine or project policy; a `--policy` file that is missing or malformed is
 a usage error (exit 2), never ignored, so CI can tell an operator mistake
 from a denied build. Per closure it prints the ecosystem, the record (sha256
@@ -194,7 +194,28 @@ to compare and is judged on its exceptions alone. A closure file whose
 `ecosystem` field disagrees with its name (a stray or renamed `.json` under
 `.blanket/closures`) is refused, not judged. No rebuild, no store
 access, no network, no sandbox: it works on a machine without bubblewrap.
-`--json` writes the report to stdout. Exit 0 when every closure is clean, 1
+`--json` writes the report to stdout. `project` and each closure's `path` are
+lossy UTF-8 strings. On Unix, a non-UTF-8 project path also has a sibling
+`project_bytes` field, and a non-UTF-8 closure path has a sibling `path_bytes`
+field, each containing the lowercase hex of the raw path bytes. Under
+`policy.sources` it lists the
+policies that were unioned into the one it judged against, in merge order.
+Each source has `origin`, `strict`, and `deny`; file-backed sources also have
+`path` as a lossy UTF-8 string. A non-UTF-8 path also has `path_bytes` as the
+lowercase hex of its raw bytes; that field is present only for non-UTF-8 paths.
+`origin` is `machine` (`BLANKET_POLICY`, or
+`~/.blanket/policy.toml`), `project` (an ancestor's
+`.blanket/policy.toml`), `flag` (the `--policy <file>` file, and nothing else
+for audit), or `env` (`BLANKET_STRICT=1`). The supplied `--policy` file is
+listed after the ordinary chain. The `path` field is omitted
+for strictness-only sources, and `deny` is always an array, including when it
+is empty. A file source is listed when it exists and is merged even if it
+denies nothing. In the text report, each file-backed source is one
+`policy: <origin> "<path>" [denies a, b] [(strict)]` result line on stdout.
+Paths are always Rust-Debug-quoted, so spaces and policy-like words in a
+filename cannot change the grammar. Strictness-only sources omit the path.
+Policy lines come first, followed by verdict lines, and `--quiet` leaves them
+in place. Exit 0 when every closure is clean, 1
 otherwise. A company deny list to start from
 ships as [policy-company.toml](policy-company.toml); every kind it names is
 checked against the binary's kind list by a unit test. **ls** reads
