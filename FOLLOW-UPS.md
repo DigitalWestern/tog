@@ -192,12 +192,20 @@ can pick it up cold.
      against untrusted branches.
   Done when the chosen design has its own review round and LIMITATIONS.md's
   audit bullet no longer says a hand-edited record audits as it says.
-- **H4 — mutation check of `src/commands/audit.rs`.** This repo's rule is that
-  fixes get mutation-checked; audit has not been. Flip each arm of
-  `Verdict::passes`, each `Freshness` mapping in `freshness_from_state`, the
-  `KINDS` membership test, and the `check_name` comparison; every mutant
-  must turn at least one test red. Done when the survivors (if any) are
-  listed here or in REVIEW.md.
+- **H4 — mutation check of `src/commands/audit.rs`. Done 2026-09-14.** 31
+  hand-written mutants over every decision the gate makes (each clause of
+  `Verdict::passes`, `Report::passes`, every `State` arm of
+  `freshness_from_state`, the `KINDS` membership test, `check_name`, the
+  `policy::denied` call and the missing-record branch in `evaluate`, and the
+  three guards in `freshness`). 30 died on the first pass; the one survivor
+  was `Report::passes` `.all(…)` → `.any(…)`, invisible because every test
+  built a single-verdict report — a project with one clean and one denied
+  closure would have exited 0. A new unit test,
+  `one_failing_closure_fails_the_whole_report`, kills it; the full set
+  re-run afterwards is 31 killed, 0 survivors. Table and per-mutant kill
+  list: docs/agent/AUDIT-MUTATION-2026-09-14.md; the driver and mutant
+  definitions are checked in under docs/agent/audit-mutation-2026-09-14/,
+  with a log row in docs/agent/REVIEW.md.
 - **H5 — policy provenance in the report.** `policy::load` unions silently;
   the JSON report says what is denied but not which file said so. Return
   the contributing sources from `load` (path → deny entries, strict) and
