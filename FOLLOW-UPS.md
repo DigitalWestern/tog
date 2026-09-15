@@ -159,12 +159,20 @@ owes under this repo's rules; H3 is the one real design piece; the rest
 are small. Each item names its exit criterion so a session
 can pick it up cold.
 
-- **H1 — independent recheck of the round-2 nit fixes.** N1 (mapping
-  extracted to `audit::freshness_from_state` and tested directly), N2
-  (stray-file message), N3 (`policy::test_env_lock` held by the three
-  env-reading tests) were verified by the author only. Done when a reviewer
-  who did not write them re-runs the three and the REVIEW.md entry-7 row
-  drops its "nit fixes verified by the author only" clause.
+- **H1 — independent recheck of the round-2 nit fixes. Done
+  2026-09-15.** N1 (mapping extracted to `audit::freshness_from_state` and
+  tested directly), N2 (stray-file message), N3 (`policy::test_env_lock`
+  held by the env-reading tests) were rechecked by a Claude Opus 5 subagent
+  that did not write them, and the recheck was itself reviewed by GPT-5.6
+  Sol. N1 and N2 stand; N3's guard was right but applied to three tests when
+  seven lib tests read `HOME`/`BLANKET_POLICY` in-process, so the two
+  `doctor_*` tests in `src/commands/inspect.rs` and the two `$HOME`-reading
+  sandbox tests in `src/kernel/sandbox.rs` now take it too. Two test-only
+  edits in all (the mapping test's inner match made exhaustive so a new
+  `State` variant cannot skip it, plus the added locks) and two recorded
+  residuals on the stray-file path.
+  Evidence and method are in the 2026-09-15 row of the `docs/agent/REVIEW.md`
+  log; the entry-7 row's "verified by the author only" clause is gone.
 - **H2 — acceptance coverage.** Add `blanket audit` to
   `tests/acceptance.sh`: after a real Python and npm sync, run it under the
   offline check (`unshare -rn` on Linux) with `--policy
