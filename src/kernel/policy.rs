@@ -700,8 +700,9 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
 /// redirect a concurrent `load` (the same hazard as `store::STORE_ENV_LOCK`).
 /// "Read" includes reading them indirectly: `audit` through `policy::load`,
 /// `doctor` through `inspect`'s policy check, and the sandbox tests that
-/// open or write under `$HOME`. A holder that also needs
-/// `store::STORE_ENV_LOCK` takes the store lock first.
+/// open or write under `$HOME`. The whole-crate guard order is
+/// env -> supervision -> store -> attribution: see the comment on
+/// `commands::sync`'s failed_tailor_sync test.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -709,9 +710,9 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Tests that open an `Attribution` frame here, then start from an empty
-/// pending list. When a test also needs the environment, supervision, and
-/// store guards, acquire them in this order: env, supervision, store,
-/// attribution.
+/// pending list. The whole-crate guard order is env -> supervision ->
+/// store -> attribution: see the comment on `commands::sync`'s
+/// failed_tailor_sync test.
 ///
 /// Every test that records or opens a token uses this same lock. The frame
 /// stack itself remains the production implementation in test builds.

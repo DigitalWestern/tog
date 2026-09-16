@@ -151,8 +151,12 @@ mod tests {
     #[test]
     fn failed_tailor_sync_clears_its_unpublished_exceptions() {
         // Process-global test state follows env -> supervision -> store ->
-        // attribution. No other test acquires these four guards in a
-        // conflicting order.
+        // attribution. Every multi-guard holder takes them in this order:
+        // commands::deps (supervision -> store -> attribution),
+        // commands::inspect's doctor tests (env -> store), the comforter
+        // writer tests (supervision -> attribution), kernel::gitsrc and the
+        // tailors (supervision). One shared total order, so no holder can
+        // wait on a lock another holder has taken after an earlier one.
         let _env_lock = policy::test_env_lock();
         let temp = TempDir::new();
         let home = temp.0.join("home");
