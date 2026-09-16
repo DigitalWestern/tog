@@ -175,6 +175,18 @@ closures already record against the policy chain plus an optional
 `--policy` file (union, so it can only tighten), refuses to pass a stale or
 unchecked closure, and touches neither the store nor the network.
 
+Each realization carries a `policy::Attribution` token from the command layer
+through its tailor to the comforter writer. The process-global frame stack keeps
+records in the innermost realization, only the thread that opened a frame may
+record into it, nested delegates own child frames, and a writer claims its
+matching frame before publication and marks it published only after the
+closure write completes. A realization that changed something must finish with
+a published closure; a sync that found nothing to realize finishes without
+one; operations that intentionally write no closure (dependency edits, cache
+hits) discard their token. A frame that was claimed but never published
+cannot finish at all: if a write fails after the claim, the claimed exceptions
+leave with the dropped attribution frame and the error surfaces.
+
 ## Hermetic install scripts and native libraries
 
 npm lifecycle scripts (and npm's implicit `node-gyp rebuild`) run at realize

@@ -1217,6 +1217,7 @@ pub fn project_cargo_env(
     vendor_obj: &Path,
     plan: &CargoPlan,
     lock_digest: &str,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let project_dir = project_dir.canonicalize()?;
     // The workspace root is what gets registered, and projecting a cargo-home
@@ -1287,7 +1288,12 @@ pub fn project_cargo_env(
     if !valid_objects {
         #[cfg(test)]
         {
-            return crate::comforter::write_closure_legacy(&project_dir, "cargo", body);
+            return crate::comforter::write_closure_legacy(
+                &project_dir,
+                "cargo",
+                body,
+                attribution,
+            );
         }
         #[cfg(not(test))]
         {
@@ -1299,7 +1305,15 @@ pub fn project_cargo_env(
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &rust_obj)?;
     refs.object_path(&store, &activity, &vendor_obj)?;
-    crate::comforter::write_closure(&project_dir, "cargo", body, &store, &activity, refs)
+    crate::comforter::write_closure(
+        &project_dir,
+        "cargo",
+        body,
+        &store,
+        &activity,
+        refs,
+        attribution,
+    )
 }
 
 /// Build a Cargo project in the existing network-denied seatbelt sandbox.
@@ -1628,10 +1642,7 @@ mod tests {
     }
 
     fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::kernel::policy::clear();
-        guard
+        crate::kernel::policy::exception_guard()
     }
 
     fn package_lock(package: &str, version: u64) -> String {
@@ -1730,6 +1741,7 @@ checksum = "{hash_b}"
     #[test]
     fn resolves_toolchain_files_and_pins() {
         let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("blanket-cargo-toolchain");
         let project = temp.path().join("project/child");
         fs::create_dir_all(&project).unwrap();
@@ -1798,11 +1810,13 @@ checksum = "{hash_b}"
             resolve_toolchain(Platform::Aarch64AppleDarwin, &project).unwrap(),
             "1.96.1"
         );
-        crate::kernel::policy::clear();
+        let _ = crate::kernel::policy::drain();
     }
 
     #[test]
     fn resolves_linux_toolchain_files_targets_and_policy() {
+        let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("blanket-cargo-linux-toolchain");
         let project = temp.path().join("project/child");
         fs::create_dir_all(&project).unwrap();
@@ -1848,7 +1862,6 @@ checksum = "{hash_b}"
             "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
         )
         .unwrap();
-        let _exception_guard = exception_guard();
         assert_eq!(
             resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).unwrap(),
             "1.96.1"
@@ -1857,7 +1870,7 @@ checksum = "{hash_b}"
             .iter()
             .any(|exception| exception.kind
                 == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE));
-        crate::kernel::policy::clear();
+        let _ = crate::kernel::policy::drain();
 
         fs::write(
             root.join("rust-toolchain"),
@@ -1870,6 +1883,7 @@ checksum = "{hash_b}"
     #[test]
     fn rustfmt_toolchain_component_is_recorded_as_unavailable_under_permissive_policy() {
         let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("blanket-cargo-rustfmt-policy");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -1888,7 +1902,7 @@ checksum = "{hash_b}"
                 && exception.subject.ends_with("rust-toolchain.toml")
                 && exception.detail.contains("rustfmt")
         }));
-        crate::kernel::policy::clear();
+        let _ = crate::kernel::policy::drain();
     }
 
     fn make_component_archives(
@@ -2077,6 +2091,8 @@ checksum = "{hash_b}"
     /// record can name and no sweep will protect.
     #[test]
     fn cargo_env_is_refused_for_a_root_that_cannot_be_registered() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("blanket-cargo-unrecordable");
         let root = temp.path().join("ws ");
         fs::create_dir_all(&root).unwrap();
@@ -2091,6 +2107,7 @@ checksum = "{hash_b}"
             &temp.path().join("absent-vendor"),
             &plan,
             &lock_digest("version = 4\n"),
+            &mut attribution,
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -2098,10 +2115,13 @@ checksum = "{hash_b}"
             !root.join(".blanket").exists(),
             "projected into a workspace no record can name"
         );
+        attribution.discard();
     }
 
     #[test]
     fn projects_cargo_config_wrapper_and_closure() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("blanket-cargo-project");
         let project = temp.path().join("project");
         let rust = temp.path().join("objects/rust-id");
@@ -2116,7 +2136,8 @@ checksum = "{hash_b}"
             members: vec!["app".into()],
         };
         let digest = lock_digest("version = 4\n");
-        project_cargo_env(&project, &rust, &vendor, &plan, &digest).unwrap();
+        project_cargo_env(&project, &rust, &vendor, &plan, &digest, &mut attribution).unwrap();
+        attribution.finish(true).unwrap();
 
         let home = project.join(".blanket/cargo-home").canonicalize().unwrap();
         let vendor = vendor.canonicalize().unwrap();
@@ -2157,6 +2178,8 @@ checksum = "{hash_b}"
 
     #[test]
     fn projection_refuses_symlinked_bin_escape() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
         let temp = TempDir::new("blanket-cargo-symlink-bin");
         let project = temp.path().join("project");
         let outside = temp.path().join("outside");
@@ -2172,12 +2195,13 @@ checksum = "{hash_b}"
             crates: vec![],
             members: vec![],
         };
-        let result = project_cargo_env(&project, &rust, &vendor, &plan, "digest");
+        let result = project_cargo_env(&project, &rust, &vendor, &plan, "digest", &mut attribution);
         assert!(
             result.is_err(),
             "symlinked bin must not carry writes outside the project"
         );
         assert!(!outside.join("cargo").exists());
+        attribution.discard();
     }
 
     #[test]

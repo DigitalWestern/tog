@@ -885,6 +885,7 @@ pub fn project_ruby_env(
     gems_obj: &Path,
     plan: &RubyPlan,
     lock_sha256: &str,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let ruby_obj = ruby_obj.canonicalize()?;
     let gems_obj = gems_obj.canonicalize()?;
@@ -913,6 +914,7 @@ pub fn project_ruby_env(
         &store,
         &activity,
         refs,
+        attribution,
     )
 }
 

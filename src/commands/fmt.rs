@@ -107,5 +107,8 @@ pub fn run(
     // is the only thing that needs the handle, and the toolchain
     // provisioning and formatter children below all run outside it.
     let ctx = Context::open(platform, true)?;
-    formatter.fmt(&ctx, &cwd, check, args)
+    let mut attribution = policy::Attribution::open("rustfmt")?;
+    let status = formatter.fmt(&ctx, &cwd, check, args, &mut attribution)?;
+    attribution.finish(true)?;
+    Ok(status)
 }

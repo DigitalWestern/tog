@@ -490,7 +490,12 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
 
 /// Entry point for `main`: pick the project, group the specs by ecosystem,
 /// delegate each group.
-pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outcome> {
+pub fn edit(
+    platform: Platform,
+    cwd: &Path,
+    request: Request,
+    attribution: &mut policy::Attribution,
+) -> io::Result<Outcome> {
     // Validate every spec before discovering the project, opening the store,
     // looking anything up in a registry, or invoking a package manager.
     for text in &request.specs {
@@ -531,6 +536,7 @@ pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outc
                 &texts,
                 &names,
                 request.dev,
+                attribution,
             )?,
             Eco::Node => {
                 let outcome = node(
@@ -540,6 +546,7 @@ pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outc
                     request.verb,
                     &texts,
                     request.dev,
+                    attribution,
                 )?;
                 outcome_project = outcome.sync_project;
                 outcome.files
@@ -551,6 +558,7 @@ pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outc
                 request.verb,
                 &texts,
                 request.dev,
+                attribution,
             )?,
             Eco::Go => go_delegate(
                 &store,
@@ -559,6 +567,7 @@ pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outc
                 request.verb,
                 &texts,
                 request.dev,
+                attribution,
             )?,
             Eco::Ruby => ruby_delegate(
                 &store,
@@ -567,9 +576,17 @@ pub fn edit(platform: Platform, cwd: &Path, request: Request) -> io::Result<Outc
                 request.verb,
                 &texts,
                 request.dev,
+                attribution,
             )?,
-            Eco::Elixir => elixir_delegate(&store, platform, &project, request.verb, &texts)?,
-            Eco::Dotnet => dotnet_refuse(request.verb, &texts)?,
+            Eco::Elixir => elixir_delegate(
+                &store,
+                platform,
+                &project,
+                request.verb,
+                &texts,
+                attribution,
+            )?,
+            Eco::Dotnet => dotnet_refuse(request.verb, &texts, attribution)?,
         };
         let what = if names.is_empty() {
             "everything".to_string()
@@ -696,6 +713,7 @@ fn python(
     texts: &[String],
     names: &[String],
     dev: bool,
+    attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     let shape = python_shape(project)?;
@@ -742,7 +760,7 @@ fn python(
             },
             texts.join(" ")
         ))),
-        PyShape::Uv => python_uv(store, platform, project, verb, texts, dev),
+        PyShape::Uv => python_uv(store, platform, project, verb, texts, dev, attribution),
         PyShape::PipCompile => {
             if dev {
                 return Err(other("--dev has no meaning for a requirements file"));
@@ -755,7 +773,15 @@ fn python(
                 Verb::Update => {}
             }
             let upgrade = upgrade_flags(verb, names);
-            uv_compile(store, platform, project, &input, &output, &upgrade)?;
+            uv_compile(
+                store,
+                platform,
+                project,
+                &input,
+                &output,
+                &upgrade,
+                attribution,
+            )?;
             Ok(vec![
                 "requirements.in".to_string(),
                 "requirements.txt".to_string(),
@@ -777,7 +803,15 @@ fn python(
             let lock = project.join("requirements.lock.txt");
             let mut files = vec![file];
             if verb == Verb::Update && lock.is_file() {
-                uv_compile(store, platform, project, &path, &lock, &upgrade_flags(verb, names))?;
+                uv_compile(
+                    store,
+                    platform,
+                    project,
+                    &path,
+                    &lock,
+                    &upgrade_flags(verb, names),
+                    attribution,
+                )?;
                 files.push("requirements.lock.txt".to_string());
             } else {
                 // The ordinary sync re-locks when the source hash changes; a
@@ -1104,6 +1138,7 @@ fn uv_compile(
     input: &Path,
     output: &Path,
     extra: &[String],
+    _attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
     let (mut command, version) = uv_command(store, platform, project)?;
     command
@@ -1129,6 +1164,7 @@ fn python_uv(
     verb: Verb,
     texts: &[String],
     dev: bool,
+    _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     let (mut command, _) = uv_command(store, platform, project)?;
@@ -1610,6 +1646,7 @@ fn node(
     verb: Verb,
     texts: &[String],
     dev: bool,
+    attribution: &mut policy::Attribution,
 ) -> io::Result<NodeEdit> {
     validate_delegate_specs(texts)?;
     let (lock_name, lock_root) = match node_lock_for(project)? {
@@ -1674,13 +1711,20 @@ fn node(
         return Err(yarn_refusal(&lock_root, verb, texts, dev));
     }
     let manager = node_package_manager(&lock_root, &lock_text)?;
-    let (tool_root, _x_lock) = xrun::realize_node_tool(
+    let mut node_attribution = attribution.nested("node")?;
+    let (tool_root, _x_lock, realized) = xrun::realize_node_tool(
         store,
         platform,
         manager.name(),
         manager.version(),
         manager.corepack_hash(),
+        &mut node_attribution,
     )?;
+    if realized {
+        node_attribution.finish(true)?;
+    } else {
+        node_attribution.discard();
+    }
     let node_obj = node::ensure_node_for(store, platform)?;
     let executable = tool_root
         .join("node_modules/.bin")
@@ -1775,6 +1819,7 @@ fn cargo_delegate(
     verb: Verb,
     texts: &[String],
     dev: bool,
+    _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     let version = cargo::resolve_toolchain(platform, project)?;
@@ -1825,6 +1870,7 @@ fn go_delegate(
     verb: Verb,
     texts: &[String],
     dev: bool,
+    _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     if dev {
@@ -1868,6 +1914,7 @@ fn ruby_delegate(
     verb: Verb,
     texts: &[String],
     dev: bool,
+    _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     let ruby_obj = ruby::ensure_ruby_for(store, platform)?;
@@ -1917,6 +1964,7 @@ fn elixir_delegate(
     project: &Path,
     verb: Verb,
     texts: &[String],
+    _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     match verb {
@@ -1960,7 +2008,11 @@ fn elixir_delegate(
 // ---------------------------------------------------------------------------
 // .NET
 
-fn dotnet_refuse(verb: Verb, texts: &[String]) -> io::Result<Vec<String>> {
+fn dotnet_refuse(
+    verb: Verb,
+    texts: &[String],
+    _attribution: &mut policy::Attribution,
+) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
     let names = texts.join(" ");
     Err(other(match verb {
@@ -1982,25 +2034,43 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
     // policy first so cached toolchain objects cannot initialize an empty
     // default policy and let strict/deny settings be bypassed.
     policy::init(&cwd, false)?;
-    let outcome = edit(ctx.platform, &cwd, request)?;
+    let mut edit_attribution = edit_attribution()?;
+    let outcome = edit(ctx.platform, &cwd, request, &mut edit_attribution)?;
     for line in &outcome.lines {
         ui::note(line);
     }
     if no_sync {
         ui::note("--no-sync: review the change, then run 'blanket'");
+        edit_attribution.discard();
         return Ok(());
     }
     if outcome.project != cwd {
         std::env::set_current_dir(&outcome.project)?;
         ui::trace(&format!("syncing in {}", outcome.project.display()));
     }
+    // The edit owns its exceptions. Sync must open a fresh ecosystem scope.
+    edit_attribution.discard();
     sync::run(ctx, false, false)
+}
+
+/// Open the dependency edit's attribution scope before the edit can record.
+///
+/// `edit` records exceptions of its own, outside any ecosystem's closure: a
+/// `rust-toolchain.toml` naming `clippy` makes `cargo_delegate`'s
+/// `cargo::resolve_toolchain` record `toolchain-component-unavailable`, and
+/// on a warm store every `ensure_*_for` replays cached-object exceptions
+/// through `policy::check_cached`. Those belong to the edit, not to whichever
+/// ecosystem `sync` happens to realize first. `discard` clears them before
+/// sync; `Drop` covers errors, panics, and `--no-sync`. Enforcement already
+/// happened during the edit, and the owning tailor re-records the applicable
+/// exception inside its own scope during the sync that follows.
+fn edit_attribution() -> io::Result<policy::Attribution> {
+    policy::Attribution::open("dependency-edit")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn spec(text: &str) -> Spec {
         parse_spec(text)
     }
@@ -2887,5 +2957,44 @@ mod tests {
             upgrade_flags(Verb::Update, &["a".into(), "b".into()]),
             vec!["--upgrade-package", "a", "--upgrade-package", "b"]
         );
+    }
+
+    #[test]
+    fn dependency_edit_scope_clears_exceptions_before_sync() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        let mut edit = edit_attribution().unwrap();
+        policy::record_with(
+            &policy::Policy::default(),
+            policy::SKIPPED_OPTIONAL,
+            "dependency-edit fixture",
+            "optional dependency was not requested",
+        )
+        .unwrap();
+        let mut node = edit.nested("node").unwrap();
+        policy::record_with(
+            &policy::Policy::default(),
+            policy::GIT_DEPENDENCY,
+            "node fixture",
+            "nested Node realization",
+        )
+        .unwrap();
+        let node_exceptions = node.claim("node").unwrap();
+        assert_eq!(node_exceptions.len(), 1);
+        node.mark_published().unwrap();
+        node.finish(true).unwrap();
+        edit.discard();
+        assert!(
+            policy::pending().is_empty(),
+            "dependency edit left an exception queued: {:?}",
+            policy::pending()
+        );
+        let next = policy::Attribution::open("python").unwrap();
+        drop(next);
     }
 }

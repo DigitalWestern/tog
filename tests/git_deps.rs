@@ -76,14 +76,20 @@ fn store_at(root: &Path) -> Store {
     }
 }
 
+fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 #[ignore]
 fn npm_git_dependency_is_realized_from_its_commit() {
+    let _attribution_guard = attribution_guard();
     let platform = Platform::host().expect("host platform");
     let root = temp("npm");
     let (url, commit) = fixture_repo(&root.0);
     let store = store_at(&root.0);
-    policy::clear();
+    let attribution = policy::Attribution::open("node").expect("test attribution");
 
     let lock = format!(
         r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#{commit}"}}}}}}"#
@@ -111,7 +117,8 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     let again = node::realize_node_env(&store, platform, &plan, &[]).expect("second realize");
     assert_eq!(env, again);
 
-    let kinds: Vec<String> = policy::pending()
+    let kinds: Vec<String> = attribution
+        .recorded()
         .iter()
         .map(|exception| exception.kind.clone())
         .collect();
@@ -119,6 +126,8 @@ fn npm_git_dependency_is_realized_from_its_commit() {
         kinds.iter().filter(|k| *k == "git-dependency").count() >= 2,
         "expected the source and its unrun prepare script to be recorded: {kinds:?}"
     );
+    // No closure is written here, so the frame is discarded, not finished.
+    attribution.discard();
 }
 
 #[test]
@@ -241,11 +250,12 @@ fn python_fixture_repo(root: &Path) -> (String, String) {
 #[test]
 #[ignore]
 fn python_git_dependency_builds_a_wheel_from_its_commit() {
+    let _attribution_guard = attribution_guard();
     let platform = Platform::host().expect("host platform");
     let root = temp("py");
     let (url, commit) = python_fixture_repo(&root.0);
     let store = store_at(&root.0);
-    policy::clear();
+    let _attribution = policy::Attribution::open("python").expect("test attribution");
 
     let requirement = format!("gitdep @ {url}@{commit}");
     let reqs = blanket::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
@@ -302,10 +312,11 @@ fn cargo_fixture_repo(root: &Path) -> (String, String) {
 #[test]
 #[ignore]
 fn cargo_git_dependency_is_vendored_from_its_commit() {
+    let _attribution_guard = attribution_guard();
     let root = temp("cargo");
     let (url, commit) = cargo_fixture_repo(&root.0);
     let store = store_at(&root.0);
-    policy::clear();
+    let _attribution = policy::Attribution::open("cargo").expect("test attribution");
 
     let source = format!("git+{url}?rev={commit}#{commit}");
     let lock = format!(

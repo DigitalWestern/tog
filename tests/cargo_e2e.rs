@@ -51,6 +51,20 @@ fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn blanket_with_tmp(bin: &Path, project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
+    Command::new(bin)
+        .current_dir(project)
+        .env("BLANKET_STORE", store)
+        .env("TMPDIR", tmp)
+        .env("HOME", tmp.join("home"))
+        .env("BLANKET_SANDBOX_TESTS", "required")
+        .env_remove("BLANKET_POLICY")
+        .env_remove("BLANKET_STRICT")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
 fn assert_ok(output: Output, label: &str) -> String {
     assert!(
         output.status.success(),
@@ -172,4 +186,70 @@ fn cargo_sync_build_and_run_again_offline() {
         "run after rebuild",
     );
     assert_eq!(output.trim(), "hello 128");
+}
+
+#[test]
+#[ignore]
+fn dependency_edit_exception_is_not_published_to_cargo_closure() {
+    let temp = TempDir::new();
+    let project = temp.0.join("cargo-hello");
+    copy_tree(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
+        &project,
+    );
+    let tmp = temp.0.join("tmp");
+    std::fs::create_dir_all(tmp.join("home")).unwrap();
+    let store = temp.0.join("store");
+    std::fs::write(
+        project.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
+    )
+    .unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+
+    assert_ok(
+        blanket_with_tmp(&binary, &project, &store, &tmp, &["update"]),
+        "dependency edit and sync",
+    );
+
+    let closures = project.join(".blanket/closures");
+    let cargo: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(closures.join("cargo.json")).unwrap()).unwrap();
+    let exceptions = cargo["body"]["exceptions"].as_array().unwrap();
+    assert_eq!(exceptions.len(), 1, "cargo exceptions: {exceptions:?}");
+    assert_eq!(exceptions[0]["kind"], "toolchain-component-unavailable");
+    assert!(
+        exceptions[0]["subject"]
+            .as_str()
+            .is_some_and(|subject| subject.ends_with("rust-toolchain.toml")),
+        "unexpected clippy subject: {}",
+        exceptions[0]["subject"]
+    );
+    assert!(
+        exceptions[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("clippy")),
+        "unexpected clippy detail: {}",
+        exceptions[0]["detail"]
+    );
+
+    for entry in std::fs::read_dir(&closures).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().and_then(|name| name.to_str()) == Some("cargo.json") {
+            continue;
+        }
+        let closure: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let other = closure["body"]["exceptions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !other
+                .iter()
+                .any(|exception| { exception["kind"] == "toolchain-component-unavailable" }),
+            "{} also contains the toolchain exception",
+            path.display()
+        );
+    }
 }

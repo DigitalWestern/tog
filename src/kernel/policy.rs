@@ -10,9 +10,8 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(not(test))]
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// A requirement was skipped because it is project-local or a direct reference.
 pub const REQUIREMENT_SKIPPED: &str = "requirement-skipped";
@@ -79,33 +78,26 @@ pub struct Policy {
 }
 
 static POLICY: OnceLock<Policy> = OnceLock::new();
-// Production realization is single-threaded and the queue is deliberately
-// process-wide so nested tailor calls can contribute to one closure.
-#[cfg(not(test))]
-static RECORDED: OnceLock<Mutex<Vec<Exception>>> = OnceLock::new();
 
-#[cfg(not(test))]
-fn recorded() -> &'static Mutex<Vec<Exception>> {
-    RECORDED.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Debug)]
+struct Frame {
+    id: u64,
+    owner: std::thread::ThreadId,
+    ecosystem: String,
+    exceptions: Vec<Exception>,
+    claimed: bool,
+    published: bool,
 }
 
-// Unit tests run many independent realizations in parallel. A test-only
-// thread-local queue prevents one test's exception from being drained by
-// another while preserving the production queue and closure semantics.
-#[cfg(test)]
-thread_local! {
-    static RECORDED: std::cell::RefCell<Vec<Exception>> = const { std::cell::RefCell::new(Vec::new()) };
+static FRAMES: OnceLock<Mutex<Vec<Frame>>> = OnceLock::new();
+static NEXT_FRAME_ID: AtomicU64 = AtomicU64::new(1);
+
+fn frames() -> &'static Mutex<Vec<Frame>> {
+    FRAMES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn with_recorded<R>(f: impl FnOnce(&mut Vec<Exception>) -> R) -> R {
-    #[cfg(not(test))]
-    {
-        f(&mut recorded().lock().unwrap_or_else(|e| e.into_inner()))
-    }
-    #[cfg(test)]
-    {
-        RECORDED.with(|recorded| f(&mut recorded.borrow_mut()))
-    }
+fn with_frames<R>(f: impl FnOnce(&mut Vec<Frame>) -> R) -> R {
+    f(&mut frames().lock().unwrap_or_else(|error| error.into_inner()))
 }
 
 /// Parse one policy file, refusing unknown keys and unknown deny kinds.
@@ -351,55 +343,314 @@ pub fn denied(policy: &Policy, kind: &str) -> bool {
 }
 
 pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> io::Result<()> {
-    if denied(policy, kind) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "policy denies {kind}: {subject}: {detail} (see .blanket/policy.toml / BLANKET_STRICT)"
-            ),
-        ));
-    }
-    eprintln!("blanket: exception {kind}: {subject}: {detail}");
-    with_recorded(|recorded| {
-        recorded.push(Exception {
+    with_frames(|frames| {
+        let Some(frame) = frames.last_mut() else {
+            return Err(io::Error::other(
+                "exception recorded outside any attribution",
+            ));
+        };
+        // Records belong to the thread that opened the innermost frame. A
+        // worker thread recording into another realization's frame would be
+        // claimed by that realization's closure.
+        if frame.owner != std::thread::current().id() {
+            return Err(io::Error::other(format!(
+                "exception {kind} recorded from a thread that does not own the {} attribution",
+                frame.ecosystem
+            )));
+        }
+        if denied(policy, kind) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "policy denies {kind}: {subject}: {detail} (see .blanket/policy.toml / BLANKET_STRICT)"
+                ),
+            ));
+        }
+        eprintln!("blanket: exception {kind}: {subject}: {detail}");
+        frame.exceptions.push(Exception {
             kind: kind.into(),
             subject: subject.into(),
             detail: detail.into(),
-        })
-    });
-    Ok(())
+        });
+        Ok(())
+    })
 }
 
 pub fn record(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
     record_with(current(), kind, subject, detail)
 }
 
-/// Return and clear all exceptions recorded by this process.
-pub fn drain() -> Vec<Exception> {
-    with_recorded(std::mem::take)
+fn format_exception_list(exceptions: &[Exception]) -> String {
+    exceptions
+        .iter()
+        .map(|exception| {
+            format!(
+                "{}: {}: {}",
+                exception.kind, exception.subject, exception.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-pub fn pending() -> Vec<Exception> {
-    with_recorded(|recorded| recorded.clone())
+/// A value that owns one frame in the process-global attribution stack.
+#[must_use = "an attribution must be held across the realization it owns"]
+#[derive(Debug)]
+pub struct Attribution {
+    id: u64,
+    ecosystem: String,
+    active: bool,
 }
 
-pub fn clear() {
-    with_recorded(|recorded| recorded.clear())
+impl Attribution {
+    /// Open a realization frame. A different thread may not open over the
+    /// current innermost frame because records are process-global.
+    pub fn open(ecosystem: &str) -> io::Result<Self> {
+        let owner = std::thread::current().id();
+        with_frames(|frames| {
+            if let Some(frame) = frames.last() {
+                if frame.owner != owner {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!(
+                            "another thread owns the innermost attribution for {}; {ecosystem} cannot open",
+                            frame.ecosystem
+                        ),
+                    ));
+                }
+            }
+            let id = NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed);
+            frames.push(Frame {
+                id,
+                owner,
+                ecosystem: ecosystem.to_string(),
+                exceptions: Vec::new(),
+                claimed: false,
+                published: false,
+            });
+            Ok(Self {
+                id,
+                ecosystem: ecosystem.to_string(),
+                active: true,
+            })
+        })
+    }
+
+    /// Open a child realization owned by this token's thread. Records while
+    /// it is open belong to the child and cannot be claimed by the parent.
+    pub fn nested(&mut self, ecosystem: &str) -> io::Result<Self> {
+        let owner = std::thread::current().id();
+        with_frames(|frames| {
+            let Some(parent) = frames.last() else {
+                return Err(io::Error::other(
+                    "cannot nest attribution without an open frame",
+                ));
+            };
+            if parent.id != self.id {
+                return Err(io::Error::other(
+                    "cannot nest attribution while another child frame is open",
+                ));
+            }
+            if parent.owner != owner {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "cannot nest attribution from another thread",
+                ));
+            }
+            let id = NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed);
+            frames.push(Frame {
+                id,
+                owner,
+                ecosystem: ecosystem.to_string(),
+                exceptions: Vec::new(),
+                claimed: false,
+                published: false,
+            });
+            Ok(Self {
+                id,
+                ecosystem: ecosystem.to_string(),
+                active: true,
+            })
+        })
+    }
+
+    pub fn ecosystem(&self) -> &str {
+        &self.ecosystem
+    }
+
+    /// The exceptions recorded into this frame so far, without claiming
+    /// them. For diagnostics and tests; publication goes through `claim`.
+    pub fn recorded(&self) -> Vec<Exception> {
+        with_frames(|frames| {
+            frames
+                .iter()
+                .find(|frame| frame.id == self.id)
+                .map(|frame| frame.exceptions.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Claim the innermost frame for one closure. Only the comforter writer
+    /// calls this at the publication boundary; a claimed frame must then be
+    /// published or it cannot finish.
+    pub(crate) fn claim(&mut self, ecosystem: &str) -> io::Result<Vec<Exception>> {
+        with_frames(|frames| {
+            let Some(frame) = frames.last_mut() else {
+                return Err(io::Error::other(
+                    "closure publication outside any attribution",
+                ));
+            };
+            if frame.id != self.id {
+                return Err(io::Error::other(
+                    "cannot claim attribution while a child frame is open",
+                ));
+            }
+            if ecosystem != self.ecosystem || ecosystem != frame.ecosystem {
+                return Err(io::Error::other(format!(
+                    "attribution ecosystem mismatch: token is {}, closure is {ecosystem}",
+                    self.ecosystem
+                )));
+            }
+            if frame.claimed {
+                return Err(io::Error::other(format!(
+                    "the {ecosystem} attribution was already claimed"
+                )));
+            }
+            frame.claimed = true;
+            Ok(std::mem::take(&mut frame.exceptions))
+        })
+    }
+
+    /// Mark a successfully written closure. Claiming happens before the
+    /// write, so a failed write loses the claimed exceptions with the frame.
+    pub(crate) fn mark_published(&mut self) -> io::Result<()> {
+        with_frames(|frames| {
+            let Some(frame) = frames.last_mut() else {
+                return Err(io::Error::other("attribution frame is no longer open"));
+            };
+            if frame.id != self.id || !frame.claimed {
+                return Err(io::Error::other(
+                    "attribution cannot be published before its closure is claimed",
+                ));
+            }
+            frame.published = true;
+            Ok(())
+        })
+    }
+
+    pub fn finish(mut self, expect_publication: bool) -> io::Result<()> {
+        let result = with_frames(|frames| {
+            let Some(index) = frames.iter().position(|frame| frame.id == self.id) else {
+                return Err(io::Error::other("attribution frame is no longer open"));
+            };
+            if index + 1 != frames.len() {
+                let result = Err(io::Error::other(
+                    "attribution cannot finish while a child frame is open",
+                ));
+                frames.remove(index);
+                return result;
+            }
+            let frame = frames.last().expect("frame index is valid");
+            let result = if frame.claimed && !frame.published {
+                Err(io::Error::other(format!(
+                    "{} realization claimed its exceptions but the closure write did not complete",
+                    self.ecosystem
+                )))
+            } else if expect_publication && !frame.published {
+                Err(io::Error::other(format!(
+                    "{} realization reported success but published no closure",
+                    self.ecosystem
+                )))
+            } else if !frame.exceptions.is_empty() {
+                Err(io::Error::other(format!(
+                    "{} realization ended with {} exception(s) never claimed by a closure: {}",
+                    self.ecosystem,
+                    frame.exceptions.len(),
+                    format_exception_list(&frame.exceptions)
+                )))
+            } else {
+                Ok(())
+            };
+            frames.pop();
+            result
+        });
+        self.active = false;
+        result
+    }
+
+    pub fn discard(mut self) {
+        with_frames(|frames| {
+            if let Some(index) = frames.iter().position(|frame| frame.id == self.id) {
+                frames.remove(index);
+            }
+        });
+        self.active = false;
+    }
+}
+
+impl Drop for Attribution {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        // Error and panic cleanup. The success path must call finish or
+        // discard explicitly, so it cannot silently bypass publication.
+        with_frames(|frames| {
+            if let Some(index) = frames.iter().position(|frame| frame.id == self.id) {
+                frames.remove(index);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn pending() -> Vec<Exception> {
+    with_frames(|frames| {
+        frames
+            .last()
+            .map(|frame| frame.exceptions.clone())
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn drain() -> Vec<Exception> {
+    with_frames(|frames| {
+        frames
+            .last_mut()
+            .map(|frame| std::mem::take(&mut frame.exceptions))
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn clear() {
+    with_frames(|frames| {
+        if let Some(frame) = frames.last_mut() {
+            frame.exceptions.clear();
+        }
+    });
 }
 
 /// Exceptions that change the bytes of the object being built.
 pub fn object_exceptions() -> Vec<Exception> {
-    with_recorded(|recorded| {
-        recorded
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind.as_str(),
-                    FILE_COLLISION | INSTALL_SCRIPT_FAILED | GIT_DEPENDENCY | UNATTESTED_CARGO_LOCK
-                )
-            })
-            .cloned()
-            .collect()
+    with_frames(|frames| {
+        frames.last().map_or_else(Vec::new, |frame| {
+            frame
+                .exceptions
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind.as_str(),
+                        FILE_COLLISION
+                            | INSTALL_SCRIPT_FAILED
+                            | GIT_DEPENDENCY
+                            | UNATTESTED_CARGO_LOCK
+                    )
+                })
+                .cloned()
+                .collect()
+        })
     })
 }
 
@@ -449,12 +700,33 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
 /// redirect a concurrent `load` (the same hazard as `store::STORE_ENV_LOCK`).
 /// "Read" includes reading them indirectly: `audit` through `policy::load`,
 /// `doctor` through `inspect`'s policy check, and the sandbox tests that
-/// open or write under `$HOME`. A holder that also needs
-/// `store::STORE_ENV_LOCK` takes the store lock first.
+/// open or write under `$HOME`. The whole-crate guard order is
+/// env -> supervision -> store -> attribution: see the comment on
+/// `commands::sync`'s failed_tailor_sync test.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Tests that open an `Attribution` frame here, then start from an empty
+/// pending list. The whole-crate guard order is env -> supervision ->
+/// store -> attribution: see the comment on `commands::sync`'s
+/// failed_tailor_sync test.
+///
+/// Every test that records or opens a token uses this same lock. The frame
+/// stack itself remains the production implementation in test builds.
+#[cfg(test)]
+pub(crate) fn attribution_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear();
+    guard
+}
+
+#[cfg(test)]
+pub(crate) fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
+    attribution_test_lock()
 }
 
 #[cfg(test)]
@@ -547,6 +819,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn record_denied_and_allowed() {
         let _guard = exception_guard();
+        let attribution = Attribution::open("test").unwrap();
         assert!(record_with(
             &Policy {
                 strict: true,
@@ -559,26 +832,131 @@ deny = ["git-dependency"]"#,
         .is_err());
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
+        attribution.discard();
+    }
+
+    #[test]
+    fn attribution_state_machine_is_explicit() {
+        let _guard = attribution_test_lock();
+        assert!(record_with(&Policy::default(), "x", "s", "d").is_err());
+        let mut parent = Attribution::open("cargo").unwrap();
+        record_with(&Policy::default(), "x", "parent", "d").unwrap();
+        let mut child = parent.nested("node").unwrap();
+        record_with(&Policy::default(), "y", "child", "d").unwrap();
+        assert!(parent
+            .claim("cargo")
+            .unwrap_err()
+            .to_string()
+            .contains("child"));
+        assert!(child.claim("cargo").is_err());
+        assert_eq!(child.claim("node").unwrap().len(), 1);
+        child.mark_published().unwrap();
+        child.finish(true).unwrap();
+        assert_eq!(parent.claim("cargo").unwrap().len(), 1);
+        parent.mark_published().unwrap();
+        parent.finish(true).unwrap();
+    }
+
+    #[test]
+    fn finish_requires_publication_and_discard_drops_a_frame() {
+        let _guard = attribution_test_lock();
+        let attribution = Attribution::open("python").unwrap();
+        let error = attribution.finish(true).unwrap_err();
+        assert!(error.to_string().contains("published no closure"));
+        let attribution = Attribution::open("dependency-edit").unwrap();
+        record_with(&Policy::default(), "x", "s", "d").unwrap();
+        attribution.discard();
+        let next = Attribution::open("node").unwrap();
+        next.discard();
+    }
+
+    #[test]
+    fn finish_reports_exceptions_that_no_closure_claimed() {
+        let _guard = attribution_test_lock();
+        let attribution = Attribution::open("python").unwrap();
+        record_with(&Policy::default(), "x", "s", "d").unwrap();
+        let error = attribution.finish(false).unwrap_err();
+        assert!(error.to_string().contains("x: s: d"));
+        Attribution::open("node").unwrap().discard();
+    }
+
+    #[test]
+    fn dropping_an_attribution_discards_its_frame() {
+        let _guard = attribution_test_lock();
+        {
+            let _attribution = Attribution::open("python").unwrap();
+            record_with(&Policy::default(), "x", "s", "d").unwrap();
+        }
+        assert!(pending().is_empty());
+        Attribution::open("node").unwrap().discard();
+    }
+
+    #[test]
+    fn wrong_ecosystem_and_second_claim_are_rejected() {
+        let _guard = attribution_test_lock();
+        let mut attribution = Attribution::open("python").unwrap();
+        assert!(attribution.claim("node").is_err());
+        assert!(attribution.claim("python").unwrap().is_empty());
+        attribution.mark_published().unwrap();
+        assert!(attribution.claim("python").is_err());
+        attribution.finish(true).unwrap();
+    }
+
+    #[test]
+    fn a_second_thread_cannot_open_over_the_innermost_frame() {
+        let _guard = attribution_test_lock();
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let owner = std::thread::spawn(move || {
+            let scope = Attribution::open("python").unwrap();
+            opened_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(scope);
+        });
+        opened_rx.recv().unwrap();
+        let error = Attribution::open("node").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        release_tx.send(()).unwrap();
+        owner.join().unwrap();
+        Attribution::open("node").unwrap().discard();
     }
 
     #[test]
     fn drain_clears() {
         let _guard = exception_guard();
+        let attribution = Attribution::open("test").unwrap();
         record_with(&Policy::default(), "x", "s", "d").unwrap();
         assert_eq!(drain().len(), 1);
         assert!(drain().is_empty());
+        attribution.discard();
     }
 
     #[test]
-    fn recorded_exceptions_do_not_cross_test_threads() {
+    fn a_second_thread_cannot_record_into_the_innermost_frame() {
         let _guard = exception_guard();
-        std::thread::spawn(|| {
-            record_with(&Policy::default(), "thread-only", "s", "d").unwrap();
-            assert_eq!(drain().len(), 1);
-        })
-        .join()
-        .unwrap();
+        let attribution = Attribution::open("thread-owner").unwrap();
+        let error =
+            std::thread::spawn(|| record_with(&Policy::default(), "thread-shared", "s", "d"))
+                .join()
+                .unwrap()
+                .unwrap_err();
+        assert!(error.to_string().contains("does not own"), "{error}");
         assert!(pending().is_empty());
+        assert!(attribution.recorded().is_empty());
+        attribution.discard();
+    }
+
+    #[test]
+    fn a_claimed_frame_cannot_finish_without_publication() {
+        let _guard = attribution_test_lock();
+        let mut attribution = Attribution::open("node").unwrap();
+        record_with(&Policy::default(), "x", "s", "d").unwrap();
+        assert_eq!(attribution.recorded().len(), 1);
+        assert_eq!(attribution.claim("node").unwrap().len(), 1);
+        let error = attribution.finish(false).unwrap_err();
+        assert!(error.to_string().contains("did not complete"), "{error}");
+        assert!(pending().is_empty());
+        Attribution::open("python").unwrap().discard();
     }
 
     #[test]

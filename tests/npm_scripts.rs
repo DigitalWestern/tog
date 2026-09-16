@@ -159,7 +159,6 @@ fn policy_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Exceptions recorded by a test that never writes a closure stay pending
     // for the next one that does, so start each test from an empty list.
-    policy::clear();
     guard
 }
 
@@ -260,6 +259,7 @@ fn network_access_during_install_script_fails() {
     let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("BLANKET_NPM_STRICT_CHILD") {
+        let _attribution = policy::Attribution::open("node").expect("test attribution");
         policy::init(std::path::Path::new(&dir), false).unwrap();
         let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
         let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
@@ -333,12 +333,15 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let store = store_at(&dir);
     policy::init(&dir, false).unwrap();
     let plan = plan_for(&tarball, &sri);
+    let mut attribution = policy::Attribution::open("node").expect("test attribution");
     let env = node::realize_node_env(&store, platform, &plan, &[]).expect("permissive realize");
     let package_dir = env.join("node_modules/fixture-pkg");
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    node::project_node_env(&dir, &env, platform, &plan, &[], false).expect("project");
+    node::project_node_env(&dir, &env, platform, &plan, &[], false, &mut attribution)
+        .expect("project");
+    attribution.finish(true).expect("test closure attribution");
     let closure = comforter::read_closure(&dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
     assert_eq!(exceptions.len(), 1);
@@ -371,6 +374,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
 #[ignore]
 fn benign_install_script_runs_and_output_is_captured() {
     let _policy_guard = policy_guard();
+    let _attribution = policy::Attribution::open("node").expect("test attribution");
     let platform = Platform::host().expect("host platform");
     let dir = std::env::temp_dir().join(format!("blanket-good-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -391,6 +395,7 @@ fn benign_install_script_runs_and_output_is_captured() {
 #[ignore]
 fn linux_npm_roundtrip() {
     let _policy_guard = policy_guard();
+    let _attribution = policy::Attribution::open("node").expect("test attribution");
     if !cfg!(target_os = "linux") {
         eprintln!("linux_npm_roundtrip skipped: supported Linux only");
         return;
@@ -591,6 +596,7 @@ console.log('linux-npm-roundtrip-ok');
 #[ignore]
 fn skip_download_switch_is_injected_and_recorded() {
     let _policy_guard = policy_guard();
+    let _attribution = policy::Attribution::open("node").expect("test attribution");
     // puppeteer's installer reads PUPPETEER_SKIP_DOWNLOAD (verified against the
     // package's own getConfiguration.js). The script here asserts the switch is
     // visible to the lifecycle process, which is what makes the real installer
@@ -623,6 +629,7 @@ fn skip_download_switch_is_injected_and_recorded() {
 #[ignore]
 fn prebuilt_downloader_is_told_to_build_from_source() {
     let _policy_guard = policy_guard();
+    let _attribution = policy::Attribution::open("test").expect("test attribution");
     // A prebuild-install style script: with the network denied the download can
     // never succeed, so blanket asks for the source build up front.
     let platform = Platform::host().expect("host platform");

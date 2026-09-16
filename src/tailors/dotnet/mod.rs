@@ -1077,6 +1077,7 @@ pub fn project_dotnet_env(
     packages_obj: &Path,
     plan: &DotnetPlan,
     lock_sha256: &str,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
@@ -1105,6 +1106,7 @@ pub fn project_dotnet_env(
         &store,
         &activity,
         refs,
+        attribution,
     )
 }
 

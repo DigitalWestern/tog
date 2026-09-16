@@ -1061,6 +1061,7 @@ pub fn project_go_env(
     modcache_obj: &Path,
     plan: &GoPlan,
     gosum_sha256: &str,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
@@ -1089,6 +1090,7 @@ pub fn project_go_env(
         &store,
         &activity,
         refs,
+        attribution,
     )
 }
 
@@ -1850,6 +1852,13 @@ mod tests {
 
     #[test]
     fn plan_cache_key_covers_the_go_sources() {
+        // plan_go's re-plan path runs the store go through the supervisor,
+        // which owns process-wide signal dispositions: one supervised child
+        // at a time, so every test that can reach a supervised child holds
+        // this (same convention as kernel::gitsrc's realization tests).
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new();
         let project = temp.0.join("proj");
         let (gomod, gosum, plan) = plan_fixture(&project);

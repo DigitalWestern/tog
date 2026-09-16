@@ -2477,6 +2477,8 @@ mod tests {
         // file yet, exactly as a crash between the two writes would leave it.
         let project = temp.root.join("project");
         fs::create_dir_all(&project).unwrap();
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let activity = store.activity(ActivityMode::Exclusive).unwrap();
         let mut refs = crate::comforter::ClosureRefs::new();
         refs.object_id(&store, &activity, &named).unwrap();
@@ -2488,8 +2490,10 @@ mod tests {
             &store,
             &activity,
             refs,
+            &mut attribution,
         )
         .unwrap();
+        attribution.finish(true).unwrap();
         drop(activity);
         // Crash window: the visible closure is gone, the durable record is not.
         fs::remove_dir_all(project.join(".blanket/closures")).unwrap();

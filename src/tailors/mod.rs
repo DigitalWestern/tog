@@ -83,7 +83,12 @@ pub trait Tailor: Sync {
     /// Host-side preparation that must precede planning for every
     /// ecosystem (missing-lock generation). Runs for detected ecosystems
     /// only, before any of them plans.
-    fn prepare(&self, _ctx: &Context, _dir: &Path) -> io::Result<()> {
+    fn prepare(
+        &self,
+        _ctx: &Context,
+        _dir: &Path,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         Ok(())
     }
 
@@ -95,7 +100,13 @@ pub trait Tailor: Sync {
 
     /// `blanket sync`: plan, realize, project, and narrate with
     /// `ui::synced`. Returns whether anything was synced.
-    fn sync(&self, ctx: &Context, dir: &Path, fresh: bool) -> io::Result<bool>;
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool>;
 
     /// Can `blanket build <id>` name this ecosystem at all?
     fn builds(&self) -> bool {
@@ -114,7 +125,14 @@ pub trait Tailor: Sync {
     }
 
     /// Plan, realize, project, then run the sandboxed build in `root`.
-    fn build(&self, _ctx: &Context, _root: &Path, _cwd: &Path, _args: &[String]) -> io::Result<()> {
+    fn build(
+        &self,
+        _ctx: &Context,
+        _root: &Path,
+        _cwd: &Path,
+        _args: &[String],
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         Err(unsupported(self.id(), "build"))
     }
 
@@ -186,7 +204,14 @@ pub trait Tailor: Sync {
 
     /// `blanket fmt`: realize the formatter, record its closure, and run it
     /// sandboxed over the workspace `cwd` belongs to.
-    fn fmt(&self, _ctx: &Context, _cwd: &Path, _check: bool, _args: &[String]) -> io::Result<i32> {
+    fn fmt(
+        &self,
+        _ctx: &Context,
+        _cwd: &Path,
+        _check: bool,
+        _args: &[String],
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<i32> {
         Err(unsupported(self.id(), "fmt"))
     }
 }

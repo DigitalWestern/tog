@@ -52,7 +52,13 @@ impl Tailor for Cargo {
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let store = &ctx.store;
         let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store)?;
         let rust_obj = &inputs.rust_obj;
@@ -69,6 +75,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            attribution,
         )?;
         ui::synced("cargo env", &vendor_obj);
         Ok(true)
@@ -95,7 +102,14 @@ impl Tailor for Cargo {
             .to_path_buf())
     }
 
-    fn build(&self, ctx: &Context, _root: &Path, cwd: &Path, args: &[String]) -> io::Result<()> {
+    fn build(
+        &self,
+        ctx: &Context,
+        _root: &Path,
+        cwd: &Path,
+        args: &[String],
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         let store = &ctx.store;
         let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store)?;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
@@ -105,6 +119,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            attribution,
         )?;
         cargo::build_sandboxed(
             ctx.platform,
@@ -256,7 +271,14 @@ impl Tailor for Cargo {
 
     /// Realize only the Rust toolchain and its paired rustfmt component, then
     /// format the Cargo workspace without resolving dependencies.
-    fn fmt(&self, ctx: &Context, cwd: &Path, check: bool, args: &[String]) -> io::Result<i32> {
+    fn fmt(
+        &self,
+        ctx: &Context,
+        cwd: &Path,
+        check: bool,
+        args: &[String],
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<i32> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let activity = &ctx.activity;
@@ -291,6 +313,7 @@ impl Tailor for Cargo {
             store,
             activity,
             refs,
+            attribution,
         )?;
         let invocation_dir = cwd.canonicalize()?;
         let status = rustfmt::run_sandboxed(

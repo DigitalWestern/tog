@@ -192,8 +192,18 @@ pub fn project_node_env(
     plan: &NpmPlan,
     mutable: &[String],
     fresh: bool,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    project_node_env_recorded(project_dir, env_obj, platform, plan, mutable, fresh, &[])
+    project_node_env_recorded(
+        project_dir,
+        env_obj,
+        platform,
+        plan,
+        mutable,
+        fresh,
+        &[],
+        attribution,
+    )
 }
 
 /// The object id inside a native-library closure reference, checked because
@@ -578,6 +588,7 @@ pub fn project_node_env_recorded(
     mutable: &[String],
     fresh: bool,
     inputs: &[crate::comforter::InputRecord],
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     if !mutable.is_empty() {
         crate::kernel::policy::record(
@@ -697,7 +708,7 @@ pub fn project_node_env_recorded(
     );
     #[cfg(test)]
     if !strict_refs {
-        return crate::comforter::write_closure_legacy(project_dir, "node", body);
+        return crate::comforter::write_closure_legacy(project_dir, "node", body, attribution);
     }
     let project_lock = project_lock
         .as_ref()
@@ -710,6 +721,7 @@ pub fn project_node_env_recorded(
         &activity,
         refs,
         &project_lock,
+        attribution,
     )
 }
 

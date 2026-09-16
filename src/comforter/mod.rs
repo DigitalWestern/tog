@@ -151,6 +151,7 @@ pub fn write_closure(
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
     refs: ClosureRefs,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
     write_closure_inner(
@@ -161,6 +162,7 @@ pub fn write_closure(
         activity,
         Some(refs),
         None,
+        attribution,
     )
 }
 
@@ -176,6 +178,7 @@ pub(crate) fn write_closure_with_project_lock(
     activity: &crate::kernel::activity::StoreActivity,
     refs: ClosureRefs,
     project_lock: &fs::File,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
     write_closure_inner(
@@ -186,6 +189,7 @@ pub(crate) fn write_closure_with_project_lock(
         activity,
         Some(refs),
         Some(project_lock),
+        attribution,
     )
 }
 
@@ -197,8 +201,17 @@ pub fn write_closure_with_refs(
     store: &Store,
     activity: &crate::kernel::activity::StoreActivity,
     refs: ClosureRefs,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    write_closure(project_dir, ecosystem, body, store, activity, refs)
+    write_closure(
+        project_dir,
+        ecosystem,
+        body,
+        store,
+        activity,
+        refs,
+        attribution,
+    )
 }
 
 /// Persist the producer's complete root union before a project projection or
@@ -233,13 +246,23 @@ pub(crate) fn write_closure_legacy(
     project_dir: &Path,
     ecosystem: &str,
     body: serde_json::Value,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let store = match store_from_closure_body(&body) {
         Some(store) => store,
         None => Store::open()?,
     };
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    write_closure_inner(project_dir, ecosystem, body, &store, &activity, None, None)
+    write_closure_inner(
+        project_dir,
+        ecosystem,
+        body,
+        &store,
+        &activity,
+        None,
+        None,
+        attribution,
+    )
 }
 
 fn write_closure_inner(
@@ -250,8 +273,15 @@ fn write_closure_inner(
     activity: &crate::kernel::activity::StoreActivity,
     explicit_refs: Option<ClosureRefs>,
     supplied_project_lock: Option<&fs::File>,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
+    if !body.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "closure body must be a JSON object",
+        ));
+    }
     let project_dir = project_dir.canonicalize()?;
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
@@ -305,10 +335,13 @@ fn write_closure_inner(
             dir.display()
         )));
     }
-    let pending = crate::kernel::policy::pending();
-    if let Some(body) = body.as_object_mut() {
-        body.insert("exceptions".into(), serde_json::to_value(&pending)?);
-    }
+    // Claim after validating the body and before writing the closure. If a
+    // later write step fails, the claimed exceptions are gone with the frame;
+    // the token is marked published only after the write completes.
+    let pending = attribution.claim(ecosystem)?;
+    body.as_object_mut()
+        .expect("validated closure body object")
+        .insert("exceptions".into(), serde_json::to_value(&pending)?);
     // Envelope-level platform (LINUX_PORT.md stage 6): a project synced on
     // a Mac and then on a Linux box carries two different closures over
     // time; readers must not assume the body's object ids are valid for
@@ -390,7 +423,7 @@ fn write_closure_inner(
     if !durable_root {
         store.register_root_with_activity(activity, &project_dir)?;
     }
-    crate::kernel::policy::clear();
+    attribution.mark_published()?;
     Ok(())
 }
 
@@ -1299,6 +1332,8 @@ mod closure_platform_tests {
 
     #[test]
     fn closures_are_refused_for_a_project_that_cannot_be_registered() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let dir = std::env::temp_dir().join(format!("blanket-unrecordable-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let project = dir.join("project ");
@@ -1314,6 +1349,7 @@ mod closure_platform_tests {
             &store,
             &activity,
             ClosureRefs::default(),
+            &mut attribution,
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -1321,6 +1357,7 @@ mod closure_platform_tests {
             !project.join(".blanket").exists(),
             "wrote into a project no record can name"
         );
+        attribution.finish(false).unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1382,6 +1419,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let project = std::env::temp_dir().join(format!(
             "blanket-closure-durable-{}-{}",
             std::process::id(),
@@ -1410,8 +1449,10 @@ mod closure_platform_tests {
             &store,
             &activity,
             refs,
+            &mut attribution,
         )
         .unwrap();
+        attribution.finish(true).unwrap();
         drop(activity);
 
         // The closure envelope is provenance...
@@ -1427,10 +1468,118 @@ mod closure_platform_tests {
     }
 
     #[test]
+    fn non_object_body_is_rejected_before_attribution_claim() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        crate::kernel::policy::record(
+            crate::kernel::policy::FILE_COLLISION,
+            "fixture",
+            "collision before invalid publication",
+        )
+        .unwrap();
+        let project = std::env::temp_dir().join(format!(
+            "blanket-closure-non-object-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = test_store("closure-non-object");
+        fs::create_dir_all(&project).unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let error = super::write_closure(
+            &project,
+            "python",
+            serde_json::json!(["not an object"]),
+            &store,
+            &activity,
+            ClosureRefs::default(),
+            &mut attribution,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(crate::kernel::policy::pending().len(), 1);
+        assert!(!project.join(".blanket").exists());
+        attribution.discard();
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(store.root);
+    }
+
+    /// A write that fails after the claim must not count as published: the
+    /// token cannot finish, and the next attribution starts with nothing
+    /// (Sol review r5 #3, r6 #1: the failure is injected deterministically).
+    #[test]
+    fn write_failure_after_claim_leaves_the_next_attribution_clean() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        crate::kernel::policy::record(
+            crate::kernel::policy::FILE_COLLISION,
+            "fixture",
+            "collision before a failing write",
+        )
+        .unwrap();
+        let project = std::env::temp_dir().join(format!(
+            "blanket-closure-write-fails-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = test_store("closure-write-fails");
+        let closures = project.join(".blanket/closures");
+        // A directory squatting on the closure's destination name makes the
+        // final rename fail, after the claim and after the temp file was
+        // written. Works for any user on Linux and macOS.
+        let squatter = closures.join("python.json");
+        fs::create_dir_all(&squatter).unwrap();
+
+        let error = super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        )
+        .unwrap_err();
+        assert!(squatter.is_dir(), "the squatter was replaced: {error}");
+        assert!(
+            fs::read_dir(&closures)
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() == "python.json"),
+            "the failed write left a temp file behind"
+        );
+        assert!(
+            attribution.recorded().is_empty(),
+            "claimed exceptions stay claimed"
+        );
+        let error = attribution.finish(true).unwrap_err();
+        assert!(error.to_string().contains("did not complete"), "{error}");
+
+        assert!(crate::kernel::policy::pending().is_empty());
+        let next = crate::kernel::policy::Attribution::open("node").unwrap();
+        assert!(next.recorded().is_empty());
+        next.discard();
+
+        let _ = fs::remove_dir_all(&project);
+        let _ = fs::remove_dir_all(store.root);
+    }
+
+    #[test]
     fn write_closure_succeeds_for_normal_directories() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let project = std::env::temp_dir().join(format!(
             "blanket-closure-normal-{}-{}",
             std::process::id(),
@@ -1442,7 +1591,14 @@ mod closure_platform_tests {
         let store = test_store("closure-normal");
         fs::create_dir_all(&project).unwrap();
 
-        super::write_closure_legacy(&project, "python", closure_test_body(&store)).unwrap();
+        super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
 
         let closure: serde_json::Value = serde_json::from_slice(
             &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
@@ -1464,6 +1620,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let root = std::env::temp_dir().join(format!(
             "blanket-closure-blanket-symlink-{}-{}",
             std::process::id(),
@@ -1479,12 +1637,18 @@ mod closure_platform_tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join(".blanket")).unwrap();
 
-        let error =
-            super::write_closure_legacy(&project, "python", closure_test_body(&store)).unwrap_err();
+        let error = super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains(".blanket"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
+        attribution.discard();
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(store.root);
     }
@@ -1494,6 +1658,8 @@ mod closure_platform_tests {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let root = std::env::temp_dir().join(format!(
             "blanket-closure-closures-symlink-{}-{}",
             std::process::id(),
@@ -1509,12 +1675,18 @@ mod closure_platform_tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join(".blanket/closures")).unwrap();
 
-        let error =
-            super::write_closure_legacy(&project, "python", closure_test_body(&store)).unwrap_err();
+        let error = super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains(".blanket/closures"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
+        attribution.discard();
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(store.root);
     }

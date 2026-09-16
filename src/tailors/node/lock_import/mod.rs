@@ -964,7 +964,8 @@ snapshots:
     /// because it is an environment-identity input.
     #[test]
     fn pnpm_9_base32_patch_hashes_are_accepted_and_stored_verbatim() {
-        let _policy_guard = exception_guard();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         let patch_path = dir.join("patches/foo@1.0.0.patch");
         fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
@@ -1028,7 +1029,8 @@ snapshots:
 
     #[test]
     fn pnpm_9_md5_patch_hash_respects_a_denying_policy() {
-        let _policy_guard = exception_guard();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         let patch_path = dir.join("patches/foo@1.0.0.patch");
         fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
@@ -1397,7 +1399,8 @@ snapshots:
 
     #[test]
     fn yarn_v1_multi_key_sha1_and_berry_rejection() {
-        let _policy_guard = exception_guard();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         let lock = "\
 # yarn lockfile v1

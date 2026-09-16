@@ -77,7 +77,12 @@ impl Tailor for Node {
         node::preflight(platform)
     }
 
-    fn prepare(&self, ctx: &Context, dir: &Path) -> io::Result<()> {
+    fn prepare(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        _attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         inputs::ensure_npm_lock(ctx.platform, dir, &ctx.store)
     }
 
@@ -99,7 +104,13 @@ impl Tailor for Node {
         }))?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let Some(plan) = inputs::load_npm_plan(platform, dir)? else {
@@ -128,6 +139,7 @@ impl Tailor for Node {
             &config.mutable_packages,
             fresh,
             &inputs,
+            attribution,
         )?;
         ui::synced("node_modules", &env);
         Ok(true)

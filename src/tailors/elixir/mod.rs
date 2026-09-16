@@ -1524,6 +1524,7 @@ pub fn project_elixir_env(
     plan: &ElixirPlan,
     lock_sha256: &str,
     fresh: bool,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<PathBuf> {
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
@@ -1583,6 +1584,7 @@ pub fn project_elixir_env(
         &activity,
         refs,
         &project_lock,
+        attribution,
     )?;
     Ok(proj_dir)
 }

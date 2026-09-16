@@ -13,6 +13,7 @@ use std::path::PathBuf;
 pub struct Context {
     pub platform: Platform,
     pub store: Store,
+    project_dir: Option<PathBuf>,
     /// Keeps the operation protected from its first store read through its
     /// final child/projection use. Individual `Store` helpers acquire a
     /// short compatibility lease when called directly; this long-lived lease
@@ -24,6 +25,25 @@ impl Context {
     /// Open the store, run the opportunistic maintenance sweep if this
     /// command asks for one, then take the shared lease.
     pub fn open(platform: Platform, maintenance: bool) -> io::Result<Self> {
+        Self::open_with_project_dir(platform, None, maintenance)
+    }
+
+    /// Open a context whose project directory is independent of the process
+    /// cwd. Production dispatch uses `open`, which keeps the existing dynamic
+    /// cwd behavior needed by dependency edits.
+    pub fn open_in(
+        platform: Platform,
+        project_dir: &std::path::Path,
+        maintenance: bool,
+    ) -> io::Result<Self> {
+        Self::open_with_project_dir(platform, Some(project_dir.to_path_buf()), maintenance)
+    }
+
+    fn open_with_project_dir(
+        platform: Platform,
+        project_dir: Option<PathBuf>,
+        maintenance: bool,
+    ) -> io::Result<Self> {
         let store = Store::open()?;
         if maintenance {
             // Scope the narration's stderr handle to the one call that uses
@@ -36,6 +56,7 @@ impl Context {
         Ok(Self {
             platform,
             store,
+            project_dir,
             activity,
         })
     }
@@ -44,7 +65,7 @@ impl Context {
     /// asked for: `add`/`remove`/`update` may change directory to the
     /// project the edit landed in before running the ordinary sync.
     pub fn project_dir(&self) -> PathBuf {
-        project_dir()
+        self.project_dir.clone().unwrap_or_else(project_dir)
     }
 }
 

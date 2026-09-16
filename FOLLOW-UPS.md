@@ -274,13 +274,26 @@ can pick it up cold.
   of `--quiet`; existing file sources are listed even when they deny nothing.
   Covered by `policy::tests::load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it`
   and `cli::audit_json_attributes_each_policy_to_its_source_file`.
-- **H6 — per-closure attribution guard.** Attribution of exceptions to a
-  closure relies on sync realizing and publishing one ecosystem at a time
-  (`project.rs` clears the pending list after each write). Add a debug
-  assertion, or a test, that the pending list is empty when each
-  ecosystem's realization begins, so a future concurrent sync cannot
-  silently cross-attribute. Done when the assertion exists and the suite is
-  green.
+- **H6 — per-closure attribution guard. DONE ON `fu/4-attribution-guard` (2026-09-15).**
+  Exception attribution now uses an explicit `policy::Attribution` token
+  backed by the same process-global frame stack in production and tests.
+  `Tailor::prepare`, `Tailor::sync`, and closure-producing build/format paths
+  receive the token and forward it to the comforter writer. Writers validate
+  object bodies, claim only their matching ecosystem's innermost frame before
+  writing, and mark it published only after the write completes. Nested
+  attribution handles dependency-edit delegates that publish a Node `x`
+  closure, while edit frames are discarded before the subsequent sync. Finish
+  requires publication when success is reported and rejects unclaimed
+  exceptions. Cache hits and edits with no closure explicitly discard their
+  frames. Only the frame's owning thread may record into it; a frame that
+  was claimed but never published cannot finish; `claim` is crate-private to
+  the comforter boundary and `clear`/`drain` are gone from the public API.
+  The process-global test lock serializes every test that records or
+  opens attribution, and the mixed Cargo/pnpm ignored e2e regression covers
+  the original cross-ecosystem contamination case. Five adversarial Sol
+  rounds (docs/agent/REVIEW.md); r5 on the token design was FIX-THEN-MERGE
+  and its two blockers (cross-thread record, claimed-unpublished finish) are
+  the two rules above.
 - **H7 — Flag 3 D1 and D2 outcomes.** Whatever the owner decides for the
   toolchain-only pass and the unchecked strictness, encode it in CLI.md, the
   `audit` help text, and one test each. Done when the two decisions are no

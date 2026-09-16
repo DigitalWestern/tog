@@ -11,15 +11,15 @@ pub fn run(ctx: &Context) -> io::Result<()> {
     let dir = ctx.project_dir();
     policy::init(&dir, false)?;
     let present = tailors::detected(&dir)?;
-    for tailor in &present {
-        tailor.prepare(ctx, &dir)?;
-    }
     let mut any = false;
     for tailor in &present {
+        let mut attribution = policy::Attribution::open("plan")?;
+        tailor.prepare(ctx, &dir, &mut attribution)?;
         if let Some(text) = tailor.plan(ctx, &dir)? {
             println!("{text}");
             any = true;
         }
+        attribution.discard();
     }
     if !any {
         return Err(no_inputs());

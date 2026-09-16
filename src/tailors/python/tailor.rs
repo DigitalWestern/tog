@@ -38,12 +38,18 @@ impl Tailor for Python {
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, _fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        _fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let (plan, selection, inputs) = inputs::read_plan(platform, dir, store)?;
         let env = super::env::realize_env(store, platform, &plan)?;
-        super::env::project_env_with_inputs(dir, &env, &plan, &selection, &inputs)?;
+        super::env::project_env_with_inputs(dir, &env, &plan, &selection, &inputs, attribution)?;
         ui::synced(".venv", &env);
         Ok(true)
     }

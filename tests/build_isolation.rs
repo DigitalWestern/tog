@@ -49,6 +49,11 @@ fn test_store() -> Option<Store> {
     Some(Store::open().expect("store"))
 }
 
+fn attribution_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn python_import(wheel: &std::path::Path, code: &str) {
     let output = Command::new("python3")
         .args([
@@ -70,6 +75,8 @@ fn python_import(wheel: &std::path::Path, code: &str) {
 #[ignore]
 fn pure_python_flit_sdist_uses_isolated_build_env() {
     let Some(store) = test_store() else { return };
+    let _attribution_guard = attribution_guard();
+    let attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
         "tomli-w",
         "1.2.0",
@@ -84,12 +91,15 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
         &wheel,
         "import tomli_w; assert tomli_w.dumps({'ok': True}) == 'ok = true\\n'",
     );
+    attribution.discard();
 }
 
 #[test]
 #[ignore]
 fn insightface_sdist_builds_with_runtime_numpy_constraint() {
     let Some(store) = test_store() else { return };
+    let _attribution_guard = attribution_guard();
+    let attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
         "insightface",
         "0.7.3",
@@ -113,12 +123,15 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
         &wheel,
         "import sys, types, tempfile, zipfile; d=tempfile.TemporaryDirectory(); zipfile.ZipFile(sys.argv[1]).extractall(d.name); p=types.ModuleType('insightface'); p.__path__=[d.name+'/insightface']; sys.modules['insightface']=p; u=types.ModuleType('insightface.utils'); u.__path__=[d.name+'/insightface/utils']; sys.modules['insightface.utils']=u; import insightface.utils.constant as c; assert c.DEFAULT_MP_NAME == 'buffalo_l'",
     );
+    attribution.discard();
 }
 
 #[test]
 #[ignore]
 fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
     let Some(store) = test_store() else { return };
+    let _attribution_guard = attribution_guard();
+    let mut attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
     let tokenizers = package(
         "tokenizers",
         "0.13.3",
@@ -139,7 +152,8 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
             // branch, so keep the tokenizers specimen as a TODO and prove the
             // same Rust path with the smaller real fastuuid sdist.
             eprintln!("TODO tokenizers on CPython 3.11: {error}");
-            blanket::kernel::policy::clear();
+            attribution.discard();
+            attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
             let fallback = package(
                 "fastuuid",
                 "0.14.0",
@@ -160,4 +174,5 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
         "{}",
         name
     );
+    attribution.discard();
 }

@@ -39,7 +39,13 @@ impl Tailor for Go {
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, _fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        _fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let inputs = inputs::load_go_inputs(platform, dir, store)?;
@@ -50,6 +56,7 @@ impl Tailor for Go {
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            attribution,
         )?;
         ui::synced("go modcache", &modcache);
         Ok(true)
@@ -73,7 +80,14 @@ impl Tailor for Go {
             .to_path_buf())
     }
 
-    fn build(&self, ctx: &Context, root: &Path, _cwd: &Path, args: &[String]) -> io::Result<()> {
+    fn build(
+        &self,
+        ctx: &Context,
+        root: &Path,
+        _cwd: &Path,
+        args: &[String],
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let inputs = inputs::load_go_inputs(platform, root, store)?;
@@ -84,6 +98,7 @@ impl Tailor for Go {
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            attribution,
         )?;
         go::build_sandboxed(platform, root, &inputs.go_obj, &modcache, args)
     }

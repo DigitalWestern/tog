@@ -582,6 +582,8 @@ dependencies = [{ name = "six" }]
 
     #[test]
     fn uv_lock_without_a_project_root_takes_every_non_local_package() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let package = |name: &str, source: &str| UvPackage {
             name: name.into(),
             version: "1.0.0".into(),
@@ -624,7 +626,7 @@ dependencies = [{ name = "six" }]
                 .collect::<Vec<_>>(),
             ["private", "six"]
         );
-        crate::kernel::policy::clear();
+        let _ = crate::kernel::policy::drain();
     }
 
     #[test]
@@ -702,6 +704,8 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
 
     #[test]
     fn poetry_lock_filters_legacy_categories_and_unsupported_sources() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let project: toml::Value = toml::from_str(
             r#"[tool.poetry.dependencies]
 six = "^1.0"
@@ -747,7 +751,7 @@ files = [{ file = "vendored.whl", hash = "sha256:ccccccccccccccccccccccccccccccc
             requirements[0].starts_with("six==1.17.0"),
             "{requirements:?}"
         );
-        crate::kernel::policy::clear();
+        let _ = crate::kernel::policy::drain();
     }
 
     #[test]
@@ -867,6 +871,8 @@ files = []
 
     #[test]
     fn nested_index_options_are_removed_from_resolver_input() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let dir = temp_project("nested-index");
         fs::write(dir.join("requirements.txt"), "-r child.txt\n").unwrap();
         fs::write(
@@ -877,12 +883,14 @@ files = []
         let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
         assert_eq!(manifest.requirements, ["six>=1"]);
         assert_eq!(manifest.resolver_text(), "six>=1\n");
-        crate::kernel::policy::clear();
+        let _ = crate::kernel::policy::drain();
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn discovery_order_prefers_requirements_then_project_then_poetry_then_setup_and_dir() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let cases = [
             ("requirements", "requirements.txt", "requirements.txt"),
             ("project", "pyproject.toml", "pyproject.toml [project]"),
@@ -931,7 +939,7 @@ files = []
             let got = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
             assert_eq!(got.provenance, expected, "{name}");
             let _ = fs::remove_dir_all(dir);
-            crate::kernel::policy::clear();
+            let _ = crate::kernel::policy::drain();
         }
     }
 
