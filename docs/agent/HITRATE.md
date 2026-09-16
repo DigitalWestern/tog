@@ -389,7 +389,9 @@ five of the eight are blanket regressions, not repo changes:
 
 Also new: tailwindcss now fails on `@parcel/watcher-darwin-arm64` being a
 *required* dependency that does not support Linux (the pnpm lock marks it
-required; harness class `py_no_wheel` is a mislabel). hoppscotch and tabby,
+required). This run's CSV records it as `py_no_wheel`; the classifier now has
+an `npm_platform_required` class for it, and future runs will use that. The
+CSV is a historical record and keeps the old label. hoppscotch and tabby,
 which item 4 was expected to unblock, now sync (with `git-dependency`
 exceptions, so they are company-policy misses).
 
