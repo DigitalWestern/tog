@@ -93,7 +93,12 @@ F3 report accounting, F4 acceptance tests).
    `drop(shared)` can lose to a sibling test's fork-then-exec window (the
    lock lives on the open file description, which a forked child shares
    until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
-   verbatim); fix is to retry the try-lock briefly or isolate the test.
+   verbatim). **Fixed 2026-09-14 (test only):** after `drop(shared)` the x
+   test now retries the nonblocking exclusive try-lock for up to 2 s, 10 ms
+   between attempts, and asserts it eventually succeeds; the assertion that
+   the try-lock fails *while* `shared` is held is unchanged, and
+   `lock_x_root` itself was not touched. 20/20 green in a loop plus a clean
+   full `cargo test`. The gitsrc sighting below is still unreproduced.
    Also seen once, 2026-09-12 Stage 4 gate:
    `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
    failed in one full parallel run and passed 3/3 alone and in the full
@@ -262,6 +267,9 @@ fixed on this branch; these five are not:
     fetch.
 
 Also noted, not a regression: tailwindcss fails because its pnpm lock marks
-`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`; the
-harness labels it `py_no_wheel`, which is wrong — add an
-`npm_platform_required` class when touching the classifier next.
+`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`. **Done:**
+`tests/hitrate.py` now has an `npm_platform_required` class (matching
+`required dependency does not support host`, placed above
+`py_sdist_build_failed`/`py_no_wheel` so it wins); the
+`tests/fixtures/hitrate-linux-2026-09-11.csv` row keeps its historical
+`py_no_wheel` label because the fixture is a record of that run.
