@@ -1201,6 +1201,10 @@ mod tests {
         if !linux_ready("linux_home_ssh_is_invisible") {
             return;
         }
+        // Reads $HOME and creates a scratch directory under it; a policy
+        // test repointing HOME at its own temporary tree mid-run would send
+        // this one there (and race that tree's cleanup).
+        let _env = crate::kernel::policy::test_env_lock();
         let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
         let cache = home.join(".cache");
         fs::create_dir_all(&cache).unwrap();
@@ -1241,6 +1245,9 @@ mod tests {
         let root = temp_dir("inherited-fds");
         let scratch = root.join("scratch");
         fs::create_dir(&scratch).unwrap();
+        // Same reason as `linux_home_ssh_is_invisible`: $HOME is read here,
+        // and opening a directory a policy test is about to delete is a race.
+        let _env = crate::kernel::policy::test_env_lock();
         let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
         let directory = File::open(home).unwrap();
         let (socket, _peer) = UnixStream::pair().unwrap();

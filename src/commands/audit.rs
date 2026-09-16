@@ -702,6 +702,56 @@ mod tests {
         assert_eq!(value["policy"]["strict"], false);
     }
 
+    /// A report is the conjunction of its verdicts, not the disjunction:
+    /// one failing closure fails the whole audit however many clean ones
+    /// sit beside it, and in either order. Every other test here judges a
+    /// single closure, where "all pass" and "any passes" agree.
+    #[test]
+    fn one_failing_closure_fails_the_whole_report() {
+        let temp = python_project("mixed");
+        let dir = &temp.0;
+        let clean = write_closure(
+            dir,
+            "rustfmt",
+            "rustfmt",
+            Some(host().triple()),
+            json!({
+                "rust_version": "1.96.1",
+                "rust_object": {"id": "rust-id"},
+                "rustfmt_object": {"id": "rustfmt-id"},
+                "exceptions": [],
+            }),
+        );
+        let failing = with_exceptions(dir, &[exception(GIT_DEPENDENCY, "left-pad")]);
+        let policy = deny(&[GIT_DEPENDENCY]);
+        for closures in [
+            vec![clean.clone(), failing.clone()],
+            vec![failing, clean.clone()],
+        ] {
+            let verdicts = judge(dir, &policy, &closures);
+            assert_eq!(
+                verdicts.iter().filter(|verdict| verdict.passes()).count(),
+                1,
+                "{verdicts:?}"
+            );
+            let report = Report {
+                policy: policy.clone(),
+                sources: Vec::new(),
+                verdicts,
+            };
+            assert!(!report.passes(), "one denied closure must fail the report");
+            let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+            assert_eq!(value["passed"], false);
+        }
+        // Not vacuous: the same machinery passes when every verdict does.
+        let report = Report {
+            policy: policy.clone(),
+            sources: Vec::new(),
+            verdicts: judge(dir, &policy, &[clean.clone(), clean]),
+        };
+        assert!(report.passes());
+    }
+
     #[cfg(unix)]
     #[test]
     fn json_policy_source_lossily_serializes_non_utf8_paths() {
@@ -721,14 +771,14 @@ mod tests {
 
         let output = render(Path::new("project"), &report, true).unwrap();
         let value: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(value["policy"]["sources"][0]["path"], "policy-�.toml");
+        assert_eq!(value["policy"]["sources"][0]["path"], "policy-\u{fffd}.toml");
         assert_eq!(
             value["policy"]["sources"][0]["path_bytes"],
             "706f6c6963792dff2e746f6d6c"
         );
 
         let output = render(Path::new("project"), &report, false).unwrap();
-        assert_eq!(output, "policy: machine \"policy-�.toml\"\n");
+        assert_eq!(output, "policy: machine \"policy-\u{fffd}.toml\"\n");
     }
 
     #[test]
@@ -1098,9 +1148,17 @@ mod tests {
             State::Unchecked("why".into()),
         ] {
             let freshness = freshness_from_state(state.clone());
+            // Exhaustive on purpose (no `_` arm): a new `State` variant must
+            // fail to compile here, not silently skip the mapping check.
             match state {
+                State::Synced => unreachable!("asserted above, outside the loop"),
                 State::Unchecked(_) => assert!(matches!(freshness, Freshness::Unchecked(_))),
-                _ => assert!(matches!(freshness, Freshness::Stale(_)), "{state:?}"),
+                State::NotSynced
+                | State::Changed(_)
+                | State::ProjectionMissing(_)
+                | State::ForeignPlatform(_) => {
+                    assert!(matches!(freshness, Freshness::Stale(_)), "{state:?}")
+                }
             }
             let verdict = Verdict {
                 ecosystem: "python".into(),

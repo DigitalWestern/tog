@@ -447,6 +447,10 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
 /// Tests that read or set `HOME` / `BLANKET_POLICY` hold this lock: the
 /// environment is process-global, so a test that mutates it would otherwise
 /// redirect a concurrent `load` (the same hazard as `store::STORE_ENV_LOCK`).
+/// "Read" includes reading them indirectly: `audit` through `policy::load`,
+/// `doctor` through `inspect`'s policy check, and the sandbox tests that
+/// open or write under `$HOME`. A holder that also needs
+/// `store::STORE_ENV_LOCK` takes the store lock first.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
