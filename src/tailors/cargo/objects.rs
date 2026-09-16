@@ -1,17 +1,28 @@
-//! Object kinds the Cargo tailor produces, with the identity grammar each
-//! producer writes and how a legacy record's dependencies are recovered from
-//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
-//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+//! Object kinds the Cargo tailor produces. Each row has a migration grammar
+//! for legacy records and a separate live grammar for current commits, plus
+//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
+//! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
     add_digest, add_object, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
 };
 use crate::kernel::store::ObjectDeps;
+use crate::kernel::types::Identity;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "rust",
         schema: Some("rust-toolchain/1"),
+        live_required: &[
+            "schema",
+            "cargo_sha256",
+            "rust_std_sha256",
+            "rustc_sha256",
+            "platform",
+        ],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["schema", "cargo_sha256", "rust_std_sha256", "rustc_sha256"],
             optional: &["platform"],
@@ -22,6 +33,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "rustfmt",
         schema: Some("rustfmt/1"),
+        live_required: &["schema", "rust_object", "rustfmt_sha256", "platform"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["schema", "rust_object", "rustfmt_sha256"],
             optional: &["platform"],
@@ -32,6 +47,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "cargo-vendor",
         schema: Some("cargo-vendor/1"),
+        live_required: &["schema"],
+        live_optional: &["crate:"],
+        legacy_only: &[],
+        live_contract: Some(cargo_vendor_contract),
         grammar: Grammar {
             required: &["schema"],
             optional: &[],
@@ -40,6 +59,33 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: cargo_vendor,
     },
 ];
+
+/// The `cargo-vendor/1` producer uses `identity.version == max(1,
+/// crate_count)`. Under this schema, a one-crate plan whose producer dropped
+/// its `crate:` key is indistinguishable from the legitimate empty plan.
+/// Removing that ambiguity requires `cargo-vendor/2` with a separate count
+/// input. That is a deliberate future identity change, not something this
+/// guard can do.
+fn cargo_vendor_contract(identity: &Identity) -> Result<(), String> {
+    let crates = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("crate:"))
+        .count();
+    let expected = crates.max(1);
+    let version = identity.version.parse::<usize>().map_err(|_| {
+        format!(
+            "Cargo crate count/version relation: version {:?} is not a count for {} crate: inputs",
+            identity.version, crates
+        )
+    })?;
+    if version != expected {
+        return Err(format!(
+            "Cargo crate count/version relation: version {version} does not match {crates} crate: inputs"
+        ));
+    }
+    Ok(())
+}
 
 /// `rust-toolchain/1`: the three components the producer merges, each named
 /// by its own identity input. `cargo::rust_components` requires exactly

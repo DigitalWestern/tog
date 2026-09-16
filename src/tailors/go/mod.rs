@@ -199,10 +199,12 @@ fn archive_platform(platform: Platform) -> Platform {
 
 /// Ensure the pinned Go toolchain is realized in the store.
 pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_go_for(store, Platform::host()?, version)
 }
 
 pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Go toolchain", "stage 4")?;
     // Resolve the exact row before touching the store or downloading. A
     // future catalog may carry several versions for one platform; falling
@@ -985,6 +987,7 @@ pub fn realize_modcache(
     plan: &GoPlan,
     go_obj: &Path,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Go module cache", "stage 4")?;
     let pin = go_pin(platform, &plan.go_version)?;
     let identity = modcache_identity(pin, plan);
@@ -1193,6 +1196,34 @@ pub fn build_sandboxed(
     });
     let _ = crate::kernel::store::remove_tree(&scratch);
     moved
+}
+
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let pin = go_pin(platform, GO_VERSION).expect("pinned Go toolchain for test platform");
+    let go = go_identity(pin);
+    let empty_plan = GoPlan {
+        go_version: GO_VERSION.into(),
+        module: "example.com/app".into(),
+        modules: Vec::new(),
+    };
+    let module_plan = GoPlan {
+        modules: vec![GoModule {
+            path: "example.com/lib".into(),
+            version: "v1.2.3".into(),
+            h1: "h1:module".into(),
+            zip_sha256: "a".repeat(64),
+            modfile_h1: "h1:modfile".into(),
+            modfile_sha256: "b".repeat(64),
+            info_sha256: "c".repeat(64),
+        }],
+        ..empty_plan.clone()
+    };
+    vec![
+        go,
+        modcache_identity(pin, &empty_plan),
+        modcache_identity(pin, &module_plan),
+    ]
 }
 
 #[cfg(test)]

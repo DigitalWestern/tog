@@ -178,21 +178,33 @@ fn resolve_electron(
 
 /// The identity input a provisioned artifact contributes, if any. Returns None
 /// for packages blanket does not provision.
+/// The one decision behind every `provisioned:` identity input: does the
+/// producer provision an artifact for this package at all? Returns the
+/// normalized version it would resolve. The producer and the `node-env`
+/// identity contract both consult this, so the contract can require the
+/// `provisioned:` key exactly when the producer writes one.
+pub fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'a str> {
+    if name != "electron" {
+        return None;
+    }
+    let version = version.trim_start_matches('v');
+    if !version.starts_with(|c: char| c.is_ascii_digit())
+        || !crate::kernel::gitsrc::is_safe_component(version)
+    {
+        return None;
+    }
+    Some(version)
+}
+
 pub fn provisioned_identity_input(
     store: &Store,
     platform: Platform,
     name: &str,
     version: &str,
 ) -> io::Result<Option<String>> {
-    if name != "electron" {
+    let Some(version) = provisioned_version(name, version) else {
         return Ok(None);
-    }
-    let version = version.trim_start_matches('v');
-    if !version.starts_with(|c: char| c.is_ascii_digit())
-        || !crate::kernel::gitsrc::is_safe_component(version)
-    {
-        return Ok(None);
-    }
+    };
     let (sha256, _, _, zip_name) = resolve_electron(store, platform, version)?;
     Ok(Some(format!("{zip_name}:{sha256}")))
 }

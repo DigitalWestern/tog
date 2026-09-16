@@ -11,7 +11,7 @@ when they were ported to the `Tailor` trait on 2026-09-12.
 |---|---|
 | `mod.rs` | The pinned toolchain (per-platform rows with sha256s, verified at pin time), `preflight_platform`, `ensure_<toolchain>_for`, `plan_*`, `realize_*`, `project_*_env`, and `build_sandboxed` if the ecosystem builds. Declares the sibling modules. |
 | `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `listing`, `closure_state`, `doctor`, `sbom_components`, `fmt*`, `object_kinds`. Only implement what the ecosystem has; the defaults say "not supported". |
-| `objects.rs` | `pub static KINDS: &[KindAdapter]`: one row per (kind, schema) pair the tailor commits to the store, with the identity grammar its producer writes and the function that recovers a legacy record's dependencies. A kind without a row is refused by GC, never certified. The registry hands every tailor's rows to the kernel at startup (`tailors::install_kinds`, called by `commands::dispatch`); nothing to wire by hand. |
+| `objects.rs` | `pub static KINDS: &[KindAdapter]`: one row per (kind, schema) pair the tailor commits to the store, with the live grammar, migration grammar, and the function that recovers a legacy record's dependencies. Add the producer's full `live_contract` beside its identity constructor whenever it has dynamic counts, paired keys, or platform-conditional inputs. A kind without a row is refused by GC, never certified. The registry hands every tailor's rows to the kernel at startup (`tailors::install_kinds`, called by `commands::dispatch`); nothing to wire by hand. |
 | `inputs.rs` (optional) | Project-inputs-to-plan loaders when they are more than a few lines. |
 
 Rules the tailor must keep:
@@ -25,6 +25,11 @@ Rules the tailor must keep:
   defines the object id. A new input means a new schema value
   (`"<kind>/2"`), a new `objects.rs` row, and the old row kept for the
   records already on disk.
+- Add a producer-backed matrix case for every row and every conditional
+  shape. The case must call the real identity constructor. Seed small offline
+  fixtures when construction needs external evidence, then assert the live
+  contract, required-input omissions, relation mutations, count mutations,
+  and migration-grammar acceptance.
 - Closures are written through `comforter::write_closure` and read through
   `comforter::read_closure`; `.blanket/closures/<eco>.json` is the proof a
   project was synced and is what `status`, `ls`, `sbom`, and `audit` read.

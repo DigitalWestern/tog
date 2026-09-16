@@ -237,10 +237,12 @@ fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()>
 
 /// Ensure the pinned portable Ruby is realized (interpreter at <obj>/bin/ruby).
 pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_ruby_for(store, Platform::host()?)
 }
 
 pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Ruby", "stage 4")?;
     let pin = ruby_pin(platform)?;
     let identity = ruby_identity(pin);
@@ -736,6 +738,7 @@ pub fn realize_gems(
     plan: &RubyPlan,
     ruby_obj: &Path,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Ruby gems", "stage 4")?;
     let pin = ruby_pin(platform)?;
     validate_plan(plan)?;
@@ -913,6 +916,37 @@ pub fn project_ruby_env(
         refs,
         attribution,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let pin = ruby_pin(platform).expect("pinned Ruby toolchain for test platform");
+    let ruby = ruby_identity(pin);
+    let empty_plan = RubyPlan {
+        ruby_version: RUBY_VERSION.into(),
+        ruby_platform: if platform.is_macos() {
+            "arm64-darwin20".into()
+        } else {
+            "x86_64-linux".into()
+        },
+        bundler_version: "2.6.9".into(),
+        gems: Vec::new(),
+    };
+    let gem_plan = RubyPlan {
+        gems: vec![RubyGem {
+            name: "rake".into(),
+            version: "13.2.1".into(),
+            platform: "ruby".into(),
+            full_name: "rake-13.2.1".into(),
+            sha256: "a".repeat(64),
+        }],
+        ..empty_plan.clone()
+    };
+    vec![
+        ruby,
+        ruby_gems_identity(pin, &empty_plan),
+        ruby_gems_identity(pin, &gem_plan),
+    ]
 }
 
 #[cfg(test)]

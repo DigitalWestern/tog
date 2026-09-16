@@ -81,12 +81,68 @@ pub fn sdk_fingerprint(platform: Platform) -> io::Result<String> {
     ))
 }
 
+fn nuget_identity(
+    plan: &DotnetPlan,
+    sdk_id: &str,
+    raw_hashes: &BTreeMap<String, String>,
+) -> io::Result<Identity> {
+    let mut inputs = BTreeMap::from([
+        ("schema".to_string(), "nuget-packages/1".to_string()),
+        ("extractor".to_string(), sdk_id.to_string()),
+    ]);
+    for p in &plan.packages {
+        let key = format!("{}@{}", p.id.to_ascii_lowercase(), p.version);
+        inputs.insert(format!("pkg:{key}"), p.content_hash.clone());
+        inputs.insert(
+            format!("raw:{key}"),
+            raw_hashes
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| err(format!("missing raw hash for {key}")))?,
+        );
+    }
+    Ok(Identity {
+        kind: "nuget-packages".into(),
+        name: "packages".into(),
+        version: plan.packages.len().to_string(),
+        inputs,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let sdk = sdk_identity(sdk_pin(platform).expect("pinned SDK for test platform"));
+    let empty_plan = DotnetPlan {
+        sdk_version: SDK_VERSION.into(),
+        project: "app.csproj".into(),
+        targets: vec!["net9.0".into()],
+        packages: Vec::new(),
+    };
+    let package = NugetPackage {
+        id: "Newtonsoft.Json".into(),
+        version: "13.0.3".into(),
+        content_hash: "content-hash".into(),
+    };
+    let package_plan = DotnetPlan {
+        packages: vec![package],
+        ..empty_plan.clone()
+    };
+    let raw_hashes = BTreeMap::from([(String::from("newtonsoft.json@13.0.3"), "a".repeat(64))]);
+    let nuget_empty = nuget_identity(&empty_plan, &sdk.object_id(), &BTreeMap::new())
+        .expect("empty NuGet identity");
+    let nuget_package = nuget_identity(&package_plan, &sdk.object_id(), &raw_hashes)
+        .expect("NuGet package identity");
+    vec![sdk, nuget_empty, nuget_package]
+}
+
 /// Ensure the pinned .NET SDK is realized (muxer at <obj>/dotnet).
 pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_sdk_for(store, Platform::host()?)
 }
 
 pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET SDK", "stage 4")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let pin = sdk_pin(platform)?;
@@ -875,6 +931,7 @@ pub fn realize_packages(
     sdk_obj: &Path,
     project_dir: &Path,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET packages", "stage 4")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let _ = sdk_pin(platform)?;
@@ -913,27 +970,7 @@ pub fn realize_packages(
         .and_then(|name| name.to_str())
         .ok_or_else(|| err("pinned SDK object has no UTF-8 store id"))?
         .to_string();
-    let mut inputs = BTreeMap::from([
-        ("schema".to_string(), "nuget-packages/1".to_string()),
-        ("extractor".to_string(), sdk_id),
-    ]);
-    for p in &plan.packages {
-        let key = format!("{}@{}", p.id.to_ascii_lowercase(), p.version);
-        inputs.insert(format!("pkg:{key}"), p.content_hash.clone());
-        inputs.insert(
-            format!("raw:{key}"),
-            raw_hashes
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| err(format!("missing raw hash for {key}")))?,
-        );
-    }
-    let identity = Identity {
-        kind: "nuget-packages".into(),
-        name: "packages".into(),
-        version: plan.packages.len().to_string(),
-        inputs,
-    };
+    let identity = nuget_identity(plan, &sdk_id, &raw_hashes)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
         crate::kernel::policy::check_cached(store, &id)?;

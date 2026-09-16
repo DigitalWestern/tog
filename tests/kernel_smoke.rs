@@ -4,9 +4,47 @@
 //! run: cargo test --test kernel_smoke -- --ignored
 
 use blanket::kernel::platform::Platform;
+#[cfg(debug_assertions)]
+use blanket::kernel::store::ObjectDeps;
 use blanket::kernel::store::Store;
 use blanket::kernel::types::*;
+#[cfg(debug_assertions)]
+use std::collections::BTreeMap;
+#[cfg(debug_assertions)]
+use std::fs;
+#[cfg(debug_assertions)]
+use std::panic::{catch_unwind, AssertUnwindSafe};
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
 use std::process::Command;
+
+#[cfg(debug_assertions)]
+struct TempStore(PathBuf);
+
+#[cfg(debug_assertions)]
+impl TempStore {
+    fn new() -> Self {
+        let base = std::env::temp_dir().join(format!(
+            "blanket-kernel-smoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(base.join(sub)).unwrap();
+        }
+        Self(base)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for TempStore {
+    fn drop(&mut self) {
+        let _ = blanket::kernel::store::remove_tree(&self.0);
+    }
+}
 
 #[test]
 #[ignore]
@@ -50,4 +88,60 @@ fn realize_env_and_run_python() {
     let env2 = blanket::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
         .expect("realize again");
     assert_eq!(env, env2);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn tailor_grammar_drift_panics_before_publishing() {
+    // This regression commits through the kernel directly, so it keeps an
+    // explicit installation even though public tailor realization entry
+    // points now self-install their rows.
+    blanket::tailors::install_kinds();
+    let temp = TempStore::new();
+    let store = Store {
+        root: temp.0.canonicalize().unwrap(),
+    };
+    let identity = Identity {
+        kind: "cpython".into(),
+        name: "cpython".into(),
+        version: "3.12.14".into(),
+        inputs: BTreeMap::from([("platform".into(), "x86_64-unknown-linux-gnu".into())]),
+    };
+    let id = identity.object_id();
+    let valid_identity = Identity {
+        kind: "cpython".into(),
+        name: "cpython-control".into(),
+        version: "3.12.14".into(),
+        inputs: BTreeMap::from([
+            ("artifact_sha256".into(), "a".repeat(64)),
+            ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+        ]),
+    };
+    let valid_staged = store.stage().unwrap();
+    fs::write(valid_staged.join("payload"), b"valid").unwrap();
+    store
+        .commit_with_deps(&valid_identity, &valid_staged, &[], &ObjectDeps::new())
+        .expect("valid tailor identity is the control");
+    let staged = store.stage().unwrap();
+    fs::write(staged.join("payload"), b"malformed").unwrap();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        store
+            .commit_with_deps(&identity, &staged, &[], &ObjectDeps::new())
+            .unwrap();
+    }));
+    let payload = result.expect_err("malformed tailor identity was published");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(message.contains("object-kind grammar drift"), "{message}");
+    assert!(
+        !store.object_path(&id).exists(),
+        "object directory was published"
+    );
+    assert!(
+        !store.root.join("meta").join(format!("{id}.json")).exists(),
+        "meta record was published"
+    );
 }

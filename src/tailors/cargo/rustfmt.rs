@@ -77,6 +77,14 @@ fn rustfmt_identity(
 }
 
 #[cfg(test)]
+pub(crate) fn live_identity_for_test(
+    platform: Platform,
+    rust_object_id: &str,
+) -> io::Result<Identity> {
+    rustfmt_identity(platform, RUSTFMT_VERSION, Path::new(rust_object_id))
+}
+
+#[cfg(test)]
 fn object_id_for(
     platform: Platform,
     rust_version: &str,
@@ -95,6 +103,7 @@ pub fn ensure_rustfmt(
     rust_version: &str,
     rust_object: &Path,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "rustfmt component", "stage 4")?;
     let expected_rust_id = cargo::rust_object_id(platform, rust_version)?;
     let rust_object = rust_object.canonicalize()?;

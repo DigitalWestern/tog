@@ -295,6 +295,7 @@ mod tests {
     }
 
     fn test_identity(name: &str, input: Option<&str>) -> Identity {
+        crate::kernel::objmeta::register_test_kinds();
         Identity {
             kind: "test".into(),
             name: name.into(),
@@ -325,11 +326,39 @@ mod tests {
     /// the adapters and the containment guard have something real to work on.
     fn commit_legacy_fixture(store: &Store, identity: &Identity, refs: Option<&[&str]>) -> String {
         let id = identity.object_id();
-        let staged = store.stage().unwrap();
-        fs::write(staged.join("payload"), &identity.name).unwrap();
-        store
-            .commit_with_deps(identity, &staged, &[], &ObjectDeps::new())
+        if identity.kind == "not-a-known-kind" {
+            // Unknown-kind fixtures are historical records. Publish this
+            // legacy-shaped object by hand because the live commit guard must
+            // reject the same unknown kind.
+            let object = store.object_path(&id);
+            fs::create_dir_all(&object).unwrap();
+            fs::write(object.join("payload"), &identity.name).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::json!({
+                    "schema": "object-meta/2",
+                    "id": id,
+                    "identity": identity,
+                    "created": 0,
+                    "exceptions": [],
+                    "dependencies": [],
+                    "cache_digests": [],
+                    "evidence": "explicit",
+                })
+                .to_string(),
+            )
             .unwrap();
+        } else {
+            let staged = store.stage().unwrap();
+            fs::write(staged.join("payload"), &identity.name).unwrap();
+            store
+                .commit_with_deps(identity, &staged, &[], &ObjectDeps::new())
+                .unwrap();
+        }
         let path = store.root.join("meta").join(format!("{id}.json"));
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -390,7 +419,12 @@ mod tests {
             kind: "cpython".into(),
             name: "cpython".into(),
             version: "3.11.9".into(),
-            inputs: BTreeMap::new(),
+            // The real cpython producer's input shape; the commit-time
+            // grammar check refuses anything else.
+            inputs: BTreeMap::from([
+                ("artifact_sha256".into(), "a".repeat(64)),
+                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+            ]),
         };
         let id = identity.object_id();
         let staged = store.stage().unwrap();
@@ -449,10 +483,15 @@ mod tests {
                 ("rebar3_sha512".into(), rebar3.clone()),
                 ("versions".into(), "hex2.5.1:rebar3.25.1".into()),
                 ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+                (
+                    "relocation_schema".into(),
+                    "otp-install-cross-minimal/1".into(),
+                ),
+                ("store_root".into(), "/fixture/blanket-store".into()),
             ]),
         };
         let fingerprint = crate::tailors::elixir::fingerprint_of_joined(&format!(
-            "{otp}:{elixir}:{hex_archive}:{rebar3}"
+            "{otp}:{elixir}:{hex_archive}:{rebar3}:otp-install-cross-minimal/1"
         ));
         cached_artifact(store, &otp);
         cached_artifact(store, &elixir);
@@ -2081,7 +2120,10 @@ mod tests {
             kind: "cpython".into(),
             name: "cpython".into(),
             version: "3.11.9".into(),
-            inputs: BTreeMap::from([("artifact_sha256".into(), "4".repeat(64))]),
+            inputs: BTreeMap::from([
+                ("artifact_sha256".into(), "4".repeat(64)),
+                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+            ]),
         };
         let id = commit_legacy_fixture(&store, &identity, Some(&[]));
         let before = fs::read(store.root.join("meta").join(format!("{id}.json"))).unwrap();
@@ -2120,7 +2162,10 @@ mod tests {
             kind: "cpython".into(),
             name: "cpython".into(),
             version: "3.11.9".into(),
-            inputs: BTreeMap::from([("artifact_sha256".into(), digest)]),
+            inputs: BTreeMap::from([
+                ("artifact_sha256".into(), digest),
+                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+            ]),
         };
         let id = commit_legacy_fixture(&store, &identity, Some(&[]));
 
@@ -2152,7 +2197,10 @@ mod tests {
             kind: "cpython".into(),
             name: "cpython".into(),
             version: "3.11.9".into(),
-            inputs: BTreeMap::from([("artifact_sha256".into(), digest)]),
+            inputs: BTreeMap::from([
+                ("artifact_sha256".into(), digest),
+                ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+            ]),
         };
         let id = commit_legacy_fixture(&store, &identity, Some(&[]));
 

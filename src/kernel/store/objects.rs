@@ -255,6 +255,37 @@ impl Store {
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
         self.require_activity(activity, "store publication")?;
         validate_object_deps(self, activity, deps)?;
+        // Grammar drift check (FOLLOW-UPS item 7). Each `KindAdapter` row
+        // claims to describe the inputs its producer writes *today*, but the
+        // rows were only ever read by the legacy-migration path, so a
+        // producer could drift away from its row and nothing would notice
+        // until a migration ran on a store nobody could rebuild. This is the
+        // one publication choke point, and the identity is final here, so the
+        // row is checked against the real thing.
+        //
+        // `debug_assertions`, not `test`: public tailor realization entry
+        // points self-install the rows, direct kernel callers install them
+        // explicitly, and CLI commands get them through `commands::dispatch`.
+        // Release builds skip the check, so a store written by a release build
+        // is still readable. This catches developer error, it is not a store
+        // invariant. Every committed kind must have a registered row; see
+        // `check_identity_grammar`.
+        #[cfg(debug_assertions)]
+        if let Err(reason) = crate::kernel::objmeta::check_identity_grammar(identity) {
+            panic!(
+                "object-kind grammar drift: kind {}, {}: {reason}\nthe producer and its \
+                 KindAdapter row in src/kernel/objmeta.rs (or the tailor's objects.rs) disagree; \
+                 restore the producer if the drift is accidental (a dropped input like \
+                 artifact_sha256 would let distinct artifacts share an object id); update the row \
+                 only for an intentional, compatible addition; introduce a new schema value when \
+                 identity semantics change",
+                identity.kind,
+                match crate::kernel::objmeta::schema_input_of(identity) {
+                    Some(schema) => format!("schema {schema}"),
+                    None => "no schema input".to_string(),
+                },
+            );
+        }
         let id = identity.object_id();
         let dest = self.object_path(&id);
         if self.has_with_activity(activity, &id)? {
