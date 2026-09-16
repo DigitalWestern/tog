@@ -771,7 +771,10 @@ mod tests {
 
         let output = render(Path::new("project"), &report, true).unwrap();
         let value: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(value["policy"]["sources"][0]["path"], "policy-\u{fffd}.toml");
+        assert_eq!(
+            value["policy"]["sources"][0]["path"],
+            "policy-\u{fffd}.toml"
+        );
         assert_eq!(
             value["policy"]["sources"][0]["path_bytes"],
             "706f6c6963792dff2e746f6d6c"
