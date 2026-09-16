@@ -170,13 +170,17 @@ can pick it up cold.
   env-reading tests) were verified by the author only. Done when a reviewer
   who did not write them re-runs the three and the REVIEW.md entry-7 row
   drops its "nit fixes verified by the author only" clause.
-- **H2 — acceptance coverage.** Add `blanket audit` to
-  `tests/acceptance.sh`: after a real Python and npm sync, run it under the
-  offline check (`unshare -rn` on Linux) with `--policy
-  docs/human/policy-company.toml`, assert exit 0 on the clean fixtures and
-  exit 1 after planting one denied exception; assert `~/.blanket/store` mtime
-  is unchanged across the run. Done when the checklist has the rows and they
-  pass on Linux.
+- **H2 — acceptance coverage. Done (2026-09-14).** `tests/acceptance.sh`
+  step 13 runs `blanket audit --policy docs/human/policy-company.toml` over
+  the polyglot project synced in step 11, under `deny_net` (`unshare -rn` on
+  Linux): four rows — exit 0 on the clean python + node closures, exit 1
+  naming the kind and subject after planting one `install-script-failed`
+  exception into `node.json`, clean and planted `--json` reports requiring
+  current passing/denied verdicts, and the absent store path under an
+  unwritable directory after all three audit runs. Run on Linux (Fedora,
+  2026-09-14) via a scratch driver that extracts the step-13 and helper lines
+  from `tests/acceptance.sh` with `sed -n` and runs them against a real
+  `proj-poly` sync: passed=4 failed=0. The full checklist was not re-run.
 - **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
   pick one after the owner answers D3:
   1. *Store cross-check, opt-in.* Object-affecting exceptions
