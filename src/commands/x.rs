@@ -2322,7 +2322,29 @@ mod tests {
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
         assert!(lock_x_root(&root, true, true).unwrap().is_none());
         drop(shared);
-        assert!(lock_x_root(&root, true, true).unwrap().is_some());
+        // `drop` closes this process's descriptor, but a `flock` lives on the
+        // open file description, not on the descriptor. Any sibling test that
+        // spawns a child forks the whole descriptor table, so between that
+        // `fork` and the `exec` that honours `FD_CLOEXEC` the child holds a
+        // second reference to this shared lock. The exclusive try-lock below
+        // then loses with `EWOULDBLOCK` through no fault of `lock_x_root`.
+        // The window is microseconds wide, so retry briefly; the assertion
+        // above still proves the lock blocks while `shared` is held.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let exclusive = loop {
+            if let Some(file) = lock_x_root(&root, true, true).unwrap() {
+                break Some(file);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(
+            exclusive.is_some(),
+            "exclusive lock stayed blocked for two seconds after the shared lock was dropped"
+        );
+        drop(exclusive);
         fs::remove_dir_all(base).unwrap();
     }
 

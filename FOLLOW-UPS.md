@@ -93,7 +93,12 @@ F3 report accounting, F4 acceptance tests).
    `drop(shared)` can lose to a sibling test's fork-then-exec window (the
    lock lives on the open file description, which a forked child shares
    until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
-   verbatim); fix is to retry the try-lock briefly or isolate the test.
+   verbatim). **Fixed 2026-09-14 (test only):** after `drop(shared)` the x
+   test now retries the nonblocking exclusive try-lock for up to 2 s, 10 ms
+   between attempts, and asserts it eventually succeeds; the assertion that
+   the try-lock fails *while* `shared` is held is unchanged, and
+   `lock_x_root` itself was not touched. 20/20 green in a loop plus a clean
+   full `cargo test`. The gitsrc sighting below is still unreproduced.
    Also seen once, 2026-09-12 Stage 4 gate:
    `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
    failed in one full parallel run and passed 3/3 alone and in the full
