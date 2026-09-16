@@ -227,8 +227,11 @@ Each row in that (kind, schema) coverage matrix declares two input grammars.
 Its `grammar` is the migration grammar, which remains compatible with legacy
 records. Its `live_required` and `live_optional` fields describe the inputs
 the current producer writes, including dynamic prefixes for conditional
-package entries. The live check validates required names, the live key
-whitelist, and the row's `live_relations` for paired or conditional inputs.
+package entries. Where identity shape has collection or platform semantics,
+the tailor owns a `live_contract` beside the producer's identity constructor
+in `objects.rs`; it receives the whole `Identity` and validates count fields,
+paired keys, and platform-conditional inputs. The live check validates
+required names and the live key whitelist before calling that contract.
 Debug builds enforce all three at the one publication choke point,
 `Store::commit_internal_impl`, so a producer that starts writing a new input,
 drops a required one, or emits an impossible partial group fails at the commit
@@ -243,6 +246,26 @@ also fails closed at sweep time. Public tailor realization entry points call
 through `commands::dispatch`; direct kernel callers install it explicitly.
 Release builds skip the check; it catches developer error, it is not a store
 invariant.
+Under `cargo-vendor/1`, a one-crate plan whose producer dropped its `crate:` key
+is indistinguishable from the legitimate empty plan; removing that ambiguity
+requires a new schema value (`cargo-vendor/2`) with a separate count input,
+which is a deliberate future identity change, not something this guard can do.
+The same pinned boundary applies to `python-env/2`, where a dropped sole wheel
+`pkg:` key becomes the legitimate empty environment and a dropped `native_libs`
+key on an inspected native sdist passes; to `node-env/3`, where a dropped
+package from a multi-package plan or an optional `artifact:` or Linux
+`native_libs` key passes; and to `sdist-build/3`, where dropping both halves
+of either the `rust`/`vendor` or `native_libs`/`native_linker` pair passes.
+(A dropped `provisioned:` key is caught today: the `pkg:` value names the
+package, and the contract asks the producer's own provisioning decision
+whether that package must carry one.) Their successors would be
+`python-env/3` with a plan digest over the package set plus an explicit
+native decision, `node-env/4` with a plan digest over the package set and
+declared artifacts plus an explicit native decision, and `sdist-build/4` with
+explicit build-mode and native-mode fields; a bare count or flag would not
+close every gap in its row. Each new schema would reissue every object id of
+its kind, so choosing to introduce one is an owner decision tracked in
+FOLLOW-UPS.md.
 
 Status, 2026-09-10: implemented and independently reviewed on Linux (the
 review ledger, [docs/agent/REVIEW.md](docs/agent/REVIEW.md), records the

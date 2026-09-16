@@ -4,10 +4,10 @@
 //! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
-    add_digest, add_object, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
+    add_digest, add_object, input, platform_of, Algo, Grammar, KindAdapter, MetaIndex, Record,
 };
 use crate::kernel::store::ObjectDeps;
-use std::collections::BTreeMap;
+use crate::kernel::types::Identity;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
@@ -23,7 +23,8 @@ pub static KINDS: &[KindAdapter] = &[
             "platform",
         ],
         live_optional: &["relocation_schema", "store_root"],
-        live_relations: Some(beam_relocation_relations),
+        legacy_only: &[],
+        live_contract: Some(beam_contract),
         grammar: Grammar {
             required: &[
                 "schema",
@@ -42,7 +43,8 @@ pub static KINDS: &[KindAdapter] = &[
         schema: Some("hex-deps/1"),
         live_required: &["schema", "beam"],
         live_optional: &["dep:"],
-        live_relations: None,
+        legacy_only: &[],
+        live_contract: Some(hex_deps_contract),
         grammar: Grammar {
             required: &["schema", "beam"],
             optional: &[],
@@ -52,18 +54,46 @@ pub static KINDS: &[KindAdapter] = &[
     },
 ];
 
-fn beam_relocation_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
-    let relocation = inputs.contains_key("relocation_schema");
-    let store_root = inputs.contains_key("store_root");
-    if relocation != store_root {
-        return Err(
-            "BEAM relocation relation: relocation_schema and store_root must appear together"
-                .into(),
-        );
+fn beam_contract(identity: &Identity) -> Result<(), String> {
+    let platform = platform_of(identity)?.ok_or_else(|| {
+        "BEAM relocation relation: the producer must record a platform input".to_string()
+    })?;
+    let relocation = identity.inputs.contains_key("relocation_schema");
+    let store_root = identity.inputs.contains_key("store_root");
+    let linux = matches!(
+        platform,
+        crate::kernel::platform::Platform::X86_64UnknownLinuxGnu
+    );
+    if linux != relocation || linux != store_root {
+        return Err(format!(
+            "BEAM relocation relation: relocation_schema and store_root are both required on Linux and both forbidden on Darwin (platform {})",
+            platform.triple()
+        ));
     }
     Ok(())
 }
 
+fn hex_deps_contract(identity: &Identity) -> Result<(), String> {
+    // Empty dependency plans are valid. The producer's version is the exact
+    // count when dependencies exist, including zero for the empty shape.
+    let deps = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("dep:"))
+        .count();
+    let version = identity.version.parse::<usize>().map_err(|_| {
+        format!(
+            "Hex dependency count/version relation: version {:?} is not a count for {deps} dep: inputs",
+            identity.version
+        )
+    })?;
+    if version != deps {
+        return Err(format!(
+            "Hex dependency count/version relation: version {version} does not match {deps} dep: inputs"
+        ));
+    }
+    Ok(())
+}
 /// `beam-toolchain/1`: OTP and Elixir by sha256, Hex and rebar3 by sha512.
 /// All four are direct identity inputs; the `versions` and relocation inputs
 /// are not artifacts.

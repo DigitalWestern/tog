@@ -20,6 +20,7 @@
 //! made by older producers.
 
 use crate::kernel::fetch::Digest;
+use crate::kernel::platform::Platform;
 use crate::kernel::store::{self, ObjectDeps};
 use crate::kernel::types::Identity;
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,6 +73,21 @@ pub struct Record {
 /// share this one reader so a pair can never be looked up two different ways.
 pub(crate) fn schema_input_of(identity: &Identity) -> Option<&str> {
     identity.inputs.get("schema").map(String::as_str)
+}
+
+/// Parse the platform identity input once for live contracts. A malformed
+/// platform is a producer bug even when the row only uses it to choose a
+/// conditional input shape.
+pub(crate) fn platform_of(identity: &Identity) -> Result<Option<Platform>, String> {
+    let Some(value) = identity.inputs.get("platform") else {
+        return Ok(None);
+    };
+    Platform::ALL
+        .iter()
+        .copied()
+        .find(|platform| platform.triple() == value)
+        .map(Some)
+        .ok_or_else(|| format!("identity has an unparseable platform input {value:?}"))
 }
 
 impl Record {
@@ -462,9 +478,12 @@ pub struct KindAdapter {
     /// Inputs the current producer may add conditionally. Entries ending in
     /// `:` are recognized prefixes, such as `pkg:` for variable package keys.
     pub live_optional: &'static [&'static str],
-    /// Relationships between live inputs that the names and whitelist alone
-    /// cannot express, such as paired prefixes or conditional fields.
-    pub live_relations: Option<fn(&BTreeMap<String, String>) -> Result<(), String>>,
+    /// Inputs retained only for legacy records. Each entry needs a comment in
+    /// the owning row explaining why the current producer no longer writes it.
+    pub legacy_only: &'static [&'static str],
+    /// The full producer-owned identity contract. It runs after the generic
+    /// required-name, whitelist, unknown-kind and schema checks.
+    pub live_contract: Option<fn(&Identity) -> Result<(), String>>,
     pub grammar: Grammar,
     pub adapt: fn(&Record, &MetaIndex) -> Result<ObjectDeps, String>,
 }
@@ -475,7 +494,8 @@ static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
     schema: Some("git-source/2"),
     live_required: &["schema", "url", "commit"],
     live_optional: &[],
-    live_relations: None,
+    legacy_only: &[],
+    live_contract: None,
     grammar: Grammar {
         required: &["schema", "url", "commit"],
         optional: &[],
@@ -493,7 +513,8 @@ static TEST_KINDS: &[KindAdapter] = &[KindAdapter {
     schema: None,
     live_required: &[],
     live_optional: &["input"],
-    live_relations: None,
+    legacy_only: &[],
+    live_contract: None,
     grammar: Grammar {
         required: &[],
         optional: &["input"],
@@ -631,10 +652,8 @@ pub(crate) fn grammar_accepts_key(grammar: &Grammar, key: &str) -> bool {
 /// this intentionally does not use `Grammar`: its required fields describe
 /// only what the live producer writes today, and its optional entries may be
 /// exact keys or dynamic prefixes.
-fn enforce_live_grammar(
-    inputs: &BTreeMap<String, String>,
-    adapter: &KindAdapter,
-) -> Result<(), String> {
+fn enforce_live_grammar(identity: &Identity, adapter: &KindAdapter) -> Result<(), String> {
+    let inputs = &identity.inputs;
     for key in adapter.live_required {
         if !inputs.contains_key(*key) {
             return Err(format!(
@@ -655,9 +674,7 @@ fn enforce_live_grammar(
             ));
         }
     }
-    if let Some(relations) = adapter.live_relations {
-        relations(inputs)?;
-    }
+    platform_of(identity)?;
     Ok(())
 }
 
@@ -675,7 +692,13 @@ fn enforce_live_grammar(
 pub(crate) fn check_identity_grammar(identity: &Identity) -> Result<(), String> {
     let schema = schema_input_of(identity);
     match adapter_for(&identity.kind, schema) {
-        Some(adapter) => enforce_live_grammar(&identity.inputs, adapter),
+        Some(adapter) => {
+            enforce_live_grammar(identity, adapter)?;
+            if let Some(contract) = adapter.live_contract {
+                contract(identity)?;
+            }
+            Ok(())
+        }
         None => {
             let rows: Vec<&KindAdapter> = registered_kinds()
                 .filter(|adapter| adapter.kind == identity.kind)
@@ -2356,6 +2379,14 @@ mod tests {
                         row.schema,
                         platform.triple()
                     );
+                    assert_eq!(
+                        enforce_grammar(&identity.inputs, &row.grammar),
+                        Ok(()),
+                        "real producer identity is not readable by migration grammar for {}, {:?}, {}",
+                        row.kind,
+                        row.schema,
+                        platform.triple()
+                    );
                     for key in row.live_required {
                         let mut missing = identity.clone();
                         missing.inputs.remove(*key);
@@ -2374,6 +2405,9 @@ mod tests {
     }
 
     fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut cases = vec![crate::kernel::gitsrc::live_identity_for_test()];
         cases.extend(crate::tailors::live_identity_cases(platform));
         cases
@@ -2396,16 +2430,36 @@ mod tests {
             .unwrap_or_else(|| panic!("no {kind}/{schema:?} case has {key}"))
     }
 
-    fn assert_relation_breaks(mut identity: Identity, remove: &str, relation: &str) {
-        assert_eq!(check_identity_grammar(&identity), Ok(()));
-        assert!(
-            identity.inputs.remove(remove).is_some(),
-            "missing fixture key {remove}"
-        );
-        let reason = check_identity_grammar(&identity).unwrap_err();
+    fn assert_relation_breaks(identity: &Identity, removals: &[&str], relation: &str) {
+        assert_eq!(check_identity_grammar(identity), Ok(()));
+        for remove in removals {
+            let mut broken = identity.clone();
+            assert!(
+                broken.inputs.remove(*remove).is_some(),
+                "missing fixture key {remove}"
+            );
+            let reason = check_identity_grammar(&broken).unwrap_err();
+            assert!(
+                reason.contains(relation),
+                "relation {relation} was not named after removing {remove}: {reason}"
+            );
+        }
+    }
+
+    fn assert_count_breaks(identity: &Identity, prefix: &str, relation: &str) {
+        assert_eq!(check_identity_grammar(identity), Ok(()));
+        let remove = identity
+            .inputs
+            .keys()
+            .find(|key| key.starts_with(prefix))
+            .cloned()
+            .unwrap_or_else(|| panic!("no {prefix} fixture key"));
+        let mut broken = identity.clone();
+        broken.inputs.remove(&remove);
+        let reason = check_identity_grammar(&broken).unwrap_err();
         assert!(
             reason.contains(relation),
-            "relation {relation} was not named: {reason}"
+            "count relation {relation} was not named after removing {remove}: {reason}"
         );
     }
 
@@ -2421,8 +2475,8 @@ mod tests {
             "pkg:newtonsoft.json@13.0.3",
         );
         assert_relation_breaks(
-            nuget,
-            "raw:newtonsoft.json@13.0.3",
+            &nuget,
+            &["pkg:newtonsoft.json@13.0.3", "raw:newtonsoft.json@13.0.3"],
             "NuGet pkg/raw relation",
         );
 
@@ -2433,58 +2487,116 @@ mod tests {
             "mod:example.com/lib@v1.2.3",
         );
         assert_relation_breaks(
-            go,
-            "info:example.com/lib@v1.2.3",
+            &go,
+            &[
+                "mod:example.com/lib@v1.2.3",
+                "modfile:example.com/lib@v1.2.3",
+                "info:example.com/lib@v1.2.3",
+            ],
             "Go module triplet relation",
         );
 
         let beam = case_with_input(&linux, "beam", Some("beam-toolchain/1"), "store_root");
-        assert_relation_breaks(beam, "store_root", "BEAM relocation relation");
+        assert_relation_breaks(
+            &beam,
+            &["relocation_schema", "store_root"],
+            "BEAM relocation relation",
+        );
 
         let node_empty = case_with_input(&linux, "node-env", Some("node-env/3"), "layout");
-        assert_relation_breaks(node_empty, "layout", "Node layout/package relation");
-        let node_native = case_with_input(&linux, "node-env", Some("node-env/3"), "native_libs");
-        assert_relation_breaks(
-            node_native,
-            "pkg:node_modules/example",
-            "Node native_libs/pkg relation",
-        );
-        let mut node_provisioned = case_with_input(
+        assert_relation_breaks(&node_empty, &["layout"], "Node layout/package relation");
+        let node_packages = case_with_input(
             &linux,
             "node-env",
             Some("node-env/3"),
             "pkg:node_modules/example",
         );
-        // The real constructor reaches this branch through the Electron
-        // checksum manifest, which is network-backed. Keep the fixture's
-        // current output shape while testing the offline relation itself.
-        node_provisioned.inputs.insert(
-            "provisioned:node_modules/example".into(),
-            "electron-v1:a".into(),
+        assert_relation_breaks(
+            &node_packages,
+            &["pkg:node_modules/example"],
+            "Node layout/package relation",
+        );
+        let node_native = case_with_input(&linux, "node-env", Some("node-env/3"), "native_libs");
+        assert_relation_breaks(
+            &node_native,
+            &["pkg:node_modules/example"],
+            "Node native_libs/pkg relation",
+        );
+        let node_provisioned = case_with_input(
+            &linux,
+            "node-env",
+            Some("node-env/3"),
+            "provisioned:node_modules/electron",
         );
         assert_relation_breaks(
-            node_provisioned,
-            "pkg:node_modules/example",
+            &node_provisioned,
+            &["pkg:node_modules/electron"],
             "Node provisioned/pkg relation",
         );
-
-        let mut python_env =
-            case_with_input(&linux, "python-env", Some("python-env/2"), "pkg:example");
-        // Native sdist inspection needs an archive. This closest offline
-        // fixture uses the producer's wheel-shaped environment plus the
-        // optional object input that the same constructor emits for a native
-        // sdist.
-        python_env
+        let mut orphan_provisioned = node_packages.clone();
+        orphan_provisioned.inputs.insert(
+            "provisioned:node_modules/orphan".into(),
+            "electron-v39.0.0-linux-x64.zip:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        );
+        let reason = check_identity_grammar(&orphan_provisioned).unwrap_err();
+        assert!(reason.contains("Node provisioned/pkg relation"), "{reason}");
+        let mut node_darwin_native = case_with_input(
+            &darwin,
+            "node-env",
+            Some("node-env/3"),
+            "pkg:node_modules/example",
+        );
+        node_darwin_native
             .inputs
             .insert("native_libs".into(), "native-libs-object".into());
+        let reason = check_identity_grammar(&node_darwin_native).unwrap_err();
+        assert!(reason.contains("Node native platform relation"), "{reason}");
+
+        let python_env = case_with_input(&linux, "python-env", Some("python-env/2"), "native_libs");
         assert_relation_breaks(
-            python_env,
-            "pkg:example",
+            &python_env,
+            &["pkg:matrix-python-native"],
             "Python environment native_libs/pkg relation",
         );
+        let mut orphan_native =
+            case_with_input(&linux, "python-env", Some("python-env/2"), "pkg:example");
+        orphan_native
+            .inputs
+            .insert("native_libs".into(), "native-libs-object".into());
+        let reason = check_identity_grammar(&orphan_native).unwrap_err();
+        assert!(
+            reason.contains("Python environment native_libs/pkg relation"),
+            "{reason}"
+        );
+        let mut python_darwin_native =
+            case_with_input(&darwin, "python-env", Some("python-env/2"), "pkg:example");
+        python_darwin_native
+            .inputs
+            .insert("pkg:example".into(), "Sdist:fixture".into());
+        python_darwin_native
+            .inputs
+            .insert("native_libs".into(), "native-libs-object".into());
+        let reason = check_identity_grammar(&python_darwin_native).unwrap_err();
+        assert!(
+            reason.contains("Python environment native platform relation"),
+            "{reason}"
+        );
+
+        let native_libs = case_with_input(&linux, "native-libs", None, "platform");
+        let mut native_libs_darwin = native_libs;
+        native_libs_darwin.inputs.insert(
+            "platform".into(),
+            Platform::Aarch64AppleDarwin.triple().into(),
+        );
+        let reason = check_identity_grammar(&native_libs_darwin).unwrap_err();
+        assert!(reason.contains("native-libs platform contract"), "{reason}");
 
         let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/3"), "rust");
-        assert_relation_breaks(sdist_rust, "vendor", "sdist Rust/vendor relation");
+        assert_relation_breaks(
+            &sdist_rust,
+            &["rust", "vendor"],
+            "sdist Rust/vendor relation",
+        );
         let sdist_native = case_with_input(
             &linux,
             "sdist-build",
@@ -2492,15 +2604,253 @@ mod tests {
             "native_linker",
         );
         assert_relation_breaks(
-            sdist_native,
-            "native_libs",
+            &sdist_native,
+            &["native_libs", "native_linker"],
             "sdist native_libs/native_linker relation",
+        );
+        let mut sdist_darwin_native =
+            case_with_input(&darwin, "sdist-build", Some("sdist-build/3"), "build_env");
+        sdist_darwin_native
+            .inputs
+            .insert("native_libs".into(), "native-libs-object".into());
+        sdist_darwin_native
+            .inputs
+            .insert("native_linker".into(), "native-libs-rpath/1".into());
+        let reason = check_identity_grammar(&sdist_darwin_native).unwrap_err();
+        assert!(
+            reason.contains("sdist native platform relation"),
+            "{reason}"
         );
 
         // Darwin's real BEAM constructor is the other conditional shape and
         // must pass without the Linux relocation pair.
         let beam_darwin = case_with_input(&darwin, "beam", Some("beam-toolchain/1"), "platform");
         assert_eq!(check_identity_grammar(&beam_darwin), Ok(()));
+        let mut beam_darwin_relocated = beam_darwin;
+        beam_darwin_relocated
+            .inputs
+            .insert("relocation_schema".into(), "store-relocation/1".into());
+        beam_darwin_relocated
+            .inputs
+            .insert("store_root".into(), "/fixture/blanket-store".into());
+        let reason = check_identity_grammar(&beam_darwin_relocated).unwrap_err();
+        assert!(reason.contains("BEAM relocation relation"), "{reason}");
+    }
+
+    #[test]
+    fn python_env_one_wheel_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let empty = linux
+            .iter()
+            .find(|identity| {
+                identity.kind == "python-env"
+                    && schema_input_of(identity) == Some("python-env/2")
+                    && !identity.inputs.keys().any(|key| key.starts_with("pkg:"))
+            })
+            .expect("empty Python environment matrix case");
+        let one_wheel = linux
+            .iter()
+            .find(|identity| {
+                identity.kind == "python-env"
+                    && schema_input_of(identity) == Some("python-env/2")
+                    && identity
+                        .inputs
+                        .values()
+                        .any(|value| value.starts_with("Wheel:"))
+            })
+            .expect("one-wheel Python environment matrix case");
+        let mut dropped = one_wheel.clone();
+        let package_key = dropped
+            .inputs
+            .keys()
+            .find(|key| key.starts_with("pkg:"))
+            .cloned()
+            .expect("one-wheel Python package input");
+        dropped.inputs.remove(&package_key);
+
+        // python-env/3 must add an unconditional package count or plan digest;
+        // keep this accepted drift as the reminder to tighten this assertion.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        assert_eq!(dropped.object_id(), empty.object_id());
+    }
+
+    #[test]
+    fn python_env_native_libs_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let native = case_with_input(&linux, "python-env", Some("python-env/2"), "native_libs");
+        let mut dropped = native.clone();
+        dropped.inputs.remove("native_libs");
+
+        // python-env/3 must add an unconditional package count or plan digest;
+        // the current contract cannot tell this from a non-native environment.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+    }
+
+    #[test]
+    fn node_env_package_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let multi_package = linux
+            .iter()
+            .find(|identity| {
+                identity.kind == "node-env"
+                    && schema_input_of(identity) == Some("node-env/3")
+                    && identity
+                        .inputs
+                        .keys()
+                        .filter(|key| key.starts_with("pkg:"))
+                        .count()
+                        >= 2
+            })
+            .expect("multi-package Node environment matrix case");
+        let mut dropped = multi_package.clone();
+        let package_key = dropped
+            .inputs
+            .keys()
+            .find(|key| key.starts_with("pkg:"))
+            .cloned()
+            .expect("multi-package Node package input");
+        dropped.inputs.remove(&package_key);
+
+        // node-env/4 must add an explicit provisioning/native decision; keep
+        // this accepted drift as the reminder.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+    }
+
+    #[test]
+    fn node_env_artifact_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let declared = case_with_input(
+            &linux,
+            "node-env",
+            Some("node-env/3"),
+            "artifact:.npm/tool.tar.gz",
+        );
+        let mut dropped = declared.clone();
+        dropped.inputs.remove("artifact:.npm/tool.tar.gz");
+
+        // node-env/4 must add an explicit provisioning/native decision field;
+        // optional artifact inputs cannot currently prove that one was kept.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+    }
+
+    #[test]
+    fn node_env_provisioned_dropped_is_detected_under_the_current_schema() {
+        for platform in Platform::ALL {
+            let cases = live_identity_cases(*platform);
+            let provisioned = case_with_input(
+                &cases,
+                "node-env",
+                Some("node-env/3"),
+                "provisioned:node_modules/electron",
+            );
+            let mut dropped = provisioned.clone();
+            dropped.inputs.remove("provisioned:node_modules/electron");
+
+            // The pkg: value names electron, and the producer's provisioning
+            // decision says electron always carries a provisioned: key, so
+            // no schema change is needed to catch this drift (Sol r5 #1).
+            let reason = check_identity_grammar(&dropped).unwrap_err();
+            assert!(
+                reason.contains("Node pkg/provisioned relation"),
+                "{}: {reason}",
+                platform.triple()
+            );
+        }
+    }
+
+    #[test]
+    fn node_env_native_libs_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let native = case_with_input(&linux, "node-env", Some("node-env/3"), "native_libs");
+        let mut dropped = native.clone();
+        dropped.inputs.remove("native_libs");
+
+        // node-env/4 must add an explicit provisioning/native decision field;
+        // native_libs is currently checked only when the key exists.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+    }
+
+    #[test]
+    fn sdist_build_rust_vendor_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/3"), "rust");
+        let mut dropped = rust.clone();
+        dropped.inputs.remove("rust");
+        dropped.inputs.remove("vendor");
+
+        // sdist-build/4 must add an explicit build-mode field; dropping both
+        // Rust inputs currently leaves the valid no-Rust shape.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+    }
+
+    #[test]
+    fn sdist_build_native_pair_dropped_is_a_documented_schema_limitation() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let native = case_with_input(
+            &linux,
+            "sdist-build",
+            Some("sdist-build/3"),
+            "native_linker",
+        );
+        let mut dropped = native.clone();
+        dropped.inputs.remove("native_libs");
+        dropped.inputs.remove("native_linker");
+
+        // sdist-build/4 must add an explicit native-mode field; dropping both
+        // native inputs currently leaves the valid non-native shape.
+        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+    }
+
+    #[test]
+    fn producer_count_contracts_reject_dropped_dynamic_keys() {
+        let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        assert_count_breaks(
+            linux
+                .iter()
+                .find(|identity| {
+                    identity.kind == "cargo-vendor"
+                        && schema_input_of(identity) == Some("cargo-vendor/1")
+                        && identity
+                            .inputs
+                            .keys()
+                            .filter(|key| key.starts_with("crate:"))
+                            .count()
+                            >= 2
+                })
+                .expect("multi-crate cargo-vendor matrix case"),
+            "crate:",
+            "Cargo crate count/version relation",
+        );
+        assert_count_breaks(
+            &case_with_input(
+                &linux,
+                "nuget-packages",
+                Some("nuget-packages/1"),
+                "pkg:newtonsoft.json@13.0.3",
+            ),
+            "pkg:",
+            "NuGet package count/version relation",
+        );
+        assert_count_breaks(
+            &case_with_input(
+                &linux,
+                "go-modcache",
+                Some("go-modcache/1"),
+                "mod:example.com/lib@v1.2.3",
+            ),
+            "mod:",
+            "Go module count/version relation",
+        );
+        assert_count_breaks(
+            &case_with_input(&linux, "hex-deps", Some("hex-deps/1"), "dep:jason"),
+            "dep:",
+            "Hex dependency count/version relation",
+        );
+        assert_count_breaks(
+            &case_with_input(&linux, "ruby-gems", Some("ruby-gems/1"), "gem:rake-13.2.1"),
+            "gem:",
+            "Ruby gem count/version relation",
+        );
     }
 
     /// Cheap structural drift: a row whose `required` and `optional` lists
@@ -2556,7 +2906,108 @@ mod tests {
                     "live input {key} is not accepted by migration grammar for {where_}"
                 );
             }
+            let migration_entries = row
+                .grammar
+                .required
+                .iter()
+                .copied()
+                .chain(row.grammar.optional.iter().copied())
+                .chain(row.grammar.groups.iter().map(|(prefix, _)| *prefix));
+            for key in migration_entries {
+                assert!(
+                    row.live_required.contains(&key)
+                        || row.live_optional.contains(&key)
+                        || row.legacy_only.contains(&key),
+                    "{where_} migration input or prefix {key} is absent from live_required, live_optional, and legacy_only"
+                );
+            }
+            // Requiredness, not just membership: a key the migration grammar
+            // requires is either still required of the live producer or
+            // explicitly legacy-only. Parking it in live_optional would let
+            // the producer drop it while the omission loop above never tries
+            // removing it (Sol r5 #2).
+            for key in row.grammar.required {
+                assert!(
+                    row.live_required.contains(key) || row.legacy_only.contains(key),
+                    "{where_} migration-required input {key} must be live-required or legacy-only, not live-optional"
+                );
+            }
+            let unique_legacy: BTreeSet<&str> = row.legacy_only.iter().copied().collect();
+            assert_eq!(
+                unique_legacy.len(),
+                row.legacy_only.len(),
+                "{where_} repeats a legacy-only input key"
+            );
+            for key in row.legacy_only {
+                assert!(
+                    grammar_accepts_key(&row.grammar, key),
+                    "{where_} legacy-only input {key} is not recognized by migration grammar"
+                );
+                assert!(
+                    !row.live_required.contains(key) && !row.live_optional.contains(key),
+                    "{where_} legacy-only input {key} is also listed as live"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn cargo_vendor_one_crate_dropped_is_a_documented_schema_limitation() {
+        let cases = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
+        let empty = cases
+            .iter()
+            .find(|identity| {
+                identity.kind == "cargo-vendor"
+                    && schema_input_of(identity) == Some("cargo-vendor/1")
+                    && !identity.inputs.keys().any(|key| key.starts_with("crate:"))
+            })
+            .expect("empty cargo-vendor matrix case");
+        let one_crate = cases
+            .iter()
+            .find(|identity| {
+                identity.kind == "cargo-vendor"
+                    && identity
+                        .inputs
+                        .keys()
+                        .filter(|key| key.starts_with("crate:"))
+                        .count()
+                        == 1
+            })
+            .expect("one-crate cargo-vendor matrix case");
+        let multi_crate = cases
+            .iter()
+            .find(|identity| {
+                identity.kind == "cargo-vendor"
+                    && identity
+                        .inputs
+                        .keys()
+                        .filter(|key| key.starts_with("crate:"))
+                        .count()
+                        >= 2
+            })
+            .expect("multi-crate cargo-vendor matrix case");
+        assert_eq!(empty.version, "1");
+        assert_eq!(
+            empty.object_id(),
+            "fc7c4bf367736226eeb22ce0af6f285ceded8a1d-vendor-1"
+        );
+        assert_eq!(one_crate.version, "1");
+        assert_eq!(multi_crate.version, "2");
+        // cargo-vendor/2 must add an unconditional crate count; keep this
+        // accepted collision as the reminder to tighten the contract.
+        let mut dropped_one_crate = one_crate.clone();
+        let dropped_key = dropped_one_crate
+            .inputs
+            .keys()
+            .find(|key| key.starts_with("crate:"))
+            .cloned()
+            .expect("one-crate identity input");
+        dropped_one_crate.inputs.remove(&dropped_key);
+        assert_eq!(check_identity_grammar(&dropped_one_crate), Ok(()));
+        assert_eq!(dropped_one_crate.object_id(), empty.object_id());
+        assert_eq!(check_identity_grammar(empty), Ok(()));
+        assert_eq!(check_identity_grammar(one_crate), Ok(()));
+        assert_eq!(check_identity_grammar(multi_crate), Ok(()));
     }
 
     #[test]

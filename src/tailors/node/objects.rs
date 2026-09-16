@@ -8,7 +8,7 @@ use crate::kernel::objmeta::{
     MetaIndex, Record,
 };
 use crate::kernel::store::ObjectDeps;
-use std::collections::BTreeMap;
+use crate::kernel::types::Identity;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
@@ -16,7 +16,8 @@ pub static KINDS: &[KindAdapter] = &[
         schema: None,
         live_required: &["artifact_sha256", "platform"],
         live_optional: &[],
-        live_relations: None,
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["artifact_sha256"],
             optional: &["platform"],
@@ -29,7 +30,8 @@ pub static KINDS: &[KindAdapter] = &[
         schema: Some("node-env/3"),
         live_required: &["schema", "store_root", "nodejs", "workspaces"],
         live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
-        live_relations: Some(node_env_relations),
+        legacy_only: &[],
+        live_contract: Some(node_env_contract),
         grammar: Grammar {
             required: &["schema", "nodejs"],
             optional: &["store_root", "layout", "workspaces", "native_libs"],
@@ -39,9 +41,37 @@ pub static KINDS: &[KindAdapter] = &[
     },
 ];
 
-fn node_env_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
+/// `node-env/3` cannot detect three identity drifts. Dropping one package
+/// from a multi-package plan leaves another `pkg:` key, so the presence
+/// checks pass. Dropping an `artifact:` or Linux `native_libs` key also
+/// passes because those checks are conditional on the key being present.
+/// `node-env/4` would need a plan digest over the package set, the declared
+/// artifacts, and the native decision. A dropped `provisioned:` key IS
+/// detected: the `pkg:` value names the package, and the producer's own
+/// provisioning decision says which packages must carry one.
+fn node_env_contract(identity: &Identity) -> Result<(), String> {
+    let inputs = &identity.inputs;
+    // A lockfile with no installable packages is legitimate. In that shape
+    // the producer writes `layout` and no pkg: key; artifact: is an
+    // independently optional input.
     let has_packages = inputs.keys().any(|key| key.starts_with("pkg:"));
     let has_layout = inputs.contains_key("layout");
+    for (key, value) in inputs.iter().filter(|(key, _)| key.starts_with("pkg:")) {
+        let path = &key["pkg:".len()..];
+        let (name, version) = package_name_and_version(value).ok_or_else(|| {
+            format!(
+                "Node pkg/provisioned relation: {key} value {value:?} has no name@version field"
+            )
+        })?;
+        let provisioned_key = format!("provisioned:{path}");
+        if super::realize::provisioned_version(name, version).is_some()
+            && !inputs.contains_key(&provisioned_key)
+        {
+            return Err(format!(
+                "Node pkg/provisioned relation: {key} names provisioned package {name}@{version} and requires {provisioned_key}"
+            ));
+        }
+    }
     for key in inputs.keys().filter(|key| key.starts_with("provisioned:")) {
         let suffix = &key["provisioned:".len()..];
         let package_key = format!("pkg:{suffix}");
@@ -54,6 +84,18 @@ fn node_env_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
     if inputs.contains_key("native_libs") && !has_packages {
         return Err("Node native_libs/pkg relation: native_libs requires a pkg: input".into());
     }
+    if inputs.contains_key("native_libs")
+        && super::platform_of_node_object(
+            inputs
+                .get("nodejs")
+                .ok_or_else(|| "Node native platform relation: no nodejs input".to_string())?,
+        ) != Some(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu)
+    {
+        return Err(
+            "Node native platform relation: native_libs is only produced for Linux Node objects"
+                .into(),
+        );
+    }
     if has_layout == has_packages {
         return Err(
             "Node layout/package relation: layout is present exactly when no pkg: input exists"
@@ -61,6 +103,15 @@ fn node_env_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The `<name>@<version>` field of a `pkg:` value. The producer writes
+/// `<algo>:<hex>:<name>@<version>:patch[..]:bin[..]` for a registry package
+/// and `git:<object id>:<name>@<version>:...` for a git package; the name may
+/// be scoped (`@scope/pkg`) but never contains a colon.
+fn package_name_and_version(value: &str) -> Option<(&str, &str)> {
+    let name_version = value.splitn(4, ':').nth(2)?;
+    name_version.rsplit_once('@')
 }
 
 /// `node-env/3`: Node and the native library set are direct object ids; a

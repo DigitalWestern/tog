@@ -83,45 +83,43 @@ F3 report accounting, F4 acceptance tests).
    code relies on. Nothing Linux-side clears this.
 6. **M05 mutation survivor** — redundant-marking acceptance gap, known and
    documented in `docs/agent/D10-ACCEPTANCE-2026-09-09.md` §8.
-7. **Grammar-table drift for the 21st (kind,schema) pair** — *implemented
-   on `fu/7-grammar-drift` (draft PR), not mergeable: owner design decision
-   needed, see the end of this item.* Every `KindAdapter` row now has a migration `grammar` for
-   legacy-record compatibility and a separate `live_required` /
-   `live_optional` grammar for the current producer. Under
-   `cfg(debug_assertions)`, `objmeta::check_identity_grammar` validates the
-   live required names, live key whitelist, and each row's live relations for
-   paired or conditional inputs at the single publication choke point,
-   `Store::commit_internal_impl`. Public tailor realization entry points call
-   `tailors::install_kinds()` before they can publish; CLI commands call it
-   through `commands::dispatch`; direct kernel callers install it explicitly.
-   Unit tests have a cfg(test)-only registration for synthetic kinds. A
-   missing or unrecognized live input, an unregistered kind, a schema with no
-   row, or an impossible partial relation panics at the drifting commit
-   instead of surfacing years later during migration. The same row still
-   drives migration, and unknown pairs fail closed at sweep time.
-   **Open after four adversarial review rounds (Sol, 2026-09-15, r4 REWORK;
-   docs/agent/REVIEW.md):** what began as "check the row against the
-   identity at commit time" turned into specifying each producer's full
-   identity contract, and the reviewer's remaining findings are that
-   contract's design: (1) collection completeness is unchecked because the
-   relation hook sees only `inputs`, not `Identity::version`, so a
-   `cargo-vendor` (or NuGet, Go, Hex, Ruby) producer that stopped inserting
-   every `crate:` key would collide with the legitimate empty object; the
-   fix needs the count field tied to its dynamic-key group; (2) BEAM's
-   `relocation_schema`/`store_root` pair is platform-conditional (required on
-   Linux, forbidden on Darwin), so relations need the platform; (3) the
-   live-subset test checks tokens, not requiredness; (4) the Electron and
-   native-sdist conditional cases are hand-inserted rather than produced.
-   Decide whether the commit-time guard should be a full per-producer
-   contract (then the relation hook takes the whole `Identity` and the
-   platform, and every producer needs a pinned offline fixture) or a
-   narrower "required names + whitelist + unknown kinds" guard documented as
-   such (then the r4 findings become a documented limitation). Until then
-   the branch stays a draft PR; nothing on `main` changed.
-   `objmeta::tests` uses real producer constructors for live required-input
-   omissions, checks that the live language is accepted by migration grammar,
-   and breaks every declared relation once. Adding a pair still requires
-   adding its row.
+7. **Grammar-table drift for the 21st (kind,schema) pair** — implemented
+   on `fu/7-grammar-drift`; Sol r5 FIX-THEN-MERGE fixes applied; schema
+   successors pending owner decision. Each `KindAdapter` row now has a
+   migration grammar, a live required/optional grammar, and, where its
+   producer has dynamic or conditional identity shape, a full
+   `live_contract` over the complete `Identity`. Contracts beside the
+   producer constructors validate collection counts, paired keys,
+   platform-specific inputs, and the producer's own provisioning decision
+   (`python::artifacts::provisioned_version` is consulted by both the Node
+   producer and the `node-env` contract, so a dropped `provisioned:` key is
+   caught under the current schema). Debug commits run the generic checks
+   before the contract at `Store::commit_internal_impl`. Unknown kinds and
+   schema pairs fail closed.
+
+   | kind | undetectable drift | successor schema and field that closes it |
+   |---|---|---|
+   | `cargo-vendor/1` | A one-crate plan drops its sole `crate:` key and becomes the legitimate empty plan. | `cargo-vendor/2`, an unconditional crate count. |
+   | `python-env/2` | A one-wheel plan drops its sole `pkg:` key, or an inspected native sdist drops `native_libs`. | `python-env/3`, a plan digest over the package set plus an explicit native decision (a package count alone cannot see a dropped `native_libs`). |
+   | `node-env/3` | A multi-package plan drops one `pkg:` key, or an `artifact:` or Linux `native_libs` key is dropped. | `node-env/4`, a plan digest over the package set and declared artifacts plus an explicit native decision (a provisioning/native flag alone cannot see a dropped package or artifact). |
+   | `sdist-build/3` | Both `rust`/`vendor` or both `native_libs`/`native_linker` are dropped together. | `sdist-build/4`, explicit build-mode and native-mode fields. |
+
+   Introducing any successor schema reissues every object id of that kind
+   because store objects are input-addressed. That is an owner decision and
+   is tracked here. The two-platform matrix uses real producer constructors,
+   seeds the Electron checksum manifest and byte-identical local sdists
+   (`build::deterministic_tar_gz`: fixed mtimes, ids, order, and gzip
+   header, so fixture identities are reproducible across runs and tar
+   implementations) for the conditional paths, checks migration readability,
+   and rejects every live-required input. A migration-required input must
+   be live-required or explicitly `legacy_only`; parking one in
+   `live_optional` fails the structural test. The relation tests reject
+   one-half drops for NuGet's `pkg:`/`raw:` pair, Go's module triplet,
+   BEAM's Linux relocation pair, both sdist pairs, Node's layout/package
+   relation in both directions, Node's pkg/provisioned relation, and the
+   currently detectable package side of Node/Python conditional relations.
+   Count tests reject one dynamic key for every count contract. Limitation
+   tests accept and pin the four documented schema gaps above.
 8. **Flaky unit test `x::tests::shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit`**
    — failed once in the full `cargo test` run of 2026-09-12 (REFACTOR.md
    Stage 2 gate) and passed on every rerun, including 5/5 in isolation and

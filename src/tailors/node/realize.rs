@@ -246,6 +246,14 @@ pub fn realize_node_env(
     realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
 }
 
+/// The producer's provisioning decision, exposed to the `node-env` identity
+/// contract in `objects.rs` so both consult the same rule. Lives here because
+/// this file is the documented node-to-python-artifacts seam
+/// (tests/architecture.rs allow-list).
+pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'a str> {
+    crate::tailors::python::artifacts::provisioned_version(name, version)
+}
+
 pub(super) fn node_env_identity(
     store: &Store,
     platform: Platform,

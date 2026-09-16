@@ -986,7 +986,35 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     })
     .expect("registry Cargo vendor identity")
     .1;
-    vec![rust, rustfmt, vendor_empty, vendor_registry]
+    let vendor_registry_many = vendor_identity(&CargoPlan {
+        rust_version: RUST_VERSION.into(),
+        crates: vec![
+            CargoCrate {
+                name: "rand".into(),
+                version: "0.9.0".into(),
+                sha256: "b".repeat(64),
+                url: "https://crates.io/api/v1/crates/rand/0.9.0/download".into(),
+                git: None,
+            },
+            CargoCrate {
+                name: "serde".into(),
+                version: "1.0.0".into(),
+                sha256: "a".repeat(64),
+                url: "https://crates.io/api/v1/crates/serde/1.0.0/download".into(),
+                git: None,
+            },
+        ],
+        members: Vec::new(),
+    })
+    .expect("multi-crate Cargo vendor identity")
+    .1;
+    vec![
+        rust,
+        rustfmt,
+        vendor_empty,
+        vendor_registry,
+        vendor_registry_many,
+    ]
 }
 
 #[derive(Serialize)]

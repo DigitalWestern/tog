@@ -483,10 +483,15 @@ mod tests {
                 ("rebar3_sha512".into(), rebar3.clone()),
                 ("versions".into(), "hex2.5.1:rebar3.25.1".into()),
                 ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+                (
+                    "relocation_schema".into(),
+                    "otp-install-cross-minimal/1".into(),
+                ),
+                ("store_root".into(), "/fixture/blanket-store".into()),
             ]),
         };
         let fingerprint = crate::tailors::elixir::fingerprint_of_joined(&format!(
-            "{otp}:{elixir}:{hex_archive}:{rebar3}"
+            "{otp}:{elixir}:{hex_archive}:{rebar3}:otp-install-cross-minimal/1"
         ));
         cached_artifact(store, &otp);
         cached_artifact(store, &elixir);

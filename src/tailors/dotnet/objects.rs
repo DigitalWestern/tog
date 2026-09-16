@@ -7,7 +7,7 @@ use crate::kernel::objmeta::{
     add_digest, add_object, artifact_sha512, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
 };
 use crate::kernel::store::ObjectDeps;
-use std::collections::BTreeMap;
+use crate::kernel::types::Identity;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
@@ -15,7 +15,8 @@ pub static KINDS: &[KindAdapter] = &[
         schema: Some("dotnet-sdk/1"),
         live_required: &["schema", "artifact_sha512", "platform"],
         live_optional: &[],
-        live_relations: None,
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["schema", "artifact_sha512"],
             optional: &["platform"],
@@ -28,7 +29,8 @@ pub static KINDS: &[KindAdapter] = &[
         schema: Some("nuget-packages/1"),
         live_required: &["schema", "extractor"],
         live_optional: &["pkg:", "raw:"],
-        live_relations: Some(nuget_package_relations),
+        legacy_only: &[],
+        live_contract: Some(nuget_package_contract),
         grammar: Grammar {
             required: &["schema", "extractor"],
             optional: &[],
@@ -41,7 +43,31 @@ pub static KINDS: &[KindAdapter] = &[
     },
 ];
 
-fn nuget_package_relations(inputs: &BTreeMap<String, String>) -> Result<(), String> {
+fn nuget_package_contract(identity: &Identity) -> Result<(), String> {
+    let inputs = &identity.inputs;
+    // Empty restore plans are legitimate. The producer records zero in
+    // identity.version, and every package contributes one pkg:/raw: pair.
+    let pkg = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("pkg:"))
+        .count();
+    let raw = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("raw:"))
+        .count();
+    let version = identity.version.parse::<usize>().map_err(|_| {
+        format!(
+            "NuGet package count/version relation; NuGet pkg/raw relation: version {:?} is not a count for {pkg} pkg:/raw: pairs",
+            identity.version
+        )
+    })?;
+    if pkg != raw || version != pkg {
+        return Err(format!(
+            "NuGet package count/version relation; NuGet pkg/raw relation: version {version}, pkg: count {pkg}, raw: count {raw}"
+        ));
+    }
     for (prefix, sibling) in [("pkg:", "raw:"), ("raw:", "pkg:")] {
         for key in inputs.keys().filter(|key| key.starts_with(prefix)) {
             let suffix = &key[prefix.len()..];

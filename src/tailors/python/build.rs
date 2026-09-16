@@ -214,6 +214,162 @@ fn native_libs_supported(platform: Platform) -> bool {
 pub(crate) struct SdistIdentityPlan {
     pub input: String,
     pub native_libs_id: Option<String>,
+    #[cfg(test)]
+    pub identity: Identity,
+}
+
+#[cfg(test)]
+fn test_store(label: &str) -> Store {
+    let root = std::env::temp_dir().join(format!(
+        "blanket-build-identity-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        fs::create_dir_all(root.join(sub)).expect("create Python identity fixture store");
+    }
+    Store {
+        root: root
+            .canonicalize()
+            .expect("canonical Python identity fixture store"),
+    }
+}
+
+/// A byte-identical `.tar.gz` for a fixture tree, with no dependence on
+/// the host's tar, gzip, clock, uid, or directory order: ustar headers with
+/// mtime 0 and uid/gid 0 in sorted entry order, wrapped in a gzip stream of
+/// stored deflate blocks with a zero mtime header. Fixture identities that
+/// hash the archive are therefore reproducible across runs and platforms.
+#[cfg(test)]
+pub(crate) fn deterministic_tar_gz(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    fn header(name: &str, size: usize, typeflag: u8, mode: &[u8; 8]) -> [u8; 512] {
+        let mut block = [0u8; 512];
+        assert!(name.len() < 100, "fixture entry name too long: {name}");
+        block[..name.len()].copy_from_slice(name.as_bytes());
+        block[100..108].copy_from_slice(mode);
+        block[108..116].copy_from_slice(b"0000000\0");
+        block[116..124].copy_from_slice(b"0000000\0");
+        block[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+        block[136..148].copy_from_slice(b"00000000000\0");
+        block[148..156].copy_from_slice(b"        ");
+        block[156] = typeflag;
+        block[257..263].copy_from_slice(b"ustar\0");
+        block[263..265].copy_from_slice(b"00");
+        let sum: u32 = block.iter().map(|&b| u32::from(b)).sum();
+        block[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        block
+    }
+    let mut tar = Vec::new();
+    tar.extend_from_slice(&header(&format!("{root}/"), 0, b'5', b"0000755\0"));
+    let mut entries: Vec<(&str, &str)> = files.to_vec();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, text) in entries {
+        let bytes = text.as_bytes();
+        tar.extend_from_slice(&header(
+            &format!("{root}/{name}"),
+            bytes.len(),
+            b'0',
+            b"0000644\0",
+        ));
+        tar.extend_from_slice(bytes);
+        tar.resize(tar.len().div_ceil(512) * 512, 0);
+    }
+    tar.resize(tar.len() + 1024, 0);
+
+    let mut table = [0u32; 256];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let mut c = i as u32;
+        for _ in 0..8 {
+            c = if c & 1 == 1 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+        *slot = c;
+    }
+    let crc = !tar.iter().fold(0xFFFF_FFFFu32, |acc, &b| {
+        table[((acc ^ u32::from(b)) & 0xFF) as usize] ^ (acc >> 8)
+    });
+
+    let mut gz = vec![0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03];
+    let mut chunks = tar.chunks(0xFFFF).peekable();
+    while let Some(chunk) = chunks.next() {
+        let len = chunk.len() as u16;
+        gz.push(u8::from(chunks.peek().is_none()));
+        gz.extend_from_slice(&len.to_le_bytes());
+        gz.extend_from_slice(&(!len).to_le_bytes());
+        gz.extend_from_slice(chunk);
+    }
+    gz.extend_from_slice(&crc.to_le_bytes());
+    gz.extend_from_slice(&(tar.len() as u32).to_le_bytes());
+    gz
+}
+
+#[cfg(test)]
+pub(crate) fn local_native_sdist_for_test(store: &Store, name: &str) -> LockedPackage {
+    use sha2::Digest as _;
+
+    let archive = store.root.join(format!("{name}-1.0.tar.gz"));
+    let bytes = deterministic_tar_gz(
+        &format!("{name}-1.0"),
+        &[
+            (
+                "pyproject.toml",
+                "[build-system]\nrequires = [\"setuptools>=40.8\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+            ),
+            ("binding.gyp", "{}"),
+        ],
+    );
+    fs::write(&archive, &bytes).expect("write local native sdist");
+    let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+    LockedPackage {
+        name: name.into(),
+        version: "1.0".into(),
+        filename: format!("{name}-1.0.tar.gz"),
+        url: format!("file://{}", archive.display()),
+        sha256,
+        kind: ArtifactKind::Sdist,
+        git: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn local_rust_sdist_for_test(store: &Store, name: &str) -> LockedPackage {
+    use sha2::Digest as _;
+
+    let archive = store.root.join(format!("{name}-1.0.tar.gz"));
+    let bytes = deterministic_tar_gz(
+        &format!("{name}-1.0"),
+        &[
+            (
+                "pyproject.toml",
+                "[build-system]\nrequires = [\"setuptools>=40.8\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+            ),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"matrix-rust\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "Cargo.lock",
+                "# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"matrix-rust\"\nversion = \"0.1.0\"\n",
+            ),
+        ],
+    );
+    fs::write(&archive, &bytes).expect("write local Rust sdist");
+    let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+    LockedPackage {
+        name: name.into(),
+        version: "1.0".into(),
+        filename: format!("{name}-1.0.tar.gz"),
+        url: format!("file://{}", archive.display()),
+        sha256,
+        kind: ArtifactKind::Sdist,
+        git: None,
+    }
 }
 
 /// Return the exact package input used by a parent Python environment. This
@@ -238,6 +394,8 @@ pub(crate) fn plan_sdist_identity_input(
         return Ok(SdistIdentityPlan {
             input: format!("Sdist:{}:{}", pkg.sha256, derivation_fingerprint()),
             native_libs_id: None,
+            #[cfg(test)]
+            identity: sdist_identity(platform, pkg, pin),
         });
     }
 
@@ -292,6 +450,8 @@ pub(crate) fn plan_sdist_identity_input(
     Ok(SdistIdentityPlan {
         input: format!("Sdist:{}:{}", pkg.sha256, identity.object_id()),
         native_libs_id,
+        #[cfg(test)]
+        identity,
     })
 }
 
@@ -887,32 +1047,55 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         git: None,
     };
     let schema_two = sdist_identity(platform, &pkg, pin);
-    let schema_three =
-        isolated_sdist_identity_from_ids(platform, &pkg, pin, "build-env-object", None, None, None);
-    let schema_three_rust = isolated_sdist_identity_from_ids(
+    let schema_three = sdist_build_identity(
         platform,
         &pkg,
         pin,
-        "build-env-object",
-        Some("rust-object"),
-        Some("vendor-object"),
+        Path::new("build-env-object"),
         None,
-    );
-    let schema_three_native = isolated_sdist_identity_from_ids(
+        false,
+        schema_two.clone(),
+        None,
+    )
+    .expect("generic isolated sdist identity");
+    let rust_inputs = RustPlanInputs {
+        rust_version: "1.96.1".into(),
+        rust_id: "rust-object".into(),
+        vendor_id: "vendor-object".into(),
+        lock_text: String::new(),
+        generated_lock: false,
+    };
+    let schema_three_rust = sdist_build_identity(
         platform,
         &pkg,
         pin,
-        "build-env-object",
+        Path::new("build-env-object"),
+        Some(&rust_inputs),
+        false,
+        schema_two.clone(),
         None,
-        None,
-        Some("native-libs-object"),
-    );
-    vec![
-        schema_two,
-        schema_three,
-        schema_three_rust,
-        schema_three_native,
-    ]
+    )
+    .expect("Rust isolated sdist identity");
+    let mut cases = vec![schema_two, schema_three, schema_three_rust];
+    if platform == Platform::X86_64UnknownLinuxGnu {
+        let store = test_store("matrix-native");
+        let native_pkg = local_native_sdist_for_test(&store, "matrix-native");
+        let planned = plan_sdist_identity_input(&store, platform, &native_pkg, pin.version, None)
+            .expect("native sdist identity plan");
+        cases.push(planned.identity);
+        let _ = crate::kernel::store::remove_tree(&store.root);
+    } else if platform.is_macos() {
+        let store = test_store("matrix-rust-darwin");
+        let rust_pkg = local_rust_sdist_for_test(&store, "matrix-rust-darwin");
+        let planned = plan_sdist_identity_input(&store, platform, &rust_pkg, pin.version, None)
+            .expect("Darwin Rust sdist identity plan");
+        // Cargo.toml makes info.rust_build true, so plan_sdist_identity_input
+        // takes the schema-3 path even though Darwin has no native-libs pin.
+        assert_eq!(planned.identity.inputs["schema"], "sdist-build/3");
+        cases.push(planned.identity);
+        let _ = crate::kernel::store::remove_tree(&store.root);
+    }
+    cases
 }
 
 /// A Cargo.lock we generated ourselves is not what the sdist attested to.
@@ -1006,56 +1189,68 @@ fn find_wheel(dir: &Path) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// The local sdist fixtures are byte-identical across stores and runs,
+    /// so every identity derived from them is reproducible; on Linux the
+    /// planned native sdist identity is checked input for input (Sol r5 #4).
+    #[test]
+    fn local_sdist_fixtures_are_reproducible_across_stores() {
+        // Planning inspects the archive through a supervised child; the
+        // process supervises one child at a time.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let first_store = super::test_store("repro-first");
+        let second_store = super::test_store("repro-second");
+        let first = super::local_native_sdist_for_test(&first_store, "matrix-native");
+        let second = super::local_native_sdist_for_test(&second_store, "matrix-native");
+        assert_eq!(
+            first.sha256, second.sha256,
+            "native sdist archive bytes differ"
+        );
+        let first_rust = super::local_rust_sdist_for_test(&first_store, "matrix-rust");
+        let second_rust = super::local_rust_sdist_for_test(&second_store, "matrix-rust");
+        assert_eq!(
+            first_rust.sha256, second_rust.sha256,
+            "Rust sdist archive bytes differ"
+        );
+        assert_eq!(
+            super::deterministic_tar_gz("x-1.0", &[("b", "2"), ("a", "1")]),
+            super::deterministic_tar_gz("x-1.0", &[("a", "1"), ("b", "2")]),
+            "entry order leaked into the archive"
+        );
+        if let Ok(platform @ crate::kernel::platform::Platform::X86_64UnknownLinuxGnu) =
+            crate::kernel::platform::Platform::host()
+        {
+            let pin = crate::tailors::python::lookup(platform, "3.12.14").expect("pinned CPython");
+            let planned_first =
+                super::plan_sdist_identity_input(&first_store, platform, &first, pin.version, None)
+                    .expect("first native sdist plan");
+            let planned_again =
+                super::plan_sdist_identity_input(&first_store, platform, &first, pin.version, None)
+                    .expect("repeated native sdist plan");
+            assert_eq!(planned_first.identity.inputs, planned_again.identity.inputs);
+            assert_eq!(planned_first.input, planned_again.input);
+            // The build-env and native-libs object ids are store-root
+            // addressed, so only the archive-derived input is expected to
+            // agree across two different stores.
+            let planned_elsewhere = super::plan_sdist_identity_input(
+                &second_store,
+                platform,
+                &second,
+                pin.version,
+                None,
+            )
+            .expect("second-store native sdist plan");
+            assert_eq!(
+                planned_first.identity.inputs["sdist_sha256"],
+                planned_elsewhere.identity.inputs["sdist_sha256"]
+            );
+        }
+        let _ = crate::kernel::store::remove_tree(&first_store.root);
+        let _ = crate::kernel::store::remove_tree(&second_store.root);
+    }
+
     use super::*;
-    use sha2::Digest as _;
-
-    fn test_store(label: &str) -> Store {
-        let root = std::env::temp_dir().join(format!(
-            "blanket-build-identity-{label}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
-            fs::create_dir_all(root.join(sub)).unwrap();
-        }
-        Store {
-            root: root.canonicalize().unwrap(),
-        }
-    }
-
-    fn local_native_sdist(store: &Store, name: &str) -> LockedPackage {
-        let source = store.root.join(format!("{name}-source"));
-        let root = source.join(format!("{name}-1.0"));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            root.join("pyproject.toml"),
-            "[build-system]\nrequires = [\"setuptools>=40.8\"]\nbuild-backend = \"setuptools.build_meta\"\n",
-        )
-        .unwrap();
-        fs::write(root.join("binding.gyp"), "{}").unwrap();
-        let archive = store.root.join(format!("{name}-1.0.tar.gz"));
-        let status = Command::new("/usr/bin/tar")
-            .args(["-czf"])
-            .arg(&archive)
-            .args(["-C"])
-            .arg(&source)
-            .arg(format!("{name}-1.0"))
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let bytes = fs::read(&archive).unwrap();
-        let sha256 = hex::encode(sha2::Sha256::digest(bytes));
-        let _ = fs::remove_dir_all(source);
-        LockedPackage {
-            name: name.into(),
-            version: "1.0".into(),
-            filename: format!("{name}-1.0.tar.gz"),
-            url: format!("file://{}", archive.display()),
-            sha256,
-            kind: ArtifactKind::Sdist,
-            git: None,
-        }
-    }
 
     #[test]
     fn darwin_identity_unchanged() {
@@ -1093,7 +1288,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("darwin-native");
-        let pkg = local_native_sdist(&store, "darwin-native");
+        let pkg = local_native_sdist_for_test(&store, "darwin-native");
         let planned =
             plan_sdist_identity_input(&store, Platform::Aarch64AppleDarwin, &pkg, "3.12.14", None)
                 .unwrap();

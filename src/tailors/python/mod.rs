@@ -23,6 +23,8 @@ use crate::kernel::types::Identity;
 #[cfg(test)]
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
@@ -185,8 +187,21 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .find(|pin| pin.platform == platform)
             .expect("pinned uv for test platform"),
     );
+    let root = std::env::temp_dir().join(format!(
+        "blanket-python-identity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        fs::create_dir_all(root.join(sub)).expect("Python identity fixture store");
+    }
     let store = Store {
-        root: std::env::current_dir().expect("test working directory"),
+        root: root
+            .canonicalize()
+            .expect("canonical Python identity fixture store"),
     };
     let empty_plan = Plan {
         ecosystem: "python".into(),
@@ -209,14 +224,29 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         .expect("empty Python environment identity");
     let env_wheel = env::environment_identity(&store, platform, &wheel_plan, &cpython.object_id())
         .expect("Python wheel environment identity");
-    let mut cases = vec![cpython, uv, env_empty, env_wheel];
+    let mut cases = vec![cpython.clone(), uv, env_empty, env_wheel];
     if platform == Platform::X86_64UnknownLinuxGnu {
+        let native_pkg = build::local_native_sdist_for_test(&store, "matrix-python-native");
+        let native_plan = Plan {
+            packages: vec![native_pkg],
+            ..empty_plan.clone()
+        };
+        let env_native =
+            env::environment_identity(&store, platform, &native_plan, &cpython.object_id())
+                .expect("Python native-sdist environment identity");
+        cases.push(env_native);
         cases.push(
             nativelibs::live_identity_for_test(&store, platform)
                 .expect("pinned native library identity"),
         );
+    } else {
+        // Native libraries are unsupported on Darwin, so the local native
+        // sdist would take plan_sdist_identity_input's schema-2 fast path.
+        // It is intentionally omitted here; the Darwin schema-3 matrix case
+        // uses a Rust sdist whose Cargo.toml selects that path.
     }
     cases.extend(build::live_identity_cases(platform));
+    let _ = crate::kernel::store::remove_tree(&store.root);
     cases
 }
 
