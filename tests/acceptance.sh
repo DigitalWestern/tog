@@ -259,6 +259,91 @@ esac
 echo "$SBOM" | grep -q 'pkg:pypi/six@' && echo "$SBOM" | grep -q 'pkg:npm/is-odd@' \
   && ok "sbom lists both ecosystems' packages" || bad "sbom missing expected purls"
 
+echo "== 13. audit: offline admission gate over the polyglot closures"
+POLICY="$(cd "$(dirname "$0")/.." && pwd)/docs/human/policy-company.toml"
+mkdir -p "$WORK/nostore"
+chmod 555 "$WORK/nostore"
+export BLANKET_STORE="$WORK/nostore/store"
+# An absent path under an unwritable dir proves audit never opened or wrote the store.
+AUDIT_JSON=$(cd "$WORK/p" && deny_net "$BLANKET" audit --json --policy "$POLICY") && STATUS=0 || STATUS=$?
+CLEAN_JSON_CHECK=$(printf '%s\n' "$AUDIT_JSON" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+closures = report["closures"]
+ecosystems = {closure["ecosystem"] for closure in closures}
+if len(closures) != 2 or ecosystems != {"python", "node"}:
+    raise SystemExit(f"unexpected ecosystems: {ecosystems}")
+if report["passed"] is not True or any(
+    closure["freshness"] != "current" or closure["passed"] is not True
+    for closure in closures
+):
+    raise SystemExit("clean closure is not current and passed")
+print("clean report has current, passing python and node closures")
+' 2>&1) && CLEAN_JSON_STATUS=0 || CLEAN_JSON_STATUS=$?
+if [ "$STATUS" -eq 0 ] && [ "$CLEAN_JSON_STATUS" -eq 0 ]; then
+  ok "clean polyglot closures pass the company policy, network denied"
+else
+  bad "clean --json: exit $STATUS, check=$CLEAN_JSON_CHECK, output: $AUDIT_JSON"
+fi
+
+# Plant one exception the company policy denies, in the node closure only.
+NODE_CLOSURE="$WORK/p/.blanket/closures/node.json"
+mv "$NODE_CLOSURE" "$WORK/node.json.orig"
+cp "$WORK/node.json.orig" "$NODE_CLOSURE"
+python3 - "$NODE_CLOSURE" <<'PLANT'
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path))
+doc["body"]["exceptions"].append({
+    "kind": "install-script-failed",
+    "subject": "acceptance-plant",
+    "detail": "planted by tests/acceptance.sh step 13",
+})
+with open(path, "w") as handle:
+    json.dump(doc, handle, indent=2)
+PLANT
+AUDIT=$(cd "$WORK/p" && deny_net "$BLANKET" audit --policy "$POLICY") && STATUS=0 || STATUS=$?
+if [ "$STATUS" -eq 1 ] && printf '%s\n' "$AUDIT" | grep -q 'install-script-failed' \
+   && printf '%s\n' "$AUDIT" | grep -q 'acceptance-plant'; then
+  ok "planted denied exception fails the gate (exit 1, names the kind and subject)"
+else
+  bad "planted exception: exit $STATUS, output: $AUDIT"
+fi
+AUDIT_JSON=$(cd "$WORK/p" && deny_net "$BLANKET" audit --json --policy "$POLICY") && STATUS=0 || STATUS=$?
+PLANTED_JSON_CHECK=$(printf '%s\n' "$AUDIT_JSON" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+node = [closure for closure in report["closures"] if closure["ecosystem"] == "node"]
+if len(node) != 1:
+    raise SystemExit("node verdict missing or duplicated")
+node = node[0]
+if report["passed"] is not False or node["passed"] is not False:
+    raise SystemExit("planted report unexpectedly passed")
+if node["freshness"] != "current":
+    raise SystemExit("node freshness: " + str(node["freshness"]))
+if not any(
+    exception["kind"] == "install-script-failed"
+    and exception["subject"] == "acceptance-plant"
+    for exception in node["denied"]
+):
+    raise SystemExit("planted denial missing from node verdict")
+print("node verdict is current with the planted denied exception")
+' 2>&1) && PLANTED_JSON_STATUS=0 || PLANTED_JSON_STATUS=$?
+if [ "$STATUS" -eq 1 ] && [ "$PLANTED_JSON_STATUS" -eq 0 ]; then
+  ok "--json report parses with a current node denial (exit 1, passed=false)"
+else
+  bad "--json: exit $STATUS, check=$PLANTED_JSON_CHECK, output: $AUDIT_JSON"
+fi
+rm "$NODE_CLOSURE"
+mv "$WORK/node.json.orig" "$NODE_CLOSURE"
+
+if [ ! -e "$BLANKET_STORE" ]; then
+  ok "audit did not create a store under the unwritable directory"
+else
+  bad "audit created store path under unwritable directory: $BLANKET_STORE"
+fi
+export BLANKET_STORE="$WORK/store"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

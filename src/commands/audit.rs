@@ -574,6 +574,54 @@ mod tests {
         assert_eq!(value["policy"]["strict"], false);
     }
 
+    /// A report is the conjunction of its verdicts, not the disjunction:
+    /// one failing closure fails the whole audit however many clean ones
+    /// sit beside it, and in either order. Every other test here judges a
+    /// single closure, where "all pass" and "any passes" agree.
+    #[test]
+    fn one_failing_closure_fails_the_whole_report() {
+        let temp = python_project("mixed");
+        let dir = &temp.0;
+        let clean = write_closure(
+            dir,
+            "rustfmt",
+            "rustfmt",
+            Some(host().triple()),
+            json!({
+                "rust_version": "1.96.1",
+                "rust_object": {"id": "rust-id"},
+                "rustfmt_object": {"id": "rustfmt-id"},
+                "exceptions": [],
+            }),
+        );
+        let failing = with_exceptions(dir, &[exception(GIT_DEPENDENCY, "left-pad")]);
+        let policy = deny(&[GIT_DEPENDENCY]);
+        for closures in [
+            vec![clean.clone(), failing.clone()],
+            vec![failing, clean.clone()],
+        ] {
+            let verdicts = judge(dir, &policy, &closures);
+            assert_eq!(
+                verdicts.iter().filter(|verdict| verdict.passes()).count(),
+                1,
+                "{verdicts:?}"
+            );
+            let report = Report {
+                policy: policy.clone(),
+                verdicts,
+            };
+            assert!(!report.passes(), "one denied closure must fail the report");
+            let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+            assert_eq!(value["passed"], false);
+        }
+        // Not vacuous: the same machinery passes when every verdict does.
+        let report = Report {
+            policy: policy.clone(),
+            verdicts: judge(dir, &policy, &[clean.clone(), clean]),
+        };
+        assert!(report.passes());
+    }
+
     #[test]
     fn denied_exceptions_are_listed_with_subject_and_detail() {
         let temp = python_project("denied");
