@@ -384,12 +384,14 @@ five of the eight are blanket regressions, not repo changes:
 | vitejs/vite | npm_script_failed | `workspace-node_modules …/__tests__/plugins/fixtures/license/dep-license-mit/node_modules is a real file or directory; refusing to overwrite it` — a checked-in fixture `node_modules` inside a pnpm workspace member | regression from the no-overwrite check; FOLLOW-UPS |
 | microsoft/playwright | npm_script_failed | `commit env: cache dependency sha256:6705a9… is unavailable` | regression, likely object-meta/2 cache-dependency tracking; FOLLOW-UPS |
 | mermaid-js/mermaid | other | `pnpm patch fastdom has no package@version identity` | pnpm `patchedDependencies` keyed by bare name (new fail-closed row); FOLLOW-UPS |
-| paperclipai/paperclip | fetch_failed | pnpm patch hash mismatch (expected base32 `fymct…`, computed sha256 hex) | pnpm patch-hash format mismatch; FOLLOW-UPS |
+| paperclipai/paperclip | fetch_failed | pnpm patch hash mismatch (expected base32 `fymct…`, computed sha256 hex) | **fixed** — pnpm 9 is base32 of **md5**, with lossy UTF-8/CRLF normalization; normalized matches bind raw bytes by SHA-256, raw SHA-256 matches keep their existing identity, and the verified bytes are snapshotted in a private `stage-*` directory before `patch` reads them (FOLLOW-UPS npm item 11) |
 | ChatGPTNextWeb/NextChat | other | git source `aoai-realtime-audio-sdk` checkout of `abf2e9a8…` fails: `unable to read tree` (shallow/partial fetch) | item 4 git-dependency realization; FOLLOW-UPS |
 
 Also new: tailwindcss now fails on `@parcel/watcher-darwin-arm64` being a
 *required* dependency that does not support Linux (the pnpm lock marks it
-required; harness class `py_no_wheel` is a mislabel). hoppscotch and tabby,
+required). This run's CSV records it as `py_no_wheel`; the classifier now has
+an `npm_platform_required` class for it, and future runs will use that. The
+CSV is a historical record and keeps the old label. hoppscotch and tabby,
 which item 4 was expected to unblock, now sync (with `git-dependency`
 exceptions, so they are company-policy misses).
 

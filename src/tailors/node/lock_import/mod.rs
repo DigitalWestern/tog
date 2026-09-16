@@ -705,6 +705,15 @@ mod tests {
         path
     }
 
+    /// Tests that inspect pending policy exceptions must not overlap with one
+    /// another or inherit an exception from a previous test.
+    fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::kernel::policy::clear();
+        guard
+    }
+
     #[test]
     fn pnpm_v9_catalog_peer_link_and_optional_platform() {
         let dir = project();
@@ -950,6 +959,137 @@ snapshots:
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// pnpm 9 declares patch hashes as base32-encoded md5, not sha256 hex
+    /// (see `check_patch_hash`). The lockfile string is stored verbatim
+    /// because it is an environment-identity input.
+    #[test]
+    fn pnpm_9_base32_patch_hashes_are_accepted_and_stored_verbatim() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = project();
+        let patch_path = dir.join("patches/foo@1.0.0.patch");
+        fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
+        let patch_bytes = b"diff --git a/index.js b/index.js\n";
+        fs::write(&patch_path, patch_bytes).unwrap();
+        let hash = "kpncbvlbnwqxywzzahw2g7pnwq";
+        let lock = format!(
+            r#"lockfileVersion: '9.0'
+patchedDependencies:
+  foo@1.0.0:
+    path: patches/foo@1.0.0.patch
+    hash: {hash}
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  foo@1.0.0: {{}}
+"#
+        );
+        let plan = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap();
+        assert_eq!(
+            plan.packages[0]
+                .patch
+                .as_ref()
+                .map(|patch| patch.hash.as_str()),
+            Some(hash)
+        );
+        let expected_content_sha256 = hex::encode(Sha256::digest(patch_bytes));
+        assert_eq!(
+            plan.packages[0]
+                .patch
+                .as_ref()
+                .and_then(|patch| patch.content_sha256.as_deref()),
+            Some(expected_content_sha256.as_str())
+        );
+        let exceptions = crate::kernel::policy::pending();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(exceptions[0].kind, crate::kernel::policy::WEAK_INTEGRITY);
+        assert_eq!(exceptions[0].subject, "foo@1.0.0");
+        assert_eq!(
+            exceptions[0].detail,
+            "pnpm 9 md5 patch hash accepted and verified, but is cryptographically weak; the environment id binds the patch by sha256"
+        );
+        fs::write(&patch_path, b"changed patch").unwrap();
+        let error = plan_pnpm(Platform::X86_64UnknownLinuxGnu, &lock, &dir).unwrap_err();
+        // The computed value is reported in the declared encoding.
+        assert!(
+            error
+                .to_string()
+                .contains("expected kpncbvlbnwqxywzzahw2g7pnwq, got uncj4ibb6pblo7yg3phh2pzyhy"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pnpm_9_md5_patch_hash_respects_a_denying_policy() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = project();
+        let patch_path = dir.join("patches/foo@1.0.0.patch");
+        fs::create_dir_all(patch_path.parent().unwrap()).unwrap();
+        let patch_bytes = b"diff --git a/index.js b/index.js\n";
+        fs::write(&patch_path, patch_bytes).unwrap();
+        let lock = |hash: &str| {
+            format!(
+                r#"lockfileVersion: '9.0'
+patchedDependencies:
+  foo@1.0.0:
+    path: patches/foo@1.0.0.patch
+    hash: {hash}
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  foo@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  foo@1.0.0: {{}}
+"#
+            )
+        };
+        let deny_weak_integrity = crate::kernel::policy::Policy {
+            deny: std::collections::BTreeSet::from([
+                crate::kernel::policy::WEAK_INTEGRITY.to_string()
+            ]),
+            ..Default::default()
+        };
+        let md5_error = super::pnpm::plan_pnpm_with_policy(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock("kpncbvlbnwqxywzzahw2g7pnwq"),
+            &dir,
+            &deny_weak_integrity,
+        )
+        .unwrap_err();
+        assert!(md5_error
+            .to_string()
+            .contains("policy denies weak-integrity"));
+
+        let sha256_plan = super::pnpm::plan_pnpm_with_policy(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock("2692094a267de7e28825147fd6cb2ebde098a4e68c25dfa3976ac806f4a1a784"),
+            &dir,
+            &deny_weak_integrity,
+        )
+        .unwrap();
+        assert!(sha256_plan.packages[0]
+            .patch
+            .as_ref()
+            .unwrap()
+            .content_sha256
+            .is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn local_snapshot_dependencies_are_traversed_from_the_source_link() {
         let dir = project();
@@ -1100,6 +1240,7 @@ snapshots:
 
     #[test]
     fn pnpm_required_git_errors_but_optional_git_is_skipped() {
+        let _policy_guard = exception_guard();
         let dir = project();
         let required = "\
 lockfileVersion: '9.0'

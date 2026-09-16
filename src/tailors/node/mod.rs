@@ -259,6 +259,10 @@ pub struct NpmPatch {
     pub path: String,
     /// The lockfile's verified patch hash, included in the environment id.
     pub hash: String,
+    /// Raw-byte SHA-256 when the lockfile hash matched pnpm's normalized/lossy
+    /// patch text. A raw match is `None` so existing SHA-256 patch identities
+    /// remain byte-identical.
+    pub content_sha256: Option<String>,
 }
 
 /// A workspace link: `node_modules/<name>` resolving to a source directory
@@ -657,6 +661,66 @@ mod tests {
         assert_eq!(
             identity.object_id(),
             "174e755a9fcb532c2addfefb93562ba28874abdc-nodejs-24.20.0"
+        );
+    }
+
+    #[test]
+    fn patch_identity_spelling_binds_pnpm_9_content_by_sha256() {
+        let store = Store {
+            root: PathBuf::from("/nonexistent/blanket-test-store"),
+        };
+        let node_obj = PathBuf::from("/nonexistent/nodejs");
+        let identity_for = |patch: NpmPatch| {
+            let plan = NpmPlan {
+                node_version: "24.20.0".into(),
+                packages: vec![NpmPackage {
+                    path: "node_modules/foo".into(),
+                    name: "foo".into(),
+                    version: "1.0.0".into(),
+                    url: "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz".into(),
+                    integrity: TEST_SRI.into(),
+                    bin: Vec::new(),
+                    patch: Some(patch),
+                    git: None,
+                    optional: false,
+                }],
+                links: Vec::new(),
+                workspaces: Vec::new(),
+                lock_source: "pnpm-lock.yaml".into(),
+            };
+            node_env_identity(
+                &store,
+                Platform::Aarch64AppleDarwin,
+                &node_obj,
+                &plan,
+                &[],
+                None,
+            )
+            .unwrap()
+        };
+        let sha256_declared = identity_for(NpmPatch {
+            path: "/project/patches/foo.patch".into(),
+            hash: "sha256-2692094a267de7e28825147fd6cb2ebde098a4e68c25dfa3976ac806f4a1a784".into(),
+            content_sha256: None,
+        });
+        let pnpm_9_declared = identity_for(NpmPatch {
+            path: "/project/patches/foo.patch".into(),
+            hash: "kpncbvlbnwqxywzzahw2g7pnwq".into(),
+            content_sha256: Some(
+                "e4688624e5f1ad0629505e6768e3bb36244f2f3e33e751215afa820334a76ed3".into(),
+            ),
+        });
+        let key = "pkg:node_modules/foo";
+        assert_eq!(
+            sha256_declared.inputs[key].split_once(":patch").unwrap().1,
+            "[sha256-2692094a267de7e28825147fd6cb2ebde098a4e68c25dfa3976ac806f4a1a784]:bin[]"
+        );
+        assert_eq!(
+            pnpm_9_declared.inputs[key]
+                .split_once(":patch")
+                .unwrap()
+                .1,
+            "[kpncbvlbnwqxywzzahw2g7pnwq;sha256:e4688624e5f1ad0629505e6768e3bb36244f2f3e33e751215afa820334a76ed3]:bin[]"
         );
     }
 
