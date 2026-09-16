@@ -93,7 +93,12 @@ F3 report accounting, F4 acceptance tests).
    `drop(shared)` can lose to a sibling test's fork-then-exec window (the
    lock lives on the open file description, which a forked child shares
    until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
-   verbatim); fix is to retry the try-lock briefly or isolate the test.
+   verbatim). **Fixed 2026-09-14 (test only):** after `drop(shared)` the x
+   test now retries the nonblocking exclusive try-lock for up to 2 s, 10 ms
+   between attempts, and asserts it eventually succeeds; the assertion that
+   the try-lock fails *while* `shared` is held is unchanged, and
+   `lock_x_root` itself was not touched. 20/20 green in a loop plus a clean
+   full `cargo test`. The gitsrc sighting below is still unreproduced.
    Also seen once, 2026-09-12 Stage 4 gate:
    `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
    failed in one full parallel run and passed 3/3 alone and in the full
@@ -165,13 +170,17 @@ can pick it up cold.
   env-reading tests) were verified by the author only. Done when a reviewer
   who did not write them re-runs the three and the REVIEW.md entry-7 row
   drops its "nit fixes verified by the author only" clause.
-- **H2 — acceptance coverage.** Add `blanket audit` to
-  `tests/acceptance.sh`: after a real Python and npm sync, run it under the
-  offline check (`unshare -rn` on Linux) with `--policy
-  docs/human/policy-company.toml`, assert exit 0 on the clean fixtures and
-  exit 1 after planting one denied exception; assert `~/.blanket/store` mtime
-  is unchanged across the run. Done when the checklist has the rows and they
-  pass on Linux.
+- **H2 — acceptance coverage. Done (2026-09-14).** `tests/acceptance.sh`
+  step 13 runs `blanket audit --policy docs/human/policy-company.toml` over
+  the polyglot project synced in step 11, under `deny_net` (`unshare -rn` on
+  Linux): four rows — exit 0 on the clean python + node closures, exit 1
+  naming the kind and subject after planting one `install-script-failed`
+  exception into `node.json`, clean and planted `--json` reports requiring
+  current passing/denied verdicts, and the absent store path under an
+  unwritable directory after all three audit runs. Run on Linux (Fedora,
+  2026-09-14) via a scratch driver that extracts the step-13 and helper lines
+  from `tests/acceptance.sh` with `sed -n` and runs them against a real
+  `proj-poly` sync: passed=4 failed=0. The full checklist was not re-run.
 - **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
   pick one after the owner answers D3:
   1. *Store cross-check, opt-in.* Object-affecting exceptions
@@ -266,6 +275,9 @@ fixed on this branch; these five are not:
     fetch.
 
 Also noted, not a regression: tailwindcss fails because its pnpm lock marks
-`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`; the
-harness labels it `py_no_wheel`, which is wrong — add an
-`npm_platform_required` class when touching the classifier next.
+`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`. **Done:**
+`tests/hitrate.py` now has an `npm_platform_required` class (matching
+`required dependency does not support host`, placed above
+`py_sdist_build_failed`/`py_no_wheel` so it wins); the
+`tests/fixtures/hitrate-linux-2026-09-11.csv` row keeps its historical
+`py_no_wheel` label because the fixture is a record of that run.
