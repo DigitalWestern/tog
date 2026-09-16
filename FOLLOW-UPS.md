@@ -288,10 +288,35 @@ fixed on this branch; these five are not:
     identity`.** pnpm `patchedDependencies` keyed by bare package name
     (applies to every version). New fail-closed row; decide whether to
     support name-only patches by applying to each locked version.
-11. **paperclipai/paperclip — pnpm patch hash mismatch.** Expected value is
-    pnpm's base32 (`fymctidcjqjhi4cj72qtivlxry`), computed is sha256 hex.
-    pnpm 9+ stores patch hashes as base32-encoded truncated sha256; blanket
-    compares the wrong encoding. Verify against pnpm source before fixing.
+11. **paperclipai/paperclip — pnpm patch hash mismatch.** *Fixed.* The guess
+    above was wrong: pnpm 9 writes `createBase32HashFromFile`, which is **md5**
+    (not a truncated sha256) in RFC 4648 base32, lowercased with padding
+    stripped — 26 characters
+    ([crypto.base32-hash](https://github.com/pnpm/pnpm/blob/v9.15.0/packages/crypto.base32-hash/src/index.ts),
+    called from
+    [calcPatchHashes.ts](https://github.com/pnpm/pnpm/blob/v9.15.0/lockfile/settings-checker/src/calcPatchHashes.ts)).
+    pnpm 10 and 11 switched that same call site to `createHexHashFromFile`,
+    the full sha256 hex ([crypto/hash](https://github.com/pnpm/pnpm/blob/v10.15.0/crypto/hash/src/index.ts)).
+    Both generations first read as UTF-8 with replacement, then hash after
+    `content.split('\r\n').join('\n')`. `check_patch_hash`
+    (src/tailors/node/lock_import/pnpm.rs) accepts `sha256-<hex>`, bare hex,
+    and the pnpm 9 base32 form, and reports whether a declaration matched raw
+    bytes or normalized/lossy text. The pnpm 9 md5 form is always
+    normalized/lossy; SHA-256 forms accept either digest. A normalized match
+    records the raw-byte SHA-256 in `NpmPatch.content_sha256`, while a raw
+    match records `None`, preserving every previously accepted identity.
+    It fails closed on anything else. Lock import records the md5 form as a
+    `weak-integrity` exception and a denying policy refuses it. At realization
+    `apply_verified_patch` rechecks the hash, requires a raw match when no raw
+    SHA-256 was bound and the bound digest otherwise, then
+    writes the exact verified bytes to a fresh private `stage-*` directory
+    under `<store>/tmp`, feeds that snapshot to `patch`, and removes the whole
+    directory on every ordinary exit path; GC reclaims an interrupted stage.
+    md5 and the base32 encoder are hand-written, with no new
+    dependency. The declared string is stored verbatim because `NpmPatch.hash`
+    is an environment-identity input. Existing raw SHA-256-declared patch ids
+    stay byte-identical; normalized matches use
+    `patch[<hash>;sha256:<raw hex>]`.
 12. **ChatGPTNextWeb/NextChat — git source checkout `unable to read tree`.**
     item-4 git realization of `Azure-Samples/aoai-realtime-audio-sdk` at
     `abf2e9a8…`: the fetch is too shallow/partial for the checkout. Check
