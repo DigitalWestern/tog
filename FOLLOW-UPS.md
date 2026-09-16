@@ -127,7 +127,12 @@ F3 report accounting, F4 acceptance tests).
    `drop(shared)` can lose to a sibling test's fork-then-exec window (the
    lock lives on the open file description, which a forked child shares
    until its `CLOEXEC` close). Not caused by the move (`x.rs` moved
-   verbatim); fix is to retry the try-lock briefly or isolate the test.
+   verbatim). **Fixed 2026-09-14 (test only):** after `drop(shared)` the x
+   test now retries the nonblocking exclusive try-lock for up to 2 s, 10 ms
+   between attempts, and asserts it eventually succeeds; the assertion that
+   the try-lock fails *while* `shared` is held is unchanged, and
+   `lock_x_root` itself was not touched. 20/20 green in a loop plus a clean
+   full `cargo test`. The gitsrc sighting below is still unreproduced.
    Also seen once, 2026-09-12 Stage 4 gate:
    `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
    failed in one full parallel run and passed 3/3 alone and in the full
@@ -193,19 +198,31 @@ owes under this repo's rules; H3 is the one real design piece; the rest
 are small. Each item names its exit criterion so a session
 can pick it up cold.
 
-- **H1 — independent recheck of the round-2 nit fixes.** N1 (mapping
-  extracted to `audit::freshness_from_state` and tested directly), N2
-  (stray-file message), N3 (`policy::test_env_lock` held by the three
-  env-reading tests) were verified by the author only. Done when a reviewer
-  who did not write them re-runs the three and the REVIEW.md entry-7 row
-  drops its "nit fixes verified by the author only" clause.
-- **H2 — acceptance coverage.** Add `blanket audit` to
-  `tests/acceptance.sh`: after a real Python and npm sync, run it under the
-  offline check (`unshare -rn` on Linux) with `--policy
-  docs/human/policy-company.toml`, assert exit 0 on the clean fixtures and
-  exit 1 after planting one denied exception; assert `~/.blanket/store` mtime
-  is unchanged across the run. Done when the checklist has the rows and they
-  pass on Linux.
+- **H1 — independent recheck of the round-2 nit fixes. Done
+  2026-09-15.** N1 (mapping extracted to `audit::freshness_from_state` and
+  tested directly), N2 (stray-file message), N3 (`policy::test_env_lock`
+  held by the env-reading tests) were rechecked by a Claude Opus 5 subagent
+  that did not write them, and the recheck was itself reviewed by GPT-5.6
+  Sol. N1 and N2 stand; N3's guard was right but applied to three tests when
+  seven lib tests read `HOME`/`BLANKET_POLICY` in-process, so the two
+  `doctor_*` tests in `src/commands/inspect.rs` and the two `$HOME`-reading
+  sandbox tests in `src/kernel/sandbox.rs` now take it too. Two test-only
+  edits in all (the mapping test's inner match made exhaustive so a new
+  `State` variant cannot skip it, plus the added locks) and two recorded
+  residuals on the stray-file path.
+  Evidence and method are in the 2026-09-15 row of the `docs/agent/REVIEW.md`
+  log; the entry-7 row's "verified by the author only" clause is gone.
+- **H2 — acceptance coverage. Done (2026-09-14).** `tests/acceptance.sh`
+  step 13 runs `blanket audit --policy docs/human/policy-company.toml` over
+  the polyglot project synced in step 11, under `deny_net` (`unshare -rn` on
+  Linux): four rows — exit 0 on the clean python + node closures, exit 1
+  naming the kind and subject after planting one `install-script-failed`
+  exception into `node.json`, clean and planted `--json` reports requiring
+  current passing/denied verdicts, and the absent store path under an
+  unwritable directory after all three audit runs. Run on Linux (Fedora,
+  2026-09-14) via a scratch driver that extracts the step-13 and helper lines
+  from `tests/acceptance.sh` with `sed -n` and runs them against a real
+  `proj-poly` sync: passed=4 failed=0. The full checklist was not re-run.
 - **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
   pick one after the owner answers D3:
   1. *Store cross-check, opt-in.* Object-affecting exceptions
@@ -226,18 +243,37 @@ can pick it up cold.
      against untrusted branches.
   Done when the chosen design has its own review round and LIMITATIONS.md's
   audit bullet no longer says a hand-edited record audits as it says.
-- **H4 — mutation check of `src/commands/audit.rs`.** This repo's rule is that
-  fixes get mutation-checked; audit has not been. Flip each arm of
-  `Verdict::passes`, each `Freshness` mapping in `freshness_from_state`, the
-  `KINDS` membership test, and the `check_name` comparison; every mutant
-  must turn at least one test red. Done when the survivors (if any) are
-  listed here or in REVIEW.md.
-- **H5 — policy provenance in the report.** `policy::load` unions silently;
-  the JSON report says what is denied but not which file said so. Return
-  the contributing sources from `load` (path → deny entries, strict) and
-  emit them under `policy.sources`, so a CI log shows whether a denial came
-  from the machine, the repository, or `--policy`. Done when the CLI test
-  asserts the sources for a project-plus-flag case.
+- **H4 — mutation check of `src/commands/audit.rs`. Done 2026-09-14.** 31
+  hand-written mutants over every decision the gate makes (each clause of
+  `Verdict::passes`, `Report::passes`, every `State` arm of
+  `freshness_from_state`, the `KINDS` membership test, `check_name`, the
+  `policy::denied` call and the missing-record branch in `evaluate`, and the
+  three guards in `freshness`). 30 died on the first pass; the one survivor
+  was `Report::passes` `.all(…)` → `.any(…)`, invisible because every test
+  built a single-verdict report — a project with one clean and one denied
+  closure would have exited 0. A new unit test,
+  `one_failing_closure_fails_the_whole_report`, kills it; the full set
+  re-run afterwards is 31 killed, 0 survivors. Table and per-mutant kill
+  list: docs/agent/AUDIT-MUTATION-2026-09-14.md; the driver and mutant
+  definitions are checked in under docs/agent/audit-mutation-2026-09-14/,
+  with a log row in docs/agent/REVIEW.md.
+- **H5 — policy provenance in the report. Done (2026-09-15).**
+  `policy::load_with_sources` returns the merged policy plus every policy
+  that contributed, in merge order, with its origin and optional `path`,
+  `strict`, and `deny`; `load` is now a thin wrapper over it, so there is one
+  loading algorithm and no caller changed. `audit::effective_policy` appends
+  the `--policy` file after the ordinary chain. `--json` emits sources under
+  `policy.sources` with lossy UTF-8 paths, adds lowercase raw-byte
+  `path_bytes` only for non-UTF-8 paths, and omits `path` for strictness-only
+  sources (additive; every existing field is unchanged). The same lossy path
+  helper keeps `project` and closure `path` strings JSON-safe, adding sibling
+  `project_bytes` or `path_bytes` only for non-UTF-8 paths. The text report
+  prints one source line per source on stdout. File paths are always
+  Rust-Debug-quoted as `policy: <origin> "<path>" [denies ...] [(strict)]`;
+  strictness-only sources omit the path. Lines come before verdicts regardless
+  of `--quiet`; existing file sources are listed even when they deny nothing.
+  Covered by `policy::tests::load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it`
+  and `cli::audit_json_attributes_each_policy_to_its_source_file`.
 - **H6 — per-closure attribution guard.** Attribution of exceptions to a
   closure relies on sync realizing and publishing one ecosystem at a time
   (`project.rs` clears the pending list after each write). Add a debug
@@ -281,10 +317,35 @@ fixed on this branch; these five are not:
     identity`.** pnpm `patchedDependencies` keyed by bare package name
     (applies to every version). New fail-closed row; decide whether to
     support name-only patches by applying to each locked version.
-11. **paperclipai/paperclip — pnpm patch hash mismatch.** Expected value is
-    pnpm's base32 (`fymctidcjqjhi4cj72qtivlxry`), computed is sha256 hex.
-    pnpm 9+ stores patch hashes as base32-encoded truncated sha256; blanket
-    compares the wrong encoding. Verify against pnpm source before fixing.
+11. **paperclipai/paperclip — pnpm patch hash mismatch.** *Fixed.* The guess
+    above was wrong: pnpm 9 writes `createBase32HashFromFile`, which is **md5**
+    (not a truncated sha256) in RFC 4648 base32, lowercased with padding
+    stripped — 26 characters
+    ([crypto.base32-hash](https://github.com/pnpm/pnpm/blob/v9.15.0/packages/crypto.base32-hash/src/index.ts),
+    called from
+    [calcPatchHashes.ts](https://github.com/pnpm/pnpm/blob/v9.15.0/lockfile/settings-checker/src/calcPatchHashes.ts)).
+    pnpm 10 and 11 switched that same call site to `createHexHashFromFile`,
+    the full sha256 hex ([crypto/hash](https://github.com/pnpm/pnpm/blob/v10.15.0/crypto/hash/src/index.ts)).
+    Both generations first read as UTF-8 with replacement, then hash after
+    `content.split('\r\n').join('\n')`. `check_patch_hash`
+    (src/tailors/node/lock_import/pnpm.rs) accepts `sha256-<hex>`, bare hex,
+    and the pnpm 9 base32 form, and reports whether a declaration matched raw
+    bytes or normalized/lossy text. The pnpm 9 md5 form is always
+    normalized/lossy; SHA-256 forms accept either digest. A normalized match
+    records the raw-byte SHA-256 in `NpmPatch.content_sha256`, while a raw
+    match records `None`, preserving every previously accepted identity.
+    It fails closed on anything else. Lock import records the md5 form as a
+    `weak-integrity` exception and a denying policy refuses it. At realization
+    `apply_verified_patch` rechecks the hash, requires a raw match when no raw
+    SHA-256 was bound and the bound digest otherwise, then
+    writes the exact verified bytes to a fresh private `stage-*` directory
+    under `<store>/tmp`, feeds that snapshot to `patch`, and removes the whole
+    directory on every ordinary exit path; GC reclaims an interrupted stage.
+    md5 and the base32 encoder are hand-written, with no new
+    dependency. The declared string is stored verbatim because `NpmPatch.hash`
+    is an environment-identity input. Existing raw SHA-256-declared patch ids
+    stay byte-identical; normalized matches use
+    `patch[<hash>;sha256:<raw hex>]`.
 12. **ChatGPTNextWeb/NextChat — git source checkout `unable to read tree`.**
     item-4 git realization of `Azure-Samples/aoai-realtime-audio-sdk` at
     `abf2e9a8…`: the fetch is too shallow/partial for the checkout. Check
@@ -292,6 +353,9 @@ fixed on this branch; these five are not:
     fetch.
 
 Also noted, not a regression: tailwindcss fails because its pnpm lock marks
-`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`; the
-harness labels it `py_no_wheel`, which is wrong — add an
-`npm_platform_required` class when touching the classifier next.
+`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`. **Done:**
+`tests/hitrate.py` now has an `npm_platform_required` class (matching
+`required dependency does not support host`, placed above
+`py_sdist_build_failed`/`py_no_wheel` so it wins); the
+`tests/fixtures/hitrate-linux-2026-09-11.csv` row keeps its historical
+`py_no_wheel` label because the fixture is a record of that run.

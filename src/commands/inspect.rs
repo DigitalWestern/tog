@@ -1139,6 +1139,10 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // `doctor`'s policy check reads BLANKET_POLICY and $HOME. Taken
+        // after the store lock; every holder of both takes them in this
+        // order, so the pair cannot deadlock.
+        let _env = crate::kernel::policy::test_env_lock();
         let temp = TempDir::new("doctor");
         let store = temp.0.join("store");
         let old_store = std::env::var_os("BLANKET_STORE");
@@ -1184,6 +1188,7 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _env = crate::kernel::policy::test_env_lock();
         let temp = TempDir::new("doctor-order");
         let store = temp.0.join("store");
         fs::write(temp.0.join("go.mod"), "module example.com/m\n\ngo 1.27.0\n").unwrap();

@@ -3,6 +3,9 @@
 //! contract from CLI.md (exit status 0/1/2, help on stdout, errors on stderr
 //! with a next step, pass-through for `run`).
 
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1321,6 +1324,173 @@ fn synced_python_closure_with_exception(project: &Path, kind: &str) -> PathBuf {
     )
     .unwrap();
     path
+}
+
+/// `policy::load` unions silently, so the merged deny set alone cannot say
+/// which file asked for a denial. The JSON report carries the contributing
+/// policies under `policy.sources`, in merge order, so a CI log shows
+/// whether a denial came from the machine, the repository, or `--policy`.
+#[test]
+fn audit_json_attributes_each_policy_to_its_source_file() {
+    // blanket() sets HOME to this temp directory and explicitly removes both
+    // BLANKET_POLICY and BLANKET_STRICT from the child.
+    let home = TempDir::new("audit-sources-home");
+    let project = TempDir::new("audit-sources-project");
+    synced_python_closure_with_exception(&project.0, "git-dependency");
+    let machine_policy = home.0.join(".blanket/policy.toml");
+    std::fs::write(&machine_policy, "deny = []\n").unwrap();
+    let project_policy = project.0.join(".blanket/policy.toml");
+    std::fs::write(&project_policy, "deny = [\"weak-integrity\"]\n").unwrap();
+    let flag = project.0.join("company.toml");
+    std::fs::write(&flag, "strict = false\ndeny = [\"git-dependency\"]\n").unwrap();
+
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--json", "--policy", flag.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    // The child reports its own resolved cwd, which is not always the
+    // string this test built (macOS resolves /var to /private/var), so
+    // derive project-policy paths from the canonical project root.
+    let project_root = std::fs::canonicalize(&project.0).unwrap();
+    let parse_policy = |path: &Path| {
+        blanket::kernel::policy::parse_file(path, &std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let source_json = |origin: &str, path: &Path| {
+        let policy = parse_policy(path);
+        serde_json::json!({
+            "origin": origin,
+            "path": path.to_string_lossy(),
+            "strict": policy.strict,
+            "deny": policy.deny,
+        })
+    };
+    let mut expected = vec![source_json("machine", &machine_policy)];
+    for ancestor in project_root.ancestors() {
+        let path = ancestor.join(".blanket/policy.toml");
+        if path.exists() {
+            expected.push(source_json("project", &path));
+        }
+    }
+    expected.push(source_json("flag", &flag));
+
+    // The pre-existing shape is untouched: sources are additive. Compute the
+    // merged assertions from the same complete expected source array, so an
+    // ambient ancestor policy is tested rather than ignored.
+    let expected_strict = expected.iter().any(|source| source["strict"] == true);
+    let expected_deny: BTreeSet<String> = expected
+        .iter()
+        .flat_map(|source| source["deny"].as_array().unwrap())
+        .map(|kind| kind.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(value["passed"], false);
+    assert!(
+        value["project"]
+            .as_str()
+            .unwrap()
+            .contains(project.0.file_name().unwrap().to_str().unwrap(),),
+        "{value}"
+    );
+    assert_eq!(value["policy"]["strict"], expected_strict);
+    let actual_deny: BTreeSet<String> =
+        serde_json::from_value(value["policy"]["deny"].clone()).unwrap();
+    assert_eq!(actual_deny, expected_deny);
+    assert_eq!(value["closures"][0]["ecosystem"], "python");
+    assert_eq!(value["closures"][0]["freshness"], "current");
+    assert_eq!(value["closures"][0]["denied"][0]["kind"], "git-dependency");
+
+    let sources = value["policy"]["sources"].as_array().unwrap();
+    assert_eq!(sources, &expected);
+
+    // The text report says the same thing, one line per source.
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["audit", "--policy", flag.to_str().unwrap()],
+    );
+    let stdout = text(&out.stdout);
+    let dir_name = project.0.file_name().unwrap().to_str().unwrap();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("policy: ") && line.contains(dir_name))
+        .collect();
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert!(lines[0].starts_with("policy: project "), "{stdout}");
+    assert!(
+        lines[0].ends_with(".blanket/policy.toml\" denies weak-integrity"),
+        "{stdout}"
+    );
+    assert!(lines[1].starts_with("policy: flag "), "{stdout}");
+    assert!(
+        lines[1].ends_with("company.toml\" denies git-dependency"),
+        "{stdout}"
+    );
+    // These are results on stdout, so --quiet keeps them alongside the verdict.
+    let out = blanket(
+        &project.0,
+        &home.0,
+        &["--quiet", "audit", "--policy", flag.to_str().unwrap()],
+    );
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "policy: machine {:?}",
+            machine_policy.to_string_lossy()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("policy: project "), "{stdout}");
+    assert!(stdout.contains("policy: flag "), "{stdout}");
+    assert!(stdout.contains("python  denied     closure "), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_json_handles_non_utf8_project_and_closure_paths() {
+    let home = TempDir::new("audit-non-utf8-home");
+    let parent = TempDir::new("audit-non-utf8-parent");
+    let project = parent.0.join(OsString::from_vec(vec![
+        b'p', b'r', b'o', b'j', b'e', b'c', b't', b'-', 0xff,
+    ]));
+    std::fs::create_dir_all(&project).unwrap();
+    let closures = project.join(".blanket/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    let closure = closures.join("rustfmt.json");
+    std::fs::write(
+        &closure,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "rustfmt",
+            "platform": blanket::kernel::platform::Platform::host()
+                .unwrap()
+                .triple(),
+            "projected_at": 1,
+            "body": {"exceptions": []},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = blanket(&project, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["passed"], true);
+    assert_eq!(value["project"], project.to_string_lossy().as_ref());
+    assert_eq!(
+        value["project_bytes"],
+        hex::encode(project.as_os_str().as_bytes())
+    );
+    assert_eq!(
+        value["closures"][0]["path"],
+        closure.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        value["closures"][0]["path_bytes"],
+        hex::encode(closure.as_os_str().as_bytes())
+    );
 }
 
 #[test]
