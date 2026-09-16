@@ -263,6 +263,9 @@ fixed on this branch; these five are not:
     fetch.
 
 Also noted, not a regression: tailwindcss fails because its pnpm lock marks
-`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`; the
-harness labels it `py_no_wheel`, which is wrong — add an
-`npm_platform_required` class when touching the classifier next.
+`@parcel/watcher-darwin-arm64` as *required* with `os=["darwin"]`. **Done:**
+`tests/hitrate.py` now has an `npm_platform_required` class (matching
+`required dependency does not support host`, placed above
+`py_sdist_build_failed`/`py_no_wheel` so it wins); the
+`tests/fixtures/hitrate-linux-2026-09-11.csv` row keeps its historical
+`py_no_wheel` label because the fixture is a record of that run.
