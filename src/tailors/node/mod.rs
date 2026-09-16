@@ -172,6 +172,19 @@ fn node_identity(node: &PinnedNode) -> Identity {
     }
 }
 
+/// A node environment does not repeat the platform input. Its `nodejs`
+/// reference is the producer's platform anchor, so conditional contracts can
+/// still distinguish the Linux-only native-library shape without changing the
+/// established node-env identity bytes.
+pub(crate) fn platform_of_node_object(id: &str) -> Option<Platform> {
+    Platform::ALL.iter().copied().find(|platform| {
+        node_pin(*platform)
+            .map(node_identity)
+            .map(|identity| identity.object_id() == id)
+            .unwrap_or(false)
+    })
+}
+
 fn validate_node_layout(root: &Path) -> io::Result<()> {
     for relative in [
         "bin/node",
@@ -192,10 +205,12 @@ fn validate_node_layout(root: &Path) -> io::Result<()> {
 
 /// Ensure Node.js is realized in the store (interpreter at <obj>/bin/node).
 pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_node_for(store, Platform::host()?)
 }
 
 pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Node.js", "stage 2")?;
     let node = node_pin(platform)?;
     let identity = node_identity(node);
@@ -596,8 +611,180 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
 }
 
 #[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    const SRI: &str =
+        "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
+    let node = node_identity(node_pin(platform).expect("pinned Node for test platform"));
+    let node_object = PathBuf::from(node.object_id());
+    // `store_root` is a real `node-env` identity input, so the fixture store
+    // path enters every case. Pin it per process and platform (not per
+    // call) so two builds of the matrix yield identical identities; the
+    // contents written below are idempotent, and the tree is left for the
+    // OS temp cleanup rather than removed under a concurrent caller.
+    let root = std::env::temp_dir().join(format!(
+        "blanket-node-identity-fixture-{}-{}",
+        std::process::id(),
+        platform.triple()
+    ));
+    for sub in [
+        "objects",
+        "meta",
+        "cache/sha256",
+        "cache/electron-shasums",
+        "tmp",
+    ] {
+        fs::create_dir_all(root.join(sub)).expect("Node identity fixture store");
+    }
+    let store = Store {
+        root: root
+            .canonicalize()
+            .expect("canonical Node identity fixture store"),
+    };
+    let empty_plan = NpmPlan {
+        node_version: node.version.clone(),
+        packages: Vec::new(),
+        links: Vec::new(),
+        workspaces: Vec::new(),
+        lock_source: "fixture".into(),
+    };
+    let package = NpmPackage {
+        path: "node_modules/example".into(),
+        name: "example".into(),
+        version: "1.0.0".into(),
+        url: "https://registry.example.invalid/example.tgz".into(),
+        integrity: SRI.into(),
+        bin: Vec::new(),
+        patch: None,
+        git: None,
+        optional: false,
+    };
+    let package_plan = NpmPlan {
+        packages: vec![package.clone()],
+        ..empty_plan.clone()
+    };
+    let second_package = NpmPackage {
+        path: "node_modules/second-example".into(),
+        name: "second-example".into(),
+        version: "2.0.0".into(),
+        url: "https://registry.example.invalid/second-example.tgz".into(),
+        integrity: SRI.into(),
+        bin: Vec::new(),
+        patch: None,
+        git: None,
+        optional: false,
+    };
+    let multi_package_plan = NpmPlan {
+        packages: vec![package, second_package],
+        ..empty_plan.clone()
+    };
+    let artifact = DeclaredArtifact {
+        url: "https://artifacts.example.invalid/tool.tar.gz".into(),
+        sha256: "a".repeat(64),
+        path: ".npm/tool.tar.gz".into(),
+    };
+    let empty = realize::node_env_identity(&store, platform, &node_object, &empty_plan, &[], None)
+        .expect("empty Node environment identity");
+    let packages =
+        realize::node_env_identity(&store, platform, &node_object, &package_plan, &[], None)
+            .expect("Node package environment identity");
+    let multi_package = realize::node_env_identity(
+        &store,
+        platform,
+        &node_object,
+        &multi_package_plan,
+        &[],
+        None,
+    )
+    .expect("Node multi-package environment identity");
+    let declared = realize::node_env_identity(
+        &store,
+        platform,
+        &node_object,
+        &empty_plan,
+        &[artifact],
+        None,
+    )
+    .expect("Node declared-artifact environment identity");
+    let electron_version = "39.0.0";
+    let release_url =
+        format!("https://github.com/electron/electron/releases/download/v{electron_version}");
+    use sha2::Digest as _;
+    let electron_cache_directory = hex::encode(sha2::Sha256::digest(release_url.as_bytes()));
+    let electron_cache = store
+        .root
+        .join("cache/electron-shasums")
+        .join(electron_cache_directory);
+    fs::create_dir_all(&electron_cache).expect("Electron checksum fixture directory");
+    let electron_sha = "b".repeat(64);
+    // Write-then-rename: a concurrent matrix builder in this process must
+    // never observe a truncated manifest.
+    static MANIFEST_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let manifest_tmp = electron_cache.join(format!(
+        ".SHASUMS256.txt.{}",
+        MANIFEST_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    fs::write(
+        &manifest_tmp,
+        format!(
+            "{electron_sha} electron-v{electron_version}-{}-{}.zip\n",
+            platform.npm_os(),
+            platform.npm_cpu()
+        ),
+    )
+    .expect("Electron checksum fixture manifest");
+    fs::rename(&manifest_tmp, electron_cache.join("SHASUMS256.txt"))
+        .expect("publish Electron checksum fixture manifest");
+    let electron = NpmPackage {
+        path: "node_modules/electron".into(),
+        name: "electron".into(),
+        version: electron_version.into(),
+        url: format!("{release_url}/electron-v{electron_version}.zip"),
+        integrity: SRI.into(),
+        bin: Vec::new(),
+        patch: None,
+        git: None,
+        optional: false,
+    };
+    let electron_plan = NpmPlan {
+        packages: vec![electron],
+        ..empty_plan.clone()
+    };
+    let provisioned =
+        realize::node_env_identity(&store, platform, &node_object, &electron_plan, &[], None)
+            .expect("Node Electron provisioned identity");
+    let native_id =
+        native_libs_identity_id(&store, platform, true).expect("Node native library conditional");
+    let native = native_id.as_deref().map(|id| {
+        realize::node_env_identity(&store, platform, &node_object, &package_plan, &[], Some(id))
+            .expect("Node native environment identity")
+    });
+    let mut cases = vec![node, empty, packages, multi_package, declared, provisioned];
+    if let Some(native) = native {
+        cases.push(native);
+    }
+    cases
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The identity matrix is reproducible: two builds in the same process
+    /// yield the same kinds and the same inputs, case for case, on both
+    /// platforms (Sol r5 #4).
+    #[test]
+    fn live_identity_cases_are_reproducible() {
+        for platform in Platform::ALL {
+            let first = live_identity_cases(*platform);
+            let second = live_identity_cases(*platform);
+            assert_eq!(first.len(), second.len(), "{}", platform.triple());
+            for (a, b) in first.iter().zip(&second) {
+                assert_eq!(a.kind, b.kind, "{}", platform.triple());
+                assert_eq!(a.version, b.version, "{}: {}", platform.triple(), a.kind);
+                assert_eq!(a.inputs, b.inputs, "{}: {}", platform.triple(), a.kind);
+            }
+        }
+    }
 
     /// Drift check: the legacy adapter must reconstruct exactly what this
     /// producer supplies at commit, or a migrated record stops matching what
@@ -798,7 +985,18 @@ mod tests {
                     kind: "nodejs".into(),
                     name: "nodejs".into(),
                     version: "24.20.0".into(),
-                    inputs: BTreeMap::new(),
+                    // `node_identity`'s real input shape; the commit-time
+                    // grammar check refuses anything else.
+                    inputs: BTreeMap::from([
+                        ("artifact_sha256".to_string(), "b".repeat(64)),
+                        (
+                            "platform".to_string(),
+                            crate::kernel::platform::Platform::host()
+                                .unwrap()
+                                .triple()
+                                .to_string(),
+                        ),
+                    ]),
                 },
                 &node_staged,
                 &[],

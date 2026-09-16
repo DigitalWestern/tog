@@ -245,9 +245,18 @@ pub fn realize_node_env(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "node environment", "stage 2")?;
     let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
     realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
+}
+
+/// The producer's provisioning decision, exposed to the `node-env` identity
+/// contract in `objects.rs` so both consult the same rule. Lives here because
+/// this file is the documented node-to-python-artifacts seam
+/// (tests/architecture.rs allow-list).
+pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'a str> {
+    crate::tailors::python::artifacts::provisioned_version(name, version)
 }
 
 pub(super) fn node_env_identity(
@@ -868,6 +877,7 @@ pub(super) fn realize_node_env_with_node_object(
     artifacts: &[DeclaredArtifact],
     node_obj: &Path,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
         Vec::new();
     let native_libs_id =

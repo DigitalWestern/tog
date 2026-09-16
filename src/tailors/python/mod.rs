@@ -20,7 +20,11 @@ use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::types::Identity;
+#[cfg(test)]
+use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
@@ -174,6 +178,78 @@ pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<Str
     Ok(cpython_identity(pin).object_id())
 }
 
+#[cfg(test)]
+pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
+    let cpython_pin = lookup(platform, "3.12.14").expect("pinned CPython for test platform");
+    let cpython = cpython_identity(cpython_pin);
+    let uv = uv_identity(
+        UV.iter()
+            .find(|pin| pin.platform == platform)
+            .expect("pinned uv for test platform"),
+    );
+    let root = std::env::temp_dir().join(format!(
+        "blanket-python-identity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+        fs::create_dir_all(root.join(sub)).expect("Python identity fixture store");
+    }
+    let store = Store {
+        root: root
+            .canonicalize()
+            .expect("canonical Python identity fixture store"),
+    };
+    let empty_plan = Plan {
+        ecosystem: "python".into(),
+        python_version: cpython_pin.version.into(),
+        packages: Vec::new(),
+    };
+    let wheel_plan = Plan {
+        packages: vec![LockedPackage {
+            name: "example".into(),
+            version: "1.0.0".into(),
+            filename: "example-1.0.0-py3-none-any.whl".into(),
+            url: "https://files.pythonhosted.org/example.whl".into(),
+            sha256: "a".repeat(64),
+            kind: ArtifactKind::Wheel,
+            git: None,
+        }],
+        ..empty_plan.clone()
+    };
+    let env_empty = env::environment_identity(&store, platform, &empty_plan, &cpython.object_id())
+        .expect("empty Python environment identity");
+    let env_wheel = env::environment_identity(&store, platform, &wheel_plan, &cpython.object_id())
+        .expect("Python wheel environment identity");
+    let mut cases = vec![cpython.clone(), uv, env_empty, env_wheel];
+    if platform == Platform::X86_64UnknownLinuxGnu {
+        let native_pkg = build::local_native_sdist_for_test(&store, "matrix-python-native");
+        let native_plan = Plan {
+            packages: vec![native_pkg],
+            ..empty_plan.clone()
+        };
+        let env_native =
+            env::environment_identity(&store, platform, &native_plan, &cpython.object_id())
+                .expect("Python native-sdist environment identity");
+        cases.push(env_native);
+        cases.push(
+            nativelibs::live_identity_for_test(&store, platform)
+                .expect("pinned native library identity"),
+        );
+    } else {
+        // Native libraries are unsupported on Darwin, so the local native
+        // sdist would take plan_sdist_identity_input's schema-2 fast path.
+        // It is intentionally omitted here; the Darwin schema-3 matrix case
+        // uses a Rust sdist whose Cargo.toml selects that path.
+    }
+    cases.extend(build::live_identity_cases(platform));
+    let _ = crate::kernel::store::remove_tree(&store.root);
+    cases
+}
+
 pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
     crate::kernel::platform::require_host(platform, "CPython", "stage 2")?;
     lookup(platform, version)
@@ -230,10 +306,12 @@ fn uv_identity(pin: &PinnedUv) -> Identity {
 
 /// Ensure uv is realized in the store (binary at <obj>/uv).
 pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_uv_for(store, Platform::host()?)
 }
 
 pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "uv", "stage 2")?;
     let pin = UV
         .iter()
@@ -271,6 +349,7 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
 /// Ensure the given CPython is realized in the store. Returns the object path
 /// (interpreter at <path>/bin/python3).
 pub fn ensure_python(store: &Store, pin: &PinnedPython) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     ensure_python_for(store, pin, Platform::host()?)
 }
 
@@ -279,6 +358,7 @@ pub(crate) fn ensure_python_for(
     pin: &PinnedPython,
     platform: Platform,
 ) -> io::Result<PathBuf> {
+    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "CPython", "stage 2")?;
     if pin.platform != platform {
         return Err(io::Error::new(

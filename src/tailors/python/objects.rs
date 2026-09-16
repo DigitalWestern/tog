@@ -1,17 +1,23 @@
-//! Object kinds the Python tailor produces, with the identity grammar each
-//! producer writes and how a legacy record's dependencies are recovered from
-//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
-//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+//! Object kinds the Python tailor produces. Each row has a migration grammar
+//! for legacy records and a separate live grammar for current commits, plus
+//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
+//! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
-    add_digest, add_object, artifact_sha256, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
+    add_digest, add_object, artifact_sha256, input, platform_of, Algo, Grammar, KindAdapter,
+    MetaIndex, Record,
 };
 use crate::kernel::store::{self, ObjectDeps};
+use crate::kernel::types::Identity;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "cpython",
         schema: None,
+        live_required: &["artifact_sha256", "platform"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["artifact_sha256"],
             optional: &["platform"],
@@ -22,6 +28,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "uv",
         schema: None,
+        live_required: &["artifact_sha256", "platform"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["artifact_sha256"],
             optional: &["platform"],
@@ -32,6 +42,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "native-libs",
         schema: None,
+        live_required: &["platform", "manifest_sha256", "store_root"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: Some(native_libs_contract),
         grammar: Grammar {
             required: &["platform", "manifest_sha256"],
             optional: &["store_root"],
@@ -42,6 +56,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "python-env",
         schema: Some("python-env/2"),
+        live_required: &["schema", "store_root", "cpython"],
+        live_optional: &["native_libs", "pkg:"],
+        legacy_only: &[],
+        live_contract: Some(python_env_contract),
         grammar: Grammar {
             required: &["schema", "cpython"],
             optional: &["store_root", "native_libs"],
@@ -52,6 +70,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "sdist-build",
         schema: Some("sdist-build/2"),
+        live_required: &["schema", "sdist_sha256", "python", "platform", "toolchain"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["schema", "sdist_sha256", "python", "platform", "toolchain"],
             optional: &[],
@@ -62,6 +84,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "sdist-build",
         schema: Some("sdist-build/3"),
+        live_required: &["schema", "sdist_sha256", "python", "platform", "build_env"],
+        live_optional: &["rust", "vendor", "native_libs", "native_linker"],
+        legacy_only: &[],
+        live_contract: Some(sdist_build_v3_contract),
         grammar: Grammar {
             required: &["schema", "sdist_sha256", "python", "platform", "build_env"],
             optional: &["rust", "vendor", "native_libs", "native_linker"],
@@ -70,6 +96,102 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: sdist_build_v3,
     },
 ];
+
+fn native_libs_contract(identity: &Identity) -> Result<(), String> {
+    let platform = platform_of(identity)?.ok_or_else(|| {
+        "native-libs platform contract: the producer must record a platform input".to_string()
+    })?;
+    if platform != crate::kernel::platform::Platform::X86_64UnknownLinuxGnu {
+        return Err(format!(
+            "native-libs platform contract: no native-libs pin exists for {}",
+            platform.triple()
+        ));
+    }
+    Ok(())
+}
+
+/// `python-env/2` cannot detect two identity drifts. If a one-wheel plan
+/// drops its sole `pkg:` key, the result is indistinguishable from the
+/// legitimate empty environment. If an inspected native sdist drops its
+/// `native_libs` key, all native checks are conditional on that key and the
+/// drift passes. `python-env/3` would need an unconditional package count or
+/// plan digest to distinguish those identities.
+fn python_env_contract(identity: &Identity) -> Result<(), String> {
+    let inputs = &identity.inputs;
+    // An environment with no packages is legitimate. The producer writes no
+    // pkg: key in that shape; native_libs is only possible with an inspected
+    // native sdist package.
+    if inputs.contains_key("native_libs") && !inputs.keys().any(|key| key.starts_with("pkg:")) {
+        return Err(
+            "Python environment native_libs/pkg relation: native_libs requires a pkg: input".into(),
+        );
+    }
+    // Native library mounting is selected by real sdist inspection. A wheel
+    // group can legitimately be empty, but native_libs must accompany an
+    // sdist package rather than a hand-shaped wheel-only identity.
+    if inputs.contains_key("native_libs")
+        && !inputs
+            .iter()
+            .any(|(key, value)| key.starts_with("pkg:") && value.starts_with("Sdist:"))
+    {
+        return Err(
+            "Python environment native_libs/pkg relation: native_libs requires an inspected Sdist: package"
+                .into(),
+        );
+    }
+    if let Some(native_libs) = inputs.get("native_libs") {
+        let cpython = inputs.get("cpython").ok_or_else(|| {
+            "Python environment native platform relation: no cpython input".to_string()
+        })?;
+        let cpython_platform =
+            crate::kernel::platform::Platform::ALL
+                .iter()
+                .copied()
+                .find(|platform| {
+                    crate::tailors::python::object_id_for(*platform, &identity.version)
+                        .map(|id| id == *cpython)
+                        .unwrap_or(false)
+                });
+        if cpython_platform != Some(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu) {
+            return Err(format!(
+                "Python environment native platform relation: native_libs {native_libs:?} is only produced for Linux CPython"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `sdist-build/3` cannot detect either pair being dropped as a whole.
+/// Dropping both `rust` and `vendor`, or both `native_libs` and
+/// `native_linker`, leaves the same valid no-pair shape because the current
+/// checks only reject one-sided pairs. `sdist-build/4` would need explicit
+/// build-mode and native-mode fields.
+fn sdist_build_v3_contract(identity: &Identity) -> Result<(), String> {
+    let platform = platform_of(identity)?.ok_or_else(|| {
+        "Python sdist platform contract: the producer must record a platform input".to_string()
+    })?;
+    let has_native = identity.inputs.contains_key("native_libs");
+    let has_linker = identity.inputs.contains_key("native_linker");
+    if has_native != has_linker {
+        return Err(
+            "sdist native_libs/native_linker relation: native_libs and native_linker must appear together"
+                .into(),
+        );
+    }
+    if platform.is_macos() && (has_native || has_linker) {
+        return Err(
+            "sdist native platform relation: native_libs and native_linker are Linux-only".into(),
+        );
+    }
+    for (left, right, relation) in [("rust", "vendor", "sdist Rust/vendor relation")] {
+        if identity.inputs.contains_key(left) != identity.inputs.contains_key(right) {
+            return Err(format!(
+                "{relation}: {left} and {right} must appear together"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// `native-libs`: the identity commits to a *digest of the package manifest*,
 /// never to the individual library digests, so they cannot be read out of the

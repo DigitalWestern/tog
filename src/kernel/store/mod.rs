@@ -140,6 +140,7 @@ mod tests {
     use super::*;
     use crate::kernel::policy::Exception;
     use std::collections::BTreeMap;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::process::Command;
 
     struct TempDir(PathBuf);
@@ -165,6 +166,7 @@ mod tests {
     }
 
     fn identity() -> Identity {
+        crate::kernel::objmeta::register_test_kinds();
         Identity {
             kind: "test".into(),
             name: "object".into(),
@@ -403,6 +405,58 @@ mod tests {
             .unwrap();
         assert_eq!(same_object, object);
         assert_eq!(applied, vec![exception]);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn commit_rejects_malformed_kernel_identity_before_publishing() {
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let valid_identity = Identity {
+            kind: "git-source".into(),
+            name: "valid-example".into(),
+            version: "1".into(),
+            inputs: BTreeMap::from([
+                ("schema".into(), "git-source/2".into()),
+                ("url".into(), "https://example.invalid/repo.git".into()),
+                ("commit".into(), "a".repeat(40)),
+            ]),
+        };
+        store
+            .commit_with_deps(&valid_identity, &staged(&store), &[], &ObjectDeps::new())
+            .expect("valid kernel identity is the control");
+        let identity = Identity {
+            kind: "git-source".into(),
+            name: "example".into(),
+            version: "1".into(),
+            inputs: BTreeMap::from([
+                ("schema".into(), "git-source/2".into()),
+                ("url".into(), "https://example.invalid/repo.git".into()),
+            ]),
+        };
+        let id = identity.object_id();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            store
+                .commit_with_deps(&identity, &staged(&store), &[], &ObjectDeps::new())
+                .unwrap();
+        }));
+        let payload = result.expect_err("malformed kernel identity was published");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(message.contains("object-kind grammar drift"), "{message}");
+        assert!(
+            !store.object_path(&id).exists(),
+            "object directory was published"
+        );
+        assert!(
+            !store.root.join("meta").join(format!("{id}.json")).exists(),
+            "meta record was published"
+        );
     }
 
     #[test]

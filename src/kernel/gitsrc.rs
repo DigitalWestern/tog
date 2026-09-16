@@ -155,6 +155,15 @@ pub fn object_id(source: &GitSource) -> String {
     identity(source).object_id()
 }
 
+#[cfg(test)]
+pub(crate) fn live_identity_for_test() -> Identity {
+    identity(&GitSource {
+        url: "https://example.invalid/repo.git".into(),
+        commit: "a".repeat(40),
+        subdirectory: None,
+    })
+}
+
 fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);

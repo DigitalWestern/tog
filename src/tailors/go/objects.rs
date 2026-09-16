@@ -1,17 +1,22 @@
-//! Object kinds the Go tailor produces, with the identity grammar each
-//! producer writes and how a legacy record's dependencies are recovered from
-//! it (the `object-meta/2` adapters; REFACTOR.md Stage 3 step 4). Every
-//! row is proven by the metadata goldens in `kernel/objmeta.rs`.
+//! Object kinds the Go tailor produces. Each row has a migration grammar
+//! for legacy records and a separate live grammar for current commits, plus
+//! the `object-meta/2` dependency adapter. Every row is proven by the metadata
+//! goldens in `kernel/objmeta.rs`.
 
 use crate::kernel::objmeta::{
     add_digest, add_object, artifact_sha256, input, Algo, Grammar, KindAdapter, MetaIndex, Record,
 };
 use crate::kernel::store::ObjectDeps;
+use crate::kernel::types::Identity;
 
 pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "go",
         schema: Some("go-toolchain/1"),
+        live_required: &["schema", "artifact_sha256", "platform"],
+        live_optional: &[],
+        legacy_only: &[],
+        live_contract: None,
         grammar: Grammar {
             required: &["schema", "artifact_sha256"],
             optional: &["platform"],
@@ -22,6 +27,10 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "go-modcache",
         schema: Some("go-modcache/1"),
+        live_required: &["schema", "extractor"],
+        live_optional: &["mod:", "modfile:", "info:"],
+        legacy_only: &[],
+        live_contract: Some(go_module_contract),
         grammar: Grammar {
             required: &["schema", "extractor"],
             optional: &[],
@@ -36,6 +45,46 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: go_modcache,
     },
 ];
+
+fn go_module_contract(identity: &Identity) -> Result<(), String> {
+    let inputs = &identity.inputs;
+    // Empty module caches are legitimate. The producer records zero in
+    // identity.version, and every module contributes one complete triplet.
+    let counts = ["mod:", "modfile:", "info:"]
+        .map(|prefix| inputs.keys().filter(|key| key.starts_with(prefix)).count());
+    let version = identity.version.parse::<usize>().map_err(|_| {
+        format!(
+            "Go module count/version relation; Go module triplet relation: version {:?} is not a count for mod:/modfile:/info: triplets",
+            identity.version
+        )
+    })?;
+    if counts.iter().any(|count| *count != version)
+        || counts[0] != counts[1]
+        || counts[0] != counts[2]
+    {
+        return Err(format!(
+            "Go module count/version relation; Go module triplet relation: version {version}, mod:/modfile:/info: counts are {counts:?}"
+        ));
+    }
+    for (prefix, siblings) in [
+        ("mod:", ["modfile:", "info:"]),
+        ("modfile:", ["mod:", "info:"]),
+        ("info:", ["mod:", "modfile:"]),
+    ] {
+        for key in inputs.keys().filter(|key| key.starts_with(prefix)) {
+            let suffix = &key[prefix.len()..];
+            for sibling in siblings {
+                let sibling_key = format!("{sibling}{suffix}");
+                if !inputs.contains_key(&sibling_key) {
+                    return Err(format!(
+                        "Go module triplet relation: {key} requires {sibling_key}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// `go-modcache/1`: the extractor is a `go<version>:<sha256>` fingerprint, so
 /// the Go toolchain object is found by matching the one `go` record with that

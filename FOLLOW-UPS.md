@@ -83,9 +83,43 @@ F3 report accounting, F4 acceptance tests).
    code relies on. Nothing Linux-side clears this.
 6. **M05 mutation survivor** — redundant-marking acceptance gap, known and
    documented in `docs/agent/D10-ACCEPTANCE-2026-09-09.md` §8.
-7. **Grammar-table drift for the 21st (kind,schema) pair** — adding a pair
-   requires extending `objmeta::grammar_for`; unlisted pairs fail closed
-   (refusal), but a listed pair with a wrong grammar needs its own drift test.
+7. **Grammar-table drift for the 21st (kind,schema) pair** — implemented
+   on `fu/7-grammar-drift`; Sol r5 FIX-THEN-MERGE fixes applied; schema
+   successors pending owner decision. Each `KindAdapter` row now has a
+   migration grammar, a live required/optional grammar, and, where its
+   producer has dynamic or conditional identity shape, a full
+   `live_contract` over the complete `Identity`. Contracts beside the
+   producer constructors validate collection counts, paired keys,
+   platform-specific inputs, and the producer's own provisioning decision
+   (`python::artifacts::provisioned_version` is consulted by both the Node
+   producer and the `node-env` contract, so a dropped `provisioned:` key is
+   caught under the current schema). Debug commits run the generic checks
+   before the contract at `Store::commit_internal_impl`. Unknown kinds and
+   schema pairs fail closed.
+
+   | kind | undetectable drift | successor schema and field that closes it |
+   |---|---|---|
+   | `cargo-vendor/1` | A one-crate plan drops its sole `crate:` key and becomes the legitimate empty plan. | `cargo-vendor/2`, an unconditional crate count. |
+   | `python-env/2` | A one-wheel plan drops its sole `pkg:` key, or an inspected native sdist drops `native_libs`. | `python-env/3`, a plan digest over the package set plus an explicit native decision (a package count alone cannot see a dropped `native_libs`). |
+   | `node-env/3` | A multi-package plan drops one `pkg:` key, or an `artifact:` or Linux `native_libs` key is dropped. | `node-env/4`, a plan digest over the package set and declared artifacts plus an explicit native decision (a provisioning/native flag alone cannot see a dropped package or artifact). |
+   | `sdist-build/3` | Both `rust`/`vendor` or both `native_libs`/`native_linker` are dropped together. | `sdist-build/4`, explicit build-mode and native-mode fields. |
+
+   Introducing any successor schema reissues every object id of that kind
+   because store objects are input-addressed. That is an owner decision and
+   is tracked here. The two-platform matrix uses real producer constructors,
+   seeds the Electron checksum manifest and byte-identical local sdists
+   (`build::deterministic_tar_gz`: fixed mtimes, ids, order, and gzip
+   header, so fixture identities are reproducible across runs and tar
+   implementations) for the conditional paths, checks migration readability,
+   and rejects every live-required input. A migration-required input must
+   be live-required or explicitly `legacy_only`; parking one in
+   `live_optional` fails the structural test. The relation tests reject
+   one-half drops for NuGet's `pkg:`/`raw:` pair, Go's module triplet,
+   BEAM's Linux relocation pair, both sdist pairs, Node's layout/package
+   relation in both directions, Node's pkg/provisioned relation, and the
+   currently detectable package side of Node/Python conditional relations.
+   Count tests reject one dynamic key for every count contract. Limitation
+   tests accept and pin the four documented schema gaps above.
 8. **Flaky unit test `x::tests::shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit`**
    — failed once in the full `cargo test` run of 2026-09-12 (REFACTOR.md
    Stage 2 gate) and passed on every rerun, including 5/5 in isolation and
