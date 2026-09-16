@@ -493,6 +493,8 @@ mod tests {
 
     #[test]
     fn plan_skipped_requirement_is_strict_or_recorded_once() {
+        let _attribution_lock = policy::exception_guard();
+        let attribution = policy::Attribution::open("python").unwrap();
         let source = ".\n";
         let strict = policy::Policy {
             strict: true,
@@ -513,5 +515,6 @@ mod tests {
         .unwrap();
         assert_eq!(recorded.len(), 1);
         assert!(pypi::parse_requirements(source).unwrap().is_empty());
+        attribution.discard();
     }
 }

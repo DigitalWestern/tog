@@ -204,47 +204,26 @@ can pick it up cold.
   emit them under `policy.sources`, so a CI log shows whether a denial came
   from the machine, the repository, or `--policy`. Done when the CLI test
   asserts the sources for a project-plus-flag case.
-- **H6 — per-closure attribution guard. IMPLEMENTED ON `fu/4-attribution-guard`, NOT MERGEABLE: owner design decision needed (see the end of this item).** Attribution of exceptions to
-  a closure relies on each realization publishing one ecosystem at a time
-  (the claim is in `comforter::write_closure_inner`, `src/comforter/mod.rs`,
-  not `project.rs` as originally written). `policy::begin_attribution` in
-  `src/kernel/policy.rs` takes an exclusive scope for the whole producer
-  call, records its owning thread, and `claim_for_closure` refuses publication
-  outside that scope before draining the pending queue. `finish()` is the
-  success path and reports any exceptions the closure did not claim; `Drop`
-  clears the queue on errors and panics, while `discard()` explicitly clears
-  operations with no closure. `commands::sync::run` holds and finishes a
-  scope around each `Tailor::sync` call (`src/commands/sync.rs`), and the
-  command-layer `build` and `fmt` paths do the same for their closure-writing
-  tailors (`src/commands/build.rs`, `src/commands/fmt.rs`). The `x` command
-  opens the matching Python or Node scope around its direct realization paths
-  (`src/commands/x.rs`).
-  `commands::deps::run` holds a `dependency-edit` scope over the whole edit
-  and discards it immediately before calling sync, so warm-store and
-  toolchain-edit exceptions are not attributed to the next closure
-  (`src/commands/deps.rs`). Covered by policy unit tests, the
-  `dependency_edit_scope_clears_exceptions_before_sync` seam test, the
-  `failed_tailor_sync_clears_its_unpublished_exceptions` command test, and
-  the ignored `dependency_edit_exception_is_not_published_to_cargo_closure`
-  binary e2e test.
-  **Open after four adversarial review rounds (Sol, 2026-09-15, r4 REWORK;
-  docs/agent/REVIEW.md):** the reviewer keeps finding that a scope which
-  only guards the queue cannot make attribution sound, and the remaining
-  findings are design choices, not fixes: (1) a fresh pnpm delegate inside
-  a `dependency-edit` scope publishes a Node `x` closure on the same thread
-  and would claim an earlier Cargo `toolchain-component-unavailable`
-  exception, so scopes need to nest or carry the ecosystem into
-  `claim_for_closure`; (2) `finish()` treats an empty queue as proof of
-  publication, so the scope needs explicit claimed-and-published state and
-  `clear()`/`drain()` must stop being public; (3) `Tailor::prepare` runs
-  outside the scope; (4) the cfg(test) queue is thread-local while
-  production is process-global, so the concurrency tests cannot reproduce
-  cross-thread contamination; (5) a non-object closure body silently drops
-  claimed exceptions. Decide between a per-closure attribution token threaded
-  through `Tailor::sync`/`prepare` and the comforter writer (the clean fix,
-  a trait change across every tailor) and keeping the process-global queue
-  with nested scopes and publication state. Until then the branch stays a
-  draft PR; nothing on `main` changed.
+- **H6 — per-closure attribution guard. DONE ON `fu/4-attribution-guard` (2026-09-15).**
+  Exception attribution now uses an explicit `policy::Attribution` token
+  backed by the same process-global frame stack in production and tests.
+  `Tailor::prepare`, `Tailor::sync`, and closure-producing build/format paths
+  receive the token and forward it to the comforter writer. Writers validate
+  object bodies, claim only their matching ecosystem's innermost frame before
+  writing, and mark it published only after the write completes. Nested
+  attribution handles dependency-edit delegates that publish a Node `x`
+  closure, while edit frames are discarded before the subsequent sync. Finish
+  requires publication when success is reported and rejects unclaimed
+  exceptions. Cache hits and edits with no closure explicitly discard their
+  frames. Only the frame's owning thread may record into it; a frame that
+  was claimed but never published cannot finish; `claim` is crate-private to
+  the comforter boundary and `clear`/`drain` are gone from the public API.
+  The process-global test lock serializes every test that records or
+  opens attribution, and the mixed Cargo/pnpm ignored e2e regression covers
+  the original cross-ecosystem contamination case. Five adversarial Sol
+  rounds (docs/agent/REVIEW.md); r5 on the token design was FIX-THEN-MERGE
+  and its two blockers (cross-thread record, claimed-unpublished finish) are
+  the two rules above.
 - **H7 — Flag 3 D1 and D2 outcomes.** Whatever the owner decides for the
   toolchain-only pass and the unchecked strictness, encode it in CLI.md, the
   `audit` help text, and one test each. Done when the two decisions are no

@@ -50,7 +50,7 @@ pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
     };
     let root = tailor.build_root(&cwd)?;
     policy::init(&root, false)?;
-    let scope = policy::begin_attribution(tailor.id())?;
-    tailor.build(ctx, &root, &cwd, rest)?;
-    scope.finish()
+    let mut attribution = policy::Attribution::open(tailor.id())?;
+    tailor.build(ctx, &root, &cwd, rest, &mut attribution)?;
+    attribution.finish(true)
 }

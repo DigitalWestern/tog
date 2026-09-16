@@ -285,8 +285,13 @@ pub(crate) fn realize_env_at_depth(
 
 /// Project an env into a project directory: `.venv` symlink (atomic swap)
 /// plus closure-envelope provenance (.blanket/closures/python.json).
-pub fn project_env(project_dir: &Path, env_obj: &Path, plan: &Plan) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, None, &[])
+pub fn project_env(
+    project_dir: &Path,
+    env_obj: &Path,
+    plan: &Plan,
+    attribution: &mut crate::kernel::policy::Attribution,
+) -> io::Result<()> {
+    project_env_inner(project_dir, env_obj, plan, None, &[], attribution)
 }
 
 /// `project_env_with_selection` plus the input files recorded for status.
@@ -296,8 +301,16 @@ pub fn project_env_with_inputs(
     plan: &Plan,
     selection: &pyselect::PythonSelection,
     inputs: &[InputRecord],
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, Some(selection), inputs)
+    project_env_inner(
+        project_dir,
+        env_obj,
+        plan,
+        Some(selection),
+        inputs,
+        attribution,
+    )
 }
 
 /// Project a Python env and retain the exact interpreter constraint that led
@@ -308,8 +321,16 @@ pub fn project_env_with_selection(
     env_obj: &Path,
     plan: &Plan,
     selection: &pyselect::PythonSelection,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, Some(selection), &[])
+    project_env_inner(
+        project_dir,
+        env_obj,
+        plan,
+        Some(selection),
+        &[],
+        attribution,
+    )
 }
 
 pub(super) fn project_env_inner(
@@ -318,6 +339,7 @@ pub(super) fn project_env_inner(
     plan: &Plan,
     selection: Option<&pyselect::PythonSelection>,
     inputs: &[InputRecord],
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let venv = project_dir.join(".venv");
     let store = store_from_object_path(env_obj)
@@ -382,6 +404,7 @@ pub(super) fn project_env_inner(
         &activity,
         refs,
         &project_lock,
+        attribution,
     )
 }
 

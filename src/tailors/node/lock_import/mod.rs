@@ -1258,6 +1258,8 @@ snapshots:
 
     #[test]
     fn yarn_v1_multi_key_sha1_and_berry_rejection() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         let lock = "\
 # yarn lockfile v1

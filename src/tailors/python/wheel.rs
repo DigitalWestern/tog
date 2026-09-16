@@ -679,6 +679,8 @@ mod tests {
 
     #[test]
     fn later_wheel_in_sorted_order_wins_collision() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let temp = TempDir::new();
         let site = temp.path().join("site");
         let bin = temp.path().join("bin");

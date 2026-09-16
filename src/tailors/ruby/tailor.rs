@@ -39,13 +39,19 @@ impl Tailor for Ruby {
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, _fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        _fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let ruby_obj = ruby::ensure_ruby_for(store, platform)?;
         let (plan, lock_sha256) = ruby::plan_ruby(store, dir, &ruby_obj)?;
         let gems = ruby::realize_gems(store, platform, &plan, &ruby_obj)?;
-        ruby::project_ruby_env(dir, &ruby_obj, &gems, &plan, &lock_sha256)?;
+        ruby::project_ruby_env(dir, &ruby_obj, &gems, &plan, &lock_sha256, attribution)?;
         ui::synced("gems", &gems);
         Ok(true)
     }

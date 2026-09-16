@@ -42,14 +42,20 @@ impl Tailor for Dotnet {
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, _fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        _fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let platform = ctx.platform;
         let store = &ctx.store;
         dotnet::preflight(dir)?;
         let sdk = dotnet::ensure_sdk_for(store, platform)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(store, dir, &sdk)?;
         let packages = dotnet::realize_packages(store, platform, &plan, &sdk, dir)?;
-        dotnet::project_dotnet_env(dir, &sdk, &packages, &plan, &lock_sha256)?;
+        dotnet::project_dotnet_env(dir, &sdk, &packages, &plan, &lock_sha256, attribution)?;
         ui::synced("nuget packages", &packages);
         Ok(true)
     }
@@ -66,13 +72,20 @@ impl Tailor for Dotnet {
         Ok(cwd.to_path_buf())
     }
 
-    fn build(&self, ctx: &Context, _root: &Path, cwd: &Path, args: &[String]) -> io::Result<()> {
+    fn build(
+        &self,
+        ctx: &Context,
+        _root: &Path,
+        cwd: &Path,
+        args: &[String],
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let sdk = dotnet::ensure_sdk_for(store, platform)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(store, cwd, &sdk)?;
         let packages = dotnet::realize_packages(store, platform, &plan, &sdk, cwd)?;
-        dotnet::project_dotnet_env(cwd, &sdk, &packages, &plan, &lock_sha256)?;
+        dotnet::project_dotnet_env(cwd, &sdk, &packages, &plan, &lock_sha256, attribution)?;
         dotnet::build_sandboxed(platform, cwd, &sdk, &packages, args)
     }
 

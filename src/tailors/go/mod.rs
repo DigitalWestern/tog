@@ -1058,6 +1058,7 @@ pub fn project_go_env(
     modcache_obj: &Path,
     plan: &GoPlan,
     gosum_sha256: &str,
+    attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
@@ -1086,6 +1087,7 @@ pub fn project_go_env(
         &store,
         &activity,
         refs,
+        attribution,
     )
 }
 

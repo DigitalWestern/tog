@@ -28,6 +28,10 @@ Rules the tailor must keep:
 - Closures are written through `comforter::write_closure` and read through
   `comforter::read_closure`; `.blanket/closures/<eco>.json` is the proof a
   project was synced and is what `status`, `ls`, `sbom`, and `audit` read.
+- `prepare`, `sync`, and any closure-producing `build` or `fmt` method receive
+  a mutable `policy::Attribution`. Forward that token unchanged to the
+  comforter writer. The tailor does not record, claim, finish, or discard the
+  token itself. The command layer owns that lifecycle.
 
 ## 2. The registry line
 

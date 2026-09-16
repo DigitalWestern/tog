@@ -40,14 +40,28 @@ impl Tailor for Elixir {
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
-    fn sync(&self, ctx: &Context, dir: &Path, fresh: bool) -> io::Result<bool> {
+    fn sync(
+        &self,
+        ctx: &Context,
+        dir: &Path,
+        fresh: bool,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<bool> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::ensure_beam_for(store, platform)?;
         let (plan, lock_sha256) = elixir::plan_elixir(store, dir, &beam)?;
         let deps = elixir::realize_deps(store, platform, &plan, &beam)?;
-        let projection =
-            elixir::project_elixir_env(platform, dir, &beam, &deps, &plan, &lock_sha256, fresh)?;
+        let projection = elixir::project_elixir_env(
+            platform,
+            dir,
+            &beam,
+            &deps,
+            &plan,
+            &lock_sha256,
+            fresh,
+            attribution,
+        )?;
         ui::synced("hex deps", &projection);
         Ok(true)
     }
@@ -70,14 +84,29 @@ impl Tailor for Elixir {
             .to_path_buf())
     }
 
-    fn build(&self, ctx: &Context, root: &Path, _cwd: &Path, args: &[String]) -> io::Result<()> {
+    fn build(
+        &self,
+        ctx: &Context,
+        root: &Path,
+        _cwd: &Path,
+        args: &[String],
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::ensure_beam_for(store, platform)?;
         let (plan, lock_sha256) = elixir::plan_elixir(store, root, &beam)?;
         let deps = elixir::realize_deps(store, platform, &plan, &beam)?;
-        let projection =
-            elixir::project_elixir_env(platform, root, &beam, &deps, &plan, &lock_sha256, false)?;
+        let projection = elixir::project_elixir_env(
+            platform,
+            root,
+            &beam,
+            &deps,
+            &plan,
+            &lock_sha256,
+            false,
+            attribution,
+        )?;
         elixir::build_sandboxed(platform, root, &beam, &projection, args)
     }
 

@@ -27,21 +27,12 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     policy::init(&dir, strict)?;
     preflight_sync(ctx.platform, &dir)?;
     let present = tailors::detected(&dir)?;
-    for tailor in &present {
-        tailor.prepare(ctx, &dir)?;
-    }
     let mut any = false;
     for tailor in &present {
-        // One ecosystem at a time. Each `sync` ends in a closure write that
-        // claims the whole pending-exception queue and then clears it, so
-        // this ecosystem owns the queue for the length of its realization or
-        // its closure would inherit exceptions it did not cause. The scope is
-        // held across the whole call, not just checked before it, and its
-        // `Drop` clears the queue so a failed `sync` cannot leave a stale
-        // exception for the next ecosystem (FOLLOW-UPS H6).
-        let scope = policy::begin_attribution(tailor.id())?;
-        let changed = tailor.sync(ctx, &dir, fresh)?;
-        scope.finish()?;
+        let mut attribution = policy::Attribution::open(tailor.id())?;
+        tailor.prepare(ctx, &dir, &mut attribution)?;
+        let changed = tailor.sync(ctx, &dir, fresh, &mut attribution)?;
+        attribution.finish(changed)?;
         if changed {
             any = true;
         }
@@ -196,7 +187,7 @@ mod tests {
             "failed tailor left an exception queued: {:?}",
             policy::pending()
         );
-        let next = policy::begin_attribution("node").unwrap();
+        let next = policy::Attribution::open("node").unwrap();
         drop(next);
     }
 }

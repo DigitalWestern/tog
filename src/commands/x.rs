@@ -1867,7 +1867,7 @@ pub fn launch(
             "python" => {
                 let venv = root.join(".venv");
                 let executable = venv.join("bin").join(bin);
-                let scope = policy::begin_attribution("python")?;
+                let mut attribution = policy::Attribution::open("python")?;
                 // A pre-state x-request/1 root has no marker but can still
                 // be a complete legacy cache. Preserve that cache path only
                 // when its projected executable already exists.
@@ -1881,8 +1881,16 @@ pub fn launch(
                         version,
                         "realizing",
                     )?;
-                    realize_python(&store, activity, platform, &root, package, version)?;
-                    scope.finish()?;
+                    realize_python(
+                        &store,
+                        activity,
+                        platform,
+                        &root,
+                        package,
+                        version,
+                        &mut attribution,
+                    )?;
+                    attribution.finish(true)?;
                     write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
                 } else {
                     // `x_request_is_ready` already validated this projection
@@ -1894,7 +1902,7 @@ pub fn launch(
                             &root, &store, ecosystem, package, version, "ready",
                         )?;
                     }
-                    scope.discard();
+                    attribution.discard();
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
@@ -1910,7 +1918,7 @@ pub fn launch(
             _ => {
                 let node_modules = root.join("node_modules");
                 let executable = node_modules.join(".bin").join(bin);
-                let scope = policy::begin_attribution("node")?;
+                let mut attribution = policy::Attribution::open("node")?;
                 let ready = x_request_is_ready(&store, &root, "node", &executable)?;
                 if !ready {
                     write_x_request_for_store(
@@ -1921,8 +1929,16 @@ pub fn launch(
                         version,
                         "realizing",
                     )?;
-                    realize_node(&store, activity, platform, &root, package, version)?;
-                    scope.finish()?;
+                    realize_node(
+                        &store,
+                        activity,
+                        platform,
+                        &root,
+                        package,
+                        version,
+                        &mut attribution,
+                    )?;
+                    attribution.finish(true)?;
                     write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
                 } else {
                     // Already validated by `x_request_is_ready`; see above.
@@ -1931,7 +1947,7 @@ pub fn launch(
                             &root, &store, ecosystem, package, version, "ready",
                         )?;
                     }
-                    scope.discard();
+                    attribution.discard();
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
@@ -2053,7 +2069,8 @@ pub(crate) fn realize_node_tool(
     package: &str,
     version: &str,
     corepack_hash: Option<&CorepackHash>,
-) -> io::Result<(PathBuf, fs::File)> {
+    attribution: &mut policy::Attribution,
+) -> io::Result<(PathBuf, fs::File, bool)> {
     validate_exact_version(version)?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let root = node_cache_root(store, platform, package, Some(version))?;
@@ -2069,9 +2086,17 @@ pub(crate) fn realize_node_tool(
         if let Some(expected) = corepack_hash {
             verify_corepack_hash(store, &root, package, version, expected)?;
         }
-        return Ok((root, x_lock));
+        return Ok((root, x_lock, false));
     }
-    realize_node(store, &activity, platform, &root, package, Some(version))?;
+    realize_node(
+        store,
+        &activity,
+        platform,
+        &root,
+        package,
+        Some(version),
+        attribution,
+    )?;
     if !executable.is_file() {
         return Err(other(format!(
             "'{package}@{version}' installed but provides no '{package}' executable"
@@ -2080,7 +2105,7 @@ pub(crate) fn realize_node_tool(
     if let Some(expected) = corepack_hash {
         verify_corepack_hash(store, &root, package, version, expected)?;
     }
-    Ok((root, x_lock))
+    Ok((root, x_lock, true))
 }
 
 fn verify_corepack_hash(
@@ -2148,6 +2173,7 @@ fn realize_python(
     root: &Path,
     package: &str,
     version: Option<&str>,
+    attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
     fs::create_dir_all(root)?;
     let selection = pyselect::select_python(platform, &[])?;
@@ -2193,7 +2219,13 @@ fn realize_python(
     let text = fs::read_to_string(&output)?;
     let plan = pypi::plan_python(platform, &text, pin.version)?;
     let env = crate::tailors::python::env::realize_env(store, platform, &plan)?;
-    crate::tailors::python::env::project_env_with_selection(root, &env, &plan, &selection)?;
+    crate::tailors::python::env::project_env_with_selection(
+        root,
+        &env,
+        &plan,
+        &selection,
+        attribution,
+    )?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())
 }
@@ -2205,6 +2237,7 @@ fn realize_node(
     root: &Path,
     package: &str,
     version: Option<&str>,
+    attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
     fs::create_dir_all(root)?;
     let manifest = serde_json::json!({
@@ -2247,7 +2280,7 @@ fn realize_node(
     }
     let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
     let env = node::realize_node_env(store, platform, &plan, &[])?;
-    node::project_node_env(root, &env, platform, &plan, &[], false)?;
+    node::project_node_env(root, &env, platform, &plan, &[], false, attribution)?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())
 }
@@ -2784,10 +2817,7 @@ mod tests {
     /// The pending-exception queue is shared, so a test that asserts on its
     /// length starts from an empty queue under a lock of its own.
     fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        policy::clear();
-        guard
+        policy::exception_guard()
     }
 
     /// A cache hit validates the projection exactly once. `x_request_is_ready`
@@ -2796,6 +2826,7 @@ mod tests {
     #[test]
     fn ready_cache_hit_records_each_exception_once() {
         let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("python").unwrap();
         let base = temp_base("ready-exceptions");
         fs::create_dir_all(base.join("store/objects/test-env/bin")).unwrap();
         fs::create_dir_all(base.join("store/meta")).unwrap();
@@ -2848,7 +2879,7 @@ mod tests {
             "a cache hit narrated the same exception more than once: {:?}",
             policy::pending()
         );
-        policy::clear();
+        let _ = policy::drain();
         // The object is published read-only; make it removable again.
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(base).unwrap();
