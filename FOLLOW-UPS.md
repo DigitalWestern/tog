@@ -164,6 +164,29 @@ owes under this repo's rules; H3 is the one real design piece; the rest
 are small. Each item names its exit criterion so a session
 can pick it up cold.
 
+<<<<<<< HEAD
+- **H1 — independent recheck of the round-2 nit fixes. Done
+  2026-09-15.** N1 (mapping extracted to `audit::freshness_from_state` and
+  tested directly), N2 (stray-file message), N3 (`policy::test_env_lock`
+  held by the env-reading tests) were rechecked by a Claude Opus 5 subagent
+  that did not write them, and the recheck was itself reviewed by GPT-5.6
+  Sol. N1 and N2 stand; N3's guard was right but applied to three tests when
+  seven lib tests read `HOME`/`BLANKET_POLICY` in-process, so the two
+  `doctor_*` tests in `src/commands/inspect.rs` and the two `$HOME`-reading
+  sandbox tests in `src/kernel/sandbox.rs` now take it too. Two test-only
+  edits in all (the mapping test's inner match made exhaustive so a new
+  `State` variant cannot skip it, plus the added locks) and two recorded
+  residuals on the stray-file path.
+  Evidence and method are in the 2026-09-15 row of the `docs/agent/REVIEW.md`
+  log; the entry-7 row's "verified by the author only" clause is gone.
+- **H2 — acceptance coverage.** Add `blanket audit` to
+  `tests/acceptance.sh`: after a real Python and npm sync, run it under the
+  offline check (`unshare -rn` on Linux) with `--policy
+  docs/human/policy-company.toml`, assert exit 0 on the clean fixtures and
+  exit 1 after planting one denied exception; assert `~/.blanket/store` mtime
+  is unchanged across the run. Done when the checklist has the rows and they
+  pass on Linux.
+=======
 - **H1 — independent recheck of the round-2 nit fixes.** N1 (mapping
   extracted to `audit::freshness_from_state` and tested directly), N2
   (stray-file message), N3 (`policy::test_env_lock` held by the three
@@ -181,6 +204,7 @@ can pick it up cold.
   2026-09-14) via a scratch driver that extracts the step-13 and helper lines
   from `tests/acceptance.sh` with `sed -n` and runs them against a real
   `proj-poly` sync: passed=4 failed=0. The full checklist was not re-run.
+>>>>>>> origin/main
 - **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
   pick one after the owner answers D3:
   1. *Store cross-check, opt-in.* Object-affecting exceptions

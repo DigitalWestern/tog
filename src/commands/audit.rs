@@ -919,9 +919,17 @@ mod tests {
             State::Unchecked("why".into()),
         ] {
             let freshness = freshness_from_state(state.clone());
+            // Exhaustive on purpose (no `_` arm): a new `State` variant must
+            // fail to compile here, not silently skip the mapping check.
             match state {
+                State::Synced => unreachable!("asserted above, outside the loop"),
                 State::Unchecked(_) => assert!(matches!(freshness, Freshness::Unchecked(_))),
-                _ => assert!(matches!(freshness, Freshness::Stale(_)), "{state:?}"),
+                State::NotSynced
+                | State::Changed(_)
+                | State::ProjectionMissing(_)
+                | State::ForeignPlatform(_) => {
+                    assert!(matches!(freshness, Freshness::Stale(_)), "{state:?}")
+                }
             }
             let verdict = Verdict {
                 ecosystem: "python".into(),
