@@ -164,7 +164,6 @@ owes under this repo's rules; H3 is the one real design piece; the rest
 are small. Each item names its exit criterion so a session
 can pick it up cold.
 
-<<<<<<< HEAD
 - **H1 — independent recheck of the round-2 nit fixes. Done
   2026-09-15.** N1 (mapping extracted to `audit::freshness_from_state` and
   tested directly), N2 (stray-file message), N3 (`policy::test_env_lock`
@@ -179,20 +178,6 @@ can pick it up cold.
   residuals on the stray-file path.
   Evidence and method are in the 2026-09-15 row of the `docs/agent/REVIEW.md`
   log; the entry-7 row's "verified by the author only" clause is gone.
-- **H2 — acceptance coverage.** Add `blanket audit` to
-  `tests/acceptance.sh`: after a real Python and npm sync, run it under the
-  offline check (`unshare -rn` on Linux) with `--policy
-  docs/human/policy-company.toml`, assert exit 0 on the clean fixtures and
-  exit 1 after planting one denied exception; assert `~/.blanket/store` mtime
-  is unchanged across the run. Done when the checklist has the rows and they
-  pass on Linux.
-=======
-- **H1 — independent recheck of the round-2 nit fixes.** N1 (mapping
-  extracted to `audit::freshness_from_state` and tested directly), N2
-  (stray-file message), N3 (`policy::test_env_lock` held by the three
-  env-reading tests) were verified by the author only. Done when a reviewer
-  who did not write them re-runs the three and the REVIEW.md entry-7 row
-  drops its "nit fixes verified by the author only" clause.
 - **H2 — acceptance coverage. Done (2026-09-14).** `tests/acceptance.sh`
   step 13 runs `blanket audit --policy docs/human/policy-company.toml` over
   the polyglot project synced in step 11, under `deny_net` (`unshare -rn` on
@@ -204,7 +189,6 @@ can pick it up cold.
   2026-09-14) via a scratch driver that extracts the step-13 and helper lines
   from `tests/acceptance.sh` with `sed -n` and runs them against a real
   `proj-poly` sync: passed=4 failed=0. The full checklist was not re-run.
->>>>>>> origin/main
 - **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
   pick one after the owner answers D3:
   1. *Store cross-check, opt-in.* Object-affecting exceptions
@@ -239,12 +223,23 @@ can pick it up cold.
   list: docs/agent/AUDIT-MUTATION-2026-09-14.md; the driver and mutant
   definitions are checked in under docs/agent/audit-mutation-2026-09-14/,
   with a log row in docs/agent/REVIEW.md.
-- **H5 — policy provenance in the report.** `policy::load` unions silently;
-  the JSON report says what is denied but not which file said so. Return
-  the contributing sources from `load` (path → deny entries, strict) and
-  emit them under `policy.sources`, so a CI log shows whether a denial came
-  from the machine, the repository, or `--policy`. Done when the CLI test
-  asserts the sources for a project-plus-flag case.
+- **H5 — policy provenance in the report. Done (2026-09-15).**
+  `policy::load_with_sources` returns the merged policy plus every policy
+  that contributed, in merge order, with its origin and optional `path`,
+  `strict`, and `deny`; `load` is now a thin wrapper over it, so there is one
+  loading algorithm and no caller changed. `audit::effective_policy` appends
+  the `--policy` file after the ordinary chain. `--json` emits sources under
+  `policy.sources` with lossy UTF-8 paths, adds lowercase raw-byte
+  `path_bytes` only for non-UTF-8 paths, and omits `path` for strictness-only
+  sources (additive; every existing field is unchanged). The same lossy path
+  helper keeps `project` and closure `path` strings JSON-safe, adding sibling
+  `project_bytes` or `path_bytes` only for non-UTF-8 paths. The text report
+  prints one source line per source on stdout. File paths are always
+  Rust-Debug-quoted as `policy: <origin> "<path>" [denies ...] [(strict)]`;
+  strictness-only sources omit the path. Lines come before verdicts regardless
+  of `--quiet`; existing file sources are listed even when they deny nothing.
+  Covered by `policy::tests::load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it`
+  and `cli::audit_json_attributes_each_policy_to_its_source_file`.
 - **H6 — per-closure attribution guard.** Attribution of exceptions to a
   closure relies on sync realizing and publishing one ecosystem at a time
   (`project.rs` clears the pending list after each write). Add a debug

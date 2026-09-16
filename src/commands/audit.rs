@@ -17,9 +17,10 @@
 //!   found here is reported `stale`; one that predates input, platform, or
 //!   exception recording is reported `unchecked`. Neither passes — an audit
 //!   of a stale record proves nothing.
-//! - The policy under test is the ordinary chain (`policy::load`) unioned
-//!   with the optional `--policy` file. Union only tightens, so the flag can
-//!   add denials but never remove what the machine or project policy says.
+//! - The policy under test is the ordinary chain (`policy::load_with_sources`)
+//!   unioned with the optional `--policy` file. Union only tightens, so the
+//!   supplied policy can add denials but never remove what the machine or
+//!   project policy says.
 //! - An exception kind this binary does not know (a record written by a
 //!   newer blanket, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
@@ -28,7 +29,7 @@ use crate::cli;
 use crate::commands::inspect::{self, ClosureFile, State};
 use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
-use crate::kernel::policy::{self, Exception, Policy};
+use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
 use crate::kernel::ui;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -82,6 +83,10 @@ impl Verdict {
 #[derive(Debug, Clone)]
 pub struct Report {
     pub policy: Policy,
+    /// The policies that were unioned into `policy`, in merge order, so the
+    /// report can say which file denied a kind rather than only that
+    /// something did.
+    pub sources: Vec<PolicySource>,
     pub verdicts: Vec<Verdict>,
 }
 
@@ -103,14 +108,20 @@ pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
 
 /// The policy an audit judges against: the ordinary chain for `dir`
 /// (BLANKET_POLICY or ~/.blanket/policy.toml, every ancestor's
-/// .blanket/policy.toml, BLANKET_STRICT) unioned with `extra`. Union only
-/// tightens: `extra` can add denials or strictness, never remove either.
-pub fn effective_policy(dir: &Path, extra: Option<&Policy>) -> io::Result<Policy> {
-    let mut policy = policy::load(dir, false)?;
-    if let Some(extra) = extra {
+/// .blanket/policy.toml, BLANKET_STRICT) unioned with `extra`, the parsed
+/// `--policy` file and the path it came from. Union only tightens: `extra`
+/// can add denials or strictness, never remove either. Returns the
+/// contributing policies alongside the merged one, in merge order.
+pub fn effective_policy(
+    dir: &Path,
+    extra: Option<(&Path, &Policy)>,
+) -> io::Result<(Policy, Vec<PolicySource>)> {
+    let (mut policy, mut sources) = policy::load_with_sources(dir, false)?;
+    if let Some((path, extra)) = extra {
         policy::union(&mut policy, extra);
+        sources.push(PolicySource::from_file(SourceOrigin::Flag, path, extra));
     }
-    Ok(policy)
+    Ok((policy, sources))
 }
 
 /// Freshness of one closure file, from its own record. `present` is what
@@ -261,8 +272,12 @@ pub fn evaluate(
 /// Audit the project in `dir` under the policy chain unioned with `extra`
 /// (an already-parsed `--policy` file). `Err(NotFound)` when nothing is
 /// synced. Read-only: no store open, no lease, no process, no network.
-pub fn audit(platform: Platform, dir: &Path, extra: Option<&Policy>) -> io::Result<Report> {
-    let policy = effective_policy(dir, extra)?;
+pub fn audit(
+    platform: Platform,
+    dir: &Path,
+    extra: Option<(&Path, &Policy)>,
+) -> io::Result<Report> {
+    let (policy, sources) = effective_policy(dir, extra)?;
     let closures = inspect::closures(dir)?;
     if closures.is_empty() {
         return Err(io::Error::new(
@@ -275,38 +290,138 @@ pub fn audit(platform: Platform, dir: &Path, extra: Option<&Policy>) -> io::Resu
     }
     let present = inspect::detected(dir)?;
     let verdicts = evaluate(platform, dir, &policy, &closures, &present)?;
-    Ok(Report { policy, verdicts })
+    Ok(Report {
+        policy,
+        sources,
+        verdicts,
+    })
+}
+
+/// One contributing policy as the text report shows it: origin, the file
+/// (absent for strictness-only sources), and what it asked for.
+fn source_line(source: &PolicySource) -> String {
+    let mut line = format!("policy: {}", source.origin);
+    if let Some(path) = &source.path {
+        let lossy = path.to_string_lossy();
+        line.push_str(&format!(" {:?}", lossy));
+    }
+    if !source.deny.is_empty() {
+        line.push_str(&format!(
+            " denies {}",
+            source.deny.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if source.strict {
+        line.push_str(" (strict)");
+    }
+    line
+}
+
+/// JSON cannot serialize a non-UTF-8 `PathBuf`. Keep the public policy model
+/// platform-native, but make every report path an explicit lossy string. On
+/// Unix, the byte field makes a lossy path reversible when its raw bytes are
+/// not valid UTF-8.
+struct JsonPath {
+    lossy: String,
+    bytes: Option<String>,
+}
+
+fn json_path(path: &Path) -> JsonPath {
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+
+        path.to_str()
+            .is_none()
+            .then(|| hex::encode(path.as_os_str().as_bytes()))
+    };
+    #[cfg(not(unix))]
+    let bytes = None;
+
+    JsonPath {
+        lossy: path.to_string_lossy().into_owned(),
+        bytes,
+    }
+}
+
+#[derive(serde::Serialize)]
+struct JsonPolicySource {
+    origin: SourceOrigin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_bytes: Option<String>,
+    strict: bool,
+    deny: std::collections::BTreeSet<String>,
+}
+
+fn json_sources(sources: &[PolicySource]) -> Vec<JsonPolicySource> {
+    sources
+        .iter()
+        .map(|source| {
+            let path = source.path.as_deref().map(json_path);
+            JsonPolicySource {
+                origin: source.origin,
+                path: path.as_ref().map(|path| path.lossy.clone()),
+                path_bytes: path.and_then(|path| path.bytes),
+                strict: source.strict,
+                deny: source.deny.clone(),
+            }
+        })
+        .collect()
 }
 
 pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     if json {
-        let value = json!({
-            "project": dir,
-            "policy": {
-                "strict": report.policy.strict,
-                "deny": report.policy.deny,
-            },
-            "passed": report.passes(),
-            "closures": report.verdicts.iter().map(|verdict| {
+        let JsonPath {
+            lossy: project,
+            bytes: project_bytes,
+        } = json_path(dir);
+        let closures = report
+            .verdicts
+            .iter()
+            .map(|verdict| {
+                let JsonPath {
+                    lossy: path,
+                    bytes: path_bytes,
+                } = json_path(&verdict.path);
                 let (freshness, detail): (&str, Value) = match &verdict.freshness {
                     Freshness::Current => ("current", Value::Null),
                     Freshness::Stale(why) => ("stale", json!(why)),
                     Freshness::Unchecked(why) => ("unchecked", json!(why)),
                     Freshness::ToolchainOnly => ("toolchain-only", Value::Null),
                 };
-                json!({
+                let mut closure = json!({
                     "ecosystem": verdict.ecosystem,
                     "record_sha256": verdict.record_sha256,
-                    "path": verdict.path,
+                    "path": path,
                     "passed": verdict.passes(),
                     "freshness": freshness,
                     "freshness_detail": detail,
                     "denied": verdict.denied,
                     "unknown": verdict.unknown,
                     "permitted": verdict.permitted,
-                })
-            }).collect::<Vec<_>>(),
+                });
+                if let Some(path_bytes) = path_bytes {
+                    closure["path_bytes"] = json!(path_bytes);
+                }
+                closure
+            })
+            .collect::<Vec<_>>();
+        let value = json!({
+            "project": project,
+            "policy": {
+                "strict": report.policy.strict,
+                "deny": report.policy.deny,
+                "sources": json_sources(&report.sources),
+            },
+            "passed": report.passes(),
+            "closures": closures,
         });
+        let mut value = value;
+        if let Some(project_bytes) = project_bytes {
+            value["project_bytes"] = json!(project_bytes);
+        }
         return Ok(serde_json::to_string_pretty(&value)? + "\n");
     }
     let width = report
@@ -316,6 +431,12 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
         .max()
         .unwrap_or(0);
     let mut out = String::new();
+    // Policy provenance is a report result on stdout. Keep it before the
+    // verdicts, and do not suppress it with `--quiet`.
+    for source in &report.sources {
+        out.push_str(&source_line(source));
+        out.push('\n');
+    }
     for verdict in &report.verdicts {
         let record = &verdict.record_sha256[..16];
         let permitted = if verdict.permitted.is_empty() {
@@ -375,7 +496,7 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
     // mistake (exit 2), so CI can tell it from a denied build (exit 1).
     let extra = match policy {
         Some(path) => match read_policy_file(path) {
-            Ok(extra) => Some(extra),
+            Ok(extra) => Some((path, extra)),
             Err(error) => {
                 eprint!(
                     "{}",
@@ -386,7 +507,11 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
         },
         None => None,
     };
-    let report = audit(platform, &dir, extra.as_ref())?;
+    let report = audit(
+        platform,
+        &dir,
+        extra.as_ref().map(|(path, extra)| (*path, extra)),
+    )?;
     ui::note(&format!(
         "audit: policy strict={} deny=[{}]",
         report.policy.strict,
@@ -414,6 +539,8 @@ mod tests {
     };
     use std::collections::BTreeSet;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -550,6 +677,7 @@ mod tests {
         let record = record(&verdicts[0]);
         let report = Report {
             policy: deny(&[GIT_DEPENDENCY]),
+            sources: Vec::new(),
             verdicts,
         };
         assert!(report.passes());
@@ -608,6 +736,7 @@ mod tests {
             );
             let report = Report {
                 policy: policy.clone(),
+                sources: Vec::new(),
                 verdicts,
             };
             assert!(!report.passes(), "one denied closure must fail the report");
@@ -617,9 +746,81 @@ mod tests {
         // Not vacuous: the same machinery passes when every verdict does.
         let report = Report {
             policy: policy.clone(),
+            sources: Vec::new(),
             verdicts: judge(dir, &policy, &[clean.clone(), clean]),
         };
         assert!(report.passes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_policy_source_lossily_serializes_non_utf8_paths() {
+        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![
+            b'p', b'o', b'l', b'i', b'c', b'y', b'-', 0xff, b'.', b't', b'o', b'm', b'l',
+        ]));
+        let report = Report {
+            policy: Policy::default(),
+            sources: vec![PolicySource {
+                origin: SourceOrigin::Machine,
+                path: Some(path),
+                strict: false,
+                deny: BTreeSet::new(),
+            }],
+            verdicts: Vec::new(),
+        };
+
+        let output = render(Path::new("project"), &report, true).unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value["policy"]["sources"][0]["path"],
+            "policy-\u{fffd}.toml"
+        );
+        assert_eq!(
+            value["policy"]["sources"][0]["path_bytes"],
+            "706f6c6963792dff2e746f6d6c"
+        );
+
+        let output = render(Path::new("project"), &report, false).unwrap();
+        assert_eq!(output, "policy: machine \"policy-\u{fffd}.toml\"\n");
+    }
+
+    #[test]
+    fn text_policy_source_quotes_control_characters_in_paths() {
+        let report = Report {
+            policy: Policy::default(),
+            sources: vec![PolicySource {
+                origin: SourceOrigin::Machine,
+                path: Some(PathBuf::from("policy-\n.toml")),
+                strict: false,
+                deny: BTreeSet::new(),
+            }],
+            verdicts: Vec::new(),
+        };
+
+        let output = render(Path::new("project"), &report, false).unwrap();
+        assert_eq!(output, "policy: machine \"policy-\\n.toml\"\n");
+    }
+
+    #[test]
+    fn text_policy_source_quotes_grammar_significant_paths() {
+        let temp = TempDir::new("quoted-policy");
+        let path = temp.0.join("policy denies git-dependency (strict).toml");
+        fs::write(&path, "strict = true\ndeny = [\"git-dependency\"]\n").unwrap();
+        let policy = read_policy_file(&path).unwrap();
+        let report = Report {
+            policy: policy.clone(),
+            sources: vec![PolicySource::from_file(SourceOrigin::Flag, &path, &policy)],
+            verdicts: Vec::new(),
+        };
+
+        let output = render(Path::new("project"), &report, false).unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "policy: flag {:?} denies git-dependency (strict)\n",
+                path.to_string_lossy()
+            )
+        );
     }
 
     #[test]
@@ -645,7 +846,11 @@ mod tests {
         );
         assert_eq!(verdicts[0].permitted.get(SKIPPED_OPTIONAL), Some(&1));
         let record = record(&verdicts[0]);
-        let report = Report { policy, verdicts };
+        let report = Report {
+            policy,
+            sources: Vec::new(),
+            verdicts,
+        };
         assert!(!report.passes());
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
@@ -711,6 +916,7 @@ mod tests {
         let record = record(&verdicts[0]);
         let report = Report {
             policy: Policy::default(),
+            sources: Vec::new(),
             verdicts,
         };
         let text = render(&temp.0, &report, false).unwrap();
@@ -804,12 +1010,36 @@ mod tests {
             strict: false,
             deny: [GIT_DEPENDENCY.to_string()].into_iter().collect(),
         };
+        let policy_file = temp.0.join("company.toml");
         let _env = policy::test_env_lock();
-        let policy = effective_policy(&member, Some(&extra)).unwrap();
+        let (policy, sources) =
+            effective_policy(&member, Some((policy_file.as_path(), &extra))).unwrap();
         assert!(policy.deny.contains(WEAK_INTEGRITY));
         assert!(policy.deny.contains(GIT_DEPENDENCY));
-        let without = effective_policy(&member, None).unwrap();
+        // Each denial is attributable: the workspace root asked for one, the
+        // --policy file for the other, and that source is merged last.
+        let ancestor = sources
+            .iter()
+            .find(|source| {
+                source.path.as_deref() == Some(root.join(".blanket/policy.toml").as_path())
+            })
+            .expect("the workspace-root policy is a source");
+        assert_eq!(ancestor.origin, SourceOrigin::Project);
+        assert!(ancestor.deny.contains(WEAK_INTEGRITY));
+        let last = sources.last().expect("the --policy file is a source");
+        assert_eq!(last.origin, SourceOrigin::Flag);
+        assert_eq!(last.path, Some(policy_file));
+        assert!(last.deny.contains(GIT_DEPENDENCY));
+        let (without, sources) = effective_policy(&member, None).unwrap();
         assert!(without.deny.contains(WEAK_INTEGRITY));
+        assert!(!sources
+            .iter()
+            .any(|source| source.origin == SourceOrigin::Flag));
+        // A file that does not exist is not a source: the member directory
+        // has no policy of its own.
+        assert!(!sources.iter().any(|source| {
+            source.path.as_deref() == Some(member.join(".blanket/policy.toml").as_path())
+        }));
     }
 
     #[test]
@@ -863,6 +1093,7 @@ mod tests {
         let record = record(&verdicts[0]);
         let report = Report {
             policy: Policy::default(),
+            sources: Vec::new(),
             verdicts,
         };
         assert!(!report.passes());
@@ -893,6 +1124,7 @@ mod tests {
         assert_eq!(verdicts[0].denied.len(), 1);
         let report = Report {
             policy: deny(&[GIT_DEPENDENCY]),
+            sources: Vec::new(),
             verdicts,
         };
         let text = render(dir, &report, false).unwrap();
@@ -1003,6 +1235,7 @@ mod tests {
         let record = record(&verdicts[0]);
         let report = Report {
             policy: Policy::default(),
+            sources: Vec::new(),
             verdicts,
         };
         let text = render(dir, &report, false).unwrap();
@@ -1051,6 +1284,7 @@ mod tests {
                 dir,
                 &Report {
                     policy: Policy::default(),
+                    sources: Vec::new(),
                     verdicts,
                 },
                 true,
@@ -1134,7 +1368,8 @@ mod tests {
         // The chain part of the policy is whatever this machine has (see
         // `effective_policy_unions...`); the extra file is under test here.
         let _env = policy::test_env_lock();
-        let report = audit(host(), dir, Some(&extra)).unwrap();
+        let flag = dir.join("company.toml");
+        let report = audit(host(), dir, Some((flag.as_path(), &extra))).unwrap();
         assert_eq!(report.verdicts.len(), 1);
         assert_eq!(report.verdicts[0].denied.len(), 1);
         assert!(!report.passes());
