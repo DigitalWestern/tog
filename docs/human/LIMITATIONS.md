@@ -22,10 +22,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   with network). Nor does it re-verify store bytes, re-check object metadata, or judge
   what `blanket run`/`x` executed. Its evidence is the closure files in the working tree:
   it proves what those records say, plus that the recorded manifest inputs still match the
-  files on disk, and nothing more; a record edited by hand audits as whatever it now says.
+  files on disk and the `rustfmt` record names the rustfmt this binary pins, and nothing more; a record edited by hand audits as whatever it now says.
   Any closure it cannot compare with the project (no recorded inputs, no recorded platform,
   no exception record) fails as `unchecked` rather than passing, so pre-field projects need
-  one `blanket sync` before the gate is useful. An exception kind this binary does not know
+  one `blanket sync` (and one `blanket fmt` for a `rustfmt` record) before the gate is useful. An exception kind this binary does not know
   (a record written by a newer blanket) fails as `unknown` rather than being permitted.
   Loud.
 - **GC is conservative around legacy state.** Store jobs hold a shared activity lease; GC

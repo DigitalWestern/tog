@@ -1,6 +1,6 @@
 # STATUS — where blanket is, and what is next
 
-Updated 2026-09-16.
+Updated 2026-09-17.
 
 ## What blanket is
 
@@ -20,7 +20,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Other ecosystems | Fixture-proven only (`tests/`) |
 | Store GC (root protection, object metadata, fail-closed sweep) | Shipped and independently reviewed on Linux |
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
-| Policy admission gate (`blanket audit`, company policy template) | Shipped and independently reviewed on Linux. Owner decided the three open questions on 2026-09-16; implementing them is next |
+| Policy admission gate (`blanket audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is now compared, including the `rustfmt` record against its pin (2026-09-17). Signed closures and the `outdated` verdict are next |
 | `blanket sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
 | Toolchain lock (WP2) | Designed, not built (`docs/agent/DESIGNS.md` §1) |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
@@ -29,10 +29,9 @@ Cargo, Go, Ruby, Elixir, .NET.
 
 The ordered list is the top of [FOLLOW-UPS.md](FOLLOW-UPS.md):
 
-1. `blanket audit` compares the rustfmt record to its pin.
-2. Design signed closures for `blanket audit`.
-3. Ship signing and the `outdated` verdict together.
-4. Toolchain lock, starting with the shipped-table adapter.
+1. Design signed closures for `blanket audit`.
+2. Ship signing and the `outdated` verdict together.
+3. Toolchain lock, starting with the shipped-table adapter.
 
 ## How work happens here
 

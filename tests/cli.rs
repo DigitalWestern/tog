@@ -1447,6 +1447,94 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
     assert!(stdout.contains("python  denied     closure "), "{stdout}");
 }
 
+/// Write the `rustfmt` closure `blanket fmt` would write for `project` with
+/// this binary's pins, after `edit` changes its body.
+fn write_rustfmt_closure(project: &Path, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+    let platform = blanket::kernel::platform::Platform::host().unwrap();
+    let mut body = blanket::tailors::cargo::rustfmt::pinned_record(platform, project, "").unwrap();
+    body["exceptions"] = serde_json::json!([]);
+    edit(&mut body);
+    let closures = project.join(".blanket/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    let path = closures.join("rustfmt.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "rustfmt",
+            "platform": platform.triple(),
+            "projected_at": 1,
+            "body": body,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+/// The `rustfmt` record passes audit only when it names the rustfmt this
+/// binary pins for the project; one made by another rustfmt is stale, and
+/// one from before the record carried inputs is unchecked.
+#[test]
+fn audit_compares_the_rustfmt_record_to_its_pin() {
+    let home = TempDir::new("audit-rustfmt-home");
+    let project = TempDir::new("audit-rustfmt-project");
+    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    // A toolchain file naming rustfmt makes `sync` record an exception; the
+    // read-only audit must resolve the same pin without recording one.
+    std::fs::write(
+        project.0.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\"]\n",
+    )
+    .unwrap();
+
+    write_rustfmt_closure(&project.0, |_| {});
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stdout).contains("rustfmt  clean"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    let older = format!("{}-rustfmt-1.95.0", "0".repeat(40));
+    write_rustfmt_closure(&project.0, |body| {
+        body["inputs"]["rustfmt_object"] = serde_json::json!(older);
+        body["rustfmt_object"]["id"] = serde_json::json!(older);
+    });
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("rustfmt  stale")
+            && text(&out.stdout).contains(&older)
+            && text(&out.stdout).contains("run 'blanket fmt'"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    write_rustfmt_closure(&project.0, |body| {
+        body.as_object_mut().unwrap().remove("inputs");
+    });
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["passed"], false);
+    assert_eq!(value["closures"][0]["freshness"], "unchecked");
+    assert!(
+        value["closures"][0]["freshness_detail"]
+            .as_str()
+            .unwrap()
+            .contains("blanket fmt"),
+        "{value}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn audit_json_handles_non_utf8_project_and_closure_paths() {
@@ -1456,23 +1544,8 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
         b'p', b'r', b'o', b'j', b'e', b'c', b't', b'-', 0xff,
     ]));
     std::fs::create_dir_all(&project).unwrap();
-    let closures = project.join(".blanket/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    let closure = closures.join("rustfmt.json");
-    std::fs::write(
-        &closure,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "rustfmt",
-            "platform": blanket::kernel::platform::Platform::host()
-                .unwrap()
-                .triple(),
-            "projected_at": 1,
-            "body": {"exceptions": []},
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    let closure = write_rustfmt_closure(&project, |_| {});
 
     let out = blanket(&project, &home.0, &["audit", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
