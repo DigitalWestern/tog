@@ -1,9 +1,9 @@
-//! The layering rules of REFACTOR.md §2, enforced by a source scan so the
-//! refactor stays done: `commands → tailors → comforter → kernel`, one
+//! The layering rules of docs/human/ARCHITECTURE.md ("Layering rules"),
+//! enforced by a source scan: `commands → tailors → comforter → kernel`, one
 //! direction only, and no tailor names another tailor.
 //!
 //! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
-//! may wire the whole crate together. Size budgets (§2 principle 5) are
+//! may wire the whole crate together. Size budgets (layering rule 5) are
 //! reported, not enforced, so drift is visible in `cargo test` output.
 
 use std::fs;
@@ -85,7 +85,7 @@ fn layer(relative: &Path) -> String {
 }
 
 /// The one-way exceptions, each documented where it lives. Adding to this
-/// list is a shared-layer review (REFACTOR.md §2 principle 2).
+/// list is a shared-layer review (layering rule 2).
 const ALLOWED: &[(&str, &str, &str)] = &[
     // Python sdists with Rust extensions build with the cargo tailor's
     // pinned toolchain. A kernel-level toolchain provider would remove this
@@ -172,7 +172,7 @@ fn layers_point_one_way() {
     }
     assert!(
         violations.is_empty(),
-        "layering violations (REFACTOR.md §2 principle 1):\n  {}",
+        "layering violations (docs/human/ARCHITECTURE.md, layering rule 1):\n  {}",
         violations.join("\n  ")
     );
 }

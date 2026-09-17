@@ -61,11 +61,11 @@ fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
     RUBY_PINS
         .iter()
         .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("ruby", platform, "stage 4"))
+        .ok_or_else(|| no_pin("ruby", platform))
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "Ruby", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Ruby")?;
     ruby_pin(platform).map(|_| ())
 }
 
@@ -243,7 +243,7 @@ pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Ruby", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Ruby")?;
     let pin = ruby_pin(platform)?;
     let identity = ruby_identity(pin);
     let id = identity.object_id();
@@ -739,7 +739,7 @@ pub fn realize_gems(
     ruby_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Ruby gems", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Ruby gems")?;
     let pin = ruby_pin(platform)?;
     validate_plan(plan)?;
     let identity = ruby_gems_identity(pin, plan);
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[test]
     fn linux_identities_pinned() {
-        // Goldens for the shared-store check (LINUX_PORT.md stage 6): a Mac
+        // Goldens for the shared-store check: a Mac
         // and a Linux box realizing the same pin must not collide, and the
         // Linux ids must not drift without a deliberate identity change.
         let pin = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();

@@ -50,11 +50,11 @@ fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
     SDK_PINS
         .iter()
         .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("dotnet-sdk", platform, "stage 4"))
+        .ok_or_else(|| no_pin("dotnet-sdk", platform))
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, ".NET SDK", "stage 4")?;
+    crate::kernel::platform::require_host(platform, ".NET SDK")?;
     sdk_pin(platform).map(|_| ())
 }
 
@@ -143,7 +143,7 @@ pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, ".NET SDK", "stage 4")?;
+    crate::kernel::platform::require_host(platform, ".NET SDK")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let pin = sdk_pin(platform)?;
     let identity = sdk_identity(pin);
@@ -932,7 +932,7 @@ pub fn realize_packages(
     project_dir: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, ".NET packages", "stage 4")?;
+    crate::kernel::platform::require_host(platform, ".NET packages")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let _ = sdk_pin(platform)?;
     let _ = preflight(project_dir)?;
@@ -1178,8 +1178,8 @@ fn ensure_dotnet_tmp_at(
         )));
     }
     if precreate_shm {
-        // Both platforms (LINUX_PORT.md stage 4 + Mac verification round
-        // 2): CoreCLR creates `shm` by mkdtemp()-ing `/tmp/.coreclr.XXXXXX`
+        // Both platforms and both sandbox backends: CoreCLR creates `shm` by
+        // mkdtemp()-ing `/tmp/.coreclr.XXXXXX`
         // and rename()-ing it into place. Inside the bwrap sandbox /tmp is
         // a private tmpfs and this directory a separate bind mount, so the
         // rename fails with EXDEV; under Seatbelt only this directory is

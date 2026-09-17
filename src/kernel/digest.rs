@@ -1,7 +1,7 @@
 //! Content digests (kernel layer): the validated `Digest` value that
 //! artifact verification, cache addressing, and object metadata share.
-//! Moved out of `fetch` so `store` can name a digest without depending
-//! on the downloader (REFACTOR.md Stage 4).
+//! The digest type lives here so artifact verification, cache addressing, and
+//! store metadata share one validated representation.
 
 use std::io;
 

@@ -1,7 +1,7 @@
 //! Python environment realization and projection (python tailor): the
 //! venv-shaped store object a plan realizes to, its input-addressed
 //! identity, and the projection of that object into a project directory.
-//! Moved out of `comforter` in REFACTOR.md Stage 4 so the comforter is
+//! It lives in the tailor, not in `comforter`, so the comforter stays
 //! ecosystem-neutral.
 
 use crate::comforter::{
@@ -57,13 +57,8 @@ pub(super) fn environment_identity(
     plan: &Plan,
     cpython_id: &str,
 ) -> io::Result<Identity> {
-    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
-        no_pin(
-            &format!("cpython {}", plan.python_version),
-            platform,
-            "stage 2",
-        )
-    })?;
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
     inputs.insert("schema".to_string(), "python-env/2".to_string());
@@ -121,13 +116,8 @@ pub(crate) fn planned_env_object_id(
     platform: Platform,
     plan: &Plan,
 ) -> io::Result<String> {
-    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
-        no_pin(
-            &format!("cpython {}", plan.python_version),
-            platform,
-            "stage 2",
-        )
-    })?;
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
     let cpython_id = python::object_id_for(platform, &pin.version)?;
     Ok(environment_identity(store, platform, plan, &cpython_id)?.object_id())
 }
@@ -142,14 +132,9 @@ pub(crate) fn realize_env_at_depth(
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Python environment", "stage 2")?;
-    let pin = python::lookup(platform, &plan.python_version).ok_or_else(|| {
-        no_pin(
-            &format!("cpython {}", plan.python_version),
-            platform,
-            "stage 2",
-        )
-    })?;
+    crate::kernel::platform::require_host(platform, "Python environment")?;
+    let pin = python::lookup(platform, &plan.python_version)
+        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
     let python_obj = python::ensure_python_for(store, pin, platform)?;
 
     // Identity planning and realization use exactly the same input builder.

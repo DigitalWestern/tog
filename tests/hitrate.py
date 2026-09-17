@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hit-rate measurement (NEXT.md item 1): does `blanket sync` work, zero
+"""Hit-rate measurement: does `blanket sync` work, zero
 config, on a random popular real project?
 
     python3 tests/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
@@ -38,7 +38,7 @@ CLASSES = [
     # --strict: any exception the permissive run would have recorded is a
     # refusal; the err column keeps the "policy denies <kind>" line.
     ("policy_denied", r"policy denies [a-z_-]+"),
-    ("platform_unsupported", r"LINUX_PORT\.md"),
+    ("platform_unsupported", r"\(unsupported platform\)|no pinned CPython satisfies"),
     ("rust_toolchain_unpinned", r"unsupported Rust toolchain"),
     ("no_manifest", r"\bno_manifest\b"),
     ("unreadable_manifest", r"unreadable_manifest"),
@@ -62,8 +62,8 @@ CLASSES = [
     ("fetch_failed", r"fetch .*: |sha256 mismatch|hash mismatch"),
 ]
 
-# Exception kinds a company policy would deny (docs/agent/ENTERPRISE-WEDGE-2026-09-11.md
-# §0). An ok that carried only other kinds (file-collision, requirement-skipped,
+# Exception kinds a company policy would deny (docs/human/policy-company.toml).
+# An ok that carried only other kinds (file-collision, requirement-skipped,
 # built_from_source, ...) still counts as a company-policy ok; strict counts
 # only oks with zero exceptions.
 COMPANY_DENY = {

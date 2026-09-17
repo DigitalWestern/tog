@@ -383,7 +383,7 @@ pub(crate) fn plan_sdist_identity_input(
     runtime_plan: Option<&Plan>,
 ) -> io::Result<SdistIdentityPlan> {
     let pin = crate::tailors::python::lookup(platform, python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))?;
+        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform))?;
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(store, &sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
@@ -971,9 +971,9 @@ fn admit_sdist_build(
             ),
         ));
     }
-    crate::kernel::platform::require_host(platform, "sdist build", "stage 3")?;
+    crate::kernel::platform::require_host(platform, "sdist build")?;
     crate::tailors::python::lookup(platform, python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform, "stage 2"))
+        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform))
 }
 
 /// Copy the verified archive into the work tree under its locked filename.

@@ -1,6 +1,6 @@
 //! From project inputs to a Python `Plan`: manifest discovery, interpreter
 //! selection, `uv` locking of unpinned requirements, the PyPI planner, and
-//! the project-local plan cache. Moved from `commands/shared.rs` (Stage 3).
+//! the project-local plan cache.
 
 use crate::comforter;
 use crate::kernel::platform::Platform;

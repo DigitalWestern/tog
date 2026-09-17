@@ -88,7 +88,7 @@ pub struct Requirement {
     pub name: String, // PEP 503 normalized
     pub version: String,
     pub sha256s: Vec<String>, // lowercase hex, no "sha256:" prefix
-    /// A `name @ git+URL@<commit>` requirement (NEXT.md item 4). The commit is
+    /// A `name @ git+URL@<commit>` requirement. The commit is
     /// the verification, so such a line carries no `--hash`.
     pub git: Option<crate::kernel::gitsrc::GitSource>,
 }

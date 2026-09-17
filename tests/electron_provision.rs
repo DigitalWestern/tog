@@ -1,4 +1,4 @@
-//! Electron provisioning (NEXT.md item 5). Heavy: downloads the real release
+//! Electron provisioning. Heavy: downloads the real release
 //! zip (~100 MB), so it is ignored by default.
 
 use blanket::kernel::platform::Platform;

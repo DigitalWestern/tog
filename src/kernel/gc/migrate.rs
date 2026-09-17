@@ -1,10 +1,10 @@
-//! Automatic maintenance and legacy metadata migration (kernel gc, D.3):
+//! Automatic maintenance and legacy metadata migration (kernel gc):
 //! additive upgrades under the exclusive lease, never a deletion permission.
 
 use super::*;
 
 // ===========================================================================
-// D.3 — automatic maintenance and legacy migration.
+// Automatic maintenance and legacy migration.
 //
 // Migration is additive maintenance, never a deletion permission. It runs
 // under the exclusive activity lease and the publication lock, upgrades only
@@ -36,7 +36,7 @@ pub fn migrate_metadata<W: Write>(
 /// There is deliberately no shared preflight: a presence check is itself a
 /// store read, and taking a shared token first would either have to be
 /// dropped before the exclusive attempt anyway or become the lock upgrade
-/// D.3 forbids. Going straight for the exclusive lease is the same decision
+/// forbids. Going straight for the exclusive lease is the same decision
 /// with one fewer window.
 ///
 /// If another job owns the store the transition is announced as deferred and

@@ -342,7 +342,7 @@ fn write_closure_inner(
     body.as_object_mut()
         .expect("validated closure body object")
         .insert("exceptions".into(), serde_json::to_value(&pending)?);
-    // Envelope-level platform (LINUX_PORT.md stage 6): a project synced on
+    // Envelope-level platform: a project synced on
     // a Mac and then on a Linux box carries two different closures over
     // time; readers must not assume the body's object ids are valid for
     // the current host. Additive field, schema unchanged.

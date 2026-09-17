@@ -62,7 +62,7 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
         .map(|pin| pin.version)
         .collect::<Vec<_>>();
     if pins.is_empty() {
-        return Err(no_pin("go", platform, "stage 4"));
+        return Err(no_pin("go", platform));
     }
     Err(err(format!(
         "internal: resolved Go {version} for {} but only {} is realizable; set go.mod's `go` or `toolchain` directive to one of the pinned versions, or add a matching verified Go pin",
@@ -72,7 +72,7 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Go toolchain")?;
     go_pins(platform).map(|_| ())
 }
 
@@ -98,7 +98,7 @@ fn go_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
     pins.sort_unstable();
     pins.dedup();
     if pins.is_empty() {
-        return Err(no_pin("go", platform, "stage 4"));
+        return Err(no_pin("go", platform));
     }
     Ok(pins)
 }
@@ -205,7 +205,7 @@ pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
 
 pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Go toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Go toolchain")?;
     // Resolve the exact row before touching the store or downloading. A
     // future catalog may carry several versions for one platform; falling
     // back to GO_VERSION here would pair the plan with the wrong toolchain.
@@ -988,7 +988,7 @@ pub fn realize_modcache(
     go_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Go module cache", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Go module cache")?;
     let pin = go_pin(platform, &plan.go_version)?;
     let identity = modcache_identity(pin, plan);
 
@@ -1744,7 +1744,7 @@ mod tests {
         assert!(e.to_string().contains(&info_hash), "{e}");
         let _ = std::fs::remove_dir_all(&temp);
     }
-    /// Characterization (REFACTOR.md Stage 4 step 3): the plan cache is the
+    /// Characterization: the plan cache is the
     /// only part of `plan_go` reachable without a real toolchain, and it is
     /// the part an attacker can edit. These pin the key formula, the
     /// validation of cached fields, and the fact that a hit never touches

@@ -1,6 +1,6 @@
-//! Helpers two or more commands share (REFACTOR.md §4 Stage 2 step 2):
-//! project-directory resolution and exit-code plumbing. The per-ecosystem
-//! input loaders that lived here moved into their tailors in Stage 3.
+//! Helpers two or more commands share: project-directory resolution and
+//! exit-code plumbing. Ecosystem-specific input loaders stay in their
+//! respective tailors.
 
 use std::io;
 use std::path::{Path, PathBuf};

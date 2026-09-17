@@ -1,4 +1,4 @@
-//! Git sources realized by commit (NEXT.md item 4).
+//! Git sources realized by commit.
 //!
 //! A commit hash is a fingerprint, so a git dependency fits the store's model
 //! exactly: the object's identity is the normalized repository URL plus the

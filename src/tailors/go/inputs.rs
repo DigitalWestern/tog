@@ -1,5 +1,5 @@
 //! From a Go project to its inputs: toolchain selection from go.mod, the
-//! `GoPlan`, and the go.sum digest. Moved from `commands/shared.rs` (Stage 3).
+//! `GoPlan`, and the go.sum digest.
 
 use crate::kernel::platform::Platform;
 use crate::kernel::store;

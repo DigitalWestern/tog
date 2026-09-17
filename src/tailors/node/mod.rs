@@ -6,9 +6,10 @@
 //! exactly that tree as an immutable store object; projection is one
 //! node_modules symlink.
 //!
-//! v0 limits: registry tarballs only for installed packages; git sources are
-//! classified for NEXT.md item 4, while local/workspace links are projected
-//! back into the project. Lifecycle scripts run in the sandbox; failures are
+//! Installed packages come from registry tarballs or from git sources pinned
+//! to a full commit; an unpinned git source is refused (or skipped with a
+//! `git-dependency` exception when optional). Local/workspace links are
+//! projected back into the project. Lifecycle scripts run in the sandbox; failures are
 //! retained as exceptions by default.
 //!
 //! Trust model: the lockfile is a TRUSTED input. Integrity pins every
@@ -152,11 +153,11 @@ pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
     NODE_PINS
         .iter()
         .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("nodejs", platform, "stage 2"))
+        .ok_or_else(|| no_pin("nodejs", platform))
 }
 
 pub fn preflight(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "Node.js", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "Node.js")?;
     node_pin(platform).map(|_| ())
 }
 
@@ -211,7 +212,7 @@ pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Node.js", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "Node.js")?;
     let node = node_pin(platform)?;
     let identity = node_identity(node);
     let id = identity.object_id();
@@ -259,7 +260,7 @@ pub struct NpmPackage {
     pub bin: Vec<(String, String)>,
     /// Verified pnpm patch applied to this package after extraction.
     pub patch: Option<NpmPatch>,
-    /// A git dependency pinned to a commit (NEXT.md item 4). When set, the
+    /// A git dependency pinned to a commit. When set, the
     /// package content comes from the realized git object, not a tarball, and
     /// `integrity` carries `git:<commit>` rather than an SRI.
     pub git: Option<crate::kernel::gitsrc::GitSource>,
@@ -519,7 +520,7 @@ pub struct DeclaredArtifact {
     pub url: String,
     pub sha256: String,
     /// Where the file must appear, relative to the sandbox HOME
-    /// (e.g. ".npm/_libvips/libvips-8.14.5-darwin-arm64v8.tar.br"; LINUX_PORT.md stage 1).
+    /// (e.g. ".npm/_libvips/libvips-8.14.5-darwin-arm64v8.tar.br").
     pub path: String,
 }
 
@@ -2001,8 +2002,8 @@ mod tests {
 
     #[test]
     fn darwin_restriction_semantics_are_unchanged_by_the_linux_selector() {
-        // Stage 1 Darwin behavior, preserved verbatim: array-only, and any
-        // negated entry makes positives irrelevant.
+        // Darwin behavior predating the Linux selector, preserved verbatim:
+        // array-only, and any negated entry makes positives irrelevant.
         let cases = [
             (r#"["darwin"]"#, true),
             (r#"["linux"]"#, false),

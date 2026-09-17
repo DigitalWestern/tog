@@ -22,11 +22,11 @@ impl Platform {
                 if Path::new("/lib64/ld-linux-x86-64.so.2").exists() {
                     Ok(Platform::X86_64UnknownLinuxGnu)
                 } else {
-                    Err("unsupported host: Linux x86_64 without glibc (musl?) — blanket pins glibc toolchains (LINUX_PORT.md)".to_string())
+                    Err("unsupported host: Linux x86_64 without glibc (musl?) — blanket pins glibc toolchains (unsupported platform)".to_string())
                 }
             }
             _ => Err(format!(
-                "unsupported host platform {OS}/{ARCH}: blanket is pinned for aarch64-apple-darwin and x86_64-unknown-linux-gnu (LINUX_PORT.md)"
+                "unsupported host platform {OS}/{ARCH}: blanket is pinned for aarch64-apple-darwin and x86_64-unknown-linux-gnu (unsupported platform)"
             )),
         }) {
             Ok(platform) => Ok(*platform),
@@ -90,17 +90,17 @@ impl Platform {
 }
 
 /// Uniform "no pin" error used by every tailor.
-pub fn no_pin(what: &str, platform: Platform, stage: &str) -> io::Error {
+pub fn no_pin(what: &str, platform: Platform) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
-            "no {what} pinned for {} (LINUX_PORT.md {stage})",
+            "no {what} pinned for {} (unsupported platform)",
             platform.triple()
         ),
     )
 }
 
-pub fn require_host(platform: Platform, what: &str, stage: &str) -> io::Result<()> {
+pub fn require_host(platform: Platform, what: &str) -> io::Result<()> {
     let host = Platform::host()?;
     if platform == host {
         return Ok(());
@@ -108,7 +108,7 @@ pub fn require_host(platform: Platform, what: &str, stage: &str) -> io::Result<(
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
-            "cannot realize {what} for {} on host {} (LINUX_PORT.md {stage})",
+            "cannot realize {what} for {} on host {} (unsupported platform)",
             platform.triple(),
             host.triple()
         ),
@@ -142,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn no_pin_names_platform_and_stage() {
-        let error = no_pin("nodejs", Platform::X86_64UnknownLinuxGnu, "stage 2");
+    fn no_pin_names_platform() {
+        let error = no_pin("nodejs", Platform::X86_64UnknownLinuxGnu);
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         let text = error.to_string();
         assert!(text.contains("x86_64-unknown-linux-gnu"));
-        assert!(text.contains("LINUX_PORT.md"));
+        assert!(text.contains("unsupported platform"));
     }
 }

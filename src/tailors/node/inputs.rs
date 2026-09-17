@@ -1,6 +1,5 @@
 //! From a Node project to its inputs: missing-lock generation through the
-//! store npm and the lockfile-to-`NpmPlan` importers. Moved from
-//! `commands/shared.rs` (Stage 3).
+//! store npm and the lockfile-to-`NpmPlan` importers.
 
 use crate::kernel::platform::Platform;
 use crate::kernel::store;

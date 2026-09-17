@@ -1,7 +1,6 @@
 //! Signal and PTY acceptance coverage for the supervised child lifetime.
 //!
-//! These are the B.6/B.8 cases from BLANKET-IMPLEMENTATION-PLAN.md that need a
-//! real process tree: a supervisor in its own process, a real child, and real
+//! These are the supervision cases that need a real process tree: a supervisor in its own process, a real child, and real
 //! signal delivery. This binary re-executes itself with
 //! `BLANKET_SUPERVISE_SCENARIO` set; the ignored `supervisor_harness` test
 //! below then plays the supervisor and prints markers the cases wait for.
@@ -796,7 +795,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
 
 // ------------------------------------------------------------------- cases
 
-/// B.8: a parent TERM during an ordinary wait reaches the child, and the
+/// A parent TERM during an ordinary wait reaches the child, and the
 /// store stays protected until the child is actually reaped.
 #[test]
 fn parent_term_reaches_the_child_and_holds_activity_until_reap() {
@@ -835,7 +834,7 @@ fn parent_term_reaches_the_child_and_holds_activity_until_reap() {
     assert!(!alive(child), "child survived its supervisor");
 }
 
-/// B.8: TERM anywhere across the spawn boundary is either rejected before
+/// TERM anywhere across the spawn boundary is either rejected before
 /// launch or delivered to the launched child. It is never lost, and it never
 /// leaves a child running behind a supervisor that reported success.
 #[test]
@@ -880,7 +879,7 @@ fn term_across_the_spawn_boundary_is_never_lost() {
     );
 }
 
-/// B.8: repeated parent TERM stays meaningful; the supervisor does not
+/// Repeated parent TERM stays meaningful; the supervisor does not
 /// permanently suppress every TERM after the first.
 #[test]
 fn repeated_parent_term_is_forwarded_every_time() {
@@ -898,7 +897,7 @@ fn repeated_parent_term_is_forwarded_every_time() {
     store.wait_until_free();
 }
 
-/// B.8: sequential children through one lease preserve numeric exits, and a
+/// Sequential children through one lease preserve numeric exits, and a
 /// signalled child maps to 128 + signal at the command boundary while the raw
 /// wait status still says "signalled". Session reset across those children is
 /// covered by `spawn_failure_restores_dispositions`, which is the case that
@@ -916,16 +915,14 @@ fn sequential_children_preserve_numeric_and_signal_exits() {
     store.wait_until_free();
 }
 
-/// B.2: supervision owns process-wide signal dispositions, so a second
+/// Supervision owns process-wide signal dispositions, so a second
 /// concurrent session in one process is refused as busy instead of waiting on
 /// a process-global mutex.
 ///
-/// NOTE (2026-09-09): the rejection this asserts is under active dispute --
-/// it makes `cargo::tests::realizes_vendor_and_writes_complete_checksums`
-/// fail, because independent unit tests supervise children from sibling
-/// threads of one process, which B.2 explicitly permits. See the REVIEW.md
-/// round row; if the blocking session lock is restored, delete this case with
-/// it.
+/// The rejection is current, deliberate behavior: unit tests that supervise
+/// children from sibling threads serialize on `SUPERVISION_TEST_LOCK`. If
+/// supervision becomes per-operation (FOLLOW-UPS.md, "Supervision redesign"),
+/// delete this case.
 #[test]
 fn a_second_supervisory_session_is_refused_rather_than_queued() {
     let store = TempStore::new("session-busy");
@@ -941,7 +938,7 @@ fn a_second_supervisory_session_is_refused_rather_than_queued() {
     store.wait_until_free();
 }
 
-/// B.6: the wait is driven by the child transition itself, not by a timer.
+/// The wait is driven by the child transition itself, not by a timer.
 /// Under the former 100 ms poll every reap was rounded up to the next tick,
 /// so fifteen children that each live just past one tick paid roughly a
 /// second of pure waiting on top of their own runtime.
@@ -972,7 +969,7 @@ fn a_child_exit_wakes_the_supervisor_without_waiting_for_a_poll_tick() {
     store.wait_until_free();
 }
 
-/// B.6.1: a failed spawn restores the inherited dispositions, so the next
+/// A failed spawn restores the inherited dispositions, so the next
 /// child still runs and a later TERM kills the supervisor normally instead
 /// of being swallowed by a leftover handler.
 #[test]
@@ -1010,7 +1007,7 @@ fn spawn_failure_restores_dispositions() {
     store.wait_until_free();
 }
 
-/// B.7: no child sees the activity lease descriptor.
+/// No child sees the activity lease descriptor.
 #[cfg(target_os = "linux")]
 #[test]
 fn children_do_not_inherit_the_activity_descriptor() {
@@ -1027,7 +1024,7 @@ fn children_do_not_inherit_the_activity_descriptor() {
     store.wait_until_free();
 }
 
-/// B.6: SIGPIPE is characterised, not "fixed". The child gets the
+/// SIGPIPE is characterised, not "fixed". The child gets the
 /// toolchain's default disposition rather than Blanket's inherited ignore.
 #[test]
 fn sigpipe_reaches_the_child_with_the_toolchain_default() {
@@ -1047,7 +1044,7 @@ fn sigpipe_reaches_the_child_with_the_toolchain_default() {
     store.wait_until_free();
 }
 
-/// B.6.4: a child that stops itself keeps the supervisor waiting and the
+/// A child that stops itself keeps the supervisor waiting and the
 /// store protected; continuing it lets the job finish normally.
 #[cfg(target_os = "linux")]
 #[test]
@@ -1069,7 +1066,7 @@ fn a_child_that_stops_itself_keeps_the_store_protected() {
     store.wait_until_free();
 }
 
-/// B.8: terminal ^Z stops the whole foreground group, the controlling
+/// Terminal ^Z stops the whole foreground group, the controlling
 /// process can observe the stopped job as a shell would, and continuing it
 /// resumes both processes.
 #[cfg(target_os = "linux")]
@@ -1110,7 +1107,7 @@ fn terminal_stop_and_continue_covers_the_whole_group() {
     store.wait_until_free();
 }
 
-/// B.8: terminal INT reaches a trapping child once, through terminal group
+/// Terminal INT reaches a trapping child once, through terminal group
 /// delivery rather than through forwarding.
 #[test]
 fn terminal_interrupt_reaches_a_trapping_child_once() {
@@ -1128,7 +1125,7 @@ fn terminal_interrupt_reaches_a_trapping_child_once() {
     store.wait_until_free();
 }
 
-/// B.6: a group-directed TERM reaches parent and child. The documented
+/// A group-directed TERM reaches parent and child. The documented
 /// guarantee is only that the child terminates, not exactly-once delivery,
 /// so this records the delivery count instead of asserting one.
 #[test]
@@ -1151,7 +1148,7 @@ fn group_term_terminates_the_child_without_promising_exactly_once() {
     store.wait_until_free();
 }
 
-/// B.8: SIGKILL of the supervisor cannot be caught. The lease is released
+/// SIGKILL of the supervisor cannot be caught. The lease is released
 /// and the child may survive; the boundary is documented, not defended, so
 /// the case records what happened and cleans up after itself.
 #[test]
@@ -1171,7 +1168,7 @@ fn supervisor_sigkill_releases_activity_and_may_orphan_the_child() {
     unsafe { libc::kill(child, libc::SIGKILL) };
 }
 
-/// B.8: a nested exclusive command reports busy instead of waiting forever
+/// A nested exclusive command reports busy instead of waiting forever
 /// on the lease its own parent holds.
 #[test]
 fn a_nested_exclusive_command_reports_busy() {
@@ -1192,7 +1189,7 @@ fn a_nested_exclusive_command_reports_busy() {
     store.wait_until_free();
 }
 
-/// B.8: a nested read-only command simply completes.
+/// A nested read-only command simply completes.
 #[test]
 fn a_nested_read_only_command_completes() {
     let store = TempStore::new("nested-roots");
@@ -1202,7 +1199,7 @@ fn a_nested_read_only_command_completes() {
     store.wait_until_free();
 }
 
-/// B.5: captured output larger than a pipe buffer is drained while the child
+/// Captured output larger than a pipe buffer is drained while the child
 /// runs, so waiting for the child cannot deadlock.
 #[test]
 fn captured_output_larger_than_a_pipe_buffer_does_not_deadlock() {

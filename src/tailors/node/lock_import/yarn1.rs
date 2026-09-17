@@ -77,7 +77,7 @@ pub(super) fn parse_yarn_entries(lock: &str) -> io::Result<Vec<YarnEntry>> {
         let trimmed = text.trim();
         if trimmed.starts_with("__metadata:") || trimmed.starts_with("checksum:") {
             return Err(err(format!(
-                "yarn berry lockfiles carry cache-zip checksums, not tarball hashes (item 7, line {line}); run npm install --package-lock-only or pnpm import"
+                "yarn berry lockfiles carry cache-zip checksums, not tarball hashes (line {line}); run npm install --package-lock-only or pnpm import"
             )));
         }
     }

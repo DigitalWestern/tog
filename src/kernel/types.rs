@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// A git dependency pinned to a commit (NEXT.md item 4). Realized by
-/// `kernel::gitsrc`; lives here so `types` does not depend on it.
+/// A git dependency pinned to a commit. Realized by `kernel::gitsrc`; lives
+/// here so `types` does not depend on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitSource {
     /// Normalized: no `git+` prefix or fragment. HTTP credentials are removed
@@ -66,7 +66,7 @@ pub struct LockedPackage {
     pub url: String,
     pub sha256: String,
     pub kind: ArtifactKind,
-    /// A git dependency pinned to a commit (NEXT.md item 4). The checkout is
+    /// A git dependency pinned to a commit. The checkout is
     /// packed into a deterministic sdist before building, so everything
     /// downstream — build-system inspection, isolated build envs, identity —
     /// is the ordinary sdist path. Absent for registry packages, so plans

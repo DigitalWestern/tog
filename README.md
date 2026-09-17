@@ -15,8 +15,8 @@ back atomically.
 | [docs/human/ARCHITECTURE.md](docs/human/ARCHITECTURE.md) | how it works |
 | [docs/human/CLI.md](docs/human/CLI.md) | the command surface (spec) |
 | [docs/human/LIMITATIONS.md](docs/human/LIMITATIONS.md) | what it honestly cannot do |
-| [FOLLOW-UPS.md](FOLLOW-UPS.md) | what is owed and flagged |
-| [docs/agent/](docs/agent/) | review ledgers, evidence, design history (for agents) |
+| [FOLLOW-UPS.md](FOLLOW-UPS.md) | the to-do list and open decisions |
+| [docs/agent/DESIGNS.md](docs/agent/DESIGNS.md) | designed but unbuilt work (for agents) |
 
 ## Host prerequisites
 

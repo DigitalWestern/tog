@@ -2,12 +2,9 @@
 
 Rust workspace: universal package-manager kernel. Start with STATUS.md
 (where the project is, what is next) and docs/human/ARCHITECTURE.md (how
-it works). Design history lives in blanket-notes.md; the full archived
-plan is docs/agent/PLAN-2026-09-09.md. REFACTOR.md is the structural refactor plan and
-change log (read it before touching module layout). docs/agent/REVIEW.md is the review
-ledger — check it before trusting a recent feature. docs/agent/NEXT.md is
-a frozen index of shipped item numbers (code comments cite it; do not
-rename or reuse numbers). Run `cargo fmt --check` before committing.
+it works, including the layering rules). FOLLOW-UPS.md is the only to-do
+list; docs/agent/DESIGNS.md holds designed-but-unbuilt features. Run
+`cargo fmt --check` before committing.
 
 - Layers point one way: `commands → tailors → comforter → kernel`; `cli` is
   pure grammar. The kernel never names a tailor; a tailor never names another
@@ -42,9 +39,12 @@ rename or reuse numbers). Run `cargo fmt --check` before committing.
   with `BLANKET_SANDBOX_TESTS=required` and `TMPDIR` on a real disk (the
   tests keep per-run stores under TMPDIR; a 12 GB tmpfs fills). The
   offline checks in acceptance.sh use `unshare -rn` on Linux.
-- docs/agent/LINUX_PORT.md is the port's changelog; append to it when you
-  change platform behavior.
-- Documentation layout: root + docs/human/ are for humans (concise, current);
-  docs/agent/ is for agents (ledgers, evidence, archives — verbose is fine
-  there). When a document stops being current, archive it under docs/agent/
-  rather than letting it lie at the root.
+- When you change platform behavior, update the Platforms section of
+  docs/human/ARCHITECTURE.md.
+- Documentation stays small. Root + docs/human/ are for humans (concise,
+  current); docs/agent/ holds only DESIGNS.md and HITRATE.md. Do not create
+  ledgers, review reports, evidence dumps, or changelogs: review results go
+  in the pull request description, history is git. When a feature ships,
+  move its description from DESIGNS.md into docs/human/ and delete its
+  FOLLOW-UPS.md item. Code comments describe behavior; they do not cite plan
+  item numbers or documents that may be deleted.

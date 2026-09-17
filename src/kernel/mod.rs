@@ -1,6 +1,6 @@
 //! The kernel: the ecosystem-agnostic core (store, fetch, sandbox, policy,
 //! GC, supervision). Nothing in this folder may name a tailor or a command;
-//! cross-layer knowledge flows through traits and data (REFACTOR.md §2).
+//! cross-layer knowledge flows through traits and data.
 
 pub mod activity;
 pub mod archive;

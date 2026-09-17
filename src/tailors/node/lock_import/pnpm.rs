@@ -414,7 +414,7 @@ pub(super) fn source_error(
     name: &str,
     resolution: Option<&BTreeMap<String, YamlValue>>,
 ) -> Option<String> {
-    // A commit hash is a fingerprint: pinned git sources are realized (item 4).
+    // A commit hash is a fingerprint: pinned git sources are realized.
     if pinned_git_source(resolution).is_some() {
         return None;
     }
@@ -424,6 +424,7 @@ pub(super) fn source_error(
     if kind == "git" || repo.is_some() {
         let repo = repo.unwrap_or("(unknown repository)");
         let commit = yaml_str(resolution.get("commit")).unwrap_or("unspecified commit");
+        // Same persisted wording as `git_dependency_detail`; do not reword.
         return Some(
             crate::tailors::node::git_dependency_detail(name, &format!("git+{repo}#{commit}"))
                 .unwrap_or_else(|| {
@@ -950,7 +951,7 @@ fn plan_pnpm_with_recorder(
     let version = version.trim_end_matches(".0");
     if version != "9" && version != "6" {
         return Err(err(format!(
-            "unsupported pnpm lockfileVersion {:?} (item 7 supports 9.0 and 6.0)",
+            "unsupported pnpm lockfileVersion {:?} (blanket supports 9.0 and 6.0)",
             yaml_str(root.get("lockfileVersion")).unwrap_or_default()
         )));
     }

@@ -465,7 +465,7 @@ mod tests {
     /// A BEAM toolchain fixture plus the fingerprint a `hex-deps` record
     /// would use to name it. The fingerprint is not an object id, so the
     /// adapter has to find the object by recomputing it — which is exactly
-    /// the indirect-reference case D.3 calls out.
+    /// the indirect-reference case covered by this adapter.
     fn beam_fixture(store: &Store) -> (String, String) {
         let otp = "1".repeat(64);
         let elixir = "2".repeat(64);
@@ -1238,10 +1238,10 @@ mod tests {
     }
 
     // =======================================================================
-    // D.10 acceptance tests.
+    // GC safety acceptance tests.
     //
-    // Each name below is one of the failure modes the GC-safety brief lists.
-    // The x-cleanup pair lives with the code it covers, in `xrun::tests`.
+    // Each name below covers one GC-safety failure mode. The x-cleanup pair
+    // lives with the code it covers, in `xrun::tests`.
     // =======================================================================
 
     /// Register `project` as a durable root/2 record naming `objects`.
@@ -1952,7 +1952,7 @@ mod tests {
         assert!(store.object_path(&live).is_dir(), "{real_text}");
     }
 
-    /// The same property, stated the way D.10 names it: the dry run's
+    /// The dry run's
     /// in-memory adaptation and the real sweep's published one must agree.
     #[test]
     fn dry_run_adapts_in_memory_and_matches_real_plan_at_the_same_time() {
@@ -2456,10 +2456,10 @@ mod tests {
     }
 
     // =======================================================================
-    // C.10 matrix items that Package D interacts with.
+    // Cross-component retention cases that this sweep interacts with.
     //
     // These are root-record and projection retention cases whose behaviour D's
-    // sweep now decides. The rest of C.10 belongs to Package C.
+    // sweep now decides. Other retention cases belong with their owners.
     // =======================================================================
 
     /// Publication writes the durable record before the closure. A crash in
@@ -2702,7 +2702,7 @@ mod tests {
         );
     }
 
-    /// D.5: a preview separates what it would delete from what retention kept
+    /// A preview separates what it would delete from what retention kept
     /// and from what blocked it. The retention category is the one a sweep
     /// can silently fold into "nothing to do", so it is asserted explicitly.
     #[test]
@@ -2762,7 +2762,7 @@ mod tests {
             "a blocked preview still authorized a deletion: {text}"
         );
     }
-    /// Characterization (REFACTOR.md Stage 4 step 3): the read phase's
+    /// Characterization: the read phase's
     /// structural refusals. Every other gc test drives `read` through a
     /// healthy store; these pin the four "refusing to sweep" stops that
     /// guard the object, metadata, cache and stage enumerations, so an

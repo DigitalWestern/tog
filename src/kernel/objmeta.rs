@@ -685,7 +685,7 @@ fn enforce_live_grammar(identity: &Identity, adapter: &KindAdapter) -> Result<()
 /// producer that started writing a new input, or stopped writing a required
 /// one, committed fine; the stale row bit much later, during a migration, on
 /// a store nobody could re-create. This closes that gap by reading the row at
-/// commit time (FOLLOW-UPS item 7).
+/// commit time.
 ///
 /// A kind absent from every row is refused. This closes the typo path where a
 /// producer can commit a kind such as `cpythno` without any grammar at all.
@@ -2255,7 +2255,7 @@ mod tests {
         ));
     }
 
-    // -- FOLLOW-UPS item 7: commit-time grammar drift ----------------------
+    // -- commit-time grammar drift -------------------------------------------
 
     /// The commit-time check reads the same row the migration path reads, so
     /// a producer that drifts from its row fails at the commit that drifts,

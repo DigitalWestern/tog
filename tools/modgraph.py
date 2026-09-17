@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Module-graph metrics for the structural refactor (REFACTOR.md §1).
+"""Module-graph metrics: the size and dependency numbers behind the layering rules.
 
 Re-run with `python3 tools/modgraph.py` from the repo root. Prints the
 baseline table: file count, line counts, oversize files and functions,
