@@ -12,7 +12,7 @@ trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 pass=0; fail=0
 
 # Network-denied wrapper for the offline checks: Seatbelt on macOS, a user +
-# network namespace on Linux (unshare -rn). LINUX_PORT.md stage 2.
+# network namespace on Linux (unshare -rn).
 deny_net() {
   case "$(uname -s)" in
     Darwin) sandbox-exec -p '(version 1)(allow default)(deny network*)' "$@" ;;

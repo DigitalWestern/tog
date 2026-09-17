@@ -5,7 +5,7 @@
 use super::*;
 
 // ===========================================================================
-// D.4 — the four sweep phases.
+// The four sweep phases.
 //
 // `read` gathers every root, record and directory entry the decision needs
 // and holds a descriptor for each directory it may later delete from.
@@ -614,7 +614,7 @@ fn read_projections(store: &Store) -> io::Result<Projections> {
 ///
 /// Root *resolution* happens here rather than in `validate` because it is an
 /// I/O probe, not a structural check; either way it runs before anything can
-/// be deleted, which is the property D.4 is protecting.
+/// be deleted, which is the safety property this phase protects.
 pub(super) fn read<W: Write>(
     store: &Store,
     activity: &StoreActivity,

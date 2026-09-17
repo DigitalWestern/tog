@@ -37,11 +37,11 @@ fn component(platform: Platform) -> io::Result<&'static RustfmtComponent> {
     RUSTFMT_COMPONENTS
         .iter()
         .find(|component| component.platform == platform)
-        .ok_or_else(|| no_pin("rustfmt component", platform, "stage 4"))
+        .ok_or_else(|| no_pin("rustfmt component", platform))
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "rustfmt component", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "rustfmt component")?;
     component(platform).map(|_| ())
 }
 
@@ -104,7 +104,7 @@ pub fn ensure_rustfmt(
     rust_object: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "rustfmt component", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "rustfmt component")?;
     let expected_rust_id = cargo::rust_object_id(platform, rust_version)?;
     let rust_object = rust_object.canonicalize()?;
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {

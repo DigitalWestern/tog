@@ -1,4 +1,4 @@
-//! Git dependencies realized by commit (NEXT.md item 4). Heavy: realizes Node
+//! Git dependencies realized by commit. Heavy: realizes Node
 //! and a git source, so it is ignored by default.
 //!
 //! The fixture repository is local and served over `file://`, so this needs no

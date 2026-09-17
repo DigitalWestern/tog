@@ -195,9 +195,9 @@ impl Session {
         // A single process-wide signal session owns the temporary signal
         // dispositions and child-pid slot, so only one child in this process
         // can be supervised at a time. Report that as busy rather than
-        // waiting for it. B.2 forbids a process-global mutex that blocks one
-        // store's operation behind another's, and B's whole convention is
-        // that contention is a named outcome: an unbounded wait here would be
+        // waiting for it. Independent operations must not queue behind a
+        // process-global mutex, and contention across the store's locks is
+        // always a named outcome: an unbounded wait here would be
         // the same silent self-deadlock shape as a shared helper called under
         // its own exclusive lease, with no error and no timeout to end it.
         // No production path supervises two children at once — every entry

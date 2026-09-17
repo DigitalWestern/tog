@@ -1,4 +1,4 @@
-//! Install-time artifact policy (NEXT.md item 5).
+//! Install-time artifact policy.
 //!
 //! Install scripts run with the network denied, so a package that downloads
 //! something at install time fails unless blanket does one of three things:

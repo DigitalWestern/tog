@@ -1,7 +1,7 @@
 //! What every store-backed command needs: the validated host platform, an
 //! opened store, and the shared activity lease that keeps GC from racing
-//! the command (REFACTOR.md §4 Stage 2 step 1). Kernel layer, so that a
-//! tailor can take a `&Context` without naming the command layer.
+//! the command. Kernel layer, so that a tailor can take a `&Context` without
+//! naming the command layer.
 
 use crate::kernel::activity::{ActivityMode, StoreActivity};
 use crate::kernel::gc;

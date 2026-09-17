@@ -1,6 +1,6 @@
 //! The tailors: one folder per ecosystem adapter. Each tailor is a leaf of
 //! the module graph: it depends on the kernel and the comforter, never on
-//! another tailor or on a command (REFACTOR.md §2).
+//! another tailor or on a command.
 //!
 //! `Tailor` is the one blueprint every ecosystem implements and
 //! `registry()` is the only list of ecosystems in the crate. A command

@@ -2,7 +2,7 @@
 //! and the gem closure (racc compiles a C extension in the sandbox; on
 //! Linux, source nokogiri builds its vendored libxml2/libxslt there too).
 //!
-//! On Linux this is the stream-RUBY supervisor gate (LINUX_PORT.md stage 4):
+//! On Linux it is also the Ruby relocation gate:
 //! it also records the ELF / RbConfig / pkg-config relocation observations
 //! for the realized Ruby object and proves nothing at runtime depends on a
 //! staging directory, a Homebrew prefix, or a host Ruby.
@@ -229,7 +229,7 @@ fn is_glibc_soname(soname: &str) -> bool {
         // Not glibc, but a host library every source-built native gem may
         // legitimately link: nokogiri's vendored libxml2 links the host zlib
         // (zlib-ng-compat-devel on Fedora). Same trust class as the host C
-        // toolchain (LINUX_PORT.md decision 7).
+        // toolchain (docs/human/ARCHITECTURE.md, Platforms).
         "libz.so",
     ]
     .iter()
@@ -267,7 +267,7 @@ fn assert_elf_resolves_from_system(elf: &Path, staging: &Path) {
     assert_no_forbidden_prefix(&ldd, staging, "ldd resolution");
 }
 
-/// Relocation observations for the realized Linux Ruby object (brief §3).
+/// Relocation observations for the realized Linux Ruby object.
 /// Returns the interpreter's own `Gem::Platform.local`.
 fn linux_toolchain_observations(project: &Path, ruby: &Path, staging: &Path) -> String {
     let ruby_obj = ruby.canonicalize().unwrap();

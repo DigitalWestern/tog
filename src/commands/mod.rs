@@ -1,4 +1,4 @@
-//! The command layer: one file per user-facing verb (REFACTOR.md §3). This
+//! The command layer: one file per user-facing verb. This
 //! is the only layer that knows about every tailor *and* the kernel; the
 //! binary parses arguments and calls `resolve` then `dispatch`.
 

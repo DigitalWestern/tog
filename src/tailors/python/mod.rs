@@ -173,8 +173,8 @@ fn parse_pinned_version(version: &str) -> Option<crate::tailors::python::pep440:
 }
 
 pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<String> {
-    let pin = lookup(platform, version)
-        .ok_or_else(|| no_pin(&format!("cpython {version}"), platform, "stage 2"))?;
+    let pin =
+        lookup(platform, version).ok_or_else(|| no_pin(&format!("cpython {version}"), platform))?;
     Ok(cpython_identity(pin).object_id())
 }
 
@@ -251,10 +251,10 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 }
 
 pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "CPython", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "CPython")?;
     lookup(platform, version)
         .map(|_| ())
-        .ok_or_else(|| no_pin(&format!("cpython {version}"), platform, "stage 2"))
+        .ok_or_else(|| no_pin(&format!("cpython {version}"), platform))
 }
 
 /// Pinned uv (resolver delegation target). Single static binary per platform;
@@ -312,11 +312,11 @@ pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "uv", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "uv")?;
     let pin = UV
         .iter()
         .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("uv", platform, "stage 2"))?;
+        .ok_or_else(|| no_pin("uv", platform))?;
     let identity = uv_identity(pin);
     let id = identity.object_id();
     if store.has(&id)? {
@@ -359,12 +359,12 @@ pub(crate) fn ensure_python_for(
     platform: Platform,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "CPython", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "CPython")?;
     if pin.platform != platform {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "CPython pin {} is for {}, not host {} (LINUX_PORT.md stage 2)",
+                "CPython pin {} is for {}, not host {} (unsupported platform)",
                 pin.version,
                 pin.platform.triple(),
                 platform.triple()

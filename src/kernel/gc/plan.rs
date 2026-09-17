@@ -242,7 +242,7 @@ pub(super) fn plan(validated: &Validated, options: &Options) -> io::Result<Sweep
             continue;
         }
         // Kept by retention policy, or reachable from something that is.
-        // This *is* a decision, and D.5 requires it to be visible next to
+        // This *is* a decision, and it must be visible next to
         // the deletion candidates rather than silently folded into them.
         if validated.live.contains(&entry.id) {
             let reason = if recent_at(snapshot.now, &entry.stat, ACTIVE_WINDOW) {

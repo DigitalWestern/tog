@@ -1,6 +1,6 @@
 //! From a Cargo project to its inputs: toolchain resolution, workspace root
 //! discovery through the pinned Cargo, missing-lock generation, and the
-//! `CargoPlan`. Moved from `commands/shared.rs` (Stage 3).
+//! `CargoPlan`.
 
 use crate::kernel::platform::Platform;
 use crate::kernel::store;

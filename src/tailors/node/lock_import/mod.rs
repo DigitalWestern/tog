@@ -335,7 +335,7 @@ fn realizable_node<'a>(
         return Err(err(format!("{}@{}: {detail}", node.name, node.version)));
     }
     // A git source is verified by its commit, so it legitimately
-    // has no tarball integrity (item 4).
+    // has no tarball integrity.
     let node_git = lock_git_source(&node.url, !node.integrity.is_empty());
     if node.integrity.is_empty() && node_git.is_none() {
         if dependency.optional || node.optional {
@@ -1256,7 +1256,7 @@ packages:
 snapshots: {}
 ";
         let error = plan_pnpm(Platform::X86_64UnknownLinuxGnu, required, &dir).unwrap_err();
-        assert!(error.to_string().contains("item 4"));
+        assert!(error.to_string().contains("npm_git_dep"));
 
         let optional = required
             .replace("dependencies:", "optionalDependencies:")
@@ -1423,7 +1423,7 @@ is-number@^6.0.0:
         let berry = "__metadata:\n  version: 6\n";
         let error =
             plan_yarn(Platform::X86_64UnknownLinuxGnu, berry, package_json, &dir).unwrap_err();
-        assert!(error.to_string().contains("item 7"));
+        assert!(error.to_string().contains("cache-zip checksums"));
         let _ = fs::remove_dir_all(dir);
     }
 

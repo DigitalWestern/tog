@@ -1042,11 +1042,11 @@ fn add_under_a_pnpm_workspace_that_does_not_list_the_project_refuses_offline() {
 }
 
 // ---------------------------------------------------------------------------
-// D.10: `x --clean` may unregister a root only after successful cleanup.
+// `x --clean` may unregister a root only after successful cleanup.
 //
 // Both cases run offline through the real binary with a per-child HOME and
 // BLANKET_STORE, so they belong in the ordinary suite rather than behind
-// `--ignored`. See BLANKET-IMPLEMENTATION-PLAN.md §5.4 D.8.
+// `--ignored`.
 // ---------------------------------------------------------------------------
 
 /// Build an x environment that the store has a durable root record for.
@@ -1247,7 +1247,7 @@ fn failed_x_cleanup_retains_the_root_record() {
     );
 }
 
-/// C.10: cleanup must recover the originating store from either spelling —
+/// Cleanup must recover the originating store from either spelling —
 /// the explicit `x.json` marker, or a legacy environment's closure records —
 /// and act on that store's registry, never on the caller's `BLANKET_STORE`.
 #[test]

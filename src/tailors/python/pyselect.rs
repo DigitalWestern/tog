@@ -320,7 +320,7 @@ fn no_satisfying_pin(
     io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
-            "no pinned CPython satisfies {constraint} from {source} on {} (pinned: {versions}; LINUX_PORT.md stage 2)",
+            "no pinned CPython satisfies {constraint} from {source} on {} (pinned: {versions})",
             platform.triple()
         ),
     )
@@ -417,8 +417,8 @@ pub fn parse_python_version_file(text: &str, source: &str) -> io::Result<Explici
 }
 
 /// Collect all interpreter constraints that already exist in a project.
-/// Dependency parsing remains the responsibility of item 10; this function
-/// only reads metadata needed to choose the CPython pin.
+/// Dependency parsing happens in the manifest modules; this function only
+/// reads metadata needed to choose the CPython pin.
 pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
     let mut inputs = PythonInputs::default();
     let version_path = dir.join(".python-version");
@@ -511,8 +511,9 @@ pub fn collect_project_inputs(dir: &Path) -> io::Result<PythonInputs> {
     if setup_py.is_file() {
         let text = std::fs::read_to_string(&setup_py)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", setup_py.display())))?;
-        // Interim item-8 scan; item 10's sandboxed egg_info dump replaces
-        // this because setup.py may compute python_requires dynamically.
+        // A static text scan. setup.py may compute python_requires
+        // dynamically, which this cannot see; a sandboxed egg_info dump
+        // would.
         if let Some(value) = extract_setup_py_python_requires(&text) {
             inputs
                 .constraints

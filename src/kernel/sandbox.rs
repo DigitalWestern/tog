@@ -1,4 +1,5 @@
-//! Hermetic build sandbox (macOS backend: sandbox-exec/Seatbelt; Linux backend: LINUX_PORT.md stage 3).
+//! Hermetic build sandbox with sandbox-exec/Seatbelt on macOS and bubblewrap
+//! on Linux.
 //!
 //! Deny-by-default profile: no network, reads limited to declared inputs
 //! (store + system runtime), writes limited to the build's private

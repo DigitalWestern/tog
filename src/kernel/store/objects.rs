@@ -210,7 +210,7 @@ impl Store {
     /// convenience form that infers a dependency set from the identity map:
     /// an inferred set is a guess, and `commit_internal_impl` stamps what it
     /// is given as `evidence: "explicit"`. Certifying a guess as explicit is
-    /// exactly the defect the 2026-09-09 review rejected Package D for.
+    /// exactly the failure this explicit-evidence boundary prevents.
     pub fn commit_with_deps(
         &self,
         identity: &Identity,
@@ -255,7 +255,7 @@ impl Store {
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
         self.require_activity(activity, "store publication")?;
         validate_object_deps(self, activity, deps)?;
-        // Grammar drift check (FOLLOW-UPS item 7). Each `KindAdapter` row
+        // Grammar drift check. Each `KindAdapter` row
         // claims to describe the inputs its producer writes *today*, but the
         // rows were only ever read by the legacy-migration path, so a
         // producer could drift away from its row and nothing would notice

@@ -1180,7 +1180,7 @@ mod tests {
         let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
         assert!(value["checks"].as_array().unwrap().len() >= 8);
     }
-    /// Characterization (REFACTOR.md Stage 4 step 3): `doctor`'s value is
+    /// Characterization: `doctor`'s value is
     /// the order and the wording of what it prints, so pin both. The
     /// existing `doctor_reports_host_and_project` only asserts that the
     /// names are present.

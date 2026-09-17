@@ -47,7 +47,7 @@ const OTP_PINS: &[OtpPin] = &[
         url: "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz",
         sha256: "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d",
     },
-    // Our own source build (LINUX_PORT.md stage 4: hex.pm bob's Ubuntu build
+    // Our own source build: hex.pm bob's Ubuntu build
     // needs OpenSSL SM4 symbols Fedora omits). A `make release` tree: root
     // entries ./Install ./bin ./erts-17.0.5 ./lib ./releases ./misc ./usr —
     // UNINSTALLED, bin/erl does not exist until Install runs. Provenance
@@ -63,11 +63,11 @@ fn otp_pin(platform: Platform) -> io::Result<&'static OtpPin> {
     OTP_PINS
         .iter()
         .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("beam/otp", platform, "stage 4"))
+        .ok_or_else(|| no_pin("beam/otp", platform))
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "BEAM toolchain")?;
     otp_pin(platform).map(|_| ())
 }
 
@@ -499,7 +499,8 @@ fn otp_install_spec(otp_root: &Path, final_root: &Path, scratch: &Path) -> io::R
 /// must fail, not hang). This is a verified-artifact unpack step — sed, cp,
 /// ln, chmod over the staged tree, the same trust class as the tar/unzip
 /// calls around it, not a project build — so it does not go through the
-/// build sandbox (Unsupported on Linux until LINUX_PORT.md stage 3 lands).
+/// build sandbox (unsupported on Linux because the installer is a verified
+/// unpack step rather than a project build).
 /// Its result is checked by verify_otp_install, including a whole-tree scan
 /// for the staging prefix and a runtime probe before anything is committed.
 #[cfg(test)]
@@ -868,7 +869,7 @@ pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
 
 pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "BEAM toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "BEAM toolchain")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let pin = otp_pin(platform)?;
     let identity = beam_identity(pin, &store.root)?;
@@ -1350,7 +1351,7 @@ pub fn realize_deps(
     beam_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Hex dependencies", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Hex dependencies")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let _ = otp_pin(platform)?;
     validate_plan(plan)?;

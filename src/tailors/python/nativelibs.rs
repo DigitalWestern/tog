@@ -527,7 +527,7 @@ pub struct NativeLibSet {
 pub fn packages(platform: Platform) -> io::Result<&'static [NativePackage]> {
     match platform {
         Platform::X86_64UnknownLinuxGnu => Ok(LINUX_NATIVE_PACKAGES),
-        Platform::Aarch64AppleDarwin => Err(no_pin("native library set", platform, "stage 3")),
+        Platform::Aarch64AppleDarwin => Err(no_pin("native library set", platform)),
     }
 }
 
@@ -590,7 +590,7 @@ pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
 
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "native library set", "stage 3")?;
+    crate::kernel::platform::require_host(platform, "native library set")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(store, platform)?;
     let id = identity.object_id();

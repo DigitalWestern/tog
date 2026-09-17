@@ -1,5 +1,4 @@
-//! Pre-materialization archive validation and delegated extraction
-//! (PLAN.md WP2, ordered PR 2 of the toolchain-lock design).
+//! Pre-materialization archive validation and delegated extraction.
 //!
 //! Every pinned toolchain arrives as a tarball that the platform's tar
 //! unpacks into a store stage. tar's own defences differ by implementation

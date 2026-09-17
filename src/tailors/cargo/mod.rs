@@ -82,13 +82,13 @@ fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>
             .iter()
             .all(|name| components.iter().filter(|c| c.component == *name).count() == 1);
     if !complete {
-        return Err(no_pin("rust toolchain", platform, "stage 4"));
+        return Err(no_pin("rust toolchain", platform));
     }
     Ok(components)
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
-    crate::kernel::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Rust toolchain")?;
     rust_components(platform).map(|_| ())
 }
 
@@ -158,7 +158,7 @@ pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
 
 pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Rust toolchain", "stage 4")?;
+    crate::kernel::platform::require_host(platform, "Rust toolchain")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let components = rust_components(platform)?;
     if version != RUST_VERSION {
@@ -413,7 +413,7 @@ fn newest_pin(platform: Platform) -> io::Result<&'static str> {
         .iter()
         .copied()
         .max_by_key(|pin| version_key(pin))
-        .ok_or_else(|| no_pin("rust toolchain", platform, "stage 4"))
+        .ok_or_else(|| no_pin("rust toolchain", platform))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -589,10 +589,8 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 /// stops being syncable. The toolchain object is retained by the project's
 /// own `root/2` closure, which records `rust_object` directly.
 ///
-/// This replaces the earlier `realize_vendor_with_rust`. The plan's D.2
-/// table lists a rust object for row 6; the call-site audit it asks for
-/// showed the pairing is not a realized build input. See the deviation note
-/// in the ARCHITECTURE.md coverage matrix.
+/// The Rust object remains a separate closure dependency because the vendor
+/// tree is produced by the host tar, not by a build that reads the toolchain.
 pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     preflight_platform(Platform::host()?)?;

@@ -246,7 +246,7 @@ pub fn realize_node_env(
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "node environment", "stage 2")?;
+    crate::kernel::platform::require_host(platform, "node environment")?;
     let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
     realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
 }
@@ -622,7 +622,7 @@ fn extract_tarball_packages(
             // directory 0666 and then cannot open its children unless
             // directory modes are applied after extraction. normalize_modes
             // below rewrites every mode afterwards, so the store content is
-            // identical either way (LINUX_PORT.md, stage 5 follow-up).
+            // identical either way.
             tar.arg("--delay-directory-restore");
         }
         let status = crate::kernel::supervise::status_owned(&mut tar, store)?;
@@ -1099,7 +1099,7 @@ fn ensure_gyp_python(
         return Ok(p.clone());
     }
     let pin = crate::tailors::python::lookup(platform, "3.12")
-        .ok_or_else(|| crate::kernel::platform::no_pin("cpython 3.12", platform, "stage 2"))?;
+        .ok_or_else(|| crate::kernel::platform::no_pin("cpython 3.12", platform))?;
     let p = crate::tailors::python::ensure_python_for(store, pin, platform)
         .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
     Ok(python_obj.insert(p).clone())
@@ -1155,8 +1155,7 @@ fn lifecycle_base_envs(
         // NOTE: npm_config_build_from_source is not set globally here: it
         // would make packages like sharp skip their local-cache lookup
         // (where declared artifacts land). It is set per package, below,
-        // only for prebuilt-binary downloaders with no declared artifacts
-        // (NEXT.md item 5).
+        // only for prebuilt-binary downloaders with no declared artifacts.
         // Deterministic npm cache location inside the scratch HOME —
         // also where declared artifacts under .npm/ land.
         (
@@ -1177,7 +1176,7 @@ fn lifecycle_base_envs(
     envs
 }
 
-/// NEXT.md item 5: packages whose installers download at install time.
+/// Packages whose installers download at install time.
 ///
 /// A documented skip switch turns a doomed fetch into a recorded exception
 /// naming what the user runs later; a prebuilt-binary downloader is told to
@@ -1353,7 +1352,7 @@ pub(super) fn run_install_scripts_staged(
 
         // Snapshot lives in its own stage dir: neither readable nor writable
         // inside the sandbox, so a failing script cannot tamper with what
-        // gets restored (Sol, item 3 round 2).
+        // gets restored.
         let snapshot_root = store.stage()?;
         cleanup.push(snapshot_root.clone());
         let snapshot = snapshot_root.join("package");
