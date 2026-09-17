@@ -6,20 +6,24 @@ use crate::kernel::context::{self, Context};
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
-use crate::tailors;
+use crate::tailors::{self, Tailor};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
+/// Check every detected ecosystem can sync, touching no store. Returns the
+/// tailors it checked so the sync runs exactly those.
+pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
     // Syncing ends by registering this project as a GC root. Check that the
     // path can be recorded before realizing or projecting anything: a
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable(dir)?;
-    for tailor in tailors::detected(dir)? {
+    let present = tailors::detected(dir)?;
+    for tailor in &present {
         tailor.preflight(platform, dir)?;
     }
-    Ok(())
+    Ok(present)
 }
 
 /// `blanket sync` from the command line: load policy and preflight every
@@ -28,28 +32,47 @@ pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
 /// tree created, no maintenance sweep, no lease taken.
 pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = context::project_dir();
-    preflight(platform, &dir, strict)?;
+    let checked = directory_identity(&dir)?;
+    let present = preflight(platform, &dir, strict)?;
+    // Opening the store can wait on another process's lease. If the
+    // directory was renamed or replaced meanwhile, the pathname no longer
+    // names the project preflight checked: refuse rather than sync it.
     let ctx = Context::open(platform, true)?;
-    sync_preflighted(&ctx, &dir, fresh)
+    if directory_identity(&dir).ok() != Some(checked) {
+        return Err(io::Error::other(format!(
+            "{}: the project directory was moved or replaced while waiting for the store; run 'blanket sync' again",
+            dir.display()
+        )));
+    }
+    sync_preflighted(&ctx, &dir, &present, fresh)
+}
+
+fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
+    let metadata = std::fs::metadata(dir)?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
 /// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = ctx.project_dir();
-    preflight(ctx.platform, &dir, strict)?;
-    sync_preflighted(ctx, &dir, fresh)
+    let present = preflight(ctx.platform, &dir, strict)?;
+    sync_preflighted(ctx, &dir, &present, fresh)
 }
 
-fn preflight(platform: Platform, dir: &Path, strict: bool) -> io::Result<()> {
+fn preflight(platform: Platform, dir: &Path, strict: bool) -> io::Result<Vec<&'static dyn Tailor>> {
     policy::init(dir, strict)?;
     preflight_sync(platform, dir)
 }
 
-fn sync_preflighted(ctx: &Context, dir: &Path, fresh: bool) -> io::Result<()> {
-    let present = tailors::detected(dir)?;
+fn sync_preflighted(
+    ctx: &Context,
+    dir: &Path,
+    present: &[&'static dyn Tailor],
+    fresh: bool,
+) -> io::Result<()> {
     let mut any = false;
-    for tailor in &present {
+    for tailor in present {
         let mut attribution = policy::Attribution::open(tailor.id())?;
         tailor.prepare(ctx, dir, &mut attribution)?;
         let changed = tailor.sync(ctx, dir, fresh, &mut attribution)?;
@@ -164,7 +187,9 @@ mod tests {
         let temp = TempDir::new();
         let project = temp.0.join("project ");
         std::fs::create_dir_all(&project).unwrap();
-        let error = preflight_sync(Platform::host().unwrap(), &project).unwrap_err();
+        let Err(error) = preflight_sync(Platform::host().unwrap(), &project) else {
+            panic!("an unregistrable project path was accepted");
+        };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("cannot protect"), "{error}");
     }

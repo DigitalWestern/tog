@@ -234,8 +234,9 @@ can pick it up cold.
   2026-09-14) via a scratch driver that extracts the step-13 and helper lines
   from `tests/acceptance.sh` with `sed -n` and runs them against a real
   `proj-poly` sync: passed=4 failed=0. The full checklist was not re-run.
-- **H3 — make the evidence harder to forge (Flag 3 D3).** Two designs,
-  pick one after the owner answers D3:
+- **H3 — make the evidence harder to forge (Flag 3 D3).** The owner chose
+  design 2, signed closures (2026-09-16, Flag 3); design 1 is kept for the
+  record:
   1. *Store cross-check, opt-in.* Object-affecting exceptions
      (`policy::object_exceptions`: file-collision, install-script-failed,
      git-dependency, unattested_cargo_lock) are already written into store

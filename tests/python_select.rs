@@ -1,4 +1,5 @@
-//! Ignored e2e for interpreter selection and warm lock/plan caches.
+//! E2e for interpreter selection and warm lock/plan caches (network tests
+//! are ignored; the preflight refusal runs offline).
 
 use blanket::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
@@ -143,8 +144,9 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     );
 }
 
+/// Offline and fast: the refusal happens before any download, so this runs
+/// in the default suite and guards the preflight-before-store ordering.
 #[test]
-#[ignore]
 fn unpinned_patch_request_fails_closed_before_opening_store() {
     let temp = TempDir::new();
     let project = temp.0.join("proj-unpinned-patch");
