@@ -138,15 +138,14 @@ F3 report accounting, F4 acceptance tests).
    failed in one full parallel run and passed 3/3 alone and in the full
    rerun. It holds `SUPERVISION_TEST_LOCK`; the panic was not captured.
    Treat as the same family until reproduced.
-9. **`tests/python_select.rs::unpinned_patch_request_fails_closed_before_opening_store`
-   fails at HEAD, before the refactor.** Verified 2026-09-12 on `a341b32`
-   (the last pre-refactor commit): `blanket sync` opens the store in
-   `dispatch` before `preflight_sync` refuses the unpinned patch request,
-   so the store tree exists when the test checks it. The refusal itself is
-   still correct (exit 1, message intact); only the "before opening the
-   store" half of the test is false. Either move the store open after the
-   preflight (a behavior change: `sync` would preflight before the
-   maintenance sweep) or relax the test. Not touched by the refactor.
+9. **`tests/python_select.rs::unpinned_patch_request_fails_closed_before_opening_store`.
+   Fixed 2026-09-16 on `fu/9-sync-preflight-order`.** Owner decision: make
+   the behavior match the test. `blanket sync` now loads policy and runs
+   every tailor's preflight in `sync::run_command` before `Context::open`,
+   so a refused request creates no store tree, runs no maintenance sweep and
+   takes no lease. `add`/`remove`/`update` still call `sync::run` with the
+   context they opened. The test failed at `origin/main` (`store was
+   opened`) and passes on the branch.
 10. **`deps` and `x` as `Tailor` methods.** After REFACTOR.md Stage 3,
    `commands/deps.rs` and `commands/x.rs` are the only command files that
    still name a tailor (python and node). A `Tailor::edit_manifest` and a
@@ -189,6 +188,18 @@ that default, and none blocks the feature.
   LIMITATIONS.md. If `audit` is meant to gate untrusted branches, the
   evidence has to come from a signature or from store/attestation records,
   which is a feature decision, not a fix.
+
+**Owner decisions, 2026-09-16:**
+- D1: bind the rustfmt record to the pinned rustfmt version so it is
+  compared like every other record; the `toolchain-only` pass goes away.
+- D2: keep the failure (a warning would pass a record with no exceptions
+  list), but give pre-envelope records their own `outdated` verdict whose
+  message is the fix (`blanket sync` once, commit). Ship it with D3 so
+  adopters migrate once.
+- D3: signed closures (H3 design 2). `audit` is expected to judge records
+  committed by people and machines other than the one running it, so the
+  store cross-check, which needs a local store and covers four of fourteen
+  kinds, is not enough. Design and review before code.
 
 ## Flag 4 — `blanket audit` hardening plan
 

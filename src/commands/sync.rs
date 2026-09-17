@@ -2,7 +2,7 @@
 //! and project each one through the tailor registry.
 
 use crate::commands::shared::no_inputs;
-use crate::kernel::context::Context;
+use crate::kernel::context::{self, Context};
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
@@ -22,16 +22,37 @@ pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `blanket sync` from the command line: load policy and preflight every
+/// ecosystem before the store is opened. A refused request (an unpinned
+/// patch, a path no root record can hold) must leave no trace: no store
+/// tree created, no maintenance sweep, no lease taken.
+pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
+    let dir = context::project_dir();
+    preflight(platform, &dir, strict)?;
+    let ctx = Context::open(platform, true)?;
+    sync_preflighted(&ctx, &dir, fresh)
+}
+
+/// Sync with a context the caller already opened (`add`/`remove`/`update`
+/// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = ctx.project_dir();
-    policy::init(&dir, strict)?;
-    preflight_sync(ctx.platform, &dir)?;
-    let present = tailors::detected(&dir)?;
+    preflight(ctx.platform, &dir, strict)?;
+    sync_preflighted(ctx, &dir, fresh)
+}
+
+fn preflight(platform: Platform, dir: &Path, strict: bool) -> io::Result<()> {
+    policy::init(dir, strict)?;
+    preflight_sync(platform, dir)
+}
+
+fn sync_preflighted(ctx: &Context, dir: &Path, fresh: bool) -> io::Result<()> {
+    let present = tailors::detected(dir)?;
     let mut any = false;
     for tailor in &present {
         let mut attribution = policy::Attribution::open(tailor.id())?;
-        tailor.prepare(ctx, &dir, &mut attribution)?;
-        let changed = tailor.sync(ctx, &dir, fresh, &mut attribution)?;
+        tailor.prepare(ctx, dir, &mut attribution)?;
+        let changed = tailor.sync(ctx, dir, fresh, &mut attribution)?;
         attribution.finish(changed)?;
         if changed {
             any = true;
@@ -40,7 +61,7 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     if !any {
         return Err(no_inputs());
     }
-    print_exception_summary(&dir)?;
+    print_exception_summary(dir)?;
     Ok(())
 }
 
