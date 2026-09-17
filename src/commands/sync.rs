@@ -36,13 +36,24 @@ pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<
     let present = preflight(platform, &dir, strict)?;
     // Opening the store can wait on another process's lease. If the
     // directory was renamed or replaced meanwhile, the pathname no longer
-    // names the project preflight checked: refuse rather than sync it.
+    // names the project preflight checked: refuse rather than sync it. This
+    // closes the wait this ordering added, not every pathname race: the
+    // sync itself reads the project by path, as it always has.
     let ctx = Context::open(platform, true)?;
-    if directory_identity(&dir).ok() != Some(checked) {
-        return Err(io::Error::other(format!(
-            "{}: the project directory was moved or replaced while waiting for the store; run 'blanket sync' again",
+    let moved = |detail: String| {
+        io::Error::other(format!(
+            "{}: {detail} while waiting for the store; run 'blanket sync' again",
             dir.display()
-        )));
+        ))
+    };
+    match directory_identity(&dir) {
+        Ok(now) if now == checked => {}
+        Ok(_) => return Err(moved("the project directory was moved or replaced".into())),
+        Err(error) => {
+            return Err(moved(format!(
+                "the project directory became unreadable ({error})"
+            )))
+        }
     }
     sync_preflighted(&ctx, &dir, &present, fresh)
 }

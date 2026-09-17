@@ -145,7 +145,17 @@ F3 report accounting, F4 acceptance tests).
    so a refused request creates no store tree, runs no maintenance sweep and
    takes no lease. `add`/`remove`/`update` still call `sync::run` with the
    context they opened. The test failed at `origin/main` (`store was
-   opened`) and passes on the branch.
+   opened`) and passes on the branch, and now runs in the default suite.
+   Because preflight now happens before a possibly long wait on the store
+   lease, `run_command` records the directory's (dev, ino) first and refuses
+   if the pathname names a different directory after `Context::open`; the
+   tailor set preflight checked is the one synced. **Residual, not fixed:**
+   after that check, the sync (policy, detection results, every tailor's
+   file reads) still addresses the project by pathname, so a same-user
+   process that swaps the directory mid-sync can make blanket sync the
+   replacement under the original's policy. Pre-existing on `main` for every
+   command; closing it means directory-fd-relative project access in every
+   tailor, which is its own design item.
 10. **`deps` and `x` as `Tailor` methods.** After REFACTOR.md Stage 3,
    `commands/deps.rs` and `commands/x.rs` are the only command files that
    still name a tailor (python and node). A `Tailor::edit_manifest` and a
