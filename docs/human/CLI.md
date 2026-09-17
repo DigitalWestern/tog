@@ -136,8 +136,8 @@ Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
 **fmt** runs the pinned rustfmt for a Rust workspace, discovered with the
 store Cargo and `--no-deps`, so a project that has never been synced needs
 no Cargo.lock or vendor object; `--check` passes rustfmt's status through.
-The run writes a toolchain-only `rustfmt` closure that `ls`/`sbom`/`gc` see
-and `status` ignores. A package.json script named `fmt` wins and runs as
+The run writes a toolchain-only `rustfmt` closure that `ls`/`sbom`/`gc` see,
+`audit` compares with the pin, and `status` ignores. A package.json script named `fmt` wins and runs as
 `blanket run fmt`; an explicit `--eco rust` bypasses the script.
 
 **run** executes a command with the PATH and ecosystem variables of the
@@ -189,8 +189,12 @@ inputs-changed / projection-missing / other-platform checks `status` makes,
 made per closure file from that file's own record), or `unchecked` (the
 closure predates input, platform, or exception recording; run `blanket
 sync` once). Only `clean` passes, because an audit of a stale or unchecked
-record proves nothing; the toolchain-only `rustfmt` closure has no inputs
-to compare and is judged on its exceptions alone. A closure file whose
+record proves nothing. The `rustfmt` closure `blanket fmt` writes projects
+nothing, so its input is the rustfmt object it ran: it is `stale` when that
+object, or the Rust object and version beside it, is not what this binary
+pins for the project (or the project selects a Rust with no pinned
+rustfmt), and `unchecked` when it predates recording one (run `blanket fmt`
+once). A closure file whose
 `ecosystem` field disagrees with its name (a stray or renamed `.json` under
 `.blanket/closures`) is refused, not judged. No rebuild, no store
 access, no network, no sandbox: it works on a machine without bubblewrap.

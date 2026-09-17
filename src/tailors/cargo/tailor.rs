@@ -182,12 +182,15 @@ impl Tailor for Cargo {
 
     fn closure_state(
         &self,
-        _platform: Platform,
+        platform: Platform,
         dir: &Path,
         ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
         Ok(match ecosystem {
+            // `blanket fmt` projects nothing: its record is current when it
+            // names the rustfmt this binary would use for the project now.
+            "rustfmt" => rustfmt::closure_state(platform, dir, body)?,
             "cargo" => {
                 if !dir.join(".blanket/cargo-home").is_dir() {
                     State::ProjectionMissing(".blanket/cargo-home".into())
@@ -298,6 +301,8 @@ impl Tailor for Cargo {
                 "id": id,
             }))
         };
+        let rustfmt_ref = object_ref(&rustfmt_object)?;
+        let inputs = rustfmt::record_inputs(rustfmt_ref["id"].as_str().unwrap_or_default());
         let mut refs = comforter::ClosureRefs::new();
         refs.object_path(store, activity, &rust_object)?;
         refs.object_path(store, activity, &rustfmt_object)?;
@@ -306,9 +311,10 @@ impl Tailor for Cargo {
             "rustfmt",
             serde_json::json!({
                 "rust_object": object_ref(&rust_object)?,
-                "rustfmt_object": object_ref(&rustfmt_object)?,
+                "rustfmt_object": rustfmt_ref,
                 "rust_version": rust_version,
                 "workspace_root": workspace_root.display().to_string(),
+                "inputs": inputs,
             }),
             store,
             activity,

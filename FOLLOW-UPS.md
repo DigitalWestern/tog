@@ -9,15 +9,7 @@ by position.
 
 ## Next up, in order
 
-1. **`blanket audit`: compare the rustfmt record to its pin.** Owner decision
-   2026-09-16. `blanket fmt` writes an inputs-free `rustfmt.json`, and the
-   gate passes it as `toolchain-only` with nothing compared. That is the last
-   unconditional pass. Record the pinned rustfmt version (the pin in
-   `src/tailors/cargo/rustfmt.rs`) as the record's input so audit compares it
-   like every other record, and delete the `toolchain-only` branch in
-   `src/commands/audit.rs`. Done when CLI.md, the `audit` help text, and a
-   test say a stale or mismatched rustfmt record fails.
-2. **`blanket audit`: design signed closures.** Owner decision 2026-09-16.
+1. **`blanket audit`: design signed closures.** Owner decision 2026-09-16.
    Today a record edited by hand audits as whatever it says. The gate is
    meant to judge records committed by other people and machines, so records
    get signed. Why not the store cross-check: it needs a local store and
@@ -26,7 +18,7 @@ by position.
    `unattested_cargo_lock`). Open questions and constraints are in
    `docs/agent/DESIGNS.md` §5. Done when the design has had an independent
    review round.
-3. **`blanket audit`: ship signing plus the `outdated` verdict together.**
+2. **`blanket audit`: ship signing plus the `outdated` verdict together.**
    Owner decision 2026-09-16. A record with no `platform` field, no inputs,
    or no exceptions array fails today as `unchecked`, so every project
    synced before those fields existed fails on first adoption. Keep the
@@ -35,7 +27,7 @@ by position.
    then commit). Unsigned records get the same treatment, so adopters
    migrate once. Done when LIMITATIONS.md no longer says a hand-edited record
    audits as it says.
-4. **Toolchain lock (WP2), shipped-table adapter first.** The next large
+3. **Toolchain lock (WP2), shipped-table adapter first.** The next large
    feature: a committed lock naming the exact toolchain per project. Design,
    remaining PRs, and the recommended order (PR 1 before the lock core) are
    in `docs/agent/DESIGNS.md` §1.

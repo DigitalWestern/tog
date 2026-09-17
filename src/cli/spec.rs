@@ -207,8 +207,9 @@ but never loosen what the machine or project policy says. Per closure:
 clean, denied (each denied exception's kind, subject, and detail, plus a
 count of permitted ones by kind), stale (its inputs changed since the sync,
 the same check 'blanket status' makes), or unchecked (the closure predates
-input or exception recording). Only clean passes: an audit of a stale or
-unchecked record proves nothing. Offline, read-only, no store access, no
+input or exception recording). The rustfmt closure 'blanket fmt' writes
+is stale when a rustfmt other than this binary's pin made it. Only clean
+passes: an audit of a stale or unchecked record proves nothing. Offline, read-only, no store access, no
 sandbox needed. Exit status 0 when every closure is clean, 1 otherwise.
 A company deny list to start from ships as docs/human/policy-company.toml.",
         options: &[

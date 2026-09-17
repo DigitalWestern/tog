@@ -1,11 +1,13 @@
 //! The pinned Rust formatting component used by `blanket fmt`.
 
+use crate::comforter::status::State;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::types::Identity;
 use crate::tailors::cargo;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -73,6 +75,74 @@ fn rustfmt_identity(
             ("rustfmt_sha256".into(), pin.sha256.into()),
             ("schema".into(), "rustfmt/1".into()),
         ]),
+    })
+}
+
+/// The `inputs` a `rustfmt` closure records: the id of the rustfmt object
+/// the run formatted with. The id hashes the rustfmt version, the pinned
+/// component sha256, the platform, and the paired Rust object, and ends in
+/// the version, so one field names exactly which rustfmt made the record.
+pub fn record_inputs(rustfmt_object_id: &str) -> Value {
+    json!({ "rustfmt_object": rustfmt_object_id })
+}
+
+/// The fields of a `rustfmt` closure that say which rustfmt made it, as
+/// this binary would write them for the project in `dir` now. Computed from
+/// the pins alone: no store, no network, no policy record.
+pub fn pinned_record(platform: Platform, dir: &Path) -> io::Result<Value> {
+    let rust_version = cargo::resolve_toolchain_quiet(platform, dir)?;
+    let rust_object = cargo::rust_object_id(platform, rust_version)?;
+    let rustfmt_object =
+        rustfmt_identity(platform, rust_version, Path::new(&rust_object))?.object_id();
+    Ok(json!({
+        "rust_version": rust_version,
+        "rust_object": { "id": rust_object },
+        "rustfmt_object": { "id": rustfmt_object },
+        "inputs": record_inputs(&rustfmt_object),
+    }))
+}
+
+/// Whether a `rustfmt` closure was made by the rustfmt this binary would use
+/// for `dir` now. A record without inputs predates them and is unchecked. A
+/// record that disagrees with `pinned_record` in any field has changed, as
+/// does any record for a project this binary pins no rustfmt for.
+pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
+    if body.get("inputs").is_none() {
+        return Ok(State::Unchecked(
+            "rustfmt inputs were not recorded by this run; run 'blanket fmt' once to record them"
+                .into(),
+        ));
+    }
+    let field = |value: &Value, pointer: &str| value.pointer(pointer).cloned().unwrap_or_default();
+    let pinned = match pinned_record(platform, dir) {
+        Ok(pinned) => pinned,
+        Err(error) => {
+            return Ok(State::Changed(vec![format!(
+                "rustfmt pin (recorded {}, but this blanket pins none here: {error})",
+                field(body, "/inputs/rustfmt_object")
+            )]))
+        }
+    };
+    let changed: Vec<String> = [
+        "/inputs/rustfmt_object",
+        "/rustfmt_object/id",
+        "/rust_object/id",
+        "/rust_version",
+    ]
+    .into_iter()
+    .filter(|pointer| field(body, pointer) != field(&pinned, pointer))
+    .map(|pointer| {
+        format!(
+            "rustfmt record {pointer} (recorded {}, this blanket uses {})",
+            field(body, pointer),
+            field(&pinned, pointer)
+        )
+    })
+    .collect();
+    Ok(if changed.is_empty() {
+        State::Synced
+    } else {
+        State::Changed(changed)
     })
 }
 

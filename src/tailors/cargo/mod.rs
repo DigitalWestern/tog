@@ -295,16 +295,31 @@ struct ToolchainSpec {
 
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
+    resolve_toolchain_with(platform, project_dir, true)
+}
+
+/// The version `resolve_toolchain` would pick, without its effects: no
+/// `toolchain-component-unavailable` exception is recorded and nothing is
+/// printed, so a read-only caller outside any attribution can ask.
+pub fn resolve_toolchain_quiet(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
+    resolve_toolchain_with(platform, project_dir, false)
+}
+
+fn resolve_toolchain_with(
+    platform: Platform,
+    project_dir: &Path,
+    effects: bool,
+) -> io::Result<&'static str> {
     let _ = rust_pins(platform)?;
     let mut dir = project_dir;
     loop {
         let legacy = dir.join("rust-toolchain");
         if legacy.exists() {
-            return resolve_toolchain_file(platform, &legacy, true);
+            return resolve_toolchain_file(platform, &legacy, true, effects);
         }
         let toml = dir.join("rust-toolchain.toml");
         if toml.exists() {
-            return resolve_toolchain_file(platform, &toml, false);
+            return resolve_toolchain_file(platform, &toml, false, effects);
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent,
@@ -318,29 +333,31 @@ fn resolve_toolchain_file(
     platform: Platform,
     path: &Path,
     legacy: bool,
+    effects: bool,
 ) -> io::Result<&'static str> {
     let text = fs::read_to_string(path)
         .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
     if legacy {
         if let Ok(document) = toml::from_str::<ToolchainDocument>(&text) {
             if let Some(spec) = document.toolchain {
-                return resolve_toolchain_spec(platform, path, spec);
+                return resolve_toolchain_spec(platform, path, spec, effects);
             }
         }
-        return resolve_channel(platform, path, text.trim());
+        return resolve_channel(platform, path, text.trim(), effects);
     }
     let document = toml::from_str::<ToolchainDocument>(&text)
         .map_err(|e| err(format!("parse {}: {e}", path.display())))?;
     let spec = document
         .toolchain
         .ok_or_else(|| err(format!("{} has no [toolchain] table", path.display())))?;
-    resolve_toolchain_spec(platform, path, spec)
+    resolve_toolchain_spec(platform, path, spec, effects)
 }
 
 fn resolve_toolchain_spec(
     platform: Platform,
     path: &Path,
     spec: ToolchainSpec,
+    effects: bool,
 ) -> io::Result<&'static str> {
     if let Some(targets) = spec.targets {
         for target in targets {
@@ -359,7 +376,7 @@ fn resolve_toolchain_spec(
             .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
             .cloned()
             .collect();
-        if !unavailable.is_empty() {
+        if effects && !unavailable.is_empty() {
             crate::kernel::policy::record(
                 crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
                 &path.display().to_string(),
@@ -370,16 +387,23 @@ fn resolve_toolchain_spec(
     let channel = spec
         .channel
         .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
-    resolve_channel(platform, path, channel.trim())
+    resolve_channel(platform, path, channel.trim(), effects)
 }
 
-fn resolve_channel(platform: Platform, path: &Path, channel: &str) -> io::Result<&'static str> {
+fn resolve_channel(
+    platform: Platform,
+    path: &Path,
+    channel: &str,
+    effects: bool,
+) -> io::Result<&'static str> {
     if channel == "stable" {
         let pin = newest_pin(platform)?;
-        eprintln!(
-            "blanket: {} resolves stable to pinned Rust {pin}",
-            path.display()
-        );
+        if effects {
+            eprintln!(
+                "blanket: {} resolves stable to pinned Rust {pin}",
+                path.display()
+            );
+        }
         return Ok(pin);
     }
 

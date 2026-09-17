@@ -127,6 +127,19 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
             .unwrap();
     let rust_id = closure["body"]["rust_object"]["id"].as_str().unwrap();
     let rustfmt_id = closure["body"]["rustfmt_object"]["id"].as_str().unwrap();
+    assert_eq!(
+        closure["body"]["inputs"]["rustfmt_object"], rustfmt_id,
+        "the fmt closure must record the rustfmt it ran as its input"
+    );
+    // The record names the pinned rustfmt, so the gate compares and passes it.
+    let audit = blanket(&binary, &project, &store, &["audit", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    assert!(
+        audit.status.success() && report["closures"][0]["freshness"] == "current",
+        "audit did not pass the fresh fmt record\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
     let rustfmt_lib_link =
         fs::read_link(store.join("objects").join(rustfmt_id).join("lib")).unwrap();
     assert!(!rustfmt_lib_link.is_absolute());
@@ -173,7 +186,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         String::from_utf8_lossy(&listed_one.stderr)
     );
 
-    // Every closure consumer must survive the toolchain-only fmt closure:
+    // Every closure consumer must survive the package-free fmt closure:
     // `sbom` reads every .blanket/closures/*.json and fails the whole
     // document on the first ecosystem it does not know.
     let sbom = blanket(&binary, &project, &store, &["sbom"]);
