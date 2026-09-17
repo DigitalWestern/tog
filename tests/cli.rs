@@ -1451,7 +1451,7 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
 /// this binary's pins, after `edit` changes its body.
 fn write_rustfmt_closure(project: &Path, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
     let platform = blanket::kernel::platform::Platform::host().unwrap();
-    let mut body = blanket::tailors::cargo::rustfmt::pinned_record(platform, project).unwrap();
+    let mut body = blanket::tailors::cargo::rustfmt::pinned_record(platform, project, "").unwrap();
     body["exceptions"] = serde_json::json!([]);
     edit(&mut body);
     let closures = project.join(".blanket/closures");
@@ -1511,7 +1511,9 @@ fn audit_compares_the_rustfmt_record_to_its_pin() {
     let out = blanket(&project.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(
-        text(&out.stdout).contains("rustfmt  stale") && text(&out.stdout).contains(&older),
+        text(&out.stdout).contains("rustfmt  stale")
+            && text(&out.stdout).contains(&older)
+            && text(&out.stdout).contains("run 'blanket fmt'"),
         "{}",
         text(&out.stdout)
     );

@@ -190,11 +190,13 @@ made per closure file from that file's own record), or `unchecked` (the
 closure predates input, platform, or exception recording; run `blanket
 sync` once). Only `clean` passes, because an audit of a stale or unchecked
 record proves nothing. The `rustfmt` closure `blanket fmt` writes projects
-nothing, so its input is the rustfmt object it ran: it is `stale` when that
-object, or the Rust object and version beside it, is not what this binary
-pins for the project (or the project selects a Rust with no pinned
-rustfmt), and `unchecked` when it predates recording one (run `blanket fmt`
-once). A closure file whose
+nothing, so its inputs are the rustfmt object it ran, the directory the
+toolchain file was looked up from, and the components that file asked for
+that blanket does not provide. It is `stale` when any of those, or the Rust
+object and version beside them, is not what this binary would record for
+the same run now (including a toolchain with no pinned rustfmt), and
+`unchecked` when it predates recording inputs; either way the fix is
+`blanket fmt`. A closure file whose
 `ecosystem` field disagrees with its name (a stray or renamed `.json` under
 `.blanket/closures`) is refused, not judged. No rebuild, no store
 access, no network, no sandbox: it works on a machine without bubblewrap.

@@ -295,13 +295,34 @@ struct ToolchainSpec {
 
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
+    resolve_toolchain_choice(platform, project_dir).map(|choice| choice.version)
+}
+
+/// What the nearest toolchain file asks for, as far as blanket answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolchainChoice {
+    /// The pinned Rust version the file resolves to.
+    pub version: &'static str,
+    /// Requested components blanket does not provide, in file order.
+    pub unavailable: Vec<String>,
+}
+
+/// `resolve_toolchain`, keeping the unavailable components it recorded as a
+/// `toolchain-component-unavailable` exception.
+pub fn resolve_toolchain_choice(
+    platform: Platform,
+    project_dir: &Path,
+) -> io::Result<ToolchainChoice> {
     resolve_toolchain_with(platform, project_dir, true)
 }
 
-/// The version `resolve_toolchain` would pick, without its effects: no
-/// `toolchain-component-unavailable` exception is recorded and nothing is
-/// printed, so a read-only caller outside any attribution can ask.
-pub fn resolve_toolchain_quiet(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
+/// The choice `resolve_toolchain_choice` would make, without its effects: no
+/// exception is recorded and nothing is printed, so a read-only caller
+/// outside any attribution can ask.
+pub fn resolve_toolchain_quiet(
+    platform: Platform,
+    project_dir: &Path,
+) -> io::Result<ToolchainChoice> {
     resolve_toolchain_with(platform, project_dir, false)
 }
 
@@ -309,7 +330,7 @@ fn resolve_toolchain_with(
     platform: Platform,
     project_dir: &Path,
     effects: bool,
-) -> io::Result<&'static str> {
+) -> io::Result<ToolchainChoice> {
     let _ = rust_pins(platform)?;
     let mut dir = project_dir;
     loop {
@@ -326,7 +347,10 @@ fn resolve_toolchain_with(
             _ => break,
         }
     }
-    Ok(newest_pin(platform)?)
+    Ok(ToolchainChoice {
+        version: newest_pin(platform)?,
+        unavailable: Vec::new(),
+    })
 }
 
 fn resolve_toolchain_file(
@@ -334,7 +358,7 @@ fn resolve_toolchain_file(
     path: &Path,
     legacy: bool,
     effects: bool,
-) -> io::Result<&'static str> {
+) -> io::Result<ToolchainChoice> {
     let text = fs::read_to_string(path)
         .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
     if legacy {
@@ -343,7 +367,10 @@ fn resolve_toolchain_file(
                 return resolve_toolchain_spec(platform, path, spec, effects);
             }
         }
-        return resolve_channel(platform, path, text.trim(), effects);
+        return Ok(ToolchainChoice {
+            version: resolve_channel(platform, path, text.trim(), effects)?,
+            unavailable: Vec::new(),
+        });
     }
     let document = toml::from_str::<ToolchainDocument>(&text)
         .map_err(|e| err(format!("parse {}: {e}", path.display())))?;
@@ -358,7 +385,7 @@ fn resolve_toolchain_spec(
     path: &Path,
     spec: ToolchainSpec,
     effects: bool,
-) -> io::Result<&'static str> {
+) -> io::Result<ToolchainChoice> {
     if let Some(targets) = spec.targets {
         for target in targets {
             if target != platform.triple() {
@@ -370,24 +397,26 @@ fn resolve_toolchain_spec(
             }
         }
     }
-    if let Some(components) = spec.components {
-        let unavailable: Vec<String> = components
-            .iter()
-            .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
-            .cloned()
-            .collect();
-        if effects && !unavailable.is_empty() {
-            crate::kernel::policy::record(
-                crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
-                &path.display().to_string(),
-                &format!("components unavailable: {}", unavailable.join(", ")),
-            )?;
-        }
+    let unavailable: Vec<String> = spec
+        .components
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
+        .collect();
+    if effects && !unavailable.is_empty() {
+        crate::kernel::policy::record(
+            crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
+            &path.display().to_string(),
+            &format!("components unavailable: {}", unavailable.join(", ")),
+        )?;
     }
     let channel = spec
         .channel
         .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
-    resolve_channel(platform, path, channel.trim(), effects)
+    Ok(ToolchainChoice {
+        version: resolve_channel(platform, path, channel.trim(), effects)?,
+        unavailable,
+    })
 }
 
 fn resolve_channel(

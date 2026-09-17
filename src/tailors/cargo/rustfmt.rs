@@ -78,34 +78,43 @@ fn rustfmt_identity(
     })
 }
 
-/// The `inputs` a `rustfmt` closure records: the id of the rustfmt object
-/// the run formatted with. The id hashes the rustfmt version, the pinned
-/// component sha256, the platform, and the paired Rust object, and ends in
-/// the version, so one field names exactly which rustfmt made the record.
-pub fn record_inputs(rustfmt_object_id: &str) -> Value {
-    json!({ "rustfmt_object": rustfmt_object_id })
+/// The `inputs` a `rustfmt` closure records. `rustfmt_object` is the id of
+/// the rustfmt object the run formatted with: it hashes the rustfmt version,
+/// the pinned component sha256, the platform, and the paired Rust object,
+/// and ends in the version. `resolved_from` is the directory the toolchain
+/// file was looked up from, relative to the workspace root the closure is
+/// written in, and `unavailable_components` is what that file asked for that
+/// blanket does not provide (the run's `toolchain-component-unavailable`
+/// exception, when non-empty).
+pub fn record_inputs(rustfmt_object: &str, resolved_from: &str, unavailable: &[String]) -> Value {
+    json!({
+        "rustfmt_object": rustfmt_object,
+        "resolved_from": resolved_from,
+        "unavailable_components": unavailable,
+    })
 }
 
 /// The fields of a `rustfmt` closure that say which rustfmt made it, as
-/// this binary would write them for the project in `dir` now. Computed from
-/// the pins alone: no store, no network, no policy record.
-pub fn pinned_record(platform: Platform, dir: &Path) -> io::Result<Value> {
-    let rust_version = cargo::resolve_toolchain_quiet(platform, dir)?;
-    let rust_object = cargo::rust_object_id(platform, rust_version)?;
+/// this binary would write them for a run in `root.join(resolved_from)` now.
+/// Computed from the pins alone: no store, no network, no policy record.
+pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io::Result<Value> {
+    let choice = cargo::resolve_toolchain_quiet(platform, &root.join(resolved_from))?;
+    let rust_object = cargo::rust_object_id(platform, choice.version)?;
     let rustfmt_object =
-        rustfmt_identity(platform, rust_version, Path::new(&rust_object))?.object_id();
+        rustfmt_identity(platform, choice.version, Path::new(&rust_object))?.object_id();
     Ok(json!({
-        "rust_version": rust_version,
+        "rust_version": choice.version,
         "rust_object": { "id": rust_object },
         "rustfmt_object": { "id": rustfmt_object },
-        "inputs": record_inputs(&rustfmt_object),
+        "inputs": record_inputs(&rustfmt_object, resolved_from, &choice.unavailable),
     }))
 }
 
-/// Whether a `rustfmt` closure was made by the rustfmt this binary would use
-/// for `dir` now. A record without inputs predates them and is unchecked. A
-/// record that disagrees with `pinned_record` in any field has changed, as
-/// does any record for a project this binary pins no rustfmt for.
+/// Whether a `rustfmt` closure in `dir` was made by the rustfmt this binary
+/// would use for the same run now. A record without inputs predates them and
+/// is unchecked. A record has changed when any field `pinned_record` writes
+/// disagrees, when the directory it was resolved from is not a plain
+/// subdirectory of `dir`, or when this binary pins no rustfmt for it.
 pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
     if body.get("inputs").is_none() {
         return Ok(State::Unchecked(
@@ -114,7 +123,18 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
         ));
     }
     let field = |value: &Value, pointer: &str| value.pointer(pointer).cloned().unwrap_or_default();
-    let pinned = match pinned_record(platform, dir) {
+    let resolved_from = body["inputs"]["resolved_from"].as_str().unwrap_or_default();
+    let plain = body["inputs"]["resolved_from"].is_string()
+        && Path::new(resolved_from)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !plain || !dir.join(resolved_from).is_dir() {
+        return Ok(State::Changed(vec![format!(
+            "rustfmt record /inputs/resolved_from ({} is not a directory of this workspace)",
+            field(body, "/inputs/resolved_from")
+        )]));
+    }
+    let pinned = match pinned_record(platform, dir, resolved_from) {
         Ok(pinned) => pinned,
         Err(error) => {
             return Ok(State::Changed(vec![format!(
@@ -124,7 +144,7 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
         }
     };
     let changed: Vec<String> = [
-        "/inputs/rustfmt_object",
+        "/inputs",
         "/rustfmt_object/id",
         "/rust_object/id",
         "/rust_version",

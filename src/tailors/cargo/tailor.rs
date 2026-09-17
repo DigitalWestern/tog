@@ -285,7 +285,8 @@ impl Tailor for Cargo {
         let platform = ctx.platform;
         let store = &ctx.store;
         let activity = &ctx.activity;
-        let rust_version = cargo::resolve_toolchain(platform, cwd)?.to_string();
+        let choice = cargo::resolve_toolchain_choice(platform, cwd)?;
+        let rust_version = choice.version.to_string();
         let rust_object = cargo::ensure_rust_for(store, platform, &rust_version)?;
         let rustfmt_object = rustfmt::ensure_rustfmt(store, platform, &rust_version, &rust_object)?;
         let workspace_root = inputs::locate_cargo_root(&rust_object, cwd, store)?.canonicalize()?;
@@ -301,8 +302,23 @@ impl Tailor for Cargo {
                 "id": id,
             }))
         };
+        let invocation_dir = cwd.canonicalize()?;
+        let resolved_from = invocation_dir
+            .strip_prefix(&workspace_root)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "fmt ran outside the workspace root cargo located",
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
         let rustfmt_ref = object_ref(&rustfmt_object)?;
-        let inputs = rustfmt::record_inputs(rustfmt_ref["id"].as_str().unwrap_or_default());
+        let inputs = rustfmt::record_inputs(
+            rustfmt_ref["id"].as_str().unwrap_or_default(),
+            &resolved_from,
+            &choice.unavailable,
+        );
         let mut refs = comforter::ClosureRefs::new();
         refs.object_path(store, activity, &rust_object)?;
         refs.object_path(store, activity, &rustfmt_object)?;
@@ -321,7 +337,6 @@ impl Tailor for Cargo {
             refs,
             attribution,
         )?;
-        let invocation_dir = cwd.canonicalize()?;
         let status = rustfmt::run_sandboxed(
             platform,
             &invocation_dir,

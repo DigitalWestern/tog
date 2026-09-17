@@ -449,9 +449,15 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                 format!("{denied} denied, {unknown} of unknown kind; permitted: {permitted}")
             }
         };
+        // The rustfmt record is rewritten by `blanket fmt`, never by a sync.
+        let refresh = if verdict.ecosystem == "rustfmt" {
+            "blanket fmt"
+        } else {
+            "blanket sync"
+        };
         let line = match &verdict.freshness {
             Freshness::Stale(why) => format!(
-                "stale      closure {record}: {why}; run 'blanket sync', then audit again ({judged})"
+                "stale      closure {record}: {why}; run '{refresh}', then audit again ({judged})"
             ),
             Freshness::Unchecked(why) => format!("unchecked  closure {record}: {why} ({judged})"),
             _ if !verdict.denied.is_empty() => format!("denied     closure {record}: {judged}"),
@@ -598,7 +604,7 @@ mod tests {
     /// The body `blanket fmt` writes for `dir` with this binary's pins: a
     /// current `rustfmt` record once `dir` holds Cargo inputs.
     fn rustfmt_body(dir: &Path) -> Value {
-        let mut body = rustfmt::pinned_record(host(), dir).unwrap();
+        let mut body = rustfmt::pinned_record(host(), dir, "").unwrap();
         body["exceptions"] = json!([]);
         body
     }
@@ -1280,11 +1286,17 @@ mod tests {
         );
         assert!(!verdicts[0].passes());
 
+        // Inputs carrying anything this binary would not write: stale.
+        let mut extra = body.clone();
+        extra["inputs"]["note"] = json!("hand-added");
+        let verdicts = judge(dir, &Policy::default(), &write(extra));
+        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
+
         // Made by another rustfmt version: stale, naming both objects.
         let current = body["rustfmt_object"]["id"].as_str().unwrap().to_string();
         let older = format!("{}-rustfmt-1.95.0", "0".repeat(40));
         let mut stale = body.clone();
-        stale["inputs"] = rustfmt::record_inputs(&older);
+        stale["inputs"]["rustfmt_object"] = json!(older);
         stale["rustfmt_object"]["id"] = json!(older);
         stale["rust_version"] = json!("1.95.0");
         let verdicts = judge(dir, &Policy::default(), &write(stale));
@@ -1297,7 +1309,7 @@ mod tests {
         // Same version, another component pin: the id differs, so stale.
         let mut repinned = body.clone();
         let other = format!("{}-rustfmt-1.96.1", "1".repeat(40));
-        repinned["inputs"] = rustfmt::record_inputs(&other);
+        repinned["inputs"]["rustfmt_object"] = json!(other);
         let verdicts = judge(dir, &Policy::default(), &write(repinned));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
@@ -1343,16 +1355,81 @@ mod tests {
         let verdicts = judge(dir, &Policy::default(), &write(python));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
-        // A toolchain file that lists rustfmt: `sync` would record an
-        // exception, but the read-only comparison records nothing and still
-        // resolves the same pin.
+        // Components requested after the run: the version and objects are
+        // unchanged, but a new run would record an exception this record
+        // lacks, so it is stale and the fix names `blanket fmt`.
         fs::write(
             dir.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\", \"clippy\"]\n",
         )
         .unwrap();
-        let verdicts = judge(dir, &Policy::default(), &write(body.clone()));
+        let closures = write(body.clone());
+        let verdicts = judge(dir, &Policy::default(), &closures);
+        let Freshness::Stale(why) = &verdicts[0].freshness else {
+            panic!("{verdicts:?}");
+        };
+        assert!(why.contains("clippy"), "{why}");
+        let report = Report {
+            policy: Policy::default(),
+            sources: Vec::new(),
+            verdicts,
+        };
+        assert!(render(dir, &report, false)
+            .unwrap()
+            .contains("run 'blanket fmt', then audit again"));
+        // The record a run under that file writes is current, read without
+        // recording anything, and its exception is still judged.
+        let mut listed = rustfmt_body(dir);
+        assert_eq!(
+            listed["inputs"]["unavailable_components"],
+            json!(["rustfmt", "clippy"])
+        );
+        listed["exceptions"] = json!([exception(
+            policy::TOOLCHAIN_COMPONENT_UNAVAILABLE,
+            "rust-toolchain.toml"
+        )]);
+        let closures = write(listed);
+        let verdicts = judge(dir, &Policy::default(), &closures);
         assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
+        let verdicts = judge(
+            dir,
+            &deny(&[policy::TOOLCHAIN_COMPONENT_UNAVAILABLE]),
+            &closures,
+        );
+        assert!(!verdicts[0].passes());
+        fs::remove_file(dir.join("rust-toolchain.toml")).unwrap();
+
+        // A run from a workspace member resolves the toolchain from there,
+        // and so does the audit of its record.
+        let member = dir.join("crates/member");
+        fs::create_dir_all(&member).unwrap();
+        let mut from_member = rustfmt::pinned_record(host(), dir, "crates/member").unwrap();
+        from_member["exceptions"] = json!([]);
+        let verdicts = judge(dir, &Policy::default(), &write(from_member.clone()));
+        assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
+        fs::write(
+            member.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.2\"\n",
+        )
+        .unwrap();
+        let verdicts = judge(dir, &Policy::default(), &write(from_member.clone()));
+        assert!(
+            matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("pins none")),
+            "{verdicts:?}"
+        );
+        fs::remove_dir_all(dir.join("crates")).unwrap();
+        let verdicts = judge(dir, &Policy::default(), &write(from_member));
+        assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
+        // The lookup directory must stay inside the workspace.
+        for escape in [json!("../"), json!("/"), json!(null), json!(["x"])] {
+            let mut escaped = body.clone();
+            escaped["inputs"]["resolved_from"] = escape.clone();
+            let verdicts = judge(dir, &Policy::default(), &write(escaped));
+            assert!(
+                matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("resolved_from")),
+                "{escape}: {verdicts:?}"
+            );
+        }
 
         // A toolchain this binary pins no rustfmt for: stale, not an error.
         fs::write(
