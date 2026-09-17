@@ -123,17 +123,27 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
         ));
     }
     let field = |value: &Value, pointer: &str| value.pointer(pointer).cloned().unwrap_or_default();
-    let resolved_from = body["inputs"]["resolved_from"].as_str().unwrap_or_default();
-    let plain = body["inputs"]["resolved_from"].is_string()
-        && Path::new(resolved_from)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)));
-    if !plain || !dir.join(resolved_from).is_dir() {
+    // `fmt` records the canonical invocation directory relative to the
+    // canonical workspace root, so only that exact spelling of a directory
+    // inside `dir` (no symlink out, no `..`, no extra separators) is accepted.
+    let resolved_from = body["inputs"]["resolved_from"].as_str();
+    let resolved_from = resolved_from.filter(|recorded| {
+        let (Ok(root), Ok(target)) = (dir.canonicalize(), dir.join(recorded).canonicalize()) else {
+            return false;
+        };
+        target.is_dir()
+            && target
+                .strip_prefix(&root)
+                .ok()
+                .and_then(Path::to_str)
+                .is_some_and(|relative| relative == *recorded)
+    });
+    let Some(resolved_from) = resolved_from else {
         return Ok(State::Changed(vec![format!(
             "rustfmt record /inputs/resolved_from ({} is not a directory of this workspace)",
             field(body, "/inputs/resolved_from")
         )]));
-    }
+    };
     let pinned = match pinned_record(platform, dir, resolved_from) {
         Ok(pinned) => pinned,
         Err(error) => {

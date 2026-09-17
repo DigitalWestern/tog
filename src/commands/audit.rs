@@ -139,13 +139,24 @@ fn freshness(
     if closure.platform.is_none() {
         // Envelopes without a platform predate the Linux port; `status`
         // cannot tell whether such a record was made on this host.
-        return Ok(Freshness::Unchecked(
-            "closure records no platform; run 'blanket sync' once to record it".into(),
-        ));
+        return Ok(Freshness::Unchecked(format!(
+            "closure records no platform; run '{}' once to record it",
+            refresh(&closure.ecosystem)
+        )));
     }
     Ok(freshness_from_state(inspect::closure_state(
         platform, dir, closure,
     )?))
+}
+
+/// The command that rewrites a closure: `blanket fmt` for the rustfmt
+/// record, which a sync never touches, and `blanket sync` for every other.
+fn refresh(ecosystem: &str) -> &'static str {
+    if ecosystem == "rustfmt" {
+        "blanket fmt"
+    } else {
+        "blanket sync"
+    }
 }
 
 /// The `status` state of a record, as the gate reads it: only `Synced` is
@@ -201,8 +212,9 @@ fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "{}: malformed exception record: {error}; run 'blanket sync'",
-                        closure.path.display()
+                        "{}: malformed exception record: {error}; run '{}'",
+                        closure.path.display(),
+                        refresh(&closure.ecosystem)
                     ),
                 )
             }),
@@ -239,10 +251,10 @@ pub fn evaluate(
             }
             None => {
                 if !matches!(freshness, Freshness::Stale(_)) {
-                    freshness = Freshness::Unchecked(
-                        "no exception record in this closure; run 'blanket sync' once to record one"
-                            .into(),
-                    );
+                    freshness = Freshness::Unchecked(format!(
+                        "no exception record in this closure; run '{}' once to record one",
+                        refresh(&closure.ecosystem)
+                    ));
                 }
             }
         }
@@ -449,12 +461,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                 format!("{denied} denied, {unknown} of unknown kind; permitted: {permitted}")
             }
         };
-        // The rustfmt record is rewritten by `blanket fmt`, never by a sync.
-        let refresh = if verdict.ecosystem == "rustfmt" {
-            "blanket fmt"
-        } else {
-            "blanket sync"
-        };
+        let refresh = refresh(&verdict.ecosystem);
         let line = match &verdict.freshness {
             Freshness::Stale(why) => format!(
                 "stale      closure {record}: {why}; run '{refresh}', then audit again ({judged})"
@@ -1329,6 +1336,15 @@ mod tests {
             );
         }
 
+        // No exception record: unchecked, and the fix is a new fmt run.
+        let mut bare = body.clone();
+        bare.as_object_mut().unwrap().remove("exceptions");
+        let verdicts = judge(dir, &Policy::default(), &write(bare));
+        assert!(
+            matches!(&verdicts[0].freshness, Freshness::Unchecked(why) if why.contains("run 'blanket fmt'")),
+            "{verdicts:?}"
+        );
+
         // An inputs-free record from before inputs were recorded: unchecked.
         let mut old = body.clone();
         old.as_object_mut().unwrap().remove("inputs");
@@ -1420,8 +1436,22 @@ mod tests {
         fs::remove_dir_all(dir.join("crates")).unwrap();
         let verdicts = judge(dir, &Policy::default(), &write(from_member));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
-        // The lookup directory must stay inside the workspace.
-        for escape in [json!("../"), json!("/"), json!(null), json!(["x"])] {
+        // The lookup directory must be the exact spelling `fmt` records of a
+        // directory inside the workspace: no symlink out, no `..`, no `.`,
+        // no trailing separator.
+        let outside = TempDir::new("rustfmt-outside");
+        std::os::unix::fs::symlink(&outside.0, dir.join("link")).unwrap();
+        fs::create_dir_all(dir.join("inner")).unwrap();
+        for escape in [
+            json!("../"),
+            json!("/"),
+            json!("."),
+            json!("link"),
+            json!("inner/"),
+            json!("inner/../inner"),
+            json!(null),
+            json!(["x"]),
+        ] {
             let mut escaped = body.clone();
             escaped["inputs"]["resolved_from"] = escape.clone();
             let verdicts = judge(dir, &Policy::default(), &write(escaped));
