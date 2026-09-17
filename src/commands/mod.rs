@@ -145,20 +145,17 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     {
         return fmt::run(platform, check, ecosystem.as_deref(), args);
     }
+    // `sync` preflights (policy, pins, root registrability) before opening
+    // the store, so a refused request touches nothing.
+    if let Sync { fresh, strict } = command {
+        return sync::run_command(platform, fresh, strict).map(|_| 0);
+    }
     let needs_maintenance = matches!(
         &command,
-        Sync { .. }
-            | Plan
-            | Build { .. }
-            | Run { .. }
-            | Add { .. }
-            | Remove { .. }
-            | Update { .. }
-            | X { .. }
+        Plan | Build { .. } | Run { .. } | Add { .. } | Remove { .. } | Update { .. } | X { .. }
     );
     let ctx = Context::open(platform, needs_maintenance)?;
     match command {
-        Sync { fresh, strict } => sync::run(&ctx, fresh, strict).map(|_| 0),
         Plan => plan::run(&ctx).map(|_| 0),
         Build { args } => build::run(&ctx, &args).map(|_| 0),
         Run { command } => run::run(&ctx, &command),
@@ -217,6 +214,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         ),
         Status { json } => status::run(ctx.platform, json),
         Fmt { .. }
+        | Sync { .. }
         | Gc(_)
         | XClean { .. }
         | StorePath

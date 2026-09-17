@@ -2,36 +2,91 @@
 //! and project each one through the tailor registry.
 
 use crate::commands::shared::no_inputs;
-use crate::kernel::context::Context;
+use crate::kernel::context::{self, Context};
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
-use crate::tailors;
+use crate::tailors::{self, Tailor};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<()> {
+/// Check every detected ecosystem can sync, touching no store. Returns the
+/// tailors it checked so the sync runs exactly those.
+pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
     // Syncing ends by registering this project as a GC root. Check that the
     // path can be recorded before realizing or projecting anything: a
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable(dir)?;
-    for tailor in tailors::detected(dir)? {
+    let present = tailors::detected(dir)?;
+    for tailor in &present {
         tailor.preflight(platform, dir)?;
     }
-    Ok(())
+    Ok(present)
 }
 
+/// `blanket sync` from the command line: load policy and preflight every
+/// ecosystem before the store is opened. A refused request (an unpinned
+/// patch, a path no root record can hold) must leave no trace: no store
+/// tree created, no maintenance sweep, no lease taken.
+pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
+    let dir = context::project_dir();
+    let checked = directory_identity(&dir)?;
+    let present = preflight(platform, &dir, strict)?;
+    // Opening the store can wait on another process's lease. If the
+    // directory was renamed or replaced meanwhile, the pathname no longer
+    // names the project preflight checked: refuse rather than sync it. This
+    // closes the wait this ordering added, not every pathname race: the
+    // sync itself reads the project by path, as it always has.
+    let ctx = Context::open(platform, true)?;
+    let moved = |detail: String| {
+        io::Error::other(format!(
+            "{}: {detail} while waiting for the store; run 'blanket sync' again",
+            dir.display()
+        ))
+    };
+    match directory_identity(&dir) {
+        Ok(now) if now == checked => {}
+        Ok(_) => return Err(moved("the project directory was moved or replaced".into())),
+        Err(error) => {
+            return Err(moved(format!(
+                "the project directory became unreadable ({error})"
+            )))
+        }
+    }
+    sync_preflighted(&ctx, &dir, &present, fresh)
+}
+
+fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
+    let metadata = std::fs::metadata(dir)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// Sync with a context the caller already opened (`add`/`remove`/`update`
+/// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = ctx.project_dir();
-    policy::init(&dir, strict)?;
-    preflight_sync(ctx.platform, &dir)?;
-    let present = tailors::detected(&dir)?;
+    let present = preflight(ctx.platform, &dir, strict)?;
+    sync_preflighted(ctx, &dir, &present, fresh)
+}
+
+fn preflight(platform: Platform, dir: &Path, strict: bool) -> io::Result<Vec<&'static dyn Tailor>> {
+    policy::init(dir, strict)?;
+    preflight_sync(platform, dir)
+}
+
+fn sync_preflighted(
+    ctx: &Context,
+    dir: &Path,
+    present: &[&'static dyn Tailor],
+    fresh: bool,
+) -> io::Result<()> {
     let mut any = false;
-    for tailor in &present {
+    for tailor in present {
         let mut attribution = policy::Attribution::open(tailor.id())?;
-        tailor.prepare(ctx, &dir, &mut attribution)?;
-        let changed = tailor.sync(ctx, &dir, fresh, &mut attribution)?;
+        tailor.prepare(ctx, dir, &mut attribution)?;
+        let changed = tailor.sync(ctx, dir, fresh, &mut attribution)?;
         attribution.finish(changed)?;
         if changed {
             any = true;
@@ -40,7 +95,7 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     if !any {
         return Err(no_inputs());
     }
-    print_exception_summary(&dir)?;
+    print_exception_summary(dir)?;
     Ok(())
 }
 
@@ -143,7 +198,9 @@ mod tests {
         let temp = TempDir::new();
         let project = temp.0.join("project ");
         std::fs::create_dir_all(&project).unwrap();
-        let error = preflight_sync(Platform::host().unwrap(), &project).unwrap_err();
+        let Err(error) = preflight_sync(Platform::host().unwrap(), &project) else {
+            panic!("an unregistrable project path was accepted");
+        };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("cannot protect"), "{error}");
     }
