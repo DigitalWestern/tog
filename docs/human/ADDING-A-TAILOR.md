@@ -2,7 +2,7 @@
 
 A tailor is one ecosystem's adapter. Adding one is a folder plus a registry
 line; no command file changes. This is the checklist that keeps that true
-(REFACTOR.md principle 3). It was followed for the seven existing tailors
+(layering rule 3 in docs/human/ARCHITECTURE.md). It was followed for the seven existing tailors
 when they were ported to the `Tailor` trait on 2026-09-12.
 
 ## 1. The folder: `src/tailors/<eco>/`
@@ -53,8 +53,8 @@ These name ecosystems outside the registry; keep them in step:
 - `src/commands/inspect.rs`: `ECOSYSTEMS` (display order; a unit test
   asserts it matches the registry).
 - `src/commands/deps.rs`: `Eco` if the ecosystem supports
-  `add`/`remove`/`update` (REFACTOR.md §6: a `Tailor::edit_manifest`
-  method is the planned replacement).
+  `add`/`remove`/`update` (a `Tailor::edit_manifest` method is the
+  planned replacement; see FOLLOW-UPS.md).
 - `src/commands/x.rs`: only if the ecosystem has a registry-tool runner.
 
 ## 4. Tests and evidence
@@ -67,7 +67,7 @@ These name ecosystems outside the registry; keep them in step:
 - A metadata golden in the `objects.rs` row's test module for every kind:
   a legacy record adapts to the exact dependency set the producer wrote.
 - A row in `tests/acceptance.sh` and in `docs/human/ARCHITECTURE.md`'s
-  tailor table; a `docs/agent/LINUX_PORT.md` entry if the sandbox or
-  platform pins change.
-- Review per STATUS.md: an agent who did not write the tailor reviews it
-  before it is called shipped.
+  tailor section; if the sandbox or platform pins change, update the
+  Platforms section there.
+- Review: an agent who did not write the tailor reviews it before it is
+  called shipped, and the result goes in the pull request description.

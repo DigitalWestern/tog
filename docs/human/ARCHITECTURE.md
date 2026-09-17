@@ -58,7 +58,7 @@ identifiers):
 
 | word | meaning | in code |
 |---|---|---|
-| **tailor** | a per-ecosystem adapter that cuts a package graph to fit | `pypi.rs`, `npm.rs`, ... |
+| **tailor** | a per-ecosystem adapter that cuts a package graph to fit | `src/tailors/<ecosystem>/` |
 | **pattern** | the fully locked plan a tailor cuts | `Plan` / `NpmPlan` |
 | **comforter** | a realized environment, stitched once, immutable, shared | `python-env` / `node-env` object |
 | **closet** | where finished comforters are kept, folded, never altered | the store |
@@ -72,8 +72,27 @@ Your `.venv` and `node_modules` are comforters.
 pin table has one row per platform; every toolchain identity carries the
 triple, so a store shared between a Mac and a Linux box never confuses
 objects. Anything unsupported on a platform fails with
-`io::ErrorKind::Unsupported` and a `LINUX_PORT.md` stage reference before
+`io::ErrorKind::Unsupported` and a message naming the platform, before
 touching the store or the network.
+
+Rules the Linux port settled, which apply to any future platform:
+
+- **A new platform is rows, not a port.** Pins are per-platform rows in the
+  existing tables; helpers take an explicit `Platform` rather than asking
+  the host. Adding `aarch64-unknown-linux-gnu` means new rows and a wheel-tag
+  band.
+- **Pin hashes come from the provider's published checksums** at pin time
+  and are pasted as constants (trust on first use). Never pin a sha256
+  computed only from our own download.
+- **One sandbox contract, two engines.** Tailors describe a build; the
+  sandbox runs it under Seatbelt on macOS and bubblewrap on Linux with the
+  same deny-by-default rules (no network, declared reads and writes,
+  scrubbed environment, `SOURCE_DATE_EPOCH`). A path that would need a
+  sandbox the platform lacks fails loudly; it never runs unsandboxed.
+- **The host C toolchain is an unpinned build input** on both platforms
+  (Xcode clang on macOS, `/usr` gcc on Linux). Pinning it is a backlog item.
+- **Darwin identity goldens stay byte-identical.** A platform change that
+  alters a macOS object id is a bug.
 
 ## The tailors
 
@@ -98,7 +117,7 @@ recorded); with none of these, the store node's bundled npm runs
 Native addons compile against the pinned Node. Existing locks win over
 ranged manifests, so a bare machine needs nothing installed besides blanket.
 
-**cargo** (`cargo.rs`). Rust has no installed-environment analog, so the
+**cargo** (`tailors/cargo/`). Rust has no installed-environment analog, so the
 comforter is everything cargo needs to build fully offline: a pinned
 toolchain object (rustc + cargo + rust-std, TOFU-pinned sha256s) plus a
 `cargo-vendor` object of every registry crate, hash-verified, with blanket
@@ -112,7 +131,7 @@ later runs unsandboxed). Honest gap: `blanket run cargo build` is
 offline-configured but not sandboxed; use `blanket build`. `blanket fmt`
 realizes a separate pinned `rustfmt` object linked against the Rust object.
 
-**go** (`golang.rs`, `dirhash.rs`). go.sum is an authentication ledger, not
+**go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
 (`go mod tidy -diff`, then `go mod download -json all`), and blanket
 re-verifies every artifact (dirhash h1, byte-for-byte reproduced, plus raw
@@ -122,7 +141,7 @@ default silently swaps toolchains), `GOROOT`, `GOENV=off`, `GOPROXY=off`.
 `blanket build` runs `go build -mod=readonly` with the project read-only.
 cgo uses host clang, the standing accepted impurity.
 
-**ruby** (`ruby.rs`). Bundler-shaped: lock parsing and platform selection
+**ruby** (`tailors/ruby/`). Bundler-shaped: lock parsing and platform selection
 are delegated to the pinned portable Ruby's own Bundler/RubyGems via a
 helper script, because `Gem::Platform` matching has wildcards and
 specificity scores no hand parser should reimplement. Gem hashes come from
@@ -134,7 +153,7 @@ store-commit rename; this bit once). Every blanket invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.
 
-**elixir** (`elixir.rs`). mix.lock is an Elixir term literal that Mix itself
+**elixir** (`tailors/elixir/`). mix.lock is an Elixir term literal that Mix itself
 evaluates as code, so blanket parses it under the pinned toolchain with a
 strict AST grammar: exact 8-field `{:hex, ...}` tuples of literals only;
 calls, variables, and legacy tuple shapes are rejected loudly. Hex tarballs
@@ -145,7 +164,7 @@ found live). Deps are source trees, realized as a `hex-deps` object and
 projected as a writable clonefile copy so native builds can write into their
 own sources. `blanket build` sandboxes `mix compile`.
 
-**dotnet** (`dotnet.rs`). NuGet's `packages.lock.json` is opt-in upstream;
+**dotnet** (`tailors/dotnet/`). NuGet's `packages.lock.json` is opt-in upstream;
 blanket makes it mandatory. The lock's `contentHash` is a semantic hash, so
 blanket never raw-compares: it fetches nupkgs into a local folder feed, then
 the pinned NuGet installs from that feed in locked mode, verifying every
@@ -158,9 +177,10 @@ must be an exact pin with `rollForward = "disable"`.
 ## Toolchain lock
 
 Every ecosystem has a pinned toolchain table with exact selection rules;
-the tables and selectors live in `src/kernel/platform.rs` and the per-ecosystem
-modules. The committed `blanket-toolchain.toml` lock design (WP2, 2026-09-06)
-and its implementation history are archived in `docs/agent/PLAN-2026-09-09.md`.
+the tables and selectors live in the per-ecosystem modules, with the
+platform enumeration in `src/kernel/platform.rs`. A committed
+`blanket-toolchain.toml` lock that records the exact toolchain per project is
+designed but not built; the design is in `docs/agent/DESIGNS.md`.
 
 ## Permissive by default, strict as a switch
 
@@ -279,9 +299,8 @@ close every gap in its row. Each new schema would reissue every object id of
 its kind, so choosing to introduce one is an owner decision tracked in
 FOLLOW-UPS.md.
 
-Status, 2026-09-10: implemented and independently reviewed on Linux (the
-review ledger, [docs/agent/REVIEW.md](docs/agent/REVIEW.md), records the
-rounds); the macOS gate has not run since this work landed. The boundary:
+Status, 2026-09-10: implemented and independently reviewed on Linux; the
+macOS gate has not run since this work landed. The boundary:
 it covers cooperating blanket processes on a local filesystem with working
 advisory locks and atomic rename; not old binaries, not programs launched
 directly from store paths, not malicious same-user changes, not network
@@ -300,13 +319,40 @@ outcome, not a hang: GC acquires exclusive activity and skips safely while a
 managed job holds the shared lease. Stage dirs and download temps use
 collision-proof names.
 
+## Layering rules
+
+These keep the layout organized. The first is enforced by
+`tests/architecture.rs`; the rest are review rules.
+
+1. **Layers point one way:** `commands → tailors → comforter → kernel`. The
+   kernel never names a tailor or a command; a tailor never names another
+   tailor or a command. Cross-layer knowledge flows through traits and data.
+   The test fails the build on a violation; its allow-list is the one place
+   a documented exception lives, with the reason beside it.
+2. **One folder, one owner scope.** Work assigned to one tailor edits
+   `src/tailors/<ecosystem>/` and nothing else without saying so. A PR that
+   touches two top-level folders is a shared-layer change and is reviewed as
+   one.
+3. **Adding an ecosystem is additive:** a new folder plus one registry line
+   (docs/human/ADDING-A-TAILOR.md). If a tailor has to edit a command, the
+   kernel, or another tailor, the abstraction is wrong and gets fixed first.
+4. **Folders are future crates.** Nothing may prevent a top-level folder
+   becoming its own crate later: no reaching into another folder's private
+   items; cross-folder use goes through `pub` items at the folder's `mod.rs`.
+5. **Size budgets:** a file over 1,500 non-test lines or a function over 150
+   lines is a review flag. The architecture test prints offenders
+   (`cargo test --test architecture -- --nocapture`); it does not fail.
+6. **Public surface is deliberate.** `lib.rs` exports what tests and the
+   binary need. Making an item `pub` is a decision, noted in the module doc
+   comment.
+7. **Moves are not rewrites.** A PR that moves code does not also change
+   behavior; identity goldens and test output stay identical.
+8. **Every module has a doc comment** whose first line says what it owns
+   and which layer it lives in.
+
 ## Layout
 
-Folders follow the layers (see [REFACTOR.md](../../REFACTOR.md) for the
-rules and the change log): `commands → tailors → comforter → kernel`. The
-kernel never names a tailor; a tailor never names another tailor;
-`tests/architecture.rs` fails the build otherwise (its allow-list is where
-the few documented exceptions live).
+Folders follow the layers above.
 
 Entry point and grammar:
 
@@ -395,9 +441,15 @@ commands iterate. See docs/human/ADDING-A-TAILOR.md.
 
 ## Where the rest lives
 
-Human docs sit next to this one (`docs/human/CLI.md` is the command
-reference, `docs/human/LIMITATIONS.md` the recorded, accepted gaps). The
-agent archive under `docs/agent/` holds the review ledger (`REVIEW.md`),
-the dated review reports, the archived plan (`PLAN-2026-09-09.md`,
-including the full WP2 toolchain-lock design), the platform changelog
-(`LINUX_PORT.md`), and the frozen item-number index (`NEXT.md`).
+- `STATUS.md`: where the project is and what is next.
+- `FOLLOW-UPS.md`: open decisions and the ordered to-do list.
+- `docs/human/CLI.md`: the command reference.
+- `docs/human/LIMITATIONS.md`: known, accepted gaps.
+- `docs/human/ADDING-A-TAILOR.md`: how to add an ecosystem.
+- `docs/agent/DESIGNS.md`: designed but unbuilt work (toolchain lock,
+  release catalog and trust, company policy layer, signed closures).
+- `docs/agent/HITRATE.md`: the real-project hit-rate measurement.
+
+Review results live in each pull request's description. Older plans,
+reviews, and changelogs were removed on 2026-09-16 and remain in git
+history.

@@ -44,18 +44,24 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   forwarded — terminal process-group delivery (`^C`) is the supported path. A cancellation
   across the spawn boundary is never dropped. `128 + signal` is a shell-visible exit code, not
   a wait status.
+- **`blanket sync` addresses the project by pathname.** It checks the project directory's
+  identity before and after waiting for the store lease and refuses if it changed, but a
+  same-user process that renames the directory and puts another project at the same path
+  *during* the sync can make blanket sync the replacement under the original's policy and
+  detected ecosystems. Every command that reads the project behaves this way; closing it
+  needs descriptor-relative project access in every tailor. Silent.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A literal `-h` tool argument needs `--` first.
 - **`blanket status` compares recorded inputs only.** `-r` includes, `requirements/` members,
   and workspace-member package.json are not recorded. Cargo/Ruby/Elixir/.NET compare the lock
   hash only; Go catches `require`/`replace` only via `go.sum`; pre-field closures show "synced
   (unchecked)".
-- **There is no committed toolchain lock yet (WP2 design only).**
+- **There is no committed toolchain lock yet (designed, not built).**
   `.node-version`/`.ruby-version`/`.tool-versions` are not consulted; Node, Ruby and Elixir
-  are single-pin. The catalog/digest machinery (WP2) is design-only
-  (`docs/agent/PLAN-2026-09-09.md`), and the
+  are single-pin. The lock and catalog/digest machinery are design-only
+  (`docs/agent/DESIGNS.md`), and the
   generic fetch helper still accepts `file://` — the dormant lock cannot authorize that path.
-- **One toolchain per lock root**: discovery is anchored at the lock root, so
+- **When the lock ships, one toolchain per lock root**: discovery is anchored at the lock root, so
   `web/.node-version` is invisible to blanket. A committed lock can aim at any allowlisted
   provider host; a hostile lock can cause an HTTPS request to a different allowlisted host.
   Reviewing a lock diff is reviewing its URLs.
@@ -90,6 +96,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the canonical `BLANKET_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).
   Both matter only to new callers.
+- **Blanket's security claim is provenance, not runtime containment.** Acquisition and build
+  happen behind one door, builds cannot reach the network, and every closure lists what went
+  in and every exception waved through. A hostile package can still put its payload in its
+  build output and run it at `blanket run` time with full network. Do not describe blanket
+  as stopping malicious code from running.
 - **Sandboxes are cooperative hermeticity, not hostile-code containment.** bubblewrap does not
   scan immutable read roots for Unix sockets (the fmt host-socket scan is Linux-only); build
   daemons can outlive a run. **Store objects are trusted from permissions + metadata, and all
