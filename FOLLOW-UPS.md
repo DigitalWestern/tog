@@ -9,25 +9,17 @@ by position.
 
 ## Next up, in order
 
-1. **`blanket audit`: design signed closures.** Owner decision 2026-09-16.
-   Today a record edited by hand audits as whatever it says. The gate is
-   meant to judge records committed by other people and machines, so records
-   get signed. Why not the store cross-check: it needs a local store and
-   covers only four of the fourteen exception kinds (the object-affecting
-   ones: `file-collision`, `install-script-failed`, `git-dependency`,
-   `unattested_cargo_lock`). Open questions and constraints are in
-   `docs/agent/DESIGNS.md` §5. Done when the design has had an independent
-   review round.
-2. **`blanket audit`: ship signing plus the `outdated` verdict together.**
+1. **`blanket audit`: ship signing plus the `outdated` verdict together.**
    Owner decision 2026-09-16. A record with no `platform` field, no inputs,
    or no exceptions array fails today as `unchecked`, so every project
    synced before those fields existed fails on first adoption. Keep the
    failure (a warning would pass a record with no exceptions list), but
    report it as `outdated` with the fix in the message (`blanket sync` once,
    then commit). Unsigned records get the same treatment, so adopters
-   migrate once. Done when LIMITATIONS.md no longer says a hand-edited record
-   audits as it says.
-3. **Toolchain lock (WP2), shipped-table adapter first.** The next large
+   migrate once. The reviewed design is `docs/agent/DESIGNS.md` §5.
+   Done when LIMITATIONS.md no longer says a hand-edited record audits as
+   it says.
+2. **Toolchain lock (WP2), shipped-table adapter first.** The next large
    feature: a committed lock naming the exact toolchain per project. Design,
    remaining PRs, and the recommended order (PR 1 before the lock core) are
    in `docs/agent/DESIGNS.md` §1.
