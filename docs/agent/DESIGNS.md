@@ -1179,29 +1179,223 @@ and a local authenticated fixture are implementable before those arrive.
 
 ## 5. Signed closures for `blanket audit`
 
-Owner decision 2026-09-16 (the `blanket audit` items in FOLLOW-UPS.md): the
-admission gate must be able to judge closure records committed by people and
-machines other than the one running it, so records get signed. Not designed
-yet; the design round owes answers to:
+Owner decision 2026-09-16. Designed 2026-09-18; awaiting one independent
+review round (FOLLOW-UPS "`blanket audit`: design signed closures"). Ships
+together with the `outdated` verdict (FOLLOW-UPS "`blanket audit`: ship
+signing plus the `outdated` verdict together").
 
-- **Who signs.** The expected shape is that CI runs `blanket sync` and signs
-  the envelope with a key only CI holds; a developer laptop key is not
-  trusted by default.
-- **Who is trusted.** The trusted-key list is policy (`.blanket/policy.toml`
-  and the machine/home chain), tightened never loosened, exactly like the WP3
-  trusted-publisher list in §2. Reuse that configuration model rather than
-  inventing a second one.
-- **Format.** An additive envelope field; the signature covers the canonical
-  bytes of the whole envelope, including `body.exceptions[]`.
-- **Old records.** A record with no signature (or no `platform` field) gets
-  an `outdated` verdict whose message is the fix (`blanket sync`, commit).
-  Ship this together with the signature so adopters re-sync once.
-- **Failure modes.** Unsigned, untrusted key, and bad signature are distinct
-  verdicts; a bad signature is never a warning.
+**Problem.** `blanket audit` judges the closure records in the working tree,
+so a record edited by hand audits as whatever it now says. The gate exists to
+judge records committed by other people and machines, so a passing audit must
+prove that the bytes it judged were written by a sync that a configured signer
+vouches for.
 
-The rejected alternative (an opt-in `audit --verify-store` cross-check against
-store metadata) covers only the four object-affecting exception kinds and
-needs a local store, which is why it was not chosen.
+**What a pass proves once this ships.** Every closure file's canonical bytes
+(below) carry a valid signature from a private key whose public key the
+auditing machine's policy trusts; the record is current for the inputs on
+disk; no recorded exception is denied or unknown. It does not prove the
+signer's sync was honest (a compromised CI signs whatever it built), and the
+unsandboxed doors listed in `docs/human/LIMITATIONS.md` stay outside the gate.
+
+### Who signs
+
+- `blanket sync` and `blanket fmt` sign every closure they write when a
+  signing key is configured: `BLANKET_SIGNING_KEY=<path>` names an Ed25519
+  private key file. Every closure goes through the one writer
+  (`comforter::write_closure_inner`), so the `rustfmt` record is signed like
+  the rest. The signature is added there, after the body is validated and the
+  exceptions are claimed, immediately before the envelope is serialized.
+- Expected deployment: CI holds the key (a CI secret written to a file at job
+  start), runs `blanket sync`, and commits the closures. Laptops have no key
+  and write unsigned records. A developer who wants a passing local audit
+  generates their own key and trusts it in their own `~/.blanket/policy.toml`;
+  that key is not in CI's machine policy, so a laptop-signed record is
+  `untrusted` in CI. Nothing is trusted by default.
+- No key configured: the record is written unsigned and the sync summary says
+  so (`closures unsigned; blanket audit reports them outdated`). Key
+  configured but missing, unreadable, malformed, or readable by group or
+  other: the sync fails before the write. It never silently downgrades to
+  unsigned once the operator asked for signing.
+- `blanket keygen <path>` writes a new key with mode 0600 and prints the
+  public key in the exact policy syntax to paste. Key file: one line,
+  `ed25519:<64 hex>` (the 32-byte seed). No PEM or PKCS#8 parsing, no second
+  algorithm.
+- Algorithm: Ed25519 through `ring` 0.17, which is already compiled into the
+  binary via `ureq`/`rustls` and becomes a direct dependency (no new crate).
+  Deterministic signatures, no parameters to get wrong, 32-byte public keys
+  that fit on one policy line.
+
+### Who is trusted
+
+Reuses the WP3 trust-configuration rules (§2) unchanged: trust is
+configuration in the existing policy chain, introduced only at an authorized
+scope, and every lower scope can only narrow it.
+
+- Policy files gain one table:
+
+  ```toml
+  [signing]
+  trusted = ["ed25519:<64 hex>", "..."]   # public keys the audit accepts
+  ```
+
+  `Policy` keeps `deny_unknown_fields`; an entry that is not `ed25519:` plus
+  64 hex characters is refused at parse time, like an unknown deny kind. An
+  older blanket refuses a policy file containing `[signing]` rather than
+  ignoring it.
+- **Machine scope introduces trust; every other scope intersects.** The
+  `trusted` list in the machine policy (`BLANKET_POLICY`, else
+  `~/.blanket/policy.toml`) is the allowed set. A `trusted` list in a project
+  `.blanket/policy.toml` or in the `--policy` file intersects with it: it can
+  drop keys, never add them. This is what stops the working tree from
+  vouching for itself: a pull request can edit the record and the project
+  policy, and can still only remove trust. A scope with no `[signing]` table
+  leaves the set unchanged. A project naming a key the machine does not is
+  not an error (the same repository is checked out on many machines); the
+  report shows every scope's list so the omission is visible.
+- **No trusted set declared in any scope is an operator mistake: exit 2**,
+  with the fix in the message (add `[signing] trusted` to the machine
+  policy), before any record is judged. Same class as a missing `--policy`
+  file: CI must be able to tell "the gate is not configured" from "the build
+  is denied". An explicitly empty list (`trusted = []`), or an intersection
+  that empties the set, is a decision: every signed record is `untrusted`,
+  exit 1.
+- Rotation: add the new public key to the machine policy, re-sync under the
+  new private key, remove the old key. Revocation is removal; records it
+  signed become `untrusted`, with the re-sync fix in the message. This is
+  WP3's "a revoked key can intentionally make an old lock unusable, reported
+  distinctly from stale inputs". No expiry, no revocation service, no
+  network: the list is the whole mechanism.
+- Report: each policy source line and each JSON `policy.sources[]` entry
+  carries the `trusted` list that scope declared; `policy.trusted` is the
+  effective set.
+- Trust is per machine. `blanket sync` parses the same table and ignores it;
+  only `blanket audit` consults it. The machine scope is whatever
+  `BLANKET_POLICY` or `$HOME` selects today; WP3 PR 1's protected machine
+  loading hardens that boundary later and this design inherits it without
+  change.
+
+### Format
+
+- One additive top-level envelope field; `schema` stays `closure/1`:
+
+  ```json
+  "signature": { "alg": "ed25519", "key": "<64 hex public key>", "sig": "<128 hex>" }
+  ```
+
+- **Canonical bytes** are the envelope parsed as a `serde_json::Value`, the
+  top-level `signature` key removed, serialized compact
+  (`serde_json::to_vec`). Keys are in byte order because `serde_json::Map`
+  is a BTreeMap in this build (the `preserve_order` feature is off and must
+  stay off: a unit test serializes `{"b":1,"a":2}` and expects
+  `{"a":2,"b":1}`). The signature therefore covers `schema`, `ecosystem`,
+  `platform`, `projected_at`, and all of `body`, including
+  `body.exceptions[]` and the recorded inputs. The writer signs the Value it
+  is about to pretty-print; the verifier parses the file and rebuilds the
+  same bytes. Reformatting the file does not break the signature; any change
+  of meaning does. Duplicate keys collapse last-wins on both sides, so a
+  second `body` appended after a signed one is a signature failure, not a
+  parser disagreement.
+- The file stays pretty-printed and `record_sha256` stays the sha256 of the
+  file bytes: it names the file that was judged, the signature names its
+  meaning.
+- Store identity is untouched: the signature lives in the envelope, not in
+  any object's inputs, so no object id changes and the Darwin goldens stay
+  byte-identical.
+- Code placement: `src/kernel/signing.rs` (key file parsing, canonical
+  bytes, sign, verify, the trusted-set type and its intersection);
+  `src/kernel/policy.rs` parses `[signing]`; the comforter writer signs;
+  `src/commands/audit.rs` verifies; `src/cli/` gains `keygen`. Layering is
+  unchanged: comforter and commands both call the kernel.
+
+### Old records: the `outdated` verdict
+
+- Today's `unchecked` verdict (no `platform`, no recorded inputs, no
+  exception record) is renamed `outdated`, and "no signature" joins it. A
+  record that predates any field the gate needs gets one verdict whose
+  message is the fix: run `blanket sync` (or `blanket fmt` for the `rustfmt`
+  record) on a machine that holds a trusted key, then commit. Adopters
+  re-sync once, not twice.
+- It stays a failure. A warning would pass a record with no exception list.
+- `read_closure` and `inspect::closures` (`run`, `x`, `ls`, `sbom`,
+  `status`) keep accepting unsigned records: verification is the gate's job
+  and the developer loop is unaffected.
+
+### Failure modes and verdicts
+
+Per closure, in evaluation order; the first row that applies is the verdict
+word on the text line. The JSON report carries the facts separately:
+`signature.state` (`trusted`, `unsigned`, `untrusted`, `bad`) and
+`signature.key` (absent when unsigned), beside the existing `freshness`,
+`denied`, `unknown`, and `permitted`.
+
+| verdict | when | the message is the fix | exit |
+|---|---|---|---|
+| `bad-signature` | a `signature` field is present and does not verify under its own `key` (tampered record, malformed field, unknown `alg`) | "record does not match its signature; find out who changed it, then regenerate with `blanket sync` under a trusted key and commit" | 1 |
+| `untrusted` | the signature verifies but the key is not in the effective trusted set | names the key and the scope that dropped it, if one did; "re-sync under a trusted key, or add this key to the machine policy" | 1 |
+| `outdated` | no `signature`, or no `platform`, inputs, or exception record | "run `blanket sync` once under a trusted key, then commit" | 1 |
+| `stale`, `denied`, `unknown`, `clean` | unchanged | unchanged | unchanged |
+
+- `bad-signature` is never a warning and no policy, flag, or environment
+  variable downgrades it. It short-circuits: freshness is not computed and
+  no exception is judged, because nothing in the record can be believed.
+  `untrusted` short-circuits the same way; exceptions are listed only for
+  records a trusted key vouches for.
+- Unsigned, untrusted, and bad signature stay distinct because their fixes
+  differ: sign it; trust it or re-sign it; find out who changed it.
+- Signature verification runs before freshness and before the exception
+  judgement. Freshness is cheap and read-only, but its result would describe
+  a record the gate does not believe.
+- Replay: an old genuine signed record copied over a newer one is caught by
+  freshness, because the inputs are inside the signed body. A genuine record
+  for identical inputs is a true statement wherever it sits, so the envelope
+  binds no project identity.
+
+### Ordered PRs, both under the ship item
+
+1. **kernel**: `signing.rs`, plus `[signing]` parsing and the intersection in
+   `policy.rs`. Inert on its own: nothing signs or verifies yet. Unit tests:
+   keygen, sign, verify round trip; canonical bytes stable across
+   pretty-print and a float round trip; the key-order guard; key file parsing
+   and the permission refusal; intersection semantics (machine introduces,
+   project and flag only narrow, an absent table leaves the set unchanged, an
+   explicit empty list empties it).
+2. **comforter, commands, cli** (a shared-layer review): the writer signs;
+   `keygen`; audit verifies and renames `unchecked` to `outdated`; the sync
+   summary line; the documentation moves listed below. Tests: sync with a key
+   then audit is `clean`; edit `body.exceptions[]` gives `bad-signature`;
+   edit `platform` gives `bad-signature`; strip `signature` gives `outdated`;
+   sign with an unlisted key gives `untrusted`; a project policy that adds a
+   key does not make the record pass; a project policy that removes the key
+   gives `untrusted`; `--policy` cannot add a key; no trusted set gives exit
+   2; `trusted = []` gives `untrusted`; a group-readable key file fails the
+   sync with no closure written; `blanket fmt` signs the `rustfmt` record;
+   the pre-`platform` fixture gives `outdated`; the existing identity goldens
+   show no object id moved.
+
+**When it ships.** `docs/human/ARCHITECTURE.md` "Permissive by default,
+strict as a switch" gains the signing paragraph; `docs/human/CLI.md`
+documents `keygen`, `BLANKET_SIGNING_KEY`, the `[signing]` table, and the new
+verdict words; `docs/human/LIMITATIONS.md` drops "a record edited by hand
+audits as whatever it now says" and states what a pass proves and does not;
+`docs/human/policy-company.toml` gets a commented `[signing]` example; this
+section is deleted.
+
+### Left for the reviewer
+
+- Whether the `--policy` file should be allowed to introduce keys as an
+  operator-controlled scope. Designed as intersect-only, because CI
+  workflows commonly take that file from the checkout.
+- `ring` as a direct dependency versus `ed25519-dalek`. Designed for `ring`
+  because it is already in the tree; if `ureq` ever drops `rustls`, `ring`
+  stays for signing.
+- The verdict word `bad-signature` (hyphenated like exception kinds) versus
+  a single word.
+- Whether `untrusted` should still list denied exceptions for operator
+  context. Designed as no, the same rule as `bad-signature`.
+
+**Rejected.** An opt-in `audit --verify-store` cross-check against store
+metadata: it needs a local store and covers only the four object-affecting
+exception kinds.
 
 ---
 
