@@ -54,12 +54,25 @@ fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
 }
 
 fn blanket_at(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
+    blanket_env(bin, cwd, store, args, &[])
+}
+
+fn blanket_env(
+    bin: &Path,
+    cwd: &Path,
+    store: &Path,
+    args: &[&str],
+    env: &[(&str, &Path)],
+) -> Output {
+    let mut command = Command::new(bin);
+    command
         .current_dir(cwd)
         .env("BLANKET_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
+        .args(args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().unwrap()
 }
 
 fn object_ids(store: &Path) -> Vec<String> {
@@ -90,8 +103,20 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     fs::remove_file(project.join("Cargo.lock")).unwrap();
     let store = temp.0.join("store");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    // `fmt` signs the rustfmt record like every closure; a scratch HOME's
+    // machine policy trusts the key so the gate can judge it.
+    let key = temp.0.join("signing.key");
+    let public = blanket::kernel::signing::generate(&key).unwrap();
+    let home = temp.0.join("home");
+    fs::create_dir_all(home.join(".blanket")).unwrap();
+    fs::write(
+        home.join(".blanket/policy.toml"),
+        format!("[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let signed: &[(&str, &Path)] = &[("BLANKET_SIGNING_KEY", &key), ("HOME", &home)];
 
-    let first = blanket(&binary, &project, &store, &["fmt", "--check"]);
+    let first = blanket_env(&binary, &project, &store, &["fmt", "--check"], signed);
     assert_eq!(
         first.status.code(),
         Some(1),
@@ -131,11 +156,22 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         closure["body"]["inputs"]["rustfmt_object"], rustfmt_id,
         "the fmt closure must record the rustfmt it ran as its input"
     );
-    // The record names the pinned rustfmt, so the gate compares and passes it.
-    let audit = blanket(&binary, &project, &store, &["audit", "--json"]);
+    assert_eq!(
+        blanket::kernel::signing::verify(&closure),
+        blanket::kernel::signing::Verification::Valid(public),
+        "fmt must sign the rustfmt record with the configured key"
+    );
+    // The record names the pinned rustfmt and is signed by a trusted key,
+    // so the gate passes it; the report still fails because the Cargo
+    // project was never synced (no cargo.json), which is `missing`.
+    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
-        audit.status.success() && report["closures"][0]["freshness"] == "current",
+        audit.status.code() == Some(1)
+            && report["closures"][0]["verdict"] == "clean"
+            && report["closures"][0]["freshness"] == "current"
+            && report["closures"][0]["signature"]["state"] == "trusted"
+            && report["missing"] == serde_json::json!(["cargo"]),
         "audit did not pass the fresh fmt record\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&audit.stdout),
         String::from_utf8_lossy(&audit.stderr)

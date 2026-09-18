@@ -73,6 +73,9 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
 
 fn preflight(platform: Platform, dir: &Path, strict: bool) -> io::Result<Vec<&'static dyn Tailor>> {
     policy::init(dir, strict)?;
+    // A configured signing key that cannot be loaded fails here, before the
+    // store is opened or any closure is written.
+    crate::comforter::init_signing()?;
     preflight_sync(platform, dir)
 }
 
@@ -96,6 +99,12 @@ fn sync_preflighted(
         return Err(no_inputs());
     }
     print_exception_summary(dir)?;
+    if crate::comforter::signing_key().is_none() {
+        eprintln!(
+            "blanket: closures unsigned; blanket audit reports them outdated \
+             (set BLANKET_SIGNING_KEY=<key file> to sign; 'blanket keygen' makes one)"
+        );
+    }
     Ok(())
 }
 
@@ -152,10 +161,15 @@ mod tests {
         }
     }
 
+    /// Scrubs every variable `preflight` reads (policy chain, strictness,
+    /// and the signing key) so a developer's environment cannot reach a
+    /// test: an exported BLANKET_SIGNING_KEY would otherwise fail preflight
+    /// here, or pin a real key for the rest of the test binary.
     struct PolicyEnv {
         home: Option<OsString>,
         policy: Option<OsString>,
         strict: Option<OsString>,
+        signing_key: Option<OsString>,
     }
 
     impl PolicyEnv {
@@ -164,10 +178,12 @@ mod tests {
                 home: std::env::var_os("HOME"),
                 policy: std::env::var_os("BLANKET_POLICY"),
                 strict: std::env::var_os("BLANKET_STRICT"),
+                signing_key: std::env::var_os("BLANKET_SIGNING_KEY"),
             };
             std::env::set_var("HOME", home);
             std::env::remove_var("BLANKET_POLICY");
             std::env::remove_var("BLANKET_STRICT");
+            std::env::remove_var("BLANKET_SIGNING_KEY");
             old
         }
     }
@@ -185,6 +201,10 @@ mod tests {
             match self.strict.take() {
                 Some(value) => std::env::set_var("BLANKET_STRICT", value),
                 None => std::env::remove_var("BLANKET_STRICT"),
+            }
+            match self.signing_key.take() {
+                Some(value) => std::env::set_var("BLANKET_SIGNING_KEY", value),
+                None => std::env::remove_var("BLANKET_SIGNING_KEY"),
             }
         }
     }

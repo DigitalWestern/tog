@@ -102,6 +102,11 @@ pub enum Command {
     Doctor {
         json: bool,
     },
+    /// `keygen <path>`: write a new closure-signing key file and print its
+    /// public key in policy syntax.
+    Keygen {
+        path: PathBuf,
+    },
     Gc(GcArgs),
     StorePath,
     StoreRoots,

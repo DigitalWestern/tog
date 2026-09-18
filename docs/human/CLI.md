@@ -33,6 +33,7 @@ INSPECT:
 
 MAINTAIN:
   gc           collect unreferenced store objects and cached artifacts
+  keygen       create a closure-signing key and print its public key
   store        'store path', 'store roots'
   completions  print a shell completion script (bash | zsh | fish)
   help         show help for a command
@@ -69,6 +70,7 @@ ENVIRONMENT:
   BLANKET_STORE           store root (default ~/.blanket/store)
   BLANKET_STRICT=1        refuse every policy exception, like --strict
   BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
+  BLANKET_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR                plain output, like --no-color
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'
@@ -174,57 +176,119 @@ mix.exs, `*.csproj`) is found from here upward — name it when several are.
 **status** compares each closure's recorded inputs against the files on disk
 and checks the projection is in place, naming the changed file otherwise.
 Offline, read-only, exit 0 only when everything is synced. **audit** is the
-CI admission gate: it reads the exceptions every sync recorded in
-`.blanket/closures/*.json` and judges them against the policy chain
-(`BLANKET_POLICY` or `~/.blanket/policy.toml`, every ancestor's
-`.blanket/policy.toml`, `BLANKET_STRICT`) unioned with `--policy <file>`.
-Union only tightens, so the supplied policy can add denials but never loosen the
-machine or project policy; a `--policy` file that is missing or malformed is
-a usage error (exit 2), never ignored, so CI can tell an operator mistake
-from a denied build. Per closure it prints the ecosystem, the record (sha256
-of the closure envelope), and one of `clean` (permitted exceptions counted
-by kind), `denied` (each denied exception's kind, subject, and detail),
-`unknown` (an exception kind this binary cannot judge), `stale` (the same
-inputs-changed / projection-missing / other-platform checks `status` makes,
-made per closure file from that file's own record), or `unchecked` (the
-closure predates input, platform, or exception recording; run `blanket
-sync` once). Only `clean` passes, because an audit of a stale or unchecked
-record proves nothing. The `rustfmt` closure `blanket fmt` writes projects
-nothing, so its inputs are the rustfmt object it ran, the directory the
-toolchain file was looked up from, and the components that file asked for
-that blanket does not provide. It is `stale` when any of those, or the Rust
-object and version beside them, is not what this binary would record for
-the same run now (including a toolchain with no pinned rustfmt), and
-`unchecked` when it predates recording inputs; either way the fix is
-`blanket fmt`. A closure file whose
-`ecosystem` field disagrees with its name (a stray or renamed `.json` under
-`.blanket/closures`) is refused, not judged. No rebuild, no store
-access, no network, no sandbox: it works on a machine without bubblewrap.
-`--json` writes the report to stdout. `project` and each closure's `path` are
-lossy UTF-8 strings. On Unix, a non-UTF-8 project path also has a sibling
-`project_bytes` field, and a non-UTF-8 closure path has a sibling `path_bytes`
-field, each containing the lowercase hex of the raw path bytes. Under
-`policy.sources` it lists the
-policies that were unioned into the one it judged against, in merge order.
-Each source has `origin`, `strict`, and `deny`; file-backed sources also have
-`path` as a lossy UTF-8 string. A non-UTF-8 path also has `path_bytes` as the
-lowercase hex of its raw bytes; that field is present only for non-UTF-8 paths.
-`origin` is `machine` (`BLANKET_POLICY`, or
-`~/.blanket/policy.toml`), `project` (an ancestor's
-`.blanket/policy.toml`), `flag` (the `--policy <file>` file, and nothing else
-for audit), or `env` (`BLANKET_STRICT=1`). The supplied `--policy` file is
-listed after the ordinary chain. The `path` field is omitted
-for strictness-only sources, and `deny` is always an array, including when it
-is empty. A file source is listed when it exists and is merged even if it
-denies nothing. In the text report, each file-backed source is one
-`policy: <origin> "<path>" [denies a, b] [(strict)]` result line on stdout.
-Paths are always Rust-Debug-quoted, so spaces and policy-like words in a
-filename cannot change the grammar. Strictness-only sources omit the path.
-Policy lines come first, followed by verdict lines, and `--quiet` leaves them
-in place. Exit 0 when every closure is clean, 1
-otherwise. A company deny list to start from
-ships as [policy-company.toml](policy-company.toml); every kind it names is
-checked against the binary's kind list by a unit test. **ls** reads
+CI admission gate: it reads the closure records every sync committed to
+`.blanket/closures/*.json`, authenticates each one, and judges the
+exceptions it records against the policy chain (`BLANKET_POLICY` or
+`~/.blanket/policy.toml`, every ancestor's `.blanket/policy.toml`,
+`BLANKET_STRICT`) merged with `--policy <file>`. Merging only tightens: a
+project or `--policy` file can add denials and drop trusted keys, never the
+reverse; a `--policy` file that is missing or malformed is a usage error
+(exit 2), never ignored, so CI can tell an operator mistake from a denied
+build.
+
+What a pass proves: every closure file carries a valid signature from a key
+the machine policy trusts, every ecosystem detected in the directory has its
+primary closure, each record is current for the inputs on disk, and no
+recorded exception is denied or unknown. It does not prove the signer's
+sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
+
+Signing: `blanket keygen <path>` writes an Ed25519 key file (mode 0600,
+never overwriting an existing file or symlink) and prints the `[signing]`
+table that trusts it; the private seed is never printed. With
+`BLANKET_SIGNING_KEY=<path>` set, every command that writes a closure
+(`sync`, `fmt`, `build`, `add`, `remove`, `update`) signs it. The key is
+loaded once, before the store is opened or a manifest is edited; a configured key (including an empty path) that is
+missing, malformed, not a regular file, or readable by group or other fails
+the command, never silently downgrades to unsigned. Unset, the record is
+written unsigned and the sync summary says so. Trust is the machine
+policy's `[signing]` table, `trusted = ["ed25519:<64 hex>", ...]`, in
+`BLANKET_POLICY` or `~/.blanket/policy.toml`; a project `.blanket/policy.toml`
+or the `--policy` file can only intersect with it, so a pull request that
+edits the record and the project policy can only remove trust. With no
+`[signing]` table at machine scope the gate is not configured: exit 2 with
+the fix in the message, before any record is judged. An explicit
+`trusted = []` is a decision: every signed record is `untrusted`. Rotation:
+add the new public key to the machine policy, re-sync under the new private
+key, then remove the old key; removal is revocation, and the records it
+signed become `untrusted` with the re-sync fix in the message. Expected
+deployment: a protected CI job holds the key, runs a trusted binary against
+an approved checkout, and commits the closures; pull-request jobs run
+`audit` with public keys only. A job that runs untrusted project code must
+not hold a signing key: `sync` can execute project code during planning and
+`fmt` can delegate a package script, and mode 0600 does not stop same-user
+code from reading the key. Keep it outside the checkout, the store, and any
+sandbox read root, and discard checkout-supplied plan caches before a
+signing sync. The signature is an additive envelope field
+(`signature: {alg, key, sig}`) over the canonical bytes of the whole record:
+`schema`, `ecosystem`, `platform`, `projected_at`, and all of `body`
+including `body.exceptions[]`. Whitespace and key order in the file do not
+matter; any change to the parsed value does. `run`, `x`, `ls`, `sbom`, and
+`status` keep accepting unsigned records: verification is the gate's job.
+
+Per closure it prints the ecosystem, the record (sha256 of the closure file
+bytes), and the first of these that applies: `bad-signature` (a signature
+is present and does not verify: tampered, malformed, or an unknown
+algorithm; find out who changed it, then regenerate under a trusted key),
+`untrusted` (verifies under a key the effective set does not contain; the
+line names the key and the scopes that exclude it), `outdated` (no
+signature, or a record from before inputs, platform, or the exception
+record were written; run `blanket sync` once under a trusted key, then
+commit), `stale` (the same inputs-changed / projection-missing /
+other-platform checks `status` makes, made per closure file from that
+file's own record), `denied` (each denied exception's kind, subject, and
+detail), `unknown` (an exception kind this binary cannot judge), or `clean`
+(permitted exceptions counted by kind). A `bad-signature`, `untrusted`, or
+unsigned record is not evaluated further: freshness is not computed and no
+exception is judged, and the line says `(not evaluated)` rather than
+claiming anything about its contents. A detected ecosystem with no
+`.blanket/closures/<ecosystem>.json` is listed as `missing` and fails the
+report; the optional `rustfmt` record is not a substitute for `cargo.json`.
+Only `clean` with nothing missing passes. The `rustfmt` closure
+`blanket fmt` writes projects nothing, so its inputs are the rustfmt object
+it ran, the directory the toolchain file was looked up from, and the
+components that file asked for that blanket does not provide. It is `stale`
+when any of those, or the Rust object and version beside them, is not what
+this binary would record for the same run now (including a toolchain with
+no pinned rustfmt), and `outdated` when it predates recording inputs;
+either way the fix is `blanket fmt`. A closure file whose `ecosystem` field
+disagrees with its name, or whose envelope is malformed (not `closure/1`,
+no ecosystem string, a non-object body), is refused with exit 1, not
+judged. No rebuild, no store access, no network, no sandbox: it works on a
+machine without bubblewrap.
+
+`--json` writes the report to stdout. `project` and each closure's `path`
+are lossy UTF-8 strings. On Unix, a non-UTF-8 project path also has a
+sibling `project_bytes` field, and a non-UTF-8 closure path has a sibling
+`path_bytes` field, each containing the lowercase hex of the raw path bytes.
+Each closure has `verdict` (the word above), `signature` (`state` one of
+`trusted`, `unsigned`, `untrusted`, `bad`; `key` present when a public key
+could be decoded; `detail` the reason, or the excluding scopes), `freshness`
+(`current`, `stale`, `outdated`, or `not-evaluated`), `freshness_detail`,
+and `denied`, `unknown`, `permitted`, which are `null` for a record that was
+not evaluated. `missing` lists the detected ecosystems without a primary
+closure. `policy.trusted` is the effective trusted set. Under
+`policy.sources` it lists the policies that were merged into the one it
+judged against, in merge order. Each source has `origin`, `strict`, `deny`,
+and `trusted` (`null` when the file has no `[signing]` table, `[]` when it
+explicitly trusts nobody); file-backed sources also have `path` as a lossy
+UTF-8 string. A non-UTF-8 path also has `path_bytes` as the lowercase hex
+of its raw bytes; that field is present only for non-UTF-8 paths. `origin`
+is `machine` (`BLANKET_POLICY`, or `~/.blanket/policy.toml`), `project` (an
+ancestor's `.blanket/policy.toml`), `flag` (the `--policy <file>` file, and
+nothing else for audit), or `env` (`BLANKET_STRICT=1`). The supplied
+`--policy` file is listed after the ordinary chain. The `path` field is
+omitted for strictness-only sources, and `deny` is always an array,
+including when it is empty. A file source is listed when it exists and is
+merged even if it denies nothing. In the text report, each file-backed
+source is one `policy: <origin> "<path>" [denies a, b] [(strict)] [trusts
+<keys> | trusts nobody]` result line on stdout. Paths are always
+Rust-Debug-quoted, so spaces and policy-like words in a filename cannot
+change the grammar. Strictness-only sources omit the path. Policy lines
+come first, then verdict lines, then `missing` lines, and `--quiet` leaves
+them in place. Exit 0 when every closure is clean and none is missing, 1
+otherwise, 2 when the gate is misconfigured. A company deny list to start
+from ships as [policy-company.toml](policy-company.toml); every kind it
+names is checked against the binary's kind list by a unit test. **ls** reads
 `.blanket/closures/*.json` (no store access): name, version, and toolchain
 per package, `-v` adds artifact and store object; the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`, `rustfmt`.
@@ -260,6 +324,8 @@ concurrent sync cannot lose one. Sharp edges:
 - `--project` also collects old unused project forests and backups; legacy
   sibling-home forests are never swept and are reported as skipped.
 
+**keygen** `<path>` creates a closure-signing key (see **audit** above) and
+prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
 root (`store roots`). **version** prints `blanket 0.1.0`.
 

@@ -20,7 +20,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Other ecosystems | Fixture-proven only (`tests/`) |
 | Store GC (root protection, object metadata, fail-closed sweep) | Shipped and independently reviewed on Linux |
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
-| Policy admission gate (`blanket audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is now compared, including the `rustfmt` record against its pin (2026-09-17). Signed-closure design independently reviewed in PR #76. Signing and the `outdated` verdict remain unbuilt |
+| Policy admission gate (`blanket audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared, including the `rustfmt` record against its pin (2026-09-17). Closure records are signed (`blanket keygen`, `BLANKET_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |
 | `blanket sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
 | Toolchain lock (WP2) | Designed, not built (`docs/agent/DESIGNS.md` §1) |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
@@ -30,8 +30,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 The ordered list is issue #73; [FOLLOW-UPS.md](FOLLOW-UPS.md) keeps the
 detail behind each item:
 
-1. Ship signing and the `outdated` verdict together (#44).
-2. Toolchain lock, starting with the shipped-table adapter.
+1. Toolchain lock, starting with the shipped-table adapter (#45).
 
 ## How work happens here
 

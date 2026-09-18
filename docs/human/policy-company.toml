@@ -91,3 +91,14 @@ deny = [
 #                                    none; every crate in it is still
 #                                    hash-verified. Commit the lock to make
 #                                    this disappear.
+
+# Closure signing. `blanket audit` accepts only records signed by a key in
+# the machine policy's [signing] table; a project or --policy copy of this
+# file can only remove keys from that table, never add one, and without the
+# table at machine scope the gate is not configured (exit 2). Generate a key
+# on the signing machine with `blanket keygen <path>`, set
+# BLANKET_SIGNING_KEY=<path> where `blanket sync` runs, and paste the table
+# it prints here:
+#
+# [signing]
+# trusted = ["ed25519:<64 hex>"]

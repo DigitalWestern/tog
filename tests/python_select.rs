@@ -43,12 +43,25 @@ fn copy_tree(src: &Path, dest: &Path) {
 }
 
 fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
+    blanket_env(bin, project, store, args, &[])
+}
+
+fn blanket_env(
+    bin: &Path,
+    project: &Path,
+    store: &Path,
+    args: &[&str],
+    env: &[(&str, &Path)],
+) -> Output {
+    let mut command = Command::new(bin);
+    command
         .current_dir(project)
         .env("BLANKET_STORE", store)
-        .args(args)
-        .output()
-        .unwrap()
+        .args(args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().unwrap()
 }
 
 fn assert_ok(output: Output, label: &str) -> String {
@@ -83,18 +96,102 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         .map(PathBuf::from)
         .unwrap_or_else(|| temp.0.join("store"));
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    // The sync signs its closure with a key made here, and a machine policy
+    // in a scratch HOME trusts it: the gate then passes the real record.
+    let key = temp.0.join("signing.key");
+    let public = blanket::kernel::signing::generate(&key).unwrap();
+    let home = temp.0.join("home");
+    std::fs::create_dir_all(home.join(".blanket")).unwrap();
+    std::fs::write(
+        home.join(".blanket/policy.toml"),
+        format!("[signing]\ntrusted = [\"{public}\"]\n"),
+    )
+    .unwrap();
+    let signed: &[(&str, &Path)] = &[("BLANKET_SIGNING_KEY", &key), ("HOME", &home)];
 
-    let first = blanket(&binary, &project, &store, &["sync"]);
+    let first = blanket_env(&binary, &project, &store, &["sync"], signed);
     let first_stderr = String::from_utf8_lossy(&first.stderr);
     assert!(first.status.success(), "first sync failed: {first_stderr}");
     assert!(
         first_stderr.contains("python 3.11.16 selected"),
         "{first_stderr}"
     );
+    assert!(
+        !first_stderr.contains("closures unsigned"),
+        "a signed sync must not warn about unsigned closures: {first_stderr}"
+    );
     let closure: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".blanket/closures/python.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(closure["signature"]["alg"], "ed25519");
+    assert_eq!(closure["signature"]["key"], public.hex());
+    assert_eq!(
+        blanket::kernel::signing::verify(&closure),
+        blanket::kernel::signing::Verification::Valid(public)
+    );
+    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    assert!(
+        audit.status.success()
+            && report["passed"] == true
+            && report["closures"][0]["verdict"] == "clean"
+            && report["closures"][0]["signature"]["state"] == "trusted",
+        "audit did not pass the signed sync record\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    // Editing the committed record is caught: no exception is judged. The
+    // edit adds an exception the sync did not record, so the value changes
+    // whatever the real sync recorded.
+    let path = project.join(".blanket/closures/python.json");
+    let mut edited = closure.clone();
+    edited["body"]["exceptions"] = serde_json::json!([
+        {"kind": "git-dependency", "subject": "left-pad", "detail": "hand-added"}
+    ]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    assert_eq!(audit.status.code(), Some(1));
+    assert_eq!(report["closures"][0]["verdict"], "bad-signature");
+    std::fs::write(&path, serde_json::to_vec_pretty(&closure).unwrap()).unwrap();
+    // An unsigned sync says so and its record is outdated.
+    let unsigned = blanket_env(
+        &binary,
+        &project,
+        &store,
+        &["sync", "--fresh"],
+        &[("HOME", &home)],
+    );
+    assert!(
+        unsigned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unsigned.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&unsigned.stderr).contains("closures unsigned"),
+        "{}",
+        String::from_utf8_lossy(&unsigned.stderr)
+    );
+    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    assert_eq!(audit.status.code(), Some(1));
+    assert_eq!(report["closures"][0]["verdict"], "outdated");
+    assert_eq!(report["closures"][0]["signature"]["state"], "unsigned");
+    let resigned = blanket_env(&binary, &project, &store, &["sync"], signed);
+    assert!(
+        resigned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resigned.stderr)
+    );
+    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    assert!(
+        audit.status.success() && report["closures"][0]["verdict"] == "clean",
+        "re-syncing under the key did not restore a clean audit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
     assert_eq!(closure["body"]["python"]["version"], "3.11.16");
     assert_eq!(closure["body"]["python"]["constraint"], ">=3.9,<3.12");
     assert_eq!(
@@ -125,7 +222,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     let lock_mtime = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
     let stamp_mtime = std::fs::metadata(&stamp_path).unwrap().modified().unwrap();
 
-    let second = blanket(&binary, &project, &store, &["sync"]);
+    let second = blanket_env(&binary, &project, &store, &["sync"], signed);
     assert_ok(second, "warm sync");
     assert_eq!(
         std::fs::metadata(&plan_path).unwrap().modified().unwrap(),

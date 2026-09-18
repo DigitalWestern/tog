@@ -12,6 +12,7 @@ pub(crate) mod gc;
 /// `pub` on purpose: the read-only closure/status views were public before
 /// the move and stay reachable as `blanket::commands::inspect`.
 pub mod inspect;
+pub(crate) mod keygen;
 pub(crate) mod ls;
 pub(crate) mod plan;
 pub(crate) mod run;
@@ -127,6 +128,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         Completions { shell } => return completions::run(shell),
         Audit { ref policy, json } => return audit::run(policy.as_deref(), json),
         Doctor { json } => return doctor::run(json),
+        Keygen { ref path } => return keygen::run(path),
         Ls {
             ref ecosystem,
             json,
@@ -154,6 +156,17 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         &command,
         Plan | Build { .. } | Run { .. } | Add { .. } | Remove { .. } | Update { .. } | X { .. }
     );
+    // Every verb that can rewrite a closure (build realizes and republishes
+    // the project's environment; add/remove/update sync after their edit)
+    // loads the signing key first, so a bad key fails before the store is
+    // opened or a manifest is touched, and no closure is ever written
+    // unsigned under a configured key.
+    if matches!(
+        &command,
+        Build { .. } | Add { .. } | Remove { .. } | Update { .. }
+    ) {
+        crate::comforter::init_signing()?;
+    }
     let ctx = Context::open(platform, needs_maintenance)?;
     match command {
         Plan => plan::run(&ctx).map(|_| 0),
@@ -221,6 +234,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         | StoreRoots
         | Completions { .. }
         | Doctor { .. }
+        | Keygen { .. }
         | Ls { .. }
         | Audit { .. } => {
             unreachable!("handled above")

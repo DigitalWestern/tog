@@ -37,6 +37,10 @@ pub struct ClosureFile {
     pub platform: Option<String>,
     pub projected_at: Option<u64>,
     pub body: Value,
+    /// The complete envelope as parsed from the one file read, unknown
+    /// fields included: what a signature covers, and what `audit` verifies
+    /// before it trusts any field lifted above.
+    pub envelope: Value,
     /// Where the envelope was read from.
     pub path: PathBuf,
     /// sha256 of the envelope bytes as read: names the exact record an
@@ -67,7 +71,10 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{}: {error}; run 'blanket sync'", entry.path().display()),
+                format!(
+                    "{:?}: {error}; run 'blanket sync'",
+                    entry.path().to_string_lossy()
+                ),
             )
         })?;
         out.push(ClosureFile {
@@ -75,6 +82,7 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
             platform: value["platform"].as_str().map(str::to_string),
             projected_at: value["projected_at"].as_u64(),
             body: value["body"].clone(),
+            envelope: value,
             path: entry.path(),
             record_sha256: hex::encode(Sha256::digest(&bytes)),
         });

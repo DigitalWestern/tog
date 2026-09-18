@@ -9,17 +9,7 @@ by position.
 
 ## Next up, in order
 
-1. **`blanket audit`: ship signing plus the `outdated` verdict together.**
-   Owner decision 2026-09-16. A record with no `platform` field, no inputs,
-   or no exceptions array fails today as `unchecked`, so every project
-   synced before those fields existed fails on first adoption. Keep the
-   failure (a warning would pass a record with no exceptions list), but
-   report it as `outdated` with the fix in the message (`blanket sync` once,
-   then commit). Unsigned records get the same treatment, so adopters
-   migrate once. The reviewed design is `docs/agent/DESIGNS.md` §5.
-   Done when LIMITATIONS.md no longer says a hand-edited record audits as
-   it says.
-2. **Toolchain lock (WP2), shipped-table adapter first.** The next large
+1. **Toolchain lock (WP2), shipped-table adapter first.** The next large
    feature: a committed lock naming the exact toolchain per project. Design,
    remaining PRs, and the recommended order (PR 1 before the lock core) are
    in `docs/agent/DESIGNS.md` §1.
@@ -84,10 +74,10 @@ by position.
   sites mint a fresh lease per child, and several extraction and clone
   helpers take no token at all, so protection cannot be proved at the call
   site. The same fix removes the `Store::has` lock-order inversion. Site
-  table in `docs/agent/DESIGNS.md` §6.
+  table in `docs/agent/DESIGNS.md` §5.
 - **`src/fsroot.rs`: descriptor-relative project writes.** Never started.
   Also the base for contained plan-cache writes and for the toolchain lock.
-  Rules in `docs/agent/DESIGNS.md` §6.
+  Rules in `docs/agent/DESIGNS.md` §5.
 - **Descriptor-relative project access in sync.** Every command reads the
   project by pathname, so a same-user process that swaps the project
   directory mid-sync can make blanket sync the replacement
@@ -95,7 +85,7 @@ by position.
   there as pre-existing. Closing it means every tailor reads through a held
   directory descriptor. Probably builds on `src/fsroot.rs`.
 - **Missing GC tests.** 18 of the 26 tests the GC design named do not exist
-  by name. List in `docs/agent/DESIGNS.md` §6.
+  by name. List in `docs/agent/DESIGNS.md` §5.
 - **GC mutation survivor: redundant root marking.** Removing the marking set
   in the sweep is not observable, because `root_live` independently protects
   the same objects. Either add a test that observes the marking set or
