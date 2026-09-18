@@ -148,8 +148,10 @@ impl Verdict {
             (Signature::Bad { .. }, _) => "bad-signature",
             (Signature::Untrusted { .. }, _) => "untrusted",
             (Signature::Unsigned, _) => "outdated",
-            (Signature::Trusted(_), Freshness::NotEvaluated) => "not-evaluated",
-            (Signature::Trusted(_), Freshness::Outdated(_)) => "outdated",
+            // A trusted record is always evaluated; the pair is unreachable
+            // and folds into the nearest failing word rather than inventing
+            // one the report does not define.
+            (Signature::Trusted(_), Freshness::Outdated(_) | Freshness::NotEvaluated) => "outdated",
             (Signature::Trusted(_), Freshness::Stale(_)) => "stale",
             (Signature::Trusted(_), Freshness::Current) => {
                 if self
@@ -292,8 +294,8 @@ fn check_shape(closure: &ClosureFile) -> io::Result<()> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{}: {what}; the record is refused, not judged: run '{}'",
-                closure.path.display(),
+                "{:?}: {what}; the record is refused, not judged: run '{}'",
+                closure.path.to_string_lossy(),
                 refresh(&closure.ecosystem)
             ),
         )
@@ -402,8 +404,8 @@ fn check_name(closure: &ClosureFile) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{}: closure claims ecosystem '{}' but is named '{stem}'; a stray or renamed file under .blanket/closures is refused, not judged: remove it or run 'blanket sync'",
-                closure.path.display(),
+                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .blanket/closures is refused, not judged: remove it or run 'blanket sync'",
+                closure.path.to_string_lossy(),
                 closure.ecosystem
             ),
         ));
@@ -422,8 +424,8 @@ fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "{}: malformed exception record: {error}; run '{}'",
-                        closure.path.display(),
+                        "{:?}: malformed exception record: {error}; run '{}'",
+                        closure.path.to_string_lossy(),
                         refresh(&closure.ecosystem)
                     ),
                 )
@@ -551,6 +553,22 @@ pub fn audit(
 ) -> io::Result<Report> {
     let (policy, sources) = effective_policy(dir, extra)?;
     audit_under(platform, dir, policy, sources)
+}
+
+/// A report line as the text report prints it: control characters (a
+/// closure file name can carry them, `ecosystem` must equal that name, and
+/// exception subjects come from the record) are escaped so a record cannot
+/// rewrite the terminal lines above it. Ordinary text prints unchanged.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 fn key_list(keys: &KeySet) -> String {
@@ -722,7 +740,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     let width = report
         .verdicts
         .iter()
-        .map(|verdict| verdict.ecosystem.len())
+        .map(|verdict| printable(&verdict.ecosystem).len())
         .chain(report.missing.iter().map(String::len))
         .max()
         .unwrap_or(0);
@@ -791,18 +809,24 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                 }
             }
         };
-        out.push_str(&format!("{:width$}  {line}\n", verdict.ecosystem));
+        out.push_str(&printable(&format!(
+            "{:width$}  {line}",
+            printable(&verdict.ecosystem)
+        )));
+        out.push('\n');
         for exception in verdict.denied.as_deref().unwrap_or_default() {
-            out.push_str(&format!(
-                "{:width$}    denied   {}  {}  {}\n",
+            out.push_str(&printable(&format!(
+                "{:width$}    denied   {}  {}  {}",
                 "", exception.kind, exception.subject, exception.detail
-            ));
+            )));
+            out.push('\n');
         }
         for exception in verdict.unknown.as_deref().unwrap_or_default() {
-            out.push_str(&format!(
-                "{:width$}    unknown  {}  {}  {}\n",
+            out.push_str(&printable(&format!(
+                "{:width$}    unknown  {}  {}  {}",
                 "", exception.kind, exception.subject, exception.detail
-            ));
+            )));
+            out.push('\n');
         }
     }
     for ecosystem in &report.missing {
@@ -2000,7 +2024,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("claims ecosystem 'rustfmt' but is named 'python'"),
+                .contains("claims ecosystem \"rustfmt\" but is named \"python\""),
             "{error}"
         );
     }
@@ -2645,5 +2669,33 @@ mod tests {
         // The well-formed envelope from the same helper passes.
         let closure = write(|_| {}, true);
         assert!(judge(dir, &permissive(), &[closure])[0].passes());
+        // A file that is valid JSON but not an object at all.
+        let path = dir.join(".blanket/closures/python.json");
+        fs::write(&path, "[1, 2]").unwrap();
+        let closure = read_closure(dir, &path);
+        let error = evaluate(host(), dir, &permissive(), &[], &[closure], &present).unwrap_err();
+        assert!(error.to_string().contains("not a JSON object"), "{error}");
+    }
+
+    #[test]
+    fn control_characters_in_a_closure_name_are_escaped_in_the_report() {
+        let temp = python_project("escape");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        // A stray closure whose name and ecosystem carry an escape sequence:
+        // orphaned (no such ecosystem), and printed without the raw bytes.
+        let name = "\u{1b}[2Kpwned";
+        let closure = write_closure(dir, name, name, Some(host().triple()), body);
+        let verdicts = judge(dir, &permissive(), &[closure]);
+        assert!(!verdicts[0].passes());
+        let text = render(dir, &report(permissive(), verdicts), false).unwrap();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("\\u{1b}[2Kpwned  stale"), "{text:?}");
+        // The refusal message for a renamed file is quoted the same way.
+        let renamed = write_closure(dir, name, "python", Some(host().triple()), python_body(dir));
+        let present = inspect::detected(dir).unwrap();
+        let error = evaluate(host(), dir, &permissive(), &[], &[renamed], &present).unwrap_err();
+        assert!(!error.to_string().contains('\u{1b}'), "{error:?}");
     }
 }

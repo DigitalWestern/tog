@@ -156,6 +156,17 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         &command,
         Plan | Build { .. } | Run { .. } | Add { .. } | Remove { .. } | Update { .. } | X { .. }
     );
+    // Every verb that can rewrite a closure (build realizes and republishes
+    // the project's environment; add/remove/update sync after their edit)
+    // loads the signing key first, so a bad key fails before the store is
+    // opened or a manifest is touched, and no closure is ever written
+    // unsigned under a configured key.
+    if matches!(
+        &command,
+        Build { .. } | Add { .. } | Remove { .. } | Update { .. }
+    ) {
+        crate::comforter::init_signing()?;
+    }
     let ctx = Context::open(platform, needs_maintenance)?;
     match command {
         Plan => plan::run(&ctx).map(|_| 0),

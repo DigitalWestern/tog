@@ -71,7 +71,10 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{}: {error}; run 'blanket sync'", entry.path().display()),
+                format!(
+                    "{:?}: {error}; run 'blanket sync'",
+                    entry.path().to_string_lossy()
+                ),
             )
         })?;
         out.push(ClosureFile {

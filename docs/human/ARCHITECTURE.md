@@ -464,7 +464,7 @@ commands iterate. See docs/human/ADDING-A-TAILOR.md.
 - `docs/human/LIMITATIONS.md`: known, accepted gaps.
 - `docs/human/ADDING-A-TAILOR.md`: how to add an ecosystem.
 - `docs/agent/DESIGNS.md`: designed but unbuilt work (toolchain lock,
-  release catalog and trust, company policy layer, signed closures).
+  release catalog and trust, company policy layer).
 - `docs/agent/HITRATE.md`: the real-project hit-rate measurement.
 
 Review results live in each pull request's description. Older plans,

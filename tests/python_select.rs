@@ -141,10 +141,14 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         String::from_utf8_lossy(&audit.stdout),
         String::from_utf8_lossy(&audit.stderr)
     );
-    // Editing the committed record is caught: no exception is judged.
+    // Editing the committed record is caught: no exception is judged. The
+    // edit adds an exception the sync did not record, so the value changes
+    // whatever the real sync recorded.
     let path = project.join(".blanket/closures/python.json");
     let mut edited = closure.clone();
-    edited["body"]["exceptions"] = serde_json::json!([]);
+    edited["body"]["exceptions"] = serde_json::json!([
+        {"kind": "git-dependency", "subject": "left-pad", "detail": "hand-added"}
+    ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
     let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
@@ -179,6 +183,14 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         resigned.status.success(),
         "{}",
         String::from_utf8_lossy(&resigned.stderr)
+    );
+    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
+    assert!(
+        audit.status.success() && report["closures"][0]["verdict"] == "clean",
+        "re-syncing under the key did not restore a clean audit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
     );
     assert_eq!(closure["body"]["python"]["version"], "3.11.16");
     assert_eq!(closure["body"]["python"]["constraint"], ">=3.9,<3.12");

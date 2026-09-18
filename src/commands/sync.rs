@@ -161,10 +161,15 @@ mod tests {
         }
     }
 
+    /// Scrubs every variable `preflight` reads (policy chain, strictness,
+    /// and the signing key) so a developer's environment cannot reach a
+    /// test: an exported BLANKET_SIGNING_KEY would otherwise fail preflight
+    /// here, or pin a real key for the rest of the test binary.
     struct PolicyEnv {
         home: Option<OsString>,
         policy: Option<OsString>,
         strict: Option<OsString>,
+        signing_key: Option<OsString>,
     }
 
     impl PolicyEnv {
@@ -173,10 +178,12 @@ mod tests {
                 home: std::env::var_os("HOME"),
                 policy: std::env::var_os("BLANKET_POLICY"),
                 strict: std::env::var_os("BLANKET_STRICT"),
+                signing_key: std::env::var_os("BLANKET_SIGNING_KEY"),
             };
             std::env::set_var("HOME", home);
             std::env::remove_var("BLANKET_POLICY");
             std::env::remove_var("BLANKET_STRICT");
+            std::env::remove_var("BLANKET_SIGNING_KEY");
             old
         }
     }
@@ -194,6 +201,10 @@ mod tests {
             match self.strict.take() {
                 Some(value) => std::env::set_var("BLANKET_STRICT", value),
                 None => std::env::remove_var("BLANKET_STRICT"),
+            }
+            match self.signing_key.take() {
+                Some(value) => std::env::set_var("BLANKET_SIGNING_KEY", value),
+                None => std::env::remove_var("BLANKET_SIGNING_KEY"),
             }
         }
     }

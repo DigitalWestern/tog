@@ -68,17 +68,16 @@ pub fn signing_key() -> Option<std::sync::Arc<SigningKey>> {
         .flatten()
 }
 
-/// Replace the process signing key. Tests that call this hold
-/// `SIGNING_TEST_LOCK` so they do not race each other's writers.
+/// Replace the process signing key. The one test that sets a key holds
+/// both `SUPERVISION_TEST_LOCK` and `attribution_test_lock` across the
+/// set, the write, and the reset; every other closure-writing test holds
+/// at least one of those, so none can observe the test key.
 #[cfg(test)]
 pub(crate) fn set_signing_key_for_test(key: Option<std::sync::Arc<SigningKey>>) {
     *SIGNING_KEY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key);
 }
-
-#[cfg(test)]
-pub(crate) static SIGNING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Explicit references protected by one project closure.  The references are
 /// validated against the supplied store at the boundary; serialized closure
@@ -1682,9 +1681,6 @@ mod closure_platform_tests {
 
     #[test]
     fn write_closure_signs_with_the_configured_key() {
-        let _signing = SIGNING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());

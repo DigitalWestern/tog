@@ -1923,7 +1923,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     let out = blanket(&mismatch.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains("claims ecosystem 'rustfmt' but is named 'python'"),
+        text(&out.stderr).contains(r#"claims ecosystem "rustfmt" but is named "python""#),
         "{}",
         text(&out.stderr)
     );
@@ -1989,6 +1989,8 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
         &["keygen"][..],
         &["keygen", "a", "b"],
         &["keygen", "--json"],
+        &["keygen", ""],
+        &["keygen", "--", "a", "b"],
     ] {
         let out = blanket(&home.0, &home.0, args);
         assert_eq!(
@@ -1997,7 +1999,17 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
             "{args:?}: {}",
             text(&out.stderr)
         );
+        assert!(!home.0.join("a").exists(), "{args:?} created a file");
     }
+    // `--` lets a path that starts with a dash through.
+    let dashed = home.0.join("-dashed.key");
+    let out = blanket(
+        &home.0,
+        &home.0,
+        &["keygen", "--", dashed.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(dashed.is_file());
     let out = blanket(&home.0, &home.0, &["help", "keygen"]);
     assert_eq!(out.status.code(), Some(0));
     assert!(text(&out.stdout).contains("BLANKET_SIGNING_KEY"));
@@ -2041,7 +2053,7 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
 }
 
 #[test]
-fn a_bad_signing_key_fails_sync_and_fmt_before_the_store_is_touched() {
+fn a_bad_signing_key_fails_every_closure_writer_before_the_store_is_touched() {
     let home = TempDir::new("badkey-home");
     let project = TempDir::new("badkey-project");
     std::fs::write(project.0.join("requirements.txt"), "").unwrap();
@@ -2059,7 +2071,12 @@ fn a_bad_signing_key_fails_sync_and_fmt_before_the_store_is_touched() {
         ("malformed", malformed.to_str().unwrap()),
         ("directory", home.0.to_str().unwrap()),
     ] {
-        for args in [&["sync"][..], &["fmt", "--eco", "rust", "--check"]] {
+        for args in [
+            &["sync"][..],
+            &["fmt", "--eco", "rust", "--check"],
+            &["build"],
+            &["add", "py:six", "--no-sync"],
+        ] {
             let out = blanket_env(&project.0, &home.0, args, &[("BLANKET_SIGNING_KEY", key)]);
             assert_eq!(
                 out.status.code(),
@@ -2079,6 +2096,11 @@ fn a_bad_signing_key_fails_sync_and_fmt_before_the_store_is_touched() {
             assert!(
                 !project.0.join(".blanket/closures").exists(),
                 "{label} {args:?}: a closure was written"
+            );
+            assert_eq!(
+                std::fs::read_to_string(project.0.join("requirements.txt")).unwrap(),
+                "",
+                "{label} {args:?}: the manifest was edited"
             );
         }
     }

@@ -572,12 +572,14 @@ fn validate_x_bin(value: &str) -> Result<(), UsageError> {
 
 fn parse_keygen(args: &[String]) -> Result<Option<Command>, UsageError> {
     let mut path = None;
+    let mut literal = false;
     for arg in args {
         match arg.as_str() {
-            "-h" | "--help" => return Ok(None),
-            other if other.starts_with('-') && path.is_none() => {
-                return Err(reject("keygen", other))
-            }
+            "-h" | "--help" if !literal => return Ok(None),
+            // `--` ends option parsing, so a path that starts with `-` can
+            // be given.
+            "--" if !literal => literal = true,
+            other if !literal && other.starts_with('-') => return Err(reject("keygen", other)),
             other => {
                 if path.is_some() {
                     return Err(UsageError::new(
@@ -585,7 +587,13 @@ fn parse_keygen(args: &[String]) -> Result<Option<Command>, UsageError> {
                         Some("keygen"),
                     ));
                 }
-                path = Some(non_empty(other, "<path>", Some("keygen"))?);
+                if other.is_empty() {
+                    return Err(UsageError::new(
+                        "keygen: the key path is empty",
+                        Some("keygen"),
+                    ));
+                }
+                path = Some(PathBuf::from(other));
             }
         }
     }
