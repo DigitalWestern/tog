@@ -655,6 +655,7 @@ mod tests {
         Policy {
             strict: false,
             deny: kinds.iter().map(|kind| kind.to_string()).collect(),
+            signing: None,
         }
     }
 
@@ -772,6 +773,7 @@ mod tests {
                 path: Some(path),
                 strict: false,
                 deny: BTreeSet::new(),
+                trusted: None,
             }],
             verdicts: Vec::new(),
         };
@@ -800,6 +802,7 @@ mod tests {
                 path: Some(PathBuf::from("policy-\n.toml")),
                 strict: false,
                 deny: BTreeSet::new(),
+                trusted: None,
             }],
             verdicts: Vec::new(),
         };
@@ -889,6 +892,7 @@ mod tests {
         let strict = Policy {
             strict: true,
             deny: BTreeSet::new(),
+            signing: None,
         };
         let verdicts = judge(&temp.0, &strict, &closures);
         assert_eq!(verdicts[0].denied.len(), 1);
@@ -986,6 +990,7 @@ mod tests {
         let mut strict = Policy {
             strict: true,
             deny: BTreeSet::new(),
+            signing: None,
         };
         policy::union(&mut strict, &permissive);
         assert!(strict.strict);
@@ -1016,6 +1021,7 @@ mod tests {
         let extra = Policy {
             strict: false,
             deny: [GIT_DEPENDENCY.to_string()].into_iter().collect(),
+            signing: None,
         };
         let policy_file = temp.0.join("company.toml");
         let _env = policy::test_env_lock();

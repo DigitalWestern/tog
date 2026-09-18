@@ -15,6 +15,7 @@ pub mod objmeta;
 pub mod platform;
 pub mod policy;
 pub mod sandbox;
+pub mod signing;
 pub mod store;
 pub mod supervise;
 #[cfg(test)]
