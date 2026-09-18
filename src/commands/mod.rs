@@ -12,6 +12,7 @@ pub(crate) mod gc;
 /// `pub` on purpose: the read-only closure/status views were public before
 /// the move and stay reachable as `blanket::commands::inspect`.
 pub mod inspect;
+pub(crate) mod keygen;
 pub(crate) mod ls;
 pub(crate) mod plan;
 pub(crate) mod run;
@@ -127,6 +128,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         Completions { shell } => return completions::run(shell),
         Audit { ref policy, json } => return audit::run(policy.as_deref(), json),
         Doctor { json } => return doctor::run(json),
+        Keygen { ref path } => return keygen::run(path),
         Ls {
             ref ecosystem,
             json,
@@ -221,6 +223,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         | StoreRoots
         | Completions { .. }
         | Doctor { .. }
+        | Keygen { .. }
         | Ls { .. }
         | Audit { .. } => {
             unreachable!("handled above")

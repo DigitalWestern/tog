@@ -8,6 +8,7 @@
 pub mod status;
 
 use crate::kernel::platform::Platform;
+use crate::kernel::signing::SigningKey;
 use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -20,6 +21,64 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CLOSURE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The closure-signing key for this invocation: `Some(None)` once preflight
+/// found no `BLANKET_SIGNING_KEY`, `Some(Some(key))` once it loaded one,
+/// `None` before preflight ran. Every closure a command writes is signed
+/// with this one key or none: there is no per-write choice.
+static SIGNING_KEY: std::sync::Mutex<Option<Option<std::sync::Arc<SigningKey>>>> =
+    std::sync::Mutex::new(None);
+
+/// Load the closure-signing key named by `BLANKET_SIGNING_KEY`, once, before
+/// any store is opened or closure written. An unset variable means every
+/// closure is written unsigned. A set variable, including an empty one,
+/// must name a loadable key file (regular, mode 0600, one `ed25519:<64
+/// hex>` line) or the command fails here; it never downgrades to unsigned.
+/// Repeated calls keep the first result.
+pub fn init_signing() -> io::Result<()> {
+    let mut slot = SIGNING_KEY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_some() {
+        return Ok(());
+    }
+    let key = match std::env::var_os("BLANKET_SIGNING_KEY") {
+        None => None,
+        Some(path) => Some(std::sync::Arc::new(
+            SigningKey::load(Path::new(&path)).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("BLANKET_SIGNING_KEY: {error}; unset it to write unsigned closures"),
+                )
+            })?,
+        )),
+    };
+    *slot = Some(key);
+    Ok(())
+}
+
+/// The loaded signing key, or `None` when none is configured (or preflight
+/// never ran, in which case closures are written unsigned and `blanket
+/// audit` reports them outdated).
+pub fn signing_key() -> Option<std::sync::Arc<SigningKey>> {
+    SIGNING_KEY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .flatten()
+}
+
+/// Replace the process signing key. Tests that call this hold
+/// `SIGNING_TEST_LOCK` so they do not race each other's writers.
+#[cfg(test)]
+pub(crate) fn set_signing_key_for_test(key: Option<std::sync::Arc<SigningKey>>) {
+    *SIGNING_KEY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key);
+}
+
+#[cfg(test)]
+pub(crate) static SIGNING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Explicit references protected by one project closure.  The references are
 /// validated against the supplied store at the boundary; serialized closure
@@ -372,7 +431,7 @@ fn write_closure_inner(
             Err(error) => return Err(error),
         },
     };
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "schema": "closure/1",
         "ecosystem": ecosystem,
         "platform": platform,
@@ -380,6 +439,12 @@ fn write_closure_inner(
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
         "body": body,
     });
+    // Sign the value that is about to be pretty-printed: the signature
+    // covers every envelope field and the whole body, exceptions included.
+    // `blanket audit` rebuilds the same canonical bytes from the file.
+    if let Some(key) = signing_key() {
+        key.sign(&mut envelope)?;
+    }
     let dest = dir.join(format!("{ecosystem}.json"));
     let bytes = serde_json::to_vec_pretty(&envelope)?;
     let dest_name = dest
@@ -1611,6 +1676,84 @@ mod closure_platform_tests {
         );
         assert!(project.join(".blanket/closures").is_dir());
 
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(store.root);
+    }
+
+    #[test]
+    fn write_closure_signs_with_the_configured_key() {
+        let _signing = SIGNING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let project = std::env::temp_dir().join(format!(
+            "blanket-closure-signed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&project).unwrap();
+        let store = test_store("closure-signed");
+        let key_path = project.join("signing.key");
+        let public = crate::kernel::signing::generate(&key_path).unwrap();
+        let key = std::sync::Arc::new(SigningKey::load(&key_path).unwrap());
+        set_signing_key_for_test(Some(key));
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        crate::kernel::policy::record("skipped_optional", "dev", "not requested").unwrap();
+        let written = super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        );
+        set_signing_key_for_test(None);
+        written.unwrap();
+        attribution.finish(true).unwrap();
+        let closure: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+        )
+        .unwrap();
+        // The signature covers the envelope as written, exceptions included.
+        assert_eq!(
+            crate::kernel::signing::verify(&closure),
+            crate::kernel::signing::Verification::Valid(public)
+        );
+        assert_eq!(closure["signature"]["key"], public.hex());
+        assert_eq!(closure["body"]["exceptions"][0]["kind"], "skipped_optional");
+        let mut edited = closure.clone();
+        edited["body"]["exceptions"] = serde_json::json!([]);
+        assert!(matches!(
+            crate::kernel::signing::verify(&edited),
+            crate::kernel::signing::Verification::Bad { .. }
+        ));
+        // `read_closure` accepts the signed record unchanged.
+        assert_eq!(
+            super::read_closure(&project, "python").unwrap()["exceptions"][0]["subject"],
+            "dev"
+        );
+        // Without a key the same writer produces an unsigned record.
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+        let closure: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::kernel::signing::verify(&closure),
+            crate::kernel::signing::Verification::Unsigned
+        );
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(store.root);
     }

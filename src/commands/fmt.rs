@@ -90,6 +90,9 @@ pub fn run(
     // dispatch: a delegated package.json `fmt` script needs no formatter
     // pin. The tailor refuses a host with no pinned component here, before
     // the store is opened.
+    // The rustfmt record is signed like every closure; a configured key
+    // that cannot be loaded fails here, before the store is opened.
+    crate::comforter::init_signing()?;
     formatter.fmt_preflight(platform)?;
     let detected = inspect::detected(&cwd)?;
     if ecosystem.is_none() && detected.len() > 1 {
@@ -110,5 +113,8 @@ pub fn run(
     let mut attribution = policy::Attribution::open("rustfmt")?;
     let status = formatter.fmt(&ctx, &cwd, check, args, &mut attribution)?;
     attribution.finish(true)?;
+    if crate::comforter::signing_key().is_none() {
+        ui::note("fmt: rustfmt record unsigned; blanket audit reports it outdated (set BLANKET_SIGNING_KEY to sign)");
+    }
     Ok(status)
 }

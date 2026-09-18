@@ -15,19 +15,26 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **`blanket fmt` is Rust-only**; other ecosystems fail clearly (pinned rustfmt 1.96.1, no
   `Cargo.lock`; `status` ignores the rustfmt closure; a sync rustfmt request still records
   `toolchain-component-unavailable` while `fmt` realizes it on demand).
-- **`blanket audit` judges recorded exceptions only.** It proves what a sync waved through
-  under the policy it is given; it does not cover the doors that run unsandboxed with
-  network: `add`/`remove`/`update` (the ecosystem's own tool edits the manifest and lock)
-  and missing-lock generation during `sync`/`plan` (uv, npm, cargo, bundler, mix resolve
-  with network). Nor does it re-verify store bytes, re-check object metadata, or judge
-  what `blanket run`/`x` executed. Its evidence is the closure files in the working tree:
-  it proves what those records say, plus that the recorded manifest inputs still match the
-  files on disk and the `rustfmt` record names the rustfmt this binary pins, and nothing more; a record edited by hand audits as whatever it now says.
-  Any closure it cannot compare with the project (no recorded inputs, no recorded platform,
-  no exception record) fails as `unchecked` rather than passing, so pre-field projects need
-  one `blanket sync` (and one `blanket fmt` for a `rustfmt` record) before the gate is useful. An exception kind this binary does not know
-  (a record written by a newer blanket) fails as `unknown` rather than being permitted.
-  Loud.
+- **`blanket audit` judges signed records only.** A pass proves that every closure file in
+  the working tree carries a valid signature from a key the machine policy trusts, that
+  every detected ecosystem has its primary closure, that each record is current for the
+  inputs on disk (and that the `rustfmt` record names the rustfmt this binary pins), and
+  that no recorded exception is denied or unknown. It does not prove the signer's sync was
+  honest or safe to run: it does not cover the doors that run unsandboxed with network
+  (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
+  missing-lock generation during `sync`/`plan`, where uv, npm, cargo, bundler, mix resolve
+  with network), nor does it re-verify store bytes, re-check object metadata, or judge what
+  `blanket run`/`x` executed. A job that runs untrusted project code must not hold a signing
+  key. The machine policy is whatever `BLANKET_POLICY` or `$HOME` selects: the gate's
+  workflow, environment, binary, and machine policy must be controlled outside the
+  untrusted checkout, and pointing `BLANKET_POLICY` at a checkout-controlled file gives that
+  file machine authority. `projected_at` is authenticated metadata, not an expiry: a genuine
+  old record whose recorded inputs still match passes. Any record the gate cannot believe or
+  compare (no signature, no recorded inputs, no recorded platform, no exception record)
+  fails as `outdated` rather than passing, so pre-signing projects need one `blanket sync`
+  under a trusted key (and one `blanket fmt` for a `rustfmt` record) before the gate is
+  useful. An exception kind this binary does not know (a record written by a newer blanket)
+  fails as `unknown` rather than being permitted. Loud.
 - **GC is conservative around legacy state.** Store jobs hold a shared activity lease; GC
   skips while work is active (older binaries do not know the protocol). `root/2` records
   survive moves, but legacy pathname-only roots and unresolved metadata block the sweep — an

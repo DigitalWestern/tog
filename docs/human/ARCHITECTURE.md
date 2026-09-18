@@ -192,8 +192,23 @@ exception. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `blanket audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
-`--policy` file (union, so it can only tighten), refuses to pass a stale or
-unchecked closure, and touches neither the store nor the network.
+`--policy` file (merged, so it can only tighten), refuses to pass a stale or
+outdated closure, and touches neither the store nor the network.
+
+Closure records are signed. With `BLANKET_SIGNING_KEY` set, `sync` and `fmt`
+load an Ed25519 key once at preflight and the one closure writer
+(`comforter::write_closure_inner`) signs every envelope it publishes over the
+canonical bytes of the whole record (`src/kernel/signing.rs`: the parsed
+value minus its top-level `signature`, serialized compact with keys in byte
+order). Trust is the machine policy's `[signing] trusted` list; project and
+`--policy` files can only intersect with it (`policy::merge`), so a working
+tree can never vouch for itself. `audit` verifies each file's signature over
+the complete envelope it read before believing any field: `bad-signature`,
+`untrusted`, and unsigned `outdated` records are not evaluated further, and a
+detected ecosystem with no primary closure is `missing`. Store identity is
+untouched: the signature lives in the envelope, not in any object's inputs.
+`blanket keygen` creates keys; the developer loop (`run`, `ls`, `status`, ...)
+accepts unsigned records.
 
 Each realization carries a `policy::Attribution` token from the command layer
 through its tailor to the comforter writer. The process-global frame stack keeps
@@ -368,7 +383,8 @@ every tailor and the kernel):
     sync.rs  plan.rs  build.rs  run.rs  fmt.rs  gc.rs  store.rs  completions.rs
     doctor.rs  ls.rs  status.rs   thin verbs over inspect.rs
     inspect.rs      status / ls / doctor: read-only views over closures + store
-    audit.rs        blanket audit: recorded exceptions judged against a policy
+    audit.rs        blanket audit: signed closure records judged against a policy
+    keygen.rs       blanket keygen: a closure-signing key and its policy table
     deps.rs         add / remove / update, delegated to each ecosystem's tool
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
     x.rs            blanket x: run a registry tool without adding it to a project

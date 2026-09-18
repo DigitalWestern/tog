@@ -43,16 +43,40 @@ impl Drop for TempDir {
 /// Run the binary in `cwd` with a throwaway store and home, so nothing here
 /// can read the developer's policy or touch a real store.
 fn blanket(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_blanket"))
+    blanket_env(cwd, home, args, &[])
+}
+
+fn blanket_env(cwd: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_blanket"));
+    command
         .args(args)
         .current_dir(cwd)
         .env("BLANKET_STORE", home.join("store"))
         .env("HOME", home)
         .env_remove("BLANKET_POLICY")
         .env_remove("BLANKET_STRICT")
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("spawn blanket")
+        .env_remove("BLANKET_SIGNING_KEY")
+        .env("NO_COLOR", "1");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("spawn blanket")
+}
+
+/// The signing key under `home`, generated on first use and trusted by
+/// `home`'s machine policy (`~/.blanket/policy.toml`, created with an empty
+/// deny list or appended to). Every closure fixture is signed with it.
+fn signing_key(home: &Path) -> blanket::kernel::signing::SigningKey {
+    let path = home.join("signing.key");
+    if !path.exists() {
+        let public = blanket::kernel::signing::generate(&path).unwrap();
+        let policy = home.join(".blanket/policy.toml");
+        std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
+        let mut text = std::fs::read_to_string(&policy).unwrap_or_else(|_| "deny = []\n".into());
+        text.push_str(&format!("\n[signing]\ntrusted = [\"{public}\"]\n"));
+        std::fs::write(&policy, text).unwrap();
+    }
+    blanket::kernel::signing::SigningKey::load(&path).unwrap()
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -1289,7 +1313,7 @@ fn x_cleanup_revalidates_explicit_or_legacy_origin() {
 /// A python closure with recorded inputs, a projection, and one recorded
 /// exception of `kind`, so `status` reports it synced and `audit` has
 /// something to judge. Returns the closure path.
-fn synced_python_closure_with_exception(project: &Path, kind: &str) -> PathBuf {
+fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str) -> PathBuf {
     std::fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let env = project.join("env-object");
     std::fs::create_dir_all(env.join("bin")).unwrap();
@@ -1301,28 +1325,25 @@ fn synced_python_closure_with_exception(project: &Path, kind: &str) -> PathBuf {
     let closures = project.join(".blanket/closures");
     std::fs::create_dir_all(&closures).unwrap();
     let path = closures.join("python.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "platform": platform.triple(),
-            "projected_at": 1,
-            "body": {
-                "env_object": env,
-                "python": {"version": "3.12.14"},
-                "plan": {"packages": []},
-                "inputs": [{"path": "requirements.txt", "sha256": requirements}],
-                "exceptions": [{
-                    "kind": kind,
-                    "subject": "left-pad",
-                    "detail": "git+https://example.invalid/left-pad",
-                }],
-            },
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let mut envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": "python",
+        "platform": platform.triple(),
+        "projected_at": 1,
+        "body": {
+            "env_object": env,
+            "python": {"version": "3.12.14"},
+            "plan": {"packages": []},
+            "inputs": [{"path": "requirements.txt", "sha256": requirements}],
+            "exceptions": [{
+                "kind": kind,
+                "subject": "left-pad",
+                "detail": "git+https://example.invalid/left-pad",
+            }],
+        },
+    });
+    signing_key(home).sign(&mut envelope).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
     path
 }
 
@@ -1336,9 +1357,10 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
     // BLANKET_POLICY and BLANKET_STRICT from the child.
     let home = TempDir::new("audit-sources-home");
     let project = TempDir::new("audit-sources-project");
-    synced_python_closure_with_exception(&project.0, "git-dependency");
+    synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
+    // The machine policy `signing_key` wrote: an empty deny list plus the
+    // trusted key.
     let machine_policy = home.0.join(".blanket/policy.toml");
-    std::fs::write(&machine_policy, "deny = []\n").unwrap();
     let project_policy = project.0.join(".blanket/policy.toml");
     std::fs::write(&project_policy, "deny = [\"weak-integrity\"]\n").unwrap();
     let flag = project.0.join("company.toml");
@@ -1366,6 +1388,7 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
             "path": path.to_string_lossy(),
             "strict": policy.strict,
             "deny": policy.deny,
+            "trusted": policy.signing.map(|signing| signing.trusted),
         })
     };
     let mut expected = vec![source_json("machine", &machine_policy)];
@@ -1444,12 +1467,19 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
     );
     assert!(stdout.contains("policy: project "), "{stdout}");
     assert!(stdout.contains("policy: flag "), "{stdout}");
-    assert!(stdout.contains("python  denied     closure "), "{stdout}");
+    assert!(
+        stdout.contains("python  denied        closure "),
+        "{stdout}"
+    );
 }
 
 /// Write the `rustfmt` closure `blanket fmt` would write for `project` with
 /// this binary's pins, after `edit` changes its body.
-fn write_rustfmt_closure(project: &Path, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+fn write_rustfmt_closure(
+    home: &Path,
+    project: &Path,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> PathBuf {
     let platform = blanket::kernel::platform::Platform::host().unwrap();
     let mut body = blanket::tailors::cargo::rustfmt::pinned_record(platform, project, "").unwrap();
     body["exceptions"] = serde_json::json!([]);
@@ -1457,24 +1487,21 @@ fn write_rustfmt_closure(project: &Path, edit: impl FnOnce(&mut serde_json::Valu
     let closures = project.join(".blanket/closures");
     std::fs::create_dir_all(&closures).unwrap();
     let path = closures.join("rustfmt.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "rustfmt",
-            "platform": platform.triple(),
-            "projected_at": 1,
-            "body": body,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let mut envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": "rustfmt",
+        "platform": platform.triple(),
+        "projected_at": 1,
+        "body": body,
+    });
+    signing_key(home).sign(&mut envelope).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
     path
 }
 
 /// The `rustfmt` record passes audit only when it names the rustfmt this
 /// binary pins for the project; one made by another rustfmt is stale, and
-/// one from before the record carried inputs is unchecked.
+/// one from before the record carried inputs is outdated.
 #[test]
 fn audit_compares_the_rustfmt_record_to_its_pin() {
     let home = TempDir::new("audit-rustfmt-home");
@@ -1488,23 +1515,34 @@ fn audit_compares_the_rustfmt_record_to_its_pin() {
     )
     .unwrap();
 
-    write_rustfmt_closure(&project.0, |_| {});
+    // The rustfmt record itself is clean; the report still fails because
+    // the Cargo project it belongs to has no cargo.json (never synced), and
+    // the optional rustfmt record is no substitute for it.
+    write_rustfmt_closure(&home.0, &project.0, |_| {});
     let out = blanket(&project.0, &home.0, &["audit"]);
     assert_eq!(
         out.status.code(),
-        Some(0),
+        Some(1),
         "stdout:\n{}\nstderr:\n{}",
         text(&out.stdout),
         text(&out.stderr)
     );
     assert!(
-        text(&out.stdout).contains("rustfmt  clean"),
+        text(&out.stdout).contains("rustfmt  clean")
+            && text(&out.stdout).contains("cargo    missing"),
         "{}",
         text(&out.stdout)
     );
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["verdict"], "clean");
+    assert_eq!(value["closures"][0]["passed"], true);
+    assert_eq!(value["closures"][0]["signature"]["state"], "trusted");
+    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
+    assert_eq!(value["passed"], false);
 
     let older = format!("{}-rustfmt-1.95.0", "0".repeat(40));
-    write_rustfmt_closure(&project.0, |body| {
+    write_rustfmt_closure(&home.0, &project.0, |body| {
         body["inputs"]["rustfmt_object"] = serde_json::json!(older);
         body["rustfmt_object"]["id"] = serde_json::json!(older);
     });
@@ -1518,14 +1556,14 @@ fn audit_compares_the_rustfmt_record_to_its_pin() {
         text(&out.stdout)
     );
 
-    write_rustfmt_closure(&project.0, |body| {
+    write_rustfmt_closure(&home.0, &project.0, |body| {
         body.as_object_mut().unwrap().remove("inputs");
     });
     let out = blanket(&project.0, &home.0, &["audit", "--json"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["passed"], false);
-    assert_eq!(value["closures"][0]["freshness"], "unchecked");
+    assert_eq!(value["closures"][0]["freshness"], "outdated");
     assert!(
         value["closures"][0]["freshness_detail"]
             .as_str()
@@ -1545,12 +1583,14 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
     ]));
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-    let closure = write_rustfmt_closure(&project, |_| {});
+    let closure = write_rustfmt_closure(&home.0, &project, |_| {});
 
     let out = blanket(&project, &home.0, &["audit", "--json"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Exit 1: the Cargo project has no cargo.json (see the pin test above).
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["passed"], true);
+    assert_eq!(value["closures"][0]["passed"], true);
+    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
     assert_eq!(value["project"], project.to_string_lossy().as_ref());
     assert_eq!(
         value["project_bytes"],
@@ -1570,6 +1610,28 @@ fn audit_json_handles_non_utf8_project_and_closure_paths() {
 fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     let home = TempDir::new("audit-home");
     let project = TempDir::new("audit-project");
+
+    // No trusted set in the machine policy: the gate is not configured,
+    // which is an operator mistake (exit 2), before any record is read.
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no trusted signing keys configured")
+            && text(&out.stderr).contains("[signing]"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    // A project policy cannot configure it either.
+    let key = signing_key(&home.0);
+    let machine_policy = home.0.join(".blanket/policy.toml");
+    let trusting = std::fs::read_to_string(&machine_policy).unwrap();
+    std::fs::write(&machine_policy, "deny = []\n").unwrap();
+    std::fs::write(project.0.join(".blanket/policy.toml"), &trusting).unwrap();
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    std::fs::remove_file(project.0.join(".blanket/policy.toml")).unwrap();
+    std::fs::write(&machine_policy, &trusting).unwrap();
 
     // Nothing synced: a failure with a next step, exit 1.
     let out = blanket(&project.0, &home.0, &["audit"]);
@@ -1598,12 +1660,118 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         text(&out.stdout)
     );
 
-    synced_python_closure_with_exception(&project.0, "git-dependency");
-    // No policy anywhere: the recorded exception is permitted and counted.
+    let closure = synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
+    // No deny list anywhere: the recorded exception is permitted and counted.
     let out = blanket(&project.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
-    assert!(stdout.contains("python  clean      closure "), "{stdout}");
+    assert!(
+        stdout.contains("python  clean         closure "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "policy: machine {:?} trusts {}",
+            machine_policy.to_string_lossy(),
+            key.public_key()
+        )),
+        "{stdout}"
+    );
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["signature"]["state"], "trusted");
+    assert_eq!(
+        value["closures"][0]["signature"]["key"],
+        key.public_key().to_string()
+    );
+    assert_eq!(value["closures"][0]["verdict"], "clean");
+    assert_eq!(
+        value["policy"]["trusted"],
+        serde_json::json!([key.public_key().to_string()])
+    );
+    assert_eq!(value["missing"], serde_json::json!([]));
+
+    // A hand edit of the committed record: bad-signature, exit 1, no
+    // exception judged; a stripped signature: outdated; another key:
+    // untrusted, and a project policy naming that key does not help.
+    let signed = std::fs::read_to_string(&closure).unwrap();
+    let mut edited: serde_json::Value = serde_json::from_str(&signed).unwrap();
+    edited["body"]["exceptions"] = serde_json::json!([]);
+    std::fs::write(&closure, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["verdict"], "bad-signature");
+    assert_eq!(value["closures"][0]["signature"]["state"], "bad");
+    assert_eq!(value["closures"][0]["freshness"], "not-evaluated");
+    assert_eq!(value["closures"][0]["denied"], serde_json::Value::Null);
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert!(
+        text(&out.stdout).contains("python  bad-signature closure ")
+            && text(&out.stdout).contains("(not evaluated)"),
+        "{}",
+        text(&out.stdout)
+    );
+    let mut stripped: serde_json::Value = serde_json::from_str(&signed).unwrap();
+    stripped.as_object_mut().unwrap().remove("signature");
+    std::fs::write(&closure, serde_json::to_vec_pretty(&stripped).unwrap()).unwrap();
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stdout).contains("python  outdated      closure ")
+            && text(&out.stdout).contains("once under a trusted key, then commit"),
+        "{}",
+        text(&out.stdout)
+    );
+    let other_home = TempDir::new("audit-other-home");
+    let other = signing_key(&other_home.0);
+    let mut resigned: serde_json::Value = serde_json::from_str(&signed).unwrap();
+    other.sign(&mut resigned).unwrap();
+    std::fs::write(&closure, serde_json::to_vec_pretty(&resigned).unwrap()).unwrap();
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stdout).contains("python  untrusted     closure ")
+            && text(&out.stdout).contains(&other.public_key().to_string()),
+        "{}",
+        text(&out.stdout)
+    );
+    std::fs::write(
+        project.0.join(".blanket/policy.toml"),
+        format!(
+            "[signing]\ntrusted = [\"{}\", \"{}\"]\n",
+            key.public_key(),
+            other.public_key()
+        ),
+    )
+    .unwrap();
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["verdict"], "untrusted");
+    assert_eq!(
+        value["policy"]["trusted"],
+        serde_json::json!([key.public_key().to_string()])
+    );
+    // And a project policy that drops the machine key makes the genuine
+    // record untrusted, naming the scope.
+    std::fs::write(&closure, &signed).unwrap();
+    std::fs::write(
+        project.0.join(".blanket/policy.toml"),
+        format!("[signing]\ntrusted = [\"{}\"]\n", other.public_key()),
+    )
+    .unwrap();
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stdout).contains("untrusted")
+            && text(&out.stdout).contains("excluded by project"),
+        "{}",
+        text(&out.stdout)
+    );
+    std::fs::remove_file(project.0.join(".blanket/policy.toml")).unwrap();
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     assert!(stdout.contains("permitted: git-dependency 1"), "{stdout}");
     // The audit never created a store.
     assert!(!home.0.join("store").exists());
@@ -1618,7 +1786,10 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     );
     assert_eq!(out.status.code(), Some(1));
     let stdout = text(&out.stdout);
-    assert!(stdout.contains("python  denied     closure "), "{stdout}");
+    assert!(
+        stdout.contains("python  denied        closure "),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("git-dependency  left-pad  git+https://example.invalid/left-pad"),
         "{stdout}"
@@ -1715,11 +1886,14 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     // An exception kind this binary does not know is never permitted, under
     // any policy, and cannot be named in one either.
     let unknown = TempDir::new("audit-unknown");
-    synced_python_closure_with_exception(&unknown.0, "kind-from-a-newer-blanket");
+    synced_python_closure_with_exception(&home.0, &unknown.0, "kind-from-a-newer-blanket");
     let out = blanket(&unknown.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1));
     let stdout = text(&out.stdout);
-    assert!(stdout.contains("python  unknown    closure "), "{stdout}");
+    assert!(
+        stdout.contains("python  unknown       closure "),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("unknown  kind-from-a-newer-blanket  left-pad"),
         "{stdout}"
@@ -1738,7 +1912,7 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
 
     // A closure named for one ecosystem but claiming another is refused.
     let mismatch = TempDir::new("audit-mismatch");
-    let path = synced_python_closure_with_exception(&mismatch.0, "git-dependency");
+    let path = synced_python_closure_with_exception(&home.0, &mismatch.0, "git-dependency");
     let body = std::fs::read_to_string(&path).unwrap().replacen(
         "\"ecosystem\": \"python\"",
         "\"ecosystem\": \"rustfmt\"",
@@ -1767,8 +1941,145 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         .contains("requirements.txt"));
     let out = blanket(&project.0, &home.0, &["audit"]);
     assert!(
-        text(&out.stdout).contains("python  stale      closure "),
+        text(&out.stdout).contains("python  stale         closure "),
         "{}",
         text(&out.stdout)
     );
+}
+
+#[test]
+fn keygen_writes_a_private_key_and_prints_the_policy_table() {
+    let home = TempDir::new("keygen");
+    let path = home.0.join("ci.key");
+    let out = blanket(&home.0, &home.0, &["keygen", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.starts_with("[signing]\ntrusted = [\"ed25519:"),
+        "{stdout}"
+    );
+    let policy = blanket::kernel::policy::parse_file(&path, &stdout).unwrap();
+    let key = blanket::kernel::signing::SigningKey::load(&path).unwrap();
+    assert_eq!(
+        policy.signing.unwrap().trusted,
+        [key.public_key()].into_iter().collect()
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let seed = std::fs::read_to_string(&path).unwrap();
+    assert!(!stdout.contains(seed.trim()) && !text(&out.stderr).contains(seed.trim()));
+    assert!(
+        text(&out.stderr).contains("BLANKET_SIGNING_KEY"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Never overwrites.
+    let out = blanket(&home.0, &home.0, &["keygen", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("exists"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), seed);
+    // Usage errors exit 2.
+    for args in [
+        &["keygen"][..],
+        &["keygen", "a", "b"],
+        &["keygen", "--json"],
+    ] {
+        let out = blanket(&home.0, &home.0, args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    let out = blanket(&home.0, &home.0, &["help", "keygen"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stdout).contains("BLANKET_SIGNING_KEY"));
+    // The key signs a record the audit trusts once the table is installed.
+    let project = TempDir::new("keygen-project");
+    std::fs::create_dir_all(home.0.join(".blanket")).unwrap();
+    std::fs::write(home.0.join(".blanket/policy.toml"), &stdout).unwrap();
+    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    let platform = blanket::kernel::platform::Platform::host().unwrap();
+    let mut body =
+        blanket::tailors::cargo::rustfmt::pinned_record(platform, &project.0, "").unwrap();
+    body["exceptions"] = serde_json::json!([]);
+    let mut envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": "rustfmt",
+        "platform": platform.triple(),
+        "projected_at": 1,
+        "body": body,
+    });
+    key.sign(&mut envelope).unwrap();
+    let closures = project.0.join(".blanket/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    std::fs::write(
+        closures.join("rustfmt.json"),
+        serde_json::to_vec_pretty(&envelope).unwrap(),
+    )
+    .unwrap();
+    // cargo.json is required for the detected Cargo project: the optional
+    // rustfmt record alone is `missing` for cargo.
+    let out = blanket(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["closures"][0]["verdict"], "clean");
+    assert_eq!(value["missing"], serde_json::json!(["cargo"]));
+    let out = blanket(&project.0, &home.0, &["audit"]);
+    assert!(
+        text(&out.stdout).contains("cargo    missing       no closure for the cargo inputs"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn a_bad_signing_key_fails_sync_and_fmt_before_the_store_is_touched() {
+    let home = TempDir::new("badkey-home");
+    let project = TempDir::new("badkey-project");
+    std::fs::write(project.0.join("requirements.txt"), "").unwrap();
+    std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    let loose = home.0.join("loose.key");
+    blanket::kernel::signing::generate(&loose).unwrap();
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let malformed = home.0.join("malformed.key");
+    std::fs::write(&malformed, "not a key\n").unwrap();
+    std::fs::set_permissions(&malformed, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for (label, key) in [
+        ("missing", "/nonexistent/signing.key"),
+        ("empty", ""),
+        ("loose", loose.to_str().unwrap()),
+        ("malformed", malformed.to_str().unwrap()),
+        ("directory", home.0.to_str().unwrap()),
+    ] {
+        for args in [&["sync"][..], &["fmt", "--eco", "rust", "--check"]] {
+            let out = blanket_env(&project.0, &home.0, args, &[("BLANKET_SIGNING_KEY", key)]);
+            assert_eq!(
+                out.status.code(),
+                Some(1),
+                "{label} {args:?}: {}",
+                text(&out.stderr)
+            );
+            let stderr = text(&out.stderr);
+            assert!(
+                stderr.contains("BLANKET_SIGNING_KEY") && stderr.contains("signing key"),
+                "{label} {args:?}: {stderr}"
+            );
+            assert!(
+                !home.0.join("store").exists(),
+                "{label} {args:?}: store was opened"
+            );
+            assert!(
+                !project.0.join(".blanket/closures").exists(),
+                "{label} {args:?}: a closure was written"
+            );
+        }
+    }
 }

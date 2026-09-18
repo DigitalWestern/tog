@@ -1,26 +1,41 @@
-//! `blanket audit` — the CI admission gate over recorded policy exceptions.
+//! `blanket audit` — the CI admission gate over signed closure records.
 //!
 //! Every sync records the exceptions it waved through in the project's
 //! `.blanket/closures/<ecosystem>.json` (`body.exceptions[]`, kinds in
-//! `policy::KINDS`). This module answers "would those closures pass policy
-//! P?" from the records alone: no rebuild, no store access, no network, no
-//! sandbox. It is read-only over the project directory (plus the same
-//! read-only object-liveness probes `blanket status` makes).
+//! `policy::KINDS`) and, with `BLANKET_SIGNING_KEY` set, signs the envelope.
+//! This module answers "would those closures pass policy P?" from the
+//! records alone: no rebuild, no store access, no network, no sandbox. It is
+//! read-only over the project directory (plus the same read-only
+//! object-liveness probes `blanket status` makes).
 //!
-//! Two rules keep the answer honest:
+//! What a pass proves: every closure file's canonical bytes carry a valid
+//! signature from a key the machine policy trusts; every detected ecosystem
+//! has its primary closure; each record is current for the inputs on disk;
+//! no recorded exception is denied or unknown. It does not prove the
+//! signer's sync was honest or safe to run.
 //!
+//! The rules that keep the answer honest, in evaluation order:
+//!
+//! - A record is authenticated before anything in it is believed. The
+//!   signature is verified over the complete envelope as parsed from the one
+//!   file read (`ClosureFile::envelope`), then the key is checked against the
+//!   effective trusted set. A bad signature, an untrusted key, or no
+//!   signature short-circuits: freshness is not computed and no exception is
+//!   judged, because nothing in the record can be believed. The three stay
+//!   distinct because their fixes differ.
 //! - A verdict is only computed over a record that still describes the
 //!   project. Freshness reuses `inspect::closure_state`, the per-record
 //!   check behind `blanket status`, applied to every closure file from its
 //!   own body: a closure whose inputs changed, whose projection is missing,
 //!   that was synced on another platform, or whose inputs are no longer
 //!   found here is reported `stale`; one that predates input, platform, or
-//!   exception recording is reported `unchecked`. Neither passes — an audit
-//!   of a stale record proves nothing.
+//!   exception recording is reported `outdated`. Neither passes.
+//! - Every ecosystem detected in the directory must have its primary
+//!   closure: deleting a denied record is not a way past the gate.
 //! - The policy under test is the ordinary chain (`policy::load_with_sources`)
-//!   unioned with the optional `--policy` file. Union only tightens, so the
-//!   supplied policy can add denials but never remove what the machine or
-//!   project policy says.
+//!   merged with the optional `--policy` file: denials only add, and the
+//!   trusted-key set only narrows, so the supplied policy can never loosen
+//!   what the machine or project policy says.
 //! - An exception kind this binary does not know (a record written by a
 //!   newer blanket, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
@@ -30,6 +45,7 @@ use crate::commands::inspect::{self, ClosureFile, State};
 use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
+use crate::kernel::signing::{self, KeySet, PublicKey, Verification};
 use crate::kernel::ui;
 use crate::tailors;
 use serde_json::{json, Value};
@@ -45,8 +61,56 @@ pub enum Freshness {
     Current,
     /// Inputs changed, projection missing, or synced on another platform.
     Stale(String),
-    /// The record cannot be compared with the project (pre-field closure).
-    Unchecked(String),
+    /// The record predates a field the gate needs (inputs, platform, or the
+    /// exception record); the detail names the refresh command.
+    Outdated(String),
+    /// Not computed: the record is unsigned, untrusted, or tampered, so its
+    /// contents cannot be believed.
+    NotEvaluated,
+}
+
+/// What the record's signature proves, judged before anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Signature {
+    /// Verifies under a key in the effective trusted set.
+    Trusted(PublicKey),
+    /// No `signature` field: a record from before signing, or from a sync
+    /// with no key configured.
+    Unsigned,
+    /// Verifies under `key`, which the effective trusted set does not
+    /// contain. `excluded_by` names every policy scope whose declared list
+    /// omits it, so the operator can see which file to review.
+    Untrusted {
+        key: PublicKey,
+        excluded_by: Vec<String>,
+    },
+    /// A `signature` field is present and does not verify: tampered record,
+    /// malformed field, or unknown algorithm. Never a warning.
+    Bad {
+        key: Option<PublicKey>,
+        reason: String,
+    },
+}
+
+impl Signature {
+    /// The JSON `signature.state` word.
+    pub fn state(&self) -> &'static str {
+        match self {
+            Signature::Trusted(_) => "trusted",
+            Signature::Unsigned => "unsigned",
+            Signature::Untrusted { .. } => "untrusted",
+            Signature::Bad { .. } => "bad",
+        }
+    }
+
+    /// The public key the record names, when one could be decoded.
+    pub fn key(&self) -> Option<PublicKey> {
+        match self {
+            Signature::Trusted(key) | Signature::Untrusted { key, .. } => Some(*key),
+            Signature::Bad { key, .. } => *key,
+            Signature::Unsigned => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,41 +119,92 @@ pub struct Verdict {
     /// sha256 of the closure envelope bytes: the exact record audited.
     pub record_sha256: String,
     pub path: std::path::PathBuf,
+    pub signature: Signature,
     pub freshness: Freshness,
-    /// Recorded exceptions the policy refuses, in recorded order.
-    pub denied: Vec<Exception>,
+    /// Recorded exceptions the policy refuses, in recorded order. `None`
+    /// when the record was not evaluated.
+    pub denied: Option<Vec<Exception>>,
     /// Recorded exceptions of a kind this binary does not know, in recorded
     /// order. Never permitted: the gate cannot judge them.
-    pub unknown: Vec<Exception>,
+    pub unknown: Option<Vec<Exception>>,
     /// Recorded exceptions the policy permits, counted by kind.
-    pub permitted: BTreeMap<String, usize>,
+    pub permitted: Option<BTreeMap<String, usize>>,
 }
 
 impl Verdict {
-    /// Passes only when the record is current and no recorded exception is
-    /// denied or unknown.
+    /// Passes only when the signature is trusted, the record is current,
+    /// and no recorded exception is denied or unknown.
     pub fn passes(&self) -> bool {
-        self.denied.is_empty() && self.unknown.is_empty() && self.freshness == Freshness::Current
+        matches!(self.signature, Signature::Trusted(_))
+            && self.freshness == Freshness::Current
+            && self.denied.as_ref().is_some_and(Vec::is_empty)
+            && self.unknown.as_ref().is_some_and(Vec::is_empty)
+    }
+
+    /// The verdict word on the text line: the first failure in evaluation
+    /// order, or `clean`.
+    pub fn word(&self) -> &'static str {
+        match (&self.signature, &self.freshness) {
+            (Signature::Bad { .. }, _) => "bad-signature",
+            (Signature::Untrusted { .. }, _) => "untrusted",
+            (Signature::Unsigned, _) => "outdated",
+            (Signature::Trusted(_), Freshness::NotEvaluated) => "not-evaluated",
+            (Signature::Trusted(_), Freshness::Outdated(_)) => "outdated",
+            (Signature::Trusted(_), Freshness::Stale(_)) => "stale",
+            (Signature::Trusted(_), Freshness::Current) => {
+                if self
+                    .denied
+                    .as_ref()
+                    .is_some_and(|denied| !denied.is_empty())
+                {
+                    "denied"
+                } else if self
+                    .unknown
+                    .as_ref()
+                    .is_some_and(|unknown| !unknown.is_empty())
+                {
+                    "unknown"
+                } else {
+                    "clean"
+                }
+            }
+        }
+    }
+
+    fn not_evaluated(closure: &ClosureFile, signature: Signature) -> Self {
+        Self {
+            ecosystem: closure.ecosystem.clone(),
+            record_sha256: closure.record_sha256.clone(),
+            path: closure.path.clone(),
+            signature,
+            freshness: Freshness::NotEvaluated,
+            denied: None,
+            unknown: None,
+            permitted: None,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Report {
     pub policy: Policy,
-    /// The policies that were unioned into `policy`, in merge order, so the
-    /// report can say which file denied a kind rather than only that
-    /// something did.
+    /// The policies that were merged into `policy`, in merge order, so the
+    /// report can say which file denied a kind or excluded a key rather
+    /// than only that something did.
     pub sources: Vec<PolicySource>,
     pub verdicts: Vec<Verdict>,
+    /// Ecosystems detected in the directory whose primary closure is
+    /// absent, in detection order. Each fails the report.
+    pub missing: Vec<String>,
 }
 
 impl Report {
     pub fn passes(&self) -> bool {
-        self.verdicts.iter().all(Verdict::passes)
+        self.missing.is_empty() && self.verdicts.iter().all(Verdict::passes)
     }
 }
 
-/// Read and validate a `--policy` file on its own, before it is unioned in,
+/// Read and validate a `--policy` file on its own, before it is merged in,
 /// so the dispatcher can report a missing or malformed file as a usage
 /// error rather than a failed audit.
 pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
@@ -101,9 +216,9 @@ pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
 
 /// The policy an audit judges against: the ordinary chain for `dir`
 /// (BLANKET_POLICY or ~/.blanket/policy.toml, every ancestor's
-/// .blanket/policy.toml, BLANKET_STRICT) unioned with `extra`, the parsed
-/// `--policy` file and the path it came from. Union only tightens: `extra`
-/// can add denials or strictness, never remove either. Returns the
+/// .blanket/policy.toml, BLANKET_STRICT) merged with `extra`, the parsed
+/// `--policy` file and the path it came from. The file can add denials or
+/// strictness and drop trusted keys, never the reverse. Returns the
 /// contributing policies alongside the merged one, in merge order.
 pub fn effective_policy(
     dir: &Path,
@@ -111,10 +226,105 @@ pub fn effective_policy(
 ) -> io::Result<(Policy, Vec<PolicySource>)> {
     let (mut policy, mut sources) = policy::load_with_sources(dir, false)?;
     if let Some((path, extra)) = extra {
-        policy::union(&mut policy, extra);
+        policy::merge(&mut policy, extra, SourceOrigin::Flag);
         sources.push(PolicySource::from_file(SourceOrigin::Flag, path, extra));
     }
     Ok((policy, sources))
+}
+
+/// The effective trusted set, or the operator-mistake error when no
+/// machine-scope policy declared one. Absent is not empty: an explicit
+/// `trusted = []` is a decision (every signed record is `untrusted`); no
+/// table at all means the gate is not configured, which CI must be able to
+/// tell from a denied build.
+pub fn trusted_keys(policy: &Policy) -> io::Result<&KeySet> {
+    policy
+        .signing
+        .as_ref()
+        .map(|signing| &signing.trusted)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no trusted signing keys configured: add a [signing] table with trusted = [\"ed25519:<64 hex>\"] to the machine policy (BLANKET_POLICY, or ~/.blanket/policy.toml); a project or --policy list can only narrow it. 'blanket keygen <path>' prints the table to paste",
+            )
+        })
+}
+
+/// The name of a policy scope as the untrusted-key message cites it.
+fn scope_name(source: &PolicySource) -> String {
+    match &source.path {
+        Some(path) => format!("{} {:?}", source.origin, path.to_string_lossy()),
+        None => source.origin.to_string(),
+    }
+}
+
+/// Verify the record's own signature over the complete envelope, then check
+/// the key against the effective set. Trust is the policy's question; the
+/// kernel only says whether the bytes verify.
+fn judge_signature(closure: &ClosureFile, trusted: &KeySet, sources: &[PolicySource]) -> Signature {
+    match signing::verify(&closure.envelope) {
+        Verification::Unsigned => Signature::Unsigned,
+        Verification::Bad { key, reason } => Signature::Bad { key, reason },
+        Verification::Valid(key) if trusted.contains(&key) => Signature::Trusted(key),
+        Verification::Valid(key) => Signature::Untrusted {
+            key,
+            excluded_by: sources
+                .iter()
+                .filter(|source| {
+                    source
+                        .trusted
+                        .as_ref()
+                        .is_some_and(|declared| !declared.contains(&key))
+                })
+                .map(scope_name)
+                .collect(),
+        },
+    }
+}
+
+/// The envelope shape the gate interprets, checked after authentication and
+/// before any field is read: `schema` is `closure/1`, `ecosystem` is a
+/// string, `body` is an object, and `platform` / `projected_at`, when
+/// present, are a string and an integer. Anything else is refused as an
+/// error (exit 1), never judged.
+fn check_shape(closure: &ClosureFile) -> io::Result<()> {
+    let refuse = |what: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: {what}; the record is refused, not judged: run '{}'",
+                closure.path.display(),
+                refresh(&closure.ecosystem)
+            ),
+        )
+    };
+    let Some(envelope) = closure.envelope.as_object() else {
+        return Err(refuse("closure envelope is not a JSON object"));
+    };
+    match envelope.get("schema").and_then(Value::as_str) {
+        Some("closure/1") => {}
+        Some(other) => return Err(refuse(&format!("unsupported closure schema '{other}'"))),
+        None => return Err(refuse("closure envelope has no schema")),
+    }
+    if !envelope.get("ecosystem").is_some_and(Value::is_string) {
+        return Err(refuse("closure envelope has no ecosystem string"));
+    }
+    if !envelope.get("body").is_some_and(Value::is_object) {
+        return Err(refuse("closure body is not a JSON object"));
+    }
+    if envelope
+        .get("platform")
+        .is_some_and(|platform| !platform.is_string())
+    {
+        return Err(refuse("closure platform is not a string"));
+    }
+    if envelope
+        .get("projected_at")
+        .is_some_and(|stamp| !stamp.is_u64())
+    {
+        return Err(refuse("closure projected_at is not an integer"));
+    }
+    Ok(())
 }
 
 /// Freshness of one closure file, from its own record. `present` is what
@@ -139,8 +349,8 @@ fn freshness(
     if closure.platform.is_none() {
         // Envelopes without a platform predate the Linux port; `status`
         // cannot tell whether such a record was made on this host.
-        return Ok(Freshness::Unchecked(format!(
-            "closure records no platform; run '{}' once to record it",
+        return Ok(Freshness::Outdated(format!(
+            "closure records no platform; run '{}' once under a trusted key, then commit",
             refresh(&closure.ecosystem)
         )));
     }
@@ -174,7 +384,7 @@ fn freshness_from_state(state: State) -> Freshness {
         State::ForeignPlatform(platform) => {
             Freshness::Stale(format!("synced on {platform}, not this host"))
         }
-        State::Unchecked(why) => Freshness::Unchecked(why),
+        State::Unchecked(why) => Freshness::Outdated(why),
     }
 }
 
@@ -221,18 +431,29 @@ fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Exception
     }
 }
 
-/// Judge every closure file against `policy`, each from its own record.
-/// `present` is what `inspect::detected` found in `dir`.
+/// Judge every closure file against `policy`, each from its own record:
+/// signature first, then shape, then freshness and exceptions. `sources`
+/// are the policies behind `policy`, cited when a key is excluded.
+/// `present` is what `inspect::detected` found in `dir`. `Err` when the
+/// policy declares no trusted set.
 pub fn evaluate(
     platform: Platform,
     dir: &Path,
     policy: &Policy,
+    sources: &[PolicySource],
     closures: &[ClosureFile],
     present: &[&str],
 ) -> io::Result<Vec<Verdict>> {
+    let trusted = trusted_keys(policy)?;
     let mut verdicts = Vec::new();
     for closure in closures {
+        let signature = judge_signature(closure, trusted, sources);
+        check_shape(closure)?;
         check_name(closure)?;
+        if !matches!(signature, Signature::Trusted(_)) {
+            verdicts.push(Verdict::not_evaluated(closure, signature));
+            continue;
+        }
         let mut freshness = freshness(platform, dir, closure, present)?;
         let mut denied = Vec::new();
         let mut unknown = Vec::new();
@@ -251,8 +472,8 @@ pub fn evaluate(
             }
             None => {
                 if !matches!(freshness, Freshness::Stale(_)) {
-                    freshness = Freshness::Unchecked(format!(
-                        "no exception record in this closure; run '{}' once to record one",
+                    freshness = Freshness::Outdated(format!(
+                        "no exception record in this closure; run '{}' once under a trusted key, then commit",
                         refresh(&closure.ecosystem)
                     ));
                 }
@@ -262,24 +483,42 @@ pub fn evaluate(
             ecosystem: closure.ecosystem.clone(),
             record_sha256: closure.record_sha256.clone(),
             path: closure.path.clone(),
+            signature,
             freshness,
-            denied,
-            unknown,
-            permitted,
+            denied: Some(denied),
+            unknown: Some(unknown),
+            permitted: Some(permitted),
         });
     }
     Ok(verdicts)
 }
 
-/// Audit the project in `dir` under the policy chain unioned with `extra`
-/// (an already-parsed `--policy` file). `Err(NotFound)` when nothing is
-/// synced. Read-only: no store open, no lease, no process, no network.
-pub fn audit(
+/// The detected ecosystems with no primary closure file: each is a record
+/// the gate needs and cannot judge. The optional `rustfmt` record is not a
+/// substitute for `cargo.json`.
+pub fn missing_closures(closures: &[ClosureFile], present: &[&str]) -> Vec<String> {
+    present
+        .iter()
+        .filter(|ecosystem| {
+            !closures
+                .iter()
+                .any(|closure| closure.ecosystem == **ecosystem)
+        })
+        .map(|ecosystem| ecosystem.to_string())
+        .collect()
+}
+
+/// Audit the project in `dir` under an already-merged policy and its
+/// sources. `Err(NotFound)` when nothing is synced; `Err` when the policy
+/// declares no trusted set. Read-only: no store open, no lease, no process,
+/// no network.
+pub fn audit_under(
     platform: Platform,
     dir: &Path,
-    extra: Option<(&Path, &Policy)>,
+    policy: Policy,
+    sources: Vec<PolicySource>,
 ) -> io::Result<Report> {
-    let (policy, sources) = effective_policy(dir, extra)?;
+    trusted_keys(&policy)?;
     let closures = inspect::closures(dir)?;
     if closures.is_empty() {
         return Err(io::Error::new(
@@ -291,12 +530,34 @@ pub fn audit(
         ));
     }
     let present = inspect::detected(dir)?;
-    let verdicts = evaluate(platform, dir, &policy, &closures, &present)?;
+    let verdicts = evaluate(platform, dir, &policy, &sources, &closures, &present)?;
+    let missing = missing_closures(&closures, &present);
     Ok(Report {
         policy,
         sources,
         verdicts,
+        missing,
     })
+}
+
+/// Audit the project in `dir` under the policy chain merged with `extra`
+/// (an already-parsed `--policy` file). The command itself splits the two
+/// steps so an unconfigured trusted set is a usage error; tests use this.
+#[cfg(test)]
+pub fn audit(
+    platform: Platform,
+    dir: &Path,
+    extra: Option<(&Path, &Policy)>,
+) -> io::Result<Report> {
+    let (policy, sources) = effective_policy(dir, extra)?;
+    audit_under(platform, dir, policy, sources)
+}
+
+fn key_list(keys: &KeySet) -> String {
+    keys.iter()
+        .map(PublicKey::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// One contributing policy as the text report shows it: origin, the file
@@ -315,6 +576,11 @@ fn source_line(source: &PolicySource) -> String {
     }
     if source.strict {
         line.push_str(" (strict)");
+    }
+    match &source.trusted {
+        Some(keys) if keys.is_empty() => line.push_str(" trusts nobody"),
+        Some(keys) => line.push_str(&format!(" trusts {}", key_list(keys))),
+        None => {}
     }
     line
 }
@@ -355,6 +621,9 @@ struct JsonPolicySource {
     path_bytes: Option<String>,
     strict: bool,
     deny: std::collections::BTreeSet<String>,
+    /// `null` when the scope declared no `[signing]` table, `[]` when it
+    /// explicitly trusts nobody.
+    trusted: Option<KeySet>,
 }
 
 fn json_sources(sources: &[PolicySource]) -> Vec<JsonPolicySource> {
@@ -368,9 +637,24 @@ fn json_sources(sources: &[PolicySource]) -> Vec<JsonPolicySource> {
                 path_bytes: path.and_then(|path| path.bytes),
                 strict: source.strict,
                 deny: source.deny.clone(),
+                trusted: source.trusted.clone(),
             }
         })
         .collect()
+}
+
+fn json_signature(signature: &Signature) -> Value {
+    let mut value = json!({ "state": signature.state() });
+    if let Some(key) = signature.key() {
+        value["key"] = json!(key.to_string());
+    }
+    let detail = match signature {
+        Signature::Bad { reason, .. } => json!(reason),
+        Signature::Untrusted { excluded_by, .. } => json!(excluded_by),
+        Signature::Trusted(_) | Signature::Unsigned => Value::Null,
+    };
+    value["detail"] = detail;
+    value
 }
 
 pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
@@ -390,13 +674,16 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                 let (freshness, detail): (&str, Value) = match &verdict.freshness {
                     Freshness::Current => ("current", Value::Null),
                     Freshness::Stale(why) => ("stale", json!(why)),
-                    Freshness::Unchecked(why) => ("unchecked", json!(why)),
+                    Freshness::Outdated(why) => ("outdated", json!(why)),
+                    Freshness::NotEvaluated => ("not-evaluated", Value::Null),
                 };
                 let mut closure = json!({
                     "ecosystem": verdict.ecosystem,
                     "record_sha256": verdict.record_sha256,
                     "path": path,
                     "passed": verdict.passes(),
+                    "verdict": verdict.word(),
+                    "signature": json_signature(&verdict.signature),
                     "freshness": freshness,
                     "freshness_detail": detail,
                     "denied": verdict.denied,
@@ -409,15 +696,22 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                 closure
             })
             .collect::<Vec<_>>();
+        let trusted = report
+            .policy
+            .signing
+            .as_ref()
+            .map(|signing| signing.trusted.clone());
         let value = json!({
             "project": project,
             "policy": {
                 "strict": report.policy.strict,
                 "deny": report.policy.deny,
+                "trusted": trusted,
                 "sources": json_sources(&report.sources),
             },
             "passed": report.passes(),
             "closures": closures,
+            "missing": report.missing,
         });
         let mut value = value;
         if let Some(project_bytes) = project_bytes {
@@ -429,6 +723,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
         .verdicts
         .iter()
         .map(|verdict| verdict.ecosystem.len())
+        .chain(report.missing.iter().map(String::len))
         .max()
         .unwrap_or(0);
     let mut out = String::new();
@@ -440,55 +735,86 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     }
     for verdict in &report.verdicts {
         let record = &verdict.record_sha256[..16];
-        let permitted = if verdict.permitted.is_empty() {
-            "no exceptions".to_string()
-        } else {
-            verdict
-                .permitted
-                .iter()
-                .map(|(kind, count)| format!("{kind} {count}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        // What the policy says about the record's exceptions, independent
-        // of whether the record is current; shown on every line so a stale
-        // record's denials are not hidden behind its staleness.
-        let judged = match (verdict.denied.len(), verdict.unknown.len()) {
-            (0, 0) => format!("permitted: {permitted}"),
-            (denied, 0) => format!("{denied} denied; permitted: {permitted}"),
-            (0, unknown) => format!("{unknown} of unknown kind; permitted: {permitted}"),
-            (denied, unknown) => {
-                format!("{denied} denied, {unknown} of unknown kind; permitted: {permitted}")
+        let word = verdict.word();
+        let refresh = refresh(&verdict.ecosystem);
+        let line = match &verdict.signature {
+            Signature::Bad { reason, .. } => format!(
+                "{word:<13} closure {record}: {reason}; find out who changed it, then regenerate with '{refresh}' under a trusted key and commit (not evaluated)"
+            ),
+            Signature::Untrusted { key, excluded_by } => {
+                let excluded = if excluded_by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (excluded by {})", excluded_by.join(", "))
+                };
+                format!(
+                    "{word:<13} closure {record}: signed by {key}, which is not in the trusted set{excluded}; re-sync under an allowed key, or have the operator review those scopes (not evaluated)"
+                )
+            }
+            Signature::Unsigned => format!(
+                "{word:<13} closure {record}: no signature; run '{refresh}' once under a trusted key, then commit (not evaluated)"
+            ),
+            Signature::Trusted(_) => {
+                // What the policy says about the record's exceptions,
+                // independent of whether the record is current; shown on
+                // every evaluated line so a stale record's denials are not
+                // hidden behind its staleness.
+                let denied = verdict.denied.as_deref().unwrap_or_default();
+                let unknown = verdict.unknown.as_deref().unwrap_or_default();
+                let permitted = match verdict.permitted.as_ref() {
+                    Some(permitted) if !permitted.is_empty() => permitted
+                        .iter()
+                        .map(|(kind, count)| format!("{kind} {count}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    _ => "no exceptions".to_string(),
+                };
+                let judged = match (denied.len(), unknown.len()) {
+                    (0, 0) => format!("permitted: {permitted}"),
+                    (denied, 0) => format!("{denied} denied; permitted: {permitted}"),
+                    (0, unknown) => format!("{unknown} of unknown kind; permitted: {permitted}"),
+                    (denied, unknown) => format!(
+                        "{denied} denied, {unknown} of unknown kind; permitted: {permitted}"
+                    ),
+                };
+                match &verdict.freshness {
+                    Freshness::Stale(why) => format!(
+                        "{word:<13} closure {record}: {why}; run '{refresh}', then audit again ({judged})"
+                    ),
+                    Freshness::Outdated(why) => {
+                        format!("{word:<13} closure {record}: {why} ({judged})")
+                    }
+                    Freshness::NotEvaluated => {
+                        format!("{word:<13} closure {record}: not evaluated")
+                    }
+                    Freshness::Current => format!("{word:<13} closure {record}: {judged}"),
+                }
             }
         };
-        let refresh = refresh(&verdict.ecosystem);
-        let line = match &verdict.freshness {
-            Freshness::Stale(why) => format!(
-                "stale      closure {record}: {why}; run '{refresh}', then audit again ({judged})"
-            ),
-            Freshness::Unchecked(why) => format!("unchecked  closure {record}: {why} ({judged})"),
-            _ if !verdict.denied.is_empty() => format!("denied     closure {record}: {judged}"),
-            _ if !verdict.unknown.is_empty() => format!("unknown    closure {record}: {judged}"),
-            _ => format!("clean      closure {record}: {judged}"),
-        };
         out.push_str(&format!("{:width$}  {line}\n", verdict.ecosystem));
-        for exception in &verdict.denied {
+        for exception in verdict.denied.as_deref().unwrap_or_default() {
             out.push_str(&format!(
                 "{:width$}    denied   {}  {}  {}\n",
                 "", exception.kind, exception.subject, exception.detail
             ));
         }
-        for exception in &verdict.unknown {
+        for exception in verdict.unknown.as_deref().unwrap_or_default() {
             out.push_str(&format!(
                 "{:width$}    unknown  {}  {}  {}\n",
                 "", exception.kind, exception.subject, exception.detail
             ));
         }
     }
+    for ecosystem in &report.missing {
+        out.push_str(&format!(
+            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'blanket sync' under a trusted key, then commit\n",
+            "missing"
+        ));
+    }
     Ok(out)
 }
 
-/// The command: judge the recorded exceptions against the policy chain plus
+/// The command: judge the recorded closures against the policy chain plus
 /// an optional `--policy` file. Needs the host platform only to tell a
 /// foreign-platform closure from a current one, as `status` does.
 pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
@@ -509,13 +835,23 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
         },
         None => None,
     };
-    let report = audit(
-        platform,
-        &dir,
-        extra.as_ref().map(|(path, extra)| (*path, extra)),
-    )?;
+    let (policy, sources) =
+        effective_policy(&dir, extra.as_ref().map(|(path, extra)| (*path, extra)))?;
+    // So is a machine policy with no trusted set: the gate is not
+    // configured, which is not the same as the build being denied.
+    let trusted = match trusted_keys(&policy) {
+        Ok(trusted) => trusted.clone(),
+        Err(error) => {
+            eprint!(
+                "{}",
+                cli::render_usage_error(&format!("audit: {error}"), Some("audit"))
+            );
+            return Ok(cli::EXIT_USAGE);
+        }
+    };
+    let report = audit_under(platform, &dir, policy, sources)?;
     ui::note(&format!(
-        "audit: policy strict={} deny=[{}]",
+        "audit: policy strict={} deny=[{}] trusted=[{}]",
         report.policy.strict,
         report
             .policy
@@ -523,7 +859,8 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
             .iter()
             .cloned()
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        key_list(&trusted)
     ));
     print!("{}", render(&dir, &report, json)?);
     Ok(if report.passes() {
@@ -536,15 +873,18 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::policy::Signing;
     use crate::kernel::policy::{
         GIT_DEPENDENCY, INSTALL_SCRIPT_FAILED, SKIPPED_OPTIONAL, WEAK_INTEGRITY,
     };
+    use crate::kernel::signing::SigningKey;
     use crate::tailors::cargo::rustfmt;
     use std::collections::BTreeSet;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempDir(PathBuf);
@@ -572,6 +912,76 @@ mod tests {
 
     fn host() -> Platform {
         Platform::host().unwrap()
+    }
+
+    /// A key generated once per test process; every fixture is signed
+    /// with it and every test policy trusts it unless a test says otherwise.
+    fn test_key() -> &'static SigningKey {
+        static KEY: OnceLock<SigningKey> = OnceLock::new();
+        KEY.get_or_init(|| generated_key("test-key"))
+    }
+
+    /// A second key no test policy trusts by default.
+    fn other_key() -> &'static SigningKey {
+        static KEY: OnceLock<SigningKey> = OnceLock::new();
+        KEY.get_or_init(|| generated_key("other-key"))
+    }
+
+    fn generated_key(label: &str) -> SigningKey {
+        let temp = TempDir::new(label);
+        let path = temp.0.join("key");
+        signing::generate(&path).unwrap();
+        SigningKey::load(&path).unwrap()
+    }
+
+    fn trusting(keys: &[&SigningKey]) -> Option<Signing> {
+        Some(Signing {
+            trusted: keys.iter().map(|key| key.public_key()).collect(),
+        })
+    }
+
+    /// A policy that denies nothing and trusts the test key.
+    fn permissive() -> Policy {
+        deny(&[])
+    }
+
+    /// The audit's own guard for tests that read the policy chain: point
+    /// the machine scope at a file that trusts the test key, so the chain
+    /// on the developer's machine cannot leak in.
+    struct MachinePolicy {
+        previous: Option<std::ffi::OsString>,
+        _dir: TempDir,
+    }
+
+    impl MachinePolicy {
+        fn trusting(label: &str, keys: &[&SigningKey]) -> Self {
+            let dir = TempDir::new(label);
+            let path = dir.0.join("machine.toml");
+            let entries: Vec<String> = keys
+                .iter()
+                .map(|key| format!("\"{}\"", key.public_key()))
+                .collect();
+            fs::write(
+                &path,
+                format!("[signing]\ntrusted = [{}]\n", entries.join(", ")),
+            )
+            .unwrap();
+            let previous = std::env::var_os("BLANKET_POLICY");
+            std::env::set_var("BLANKET_POLICY", &path);
+            Self {
+                previous,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for MachinePolicy {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("BLANKET_POLICY", value),
+                None => std::env::remove_var("BLANKET_POLICY"),
+            }
+        }
     }
 
     fn exception(kind: &str, subject: &str) -> Exception {
@@ -616,14 +1026,36 @@ mod tests {
         body
     }
 
-    /// Write `.blanket/closures/<name>.json` and return it as `closures`
-    /// would read it.
+    /// Write `.blanket/closures/<name>.json`, signed with the test key, and
+    /// return it as `closures` would read it.
     fn write_closure(
         dir: &Path,
         name: &str,
         ecosystem: &str,
         platform: Option<&str>,
         body: Value,
+    ) -> ClosureFile {
+        write_closure_with(
+            dir,
+            name,
+            ecosystem,
+            platform,
+            body,
+            Some(test_key()),
+            |_| {},
+        )
+    }
+
+    /// `write_closure` with a chosen key (`None` writes unsigned) and an
+    /// edit applied to the envelope after signing, for tampering tests.
+    fn write_closure_with(
+        dir: &Path,
+        name: &str,
+        ecosystem: &str,
+        platform: Option<&str>,
+        body: Value,
+        key: Option<&SigningKey>,
+        after_signing: impl FnOnce(&mut Value),
     ) -> ClosureFile {
         let closures = dir.join(".blanket/closures");
         fs::create_dir_all(&closures).unwrap();
@@ -636,8 +1068,16 @@ mod tests {
         if let Some(platform) = platform {
             envelope["platform"] = json!(platform);
         }
+        if let Some(key) = key {
+            key.sign(&mut envelope).unwrap();
+        }
+        after_signing(&mut envelope);
         let path = closures.join(format!("{name}.json"));
         fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
+        read_closure(dir, &path)
+    }
+
+    fn read_closure(dir: &Path, path: &Path) -> ClosureFile {
         inspect::closures(dir)
             .unwrap()
             .into_iter()
@@ -655,13 +1095,31 @@ mod tests {
         Policy {
             strict: false,
             deny: kinds.iter().map(|kind| kind.to_string()).collect(),
-            signing: None,
+            signing: trusting(&[test_key()]),
         }
     }
 
     fn judge(dir: &Path, policy: &Policy, closures: &[ClosureFile]) -> Vec<Verdict> {
+        judge_with_sources(dir, policy, &[], closures)
+    }
+
+    fn judge_with_sources(
+        dir: &Path,
+        policy: &Policy,
+        sources: &[PolicySource],
+        closures: &[ClosureFile],
+    ) -> Vec<Verdict> {
         let present = inspect::detected(dir).unwrap();
-        evaluate(host(), dir, policy, closures, &present).unwrap()
+        evaluate(host(), dir, policy, sources, closures, &present).unwrap()
+    }
+
+    fn report(policy: Policy, verdicts: Vec<Verdict>) -> Report {
+        Report {
+            policy,
+            sources: Vec::new(),
+            verdicts,
+            missing: Vec::new(),
+        }
     }
 
     fn record(verdict: &Verdict) -> String {
@@ -681,9 +1139,16 @@ mod tests {
         let verdicts = judge(&temp.0, &deny(&[GIT_DEPENDENCY]), &closures);
         assert_eq!(verdicts.len(), 1);
         assert!(verdicts[0].passes());
-        assert!(verdicts[0].denied.is_empty());
-        assert!(verdicts[0].unknown.is_empty());
-        assert_eq!(verdicts[0].permitted.get(SKIPPED_OPTIONAL), Some(&2));
+        assert!(verdicts[0].denied.as_deref().unwrap().is_empty());
+        assert!(verdicts[0].unknown.as_deref().unwrap().is_empty());
+        assert_eq!(
+            verdicts[0]
+                .permitted
+                .as_ref()
+                .unwrap()
+                .get(SKIPPED_OPTIONAL),
+            Some(&2)
+        );
         assert_eq!(verdicts[0].freshness, Freshness::Current);
         assert_eq!(verdicts[0].record_sha256.len(), 64);
         let record = record(&verdicts[0]);
@@ -691,12 +1156,13 @@ mod tests {
             policy: deny(&[GIT_DEPENDENCY]),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         assert!(report.passes());
         let text = render(&temp.0, &report, false).unwrap();
         assert_eq!(
             text,
-            format!("python  clean      closure {record}: permitted: skipped_optional 2\n")
+            format!("python  clean         closure {record}: permitted: skipped_optional 2\n")
         );
         let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
         assert_eq!(value["passed"], true);
@@ -746,6 +1212,7 @@ mod tests {
                 policy: policy.clone(),
                 sources: Vec::new(),
                 verdicts,
+                missing: Vec::new(),
             };
             assert!(!report.passes(), "one denied closure must fail the report");
             let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
@@ -756,6 +1223,7 @@ mod tests {
             policy: policy.clone(),
             sources: Vec::new(),
             verdicts: judge(dir, &policy, &[clean.clone(), clean]),
+            missing: Vec::new(),
         };
         assert!(report.passes());
     }
@@ -767,7 +1235,7 @@ mod tests {
             b'p', b'o', b'l', b'i', b'c', b'y', b'-', 0xff, b'.', b't', b'o', b'm', b'l',
         ]));
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: vec![PolicySource {
                 origin: SourceOrigin::Machine,
                 path: Some(path),
@@ -776,6 +1244,7 @@ mod tests {
                 trusted: None,
             }],
             verdicts: Vec::new(),
+            missing: Vec::new(),
         };
 
         let output = render(Path::new("project"), &report, true).unwrap();
@@ -796,7 +1265,7 @@ mod tests {
     #[test]
     fn text_policy_source_quotes_control_characters_in_paths() {
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: vec![PolicySource {
                 origin: SourceOrigin::Machine,
                 path: Some(PathBuf::from("policy-\n.toml")),
@@ -805,6 +1274,7 @@ mod tests {
                 trusted: None,
             }],
             verdicts: Vec::new(),
+            missing: Vec::new(),
         };
 
         let output = render(Path::new("project"), &report, false).unwrap();
@@ -821,6 +1291,7 @@ mod tests {
             policy: policy.clone(),
             sources: vec![PolicySource::from_file(SourceOrigin::Flag, &path, &policy)],
             verdicts: Vec::new(),
+            missing: Vec::new(),
         };
 
         let output = render(Path::new("project"), &report, false).unwrap();
@@ -848,24 +1319,32 @@ mod tests {
         let verdicts = judge(&temp.0, &policy, &closures);
         assert!(!verdicts[0].passes());
         assert_eq!(
-            verdicts[0].denied,
+            verdicts[0].denied.as_deref().unwrap(),
             vec![
                 exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0"),
                 exception(WEAK_INTEGRITY, "left-pad@1.0.0"),
             ]
         );
-        assert_eq!(verdicts[0].permitted.get(SKIPPED_OPTIONAL), Some(&1));
+        assert_eq!(
+            verdicts[0]
+                .permitted
+                .as_ref()
+                .unwrap()
+                .get(SKIPPED_OPTIONAL),
+            Some(&1)
+        );
         let record = record(&verdicts[0]);
         let report = Report {
             policy,
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         assert!(!report.passes());
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  denied     closure {record}: 2 denied; permitted: skipped_optional 1\n"
+                "python  denied        closure {record}: 2 denied; permitted: skipped_optional 1\n"
             )),
             "{text}"
         );
@@ -892,10 +1371,10 @@ mod tests {
         let strict = Policy {
             strict: true,
             deny: BTreeSet::new(),
-            signing: None,
+            signing: trusting(&[test_key()]),
         };
         let verdicts = judge(&temp.0, &strict, &closures);
-        assert_eq!(verdicts[0].denied.len(), 1);
+        assert_eq!(verdicts[0].denied.as_deref().unwrap().len(), 1);
         assert!(!verdicts[0].passes());
     }
 
@@ -911,29 +1390,32 @@ mod tests {
         )];
         // Neither an empty policy nor one that denies everything it knows
         // permits it; only strict catches it, by denying everything.
-        for policy in [Policy::default(), deny(policy::KINDS)] {
+        for policy in [permissive(), deny(policy::KINDS)] {
             let verdicts = judge(&temp.0, &policy, &closures);
             assert!(!verdicts[0].passes(), "{policy:?}");
             assert_eq!(
-                verdicts[0].unknown,
+                verdicts[0].unknown.as_deref().unwrap(),
                 vec![exception("kind-from-a-newer-blanket", "left-pad")]
             );
             assert!(!verdicts[0]
                 .permitted
+                .as_ref()
+                .unwrap()
                 .contains_key("kind-from-a-newer-blanket"));
         }
-        let verdicts = judge(&temp.0, &Policy::default(), &closures);
-        assert!(verdicts[0].denied.is_empty());
+        let verdicts = judge(&temp.0, &permissive(), &closures);
+        assert!(verdicts[0].denied.as_deref().unwrap().is_empty());
         let record = record(&verdicts[0]);
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  unknown    closure {record}: 1 of unknown kind; permitted: skipped_optional 1\n"
+                "python  unknown       closure {record}: 1 of unknown kind; permitted: skipped_optional 1\n"
             )),
             "{text}"
         );
@@ -964,12 +1446,15 @@ mod tests {
             &temp.0,
             &[exception(INSTALL_SCRIPT_FAILED, "sharp@0.33.0")],
         )];
-        let mut chain = Policy::default();
+        let mut chain = permissive();
         assert!(judge(&temp.0, &chain, &closures)[0].passes());
         policy::union(&mut chain, &read_policy_file(&extra).unwrap());
         let verdicts = judge(&temp.0, &chain, &closures);
         assert!(!verdicts[0].passes());
-        assert_eq!(verdicts[0].denied[0].kind, INSTALL_SCRIPT_FAILED);
+        assert_eq!(
+            verdicts[0].denied.as_deref().unwrap()[0].kind,
+            INSTALL_SCRIPT_FAILED
+        );
     }
 
     #[test]
@@ -1062,7 +1547,7 @@ mod tests {
         // Inputs changed since the record was written.
         let closures = [with_exceptions(dir, &[])];
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(
             verdicts[0].freshness,
             Freshness::Stale("requirements.txt changed since the last sync".into())
@@ -1071,7 +1556,7 @@ mod tests {
         // Projection missing.
         fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
         fs::remove_file(dir.join(".venv")).unwrap();
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(
             verdicts[0].freshness,
             Freshness::Stale(".venv is not the synced projection".into())
@@ -1088,7 +1573,7 @@ mod tests {
             Some("other-platform"),
             body,
         )];
-        let verdicts = judge(dir, &Policy::default(), &foreign);
+        let verdicts = judge(dir, &permissive(), &foreign);
         assert_eq!(
             verdicts[0].freshness,
             Freshness::Stale("synced on other-platform, not this host".into())
@@ -1097,7 +1582,7 @@ mod tests {
         // Inputs gone from the directory: the closure is orphaned.
         let closures = [with_exceptions(dir, &[])];
         fs::remove_file(dir.join("requirements.txt")).unwrap();
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(
             verdicts[0].freshness,
             Freshness::Stale("no python inputs found here; the closure is orphaned".into())
@@ -1105,15 +1590,16 @@ mod tests {
         assert!(!verdicts[0].passes());
         let record = record(&verdicts[0]);
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         assert!(!report.passes());
         let text = render(dir, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  stale      closure {record}: no python inputs"
+                "python  stale         closure {record}: no python inputs"
             )),
             "{text}"
         );
@@ -1134,11 +1620,12 @@ mod tests {
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
         let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &closures);
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
-        assert_eq!(verdicts[0].denied.len(), 1);
+        assert_eq!(verdicts[0].denied.as_deref().unwrap().len(), 1);
         let report = Report {
             policy: deny(&[GIT_DEPENDENCY]),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         let text = render(dir, &report, false).unwrap();
         assert!(
@@ -1168,7 +1655,7 @@ mod tests {
             // fail to compile here, not silently skip the mapping check.
             match state {
                 State::Synced => unreachable!("asserted above, outside the loop"),
-                State::Unchecked(_) => assert!(matches!(freshness, Freshness::Unchecked(_))),
+                State::Unchecked(_) => assert!(matches!(freshness, Freshness::Outdated(_))),
                 State::NotSynced
                 | State::Changed(_)
                 | State::ProjectionMissing(_)
@@ -1180,18 +1667,19 @@ mod tests {
                 ecosystem: "python".into(),
                 record_sha256: "0".repeat(64),
                 path: PathBuf::from("python.json"),
+                signature: Signature::Trusted(test_key().public_key()),
                 freshness,
-                denied: Vec::new(),
-                unknown: Vec::new(),
-                permitted: BTreeMap::new(),
+                denied: Some(Vec::new()),
+                unknown: Some(Vec::new()),
+                permitted: Some(BTreeMap::new()),
             };
             assert!(!verdict.passes(), "{verdict:?}");
         }
     }
 
     #[test]
-    fn unchecked_closure_is_reported_unchecked_not_clean() {
-        let temp = python_project("unchecked");
+    fn outdated_closure_is_reported_outdated_not_clean() {
+        let temp = python_project("outdated");
         let dir = &temp.0;
         // Pre-field closure: no recorded inputs, status says synced (unchecked).
         let mut body = python_body(dir);
@@ -1211,9 +1699,9 @@ mod tests {
                     .into()
             )
         );
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert!(
-            matches!(verdicts[0].freshness, Freshness::Unchecked(ref why) if why.contains("inputs were not recorded")),
+            matches!(verdicts[0].freshness, Freshness::Outdated(ref why) if why.contains("inputs were not recorded")),
             "{:?}",
             verdicts[0]
         );
@@ -1222,9 +1710,9 @@ mod tests {
         let mut body = python_body(dir);
         body["exceptions"] = json!([]);
         let closures = [write_closure(dir, "python", "python", None, body)];
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert!(
-            matches!(verdicts[0].freshness, Freshness::Unchecked(ref why) if why.contains("records no platform")),
+            matches!(verdicts[0].freshness, Freshness::Outdated(ref why) if why.contains("records no platform")),
             "{:?}",
             verdicts[0]
         );
@@ -1238,32 +1726,33 @@ mod tests {
             Some(host().triple()),
             python_body(dir),
         )];
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert!(
-            matches!(verdicts[0].freshness, Freshness::Unchecked(ref why) if why.contains("no exception record")),
+            matches!(verdicts[0].freshness, Freshness::Outdated(ref why) if why.contains("no exception record")),
             "{:?}",
             verdicts[0]
         );
         assert!(!verdicts[0].passes());
         let record = record(&verdicts[0]);
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         let text = render(dir, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  unchecked  closure {record}: no exception record"
+                "python  outdated      closure {record}: no exception record"
             )),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
-        assert_eq!(value["closures"][0]["freshness"], "unchecked");
+        assert_eq!(value["closures"][0]["freshness"], "outdated");
         assert_eq!(value["passed"], false);
         // A stale closure without a record stays stale (the stronger verdict).
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
     }
 
@@ -1289,7 +1778,7 @@ mod tests {
         let mut body = rustfmt_body(dir);
         body["exceptions"] = json!([exception(policy::TOOLCHAIN_COMPONENT_UNAVAILABLE, "clippy")]);
         let closures = write(body.clone());
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
         assert!(verdicts[0].passes());
         let verdicts = judge(
@@ -1302,7 +1791,7 @@ mod tests {
         // Inputs carrying anything this binary would not write: stale.
         let mut extra = body.clone();
         extra["inputs"]["note"] = json!("hand-added");
-        let verdicts = judge(dir, &Policy::default(), &write(extra));
+        let verdicts = judge(dir, &permissive(), &write(extra));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
         // Made by another rustfmt version: stale, naming both objects.
@@ -1312,7 +1801,7 @@ mod tests {
         stale["inputs"]["rustfmt_object"] = json!(older);
         stale["rustfmt_object"]["id"] = json!(older);
         stale["rust_version"] = json!("1.95.0");
-        let verdicts = judge(dir, &Policy::default(), &write(stale));
+        let verdicts = judge(dir, &permissive(), &write(stale));
         let Freshness::Stale(why) = &verdicts[0].freshness else {
             panic!("{verdicts:?}");
         };
@@ -1323,7 +1812,7 @@ mod tests {
         let mut repinned = body.clone();
         let other = format!("{}-rustfmt-1.96.1", "1".repeat(40));
         repinned["inputs"]["rustfmt_object"] = json!(other);
-        let verdicts = judge(dir, &Policy::default(), &write(repinned));
+        let verdicts = judge(dir, &permissive(), &write(repinned));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
         // Inputs that match but a body naming another object: stale, so the
@@ -1335,7 +1824,7 @@ mod tests {
         ] {
             let mut forged = body.clone();
             forged[field] = value;
-            let verdicts = judge(dir, &Policy::default(), &write(forged));
+            let verdicts = judge(dir, &permissive(), &write(forged));
             assert!(
                 matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains(field)),
                 "{field}: {verdicts:?}"
@@ -1345,36 +1834,37 @@ mod tests {
         // No exception record: unchecked, and the fix is a new fmt run.
         let mut bare = body.clone();
         bare.as_object_mut().unwrap().remove("exceptions");
-        let verdicts = judge(dir, &Policy::default(), &write(bare));
+        let verdicts = judge(dir, &permissive(), &write(bare));
         assert!(
-            matches!(&verdicts[0].freshness, Freshness::Unchecked(why) if why.contains("run 'blanket fmt'")),
+            matches!(&verdicts[0].freshness, Freshness::Outdated(why) if why.contains("run 'blanket fmt'")),
             "{verdicts:?}"
         );
 
         // An inputs-free record from before inputs were recorded: unchecked.
         let mut old = body.clone();
         old.as_object_mut().unwrap().remove("inputs");
-        let verdicts = judge(dir, &Policy::default(), &write(old));
+        let verdicts = judge(dir, &permissive(), &write(old));
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         assert!(
-            matches!(&report.verdicts[0].freshness, Freshness::Unchecked(why) if why.contains("blanket fmt")),
+            matches!(&report.verdicts[0].freshness, Freshness::Outdated(why) if why.contains("blanket fmt")),
             "{:?}",
             report.verdicts[0]
         );
         assert!(!report.passes());
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
-        assert_eq!(value["closures"][0]["freshness"], "unchecked");
+        assert_eq!(value["closures"][0]["freshness"], "outdated");
 
         // A python-shaped record under the rustfmt name is compared the same
         // way; the name alone buys nothing.
         fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
         let mut python = python_body(dir);
         python["exceptions"] = json!([]);
-        let verdicts = judge(dir, &Policy::default(), &write(python));
+        let verdicts = judge(dir, &permissive(), &write(python));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
 
         // Components requested after the run: the version and objects are
@@ -1386,15 +1876,16 @@ mod tests {
         )
         .unwrap();
         let closures = write(body.clone());
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         let Freshness::Stale(why) = &verdicts[0].freshness else {
             panic!("{verdicts:?}");
         };
         assert!(why.contains("clippy"), "{why}");
         let report = Report {
-            policy: Policy::default(),
+            policy: permissive(),
             sources: Vec::new(),
             verdicts,
+            missing: Vec::new(),
         };
         assert!(render(dir, &report, false)
             .unwrap()
@@ -1411,7 +1902,7 @@ mod tests {
             "rust-toolchain.toml"
         )]);
         let closures = write(listed);
-        let verdicts = judge(dir, &Policy::default(), &closures);
+        let verdicts = judge(dir, &permissive(), &closures);
         assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
         let verdicts = judge(
             dir,
@@ -1427,20 +1918,20 @@ mod tests {
         fs::create_dir_all(&member).unwrap();
         let mut from_member = rustfmt::pinned_record(host(), dir, "crates/member").unwrap();
         from_member["exceptions"] = json!([]);
-        let verdicts = judge(dir, &Policy::default(), &write(from_member.clone()));
+        let verdicts = judge(dir, &permissive(), &write(from_member.clone()));
         assert_eq!(verdicts[0].freshness, Freshness::Current, "{verdicts:?}");
         fs::write(
             member.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"1.2\"\n",
         )
         .unwrap();
-        let verdicts = judge(dir, &Policy::default(), &write(from_member.clone()));
+        let verdicts = judge(dir, &permissive(), &write(from_member.clone()));
         assert!(
             matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("pins none")),
             "{verdicts:?}"
         );
         fs::remove_dir_all(dir.join("crates")).unwrap();
-        let verdicts = judge(dir, &Policy::default(), &write(from_member));
+        let verdicts = judge(dir, &permissive(), &write(from_member));
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
         // The lookup directory must be the exact spelling `fmt` records of a
         // directory inside the workspace: no symlink out, no `..`, no `.`,
@@ -1460,7 +1951,7 @@ mod tests {
         ] {
             let mut escaped = body.clone();
             escaped["inputs"]["resolved_from"] = escape.clone();
-            let verdicts = judge(dir, &Policy::default(), &write(escaped));
+            let verdicts = judge(dir, &permissive(), &write(escaped));
             assert!(
                 matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("resolved_from")),
                 "{escape}: {verdicts:?}"
@@ -1473,7 +1964,7 @@ mod tests {
             "[toolchain]\nchannel = \"1.2\"\n",
         )
         .unwrap();
-        let verdicts = judge(dir, &Policy::default(), &write(body.clone()));
+        let verdicts = judge(dir, &permissive(), &write(body.clone()));
         assert!(
             matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("pins none")),
             "{verdicts:?}"
@@ -1482,7 +1973,7 @@ mod tests {
         // Without Cargo inputs the record is orphaned.
         fs::remove_file(dir.join("rust-toolchain.toml")).unwrap();
         fs::remove_file(dir.join("Cargo.toml")).unwrap();
-        let verdicts = judge(dir, &Policy::default(), &write(body));
+        let verdicts = judge(dir, &permissive(), &write(body));
         assert!(
             matches!(&verdicts[0].freshness, Freshness::Stale(why) if why.contains("no cargo inputs")),
             "{verdicts:?}"
@@ -1505,7 +1996,7 @@ mod tests {
             body,
         )];
         let present = inspect::detected(dir).unwrap();
-        let error = evaluate(host(), dir, &Policy::default(), &closures, &present).unwrap_err();
+        let error = evaluate(host(), dir, &permissive(), &[], &closures, &present).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1528,7 +2019,7 @@ mod tests {
             body,
         )];
         let present = inspect::detected(dir).unwrap();
-        let error = evaluate(host(), dir, &Policy::default(), &closures, &present).unwrap_err();
+        let error = evaluate(host(), dir, &permissive(), &[], &closures, &present).unwrap_err();
         assert!(
             error.to_string().contains("malformed exception record"),
             "{error}"
@@ -1544,10 +2035,11 @@ mod tests {
         // The chain part of the policy is whatever this machine has (see
         // `effective_policy_unions...`); the extra file is under test here.
         let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("audit-machine", &[test_key()]);
         let flag = dir.join("company.toml");
         let report = audit(host(), dir, Some((flag.as_path(), &extra))).unwrap();
         assert_eq!(report.verdicts.len(), 1);
-        assert_eq!(report.verdicts[0].denied.len(), 1);
+        assert_eq!(report.verdicts[0].denied.as_deref().unwrap().len(), 1);
         assert!(!report.passes());
         assert!(!dir.join("store").exists());
         // Nothing synced: a NotFound with a next step.
@@ -1555,6 +2047,14 @@ mod tests {
         let error = audit(host(), &empty.0, None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("run 'blanket sync' first"));
+        // No trusted set anywhere in the chain: refused before any record
+        // is read, so the gate cannot be misconfigured into judging.
+        drop(_machine);
+        let _home = MachinePolicy::trusting("audit-machine-none", &[]);
+        fs::write(std::env::var_os("BLANKET_POLICY").unwrap(), "deny = []\n").unwrap();
+        let error = audit(host(), dir, Some((flag.as_path(), &extra))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(error.to_string().contains("[signing]"), "{error}");
     }
 
     #[test]
@@ -1581,5 +2081,569 @@ mod tests {
         for kind in policy::KINDS {
             assert!(text.contains(kind), "template does not mention {kind}");
         }
+    }
+
+    #[test]
+    fn a_tampered_record_is_a_bad_signature_and_nothing_in_it_is_believed() {
+        let temp = python_project("tampered");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([exception(GIT_DEPENDENCY, "left-pad")]);
+        let tampered = |edit: fn(&mut Value)| {
+            write_closure_with(
+                dir,
+                "python",
+                "python",
+                Some(host().triple()),
+                body.clone(),
+                Some(test_key()),
+                edit,
+            )
+        };
+        // Under a denying policy: a tampered record must not even report
+        // the denial, because nothing in it can be believed.
+        let policy = deny(&[GIT_DEPENDENCY]);
+        for (label, closure) in [
+            (
+                "exceptions edited",
+                tampered(|v| v["body"]["exceptions"] = json!([])),
+            ),
+            (
+                "platform edited",
+                tampered(|v| v["platform"] = json!("aarch64-apple-darwin")),
+            ),
+            (
+                "unknown envelope field added",
+                tampered(|v| v["note"] = json!("hand-added")),
+            ),
+            ("null signature", tampered(|v| v["signature"] = Value::Null)),
+            (
+                "string signature",
+                tampered(|v| v["signature"] = json!("ed25519")),
+            ),
+            (
+                "unknown algorithm",
+                tampered(|v| v["signature"]["alg"] = json!("rsa")),
+            ),
+            (
+                "another key named",
+                tampered(|v| v["signature"]["key"] = json!(other_key().public_key().hex())),
+            ),
+        ] {
+            let verdicts = judge(dir, &policy, &[closure]);
+            let verdict = &verdicts[0];
+            assert!(
+                matches!(verdict.signature, Signature::Bad { .. }),
+                "{label}: {verdict:?}"
+            );
+            assert!(!verdict.passes(), "{label}");
+            assert_eq!(verdict.freshness, Freshness::NotEvaluated, "{label}");
+            assert!(
+                verdict.denied.is_none()
+                    && verdict.unknown.is_none()
+                    && verdict.permitted.is_none(),
+                "{label}: {verdict:?}"
+            );
+            assert_eq!(verdict.word(), "bad-signature", "{label}");
+            let record = record(verdict);
+            let report = report(policy.clone(), verdicts);
+            let text = render(dir, &report, false).unwrap();
+            assert!(
+                text.contains(&format!("python  bad-signature closure {record}: ")),
+                "{label}: {text}"
+            );
+            assert!(
+                text.contains("find out who changed it") && text.contains("(not evaluated)"),
+                "{label}: {text}"
+            );
+            assert!(
+                !text.contains("no exceptions") && !text.contains("denied "),
+                "{label}: {text}"
+            );
+            let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+            assert_eq!(value["passed"], false, "{label}");
+            assert_eq!(value["closures"][0]["passed"], false, "{label}");
+            assert_eq!(value["closures"][0]["verdict"], "bad-signature", "{label}");
+            assert_eq!(value["closures"][0]["signature"]["state"], "bad", "{label}");
+            assert_eq!(
+                value["closures"][0]["freshness"], "not-evaluated",
+                "{label}"
+            );
+            assert_eq!(
+                value["closures"][0]["freshness_detail"],
+                Value::Null,
+                "{label}"
+            );
+            assert_eq!(value["closures"][0]["denied"], Value::Null, "{label}");
+            assert_eq!(value["closures"][0]["unknown"], Value::Null, "{label}");
+            assert_eq!(value["closures"][0]["permitted"], Value::Null, "{label}");
+        }
+        // The key is reported when it can be decoded, and omitted otherwise.
+        let closure = tampered(|v| v["body"]["exceptions"] = json!([]));
+        let verdicts = judge(dir, &policy, &[closure]);
+        assert_eq!(verdicts[0].signature.key(), Some(test_key().public_key()));
+        let value: Value =
+            serde_json::from_str(&render(dir, &report(policy.clone(), verdicts), true).unwrap())
+                .unwrap();
+        assert_eq!(
+            value["closures"][0]["signature"]["key"],
+            test_key().public_key().to_string()
+        );
+        assert_eq!(
+            value["closures"][0]["signature"]["detail"],
+            "record does not match its signature"
+        );
+        let closure = tampered(|v| v["signature"] = Value::Null);
+        let verdicts = judge(dir, &policy, &[closure]);
+        assert_eq!(verdicts[0].signature.key(), None);
+        let value: Value =
+            serde_json::from_str(&render(dir, &report(policy, verdicts), true).unwrap()).unwrap();
+        assert!(
+            value["closures"][0]["signature"].get("key").is_none(),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_record_is_outdated_and_not_evaluated() {
+        let temp = python_project("unsigned");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([exception(GIT_DEPENDENCY, "left-pad")]);
+        // Stripped after signing, and never signed: the same verdict.
+        let stripped = write_closure_with(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body.clone(),
+            Some(test_key()),
+            |v| {
+                v.as_object_mut().unwrap().remove("signature");
+            },
+        );
+        let never = write_closure_with(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body.clone(),
+            None,
+            |_| {},
+        );
+        for closure in [stripped, never] {
+            let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &[closure]);
+            assert_eq!(verdicts[0].signature, Signature::Unsigned);
+            assert_eq!(verdicts[0].freshness, Freshness::NotEvaluated);
+            assert!(verdicts[0].denied.is_none());
+            assert!(!verdicts[0].passes());
+            assert_eq!(verdicts[0].word(), "outdated");
+            let record = record(&verdicts[0]);
+            let report = report(deny(&[GIT_DEPENDENCY]), verdicts);
+            let text = render(dir, &report, false).unwrap();
+            assert!(
+                text.contains(&format!(
+                    "python  outdated      closure {record}: no signature; run 'blanket sync' once under a trusted key, then commit (not evaluated)\n"
+                )),
+                "{text}"
+            );
+            let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+            assert_eq!(
+                value["closures"][0]["signature"],
+                json!({"state": "unsigned", "detail": null})
+            );
+            assert_eq!(value["closures"][0]["freshness"], "not-evaluated");
+            assert_eq!(value["closures"][0]["verdict"], "outdated");
+            assert_eq!(value["closures"][0]["denied"], Value::Null);
+        }
+        // The pre-`platform` fixture: signed, it is outdated for the missing
+        // field with the refresh command in the detail; unsigned, it is
+        // outdated for the signature first and nothing else is evaluated.
+        let mut old = python_body(dir);
+        old["exceptions"] = json!([]);
+        let signed_old = write_closure(dir, "python", "python", None, old.clone());
+        let verdicts = judge(dir, &permissive(), &[signed_old]);
+        assert!(
+            matches!(&verdicts[0].freshness, Freshness::Outdated(why) if why.contains("records no platform") && why.contains("under a trusted key")),
+            "{verdicts:?}"
+        );
+        assert_eq!(verdicts[0].word(), "outdated");
+        assert_eq!(verdicts[0].permitted.as_ref().map(BTreeMap::len), Some(0));
+        let unsigned_old = write_closure_with(dir, "python", "python", None, old, None, |_| {});
+        let verdicts = judge(dir, &permissive(), &[unsigned_old]);
+        assert_eq!(verdicts[0].signature, Signature::Unsigned);
+        assert_eq!(verdicts[0].freshness, Freshness::NotEvaluated);
+    }
+
+    #[test]
+    fn an_unlisted_key_is_untrusted_and_only_the_machine_scope_can_add_one() {
+        let temp = python_project("untrusted");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        let by_other = write_closure_with(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body.clone(),
+            Some(other_key()),
+            |_| {},
+        );
+        let verdicts = judge(dir, &permissive(), &[by_other.clone()]);
+        assert_eq!(
+            verdicts[0].signature,
+            Signature::Untrusted {
+                key: other_key().public_key(),
+                excluded_by: Vec::new(),
+            }
+        );
+        assert_eq!(verdicts[0].freshness, Freshness::NotEvaluated);
+        assert!(verdicts[0].denied.is_none());
+        assert!(!verdicts[0].passes());
+        let record = record(&verdicts[0]);
+        let report = report(permissive(), verdicts);
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains(&format!(
+                "python  untrusted     closure {record}: signed by {}, which is not in the trusted set; re-sync under an allowed key",
+                other_key().public_key()
+            )),
+            "{text}"
+        );
+        assert!(text.contains("(not evaluated)"), "{text}");
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert_eq!(value["closures"][0]["signature"]["state"], "untrusted");
+        assert_eq!(
+            value["closures"][0]["signature"]["key"],
+            other_key().public_key().to_string()
+        );
+        assert_eq!(value["closures"][0]["signature"]["detail"], json!([]));
+        assert_eq!(value["closures"][0]["verdict"], "untrusted");
+        assert_eq!(
+            value["policy"]["trusted"],
+            json!([test_key().public_key().to_string()])
+        );
+
+        // A project policy that names the other key cannot add it: the
+        // machine scope introduced {test}, so the intersection stays {test}.
+        let widening = Policy {
+            signing: trusting(&[test_key(), other_key()]),
+            ..Policy::default()
+        };
+        let mut chain = permissive();
+        policy::merge(&mut chain, &widening, SourceOrigin::Project);
+        let verdicts = judge(dir, &chain, &[by_other.clone()]);
+        assert!(matches!(verdicts[0].signature, Signature::Untrusted { .. }));
+        // Nor can the --policy file.
+        let mut chain = permissive();
+        policy::merge(&mut chain, &widening, SourceOrigin::Flag);
+        let verdicts = judge(dir, &chain, &[by_other]);
+        assert!(matches!(verdicts[0].signature, Signature::Untrusted { .. }));
+
+        // A project policy that omits the test key removes it: the record
+        // the machine alone would trust is untrusted, and the excluding
+        // scope is named in the verdict, the JSON, and the policy lines.
+        let by_test = write_closure(dir, "python", "python", Some(host().triple()), body.clone());
+        let mut chain = permissive();
+        let narrowing = Policy {
+            signing: trusting(&[other_key()]),
+            ..Policy::default()
+        };
+        policy::merge(&mut chain, &narrowing, SourceOrigin::Project);
+        assert_eq!(chain.signing, Some(Signing::default()));
+        let sources = vec![
+            PolicySource {
+                origin: SourceOrigin::Machine,
+                path: Some(PathBuf::from("/m/policy.toml")),
+                strict: false,
+                deny: BTreeSet::new(),
+                trusted: Some([test_key().public_key()].into_iter().collect()),
+            },
+            PolicySource {
+                origin: SourceOrigin::Project,
+                path: Some(PathBuf::from("/p/.blanket/policy.toml")),
+                strict: false,
+                deny: BTreeSet::new(),
+                trusted: Some([other_key().public_key()].into_iter().collect()),
+            },
+            PolicySource {
+                origin: SourceOrigin::Flag,
+                path: Some(PathBuf::from("/f/company.toml")),
+                strict: false,
+                deny: BTreeSet::new(),
+                trusted: Some(KeySet::new()),
+            },
+            PolicySource {
+                origin: SourceOrigin::Env,
+                path: None,
+                strict: true,
+                deny: BTreeSet::new(),
+                trusted: None,
+            },
+        ];
+        let verdicts = judge_with_sources(dir, &chain, &sources, &[by_test.clone()]);
+        assert_eq!(
+            verdicts[0].signature,
+            Signature::Untrusted {
+                key: test_key().public_key(),
+                excluded_by: vec![
+                    "project \"/p/.blanket/policy.toml\"".into(),
+                    "flag \"/f/company.toml\"".into()
+                ],
+            }
+        );
+        let report = Report {
+            policy: chain.clone(),
+            sources,
+            verdicts,
+            missing: Vec::new(),
+        };
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains(
+                "(excluded by project \"/p/.blanket/policy.toml\", flag \"/f/company.toml\")"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "policy: machine \"/m/policy.toml\" trusts {}\n",
+                test_key().public_key()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("policy: flag \"/f/company.toml\" trusts nobody\n"),
+            "{text}"
+        );
+        assert!(text.contains("policy: env (strict)\n"), "{text}");
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert_eq!(
+            value["closures"][0]["signature"]["detail"],
+            json!([
+                "project \"/p/.blanket/policy.toml\"",
+                "flag \"/f/company.toml\""
+            ])
+        );
+        assert_eq!(value["policy"]["trusted"], json!([]));
+        assert_eq!(
+            value["policy"]["sources"][0]["trusted"],
+            json!([test_key().public_key().to_string()])
+        );
+        assert_eq!(value["policy"]["sources"][2]["trusted"], json!([]));
+        assert_eq!(value["policy"]["sources"][3]["trusted"], Value::Null);
+
+        // An explicitly empty machine set is a decision: every valid
+        // signature is untrusted, and a bad one is still bad-signature.
+        let nobody = Policy {
+            signing: Some(Signing::default()),
+            ..Policy::default()
+        };
+        let verdicts = judge(dir, &nobody, &[by_test]);
+        assert!(matches!(verdicts[0].signature, Signature::Untrusted { .. }));
+        let tampered = write_closure_with(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body,
+            Some(test_key()),
+            |v| v["body"]["exceptions"] = json!([exception(GIT_DEPENDENCY, "x")]),
+        );
+        let verdicts = judge(dir, &nobody, &[tampered]);
+        assert!(matches!(verdicts[0].signature, Signature::Bad { .. }));
+
+        // Trust that was never configured is an error before any verdict,
+        // and a project or flag list cannot configure it.
+        let present = inspect::detected(dir).unwrap();
+        let error = evaluate(host(), dir, &Policy::default(), &[], &[], &present).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("[signing]") && error.to_string().contains("blanket keygen"),
+            "{error}"
+        );
+        let mut chain = Policy::default();
+        policy::merge(&mut chain, &widening, SourceOrigin::Project);
+        policy::merge(&mut chain, &widening, SourceOrigin::Flag);
+        assert!(evaluate(host(), dir, &chain, &[], &[], &present).is_err());
+        assert!(audit_under(host(), dir, chain, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn a_missing_primary_closure_fails_the_report() {
+        // A python + cargo project: the optional rustfmt record is no
+        // substitute for cargo.json, and a deleted python.json is missing
+        // however clean the records beside it are.
+        let temp = python_project("missing");
+        let dir = &temp.0;
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        let rustfmt = write_closure(
+            dir,
+            "rustfmt",
+            "rustfmt",
+            Some(host().triple()),
+            rustfmt_body(dir),
+        );
+        let python = with_exceptions(dir, &[]);
+        let present = inspect::detected(dir).unwrap();
+        assert_eq!(present, ["python", "cargo"]);
+        assert_eq!(
+            missing_closures(&[rustfmt.clone(), python.clone()], &present),
+            vec!["cargo".to_string()]
+        );
+        assert_eq!(
+            missing_closures(&[rustfmt.clone()], &present),
+            vec!["python".to_string(), "cargo".to_string()]
+        );
+        assert!(missing_closures(&[python.clone()], &["python"]).is_empty());
+        let verdicts = judge(dir, &permissive(), &[rustfmt.clone(), python.clone()]);
+        assert!(verdicts.iter().all(Verdict::passes), "{verdicts:?}");
+        let report = Report {
+            policy: permissive(),
+            sources: Vec::new(),
+            verdicts,
+            missing: missing_closures(&[rustfmt, python], &present),
+        };
+        assert!(!report.passes());
+        let text = render(dir, &report, false).unwrap();
+        assert!(
+            text.contains("cargo    missing       no closure for the cargo inputs found here; run 'blanket sync' under a trusted key, then commit\n"),
+            "{text}"
+        );
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["missing"], json!(["cargo"]));
+        assert_eq!(value["closures"][0]["passed"], true);
+        // Through the directory: delete the python record and audit.
+        let _env = policy::test_env_lock();
+        let _machine = MachinePolicy::trusting("missing-machine", &[test_key()]);
+        let report = audit(host(), dir, None).unwrap();
+        assert_eq!(report.missing, vec!["cargo".to_string()]);
+        fs::remove_file(dir.join(".blanket/closures/python.json")).unwrap();
+        let report = audit(host(), dir, None).unwrap();
+        assert_eq!(
+            report.missing,
+            vec!["python".to_string(), "cargo".to_string()]
+        );
+        assert_eq!(report.verdicts.len(), 1);
+        assert!(report.verdicts[0].passes());
+        assert!(!report.passes());
+        let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["missing"], json!(["python", "cargo"]));
+    }
+
+    #[test]
+    fn the_record_judged_is_the_one_read_not_the_path() {
+        let temp = python_project("replaced");
+        let dir = &temp.0;
+        let closure = with_exceptions(dir, &[]);
+        // Replace the file after the read: a hand edit, unsigned, denied.
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([exception(GIT_DEPENDENCY, "x")]);
+        write_closure_with(
+            dir,
+            "python",
+            "python",
+            Some(host().triple()),
+            body,
+            None,
+            |_| {},
+        );
+        let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &[closure.clone()]);
+        assert!(verdicts[0].passes(), "{verdicts:?}");
+        assert_eq!(verdicts[0].record_sha256, closure.record_sha256);
+        // Reading again judges the new file, under its own digest.
+        let reread = read_closure(dir, &closure.path);
+        assert_ne!(reread.record_sha256, closure.record_sha256);
+        let verdicts = judge(dir, &deny(&[GIT_DEPENDENCY]), &[reread]);
+        assert_eq!(verdicts[0].signature, Signature::Unsigned);
+    }
+
+    #[test]
+    fn a_malformed_envelope_is_refused_not_judged() {
+        let temp = python_project("shape");
+        let dir = &temp.0;
+        let mut body = python_body(dir);
+        body["exceptions"] = json!([]);
+        let present = inspect::detected(dir).unwrap();
+        let write = |edit: fn(&mut Value), sign_after: bool| {
+            let mut envelope = json!({
+                "schema": "closure/1",
+                "ecosystem": "python",
+                "platform": host().triple(),
+                "projected_at": 1,
+                "body": body.clone(),
+            });
+            if !sign_after {
+                test_key().sign(&mut envelope).unwrap();
+            }
+            edit(&mut envelope);
+            if sign_after {
+                test_key().sign(&mut envelope).unwrap();
+            }
+            let closures = dir.join(".blanket/closures");
+            fs::create_dir_all(&closures).unwrap();
+            let path = closures.join("python.json");
+            fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
+            read_closure(dir, &path)
+        };
+        let cases: [(&str, fn(&mut Value), &str); 6] = [
+            (
+                "schema",
+                |v| v["schema"] = json!("closure/2"),
+                "unsupported closure schema",
+            ),
+            (
+                "no schema",
+                |v| {
+                    v.as_object_mut().unwrap().remove("schema");
+                },
+                "no schema",
+            ),
+            (
+                "ecosystem",
+                |v| v["ecosystem"] = json!(1),
+                "no ecosystem string",
+            ),
+            (
+                "body",
+                |v| v["body"] = json!([]),
+                "body is not a JSON object",
+            ),
+            (
+                "platform",
+                |v| v["platform"] = json!(7),
+                "platform is not a string",
+            ),
+            (
+                "projected_at",
+                |v| v["projected_at"] = json!("yesterday"),
+                "projected_at is not an integer",
+            ),
+        ];
+        for (label, edit, expected) in cases {
+            // Signed over the malformed shape by a trusted key: still refused.
+            let closure = write(edit, true);
+            assert!(
+                matches!(signing::verify(&closure.envelope), Verification::Valid(_)),
+                "{label}"
+            );
+            let error =
+                evaluate(host(), dir, &permissive(), &[], &[closure], &present).unwrap_err();
+            assert!(
+                error.to_string().contains(expected) && error.to_string().contains("refused"),
+                "{label} (signed): {error}"
+            );
+            // Edited after signing: an error too, never a verdict.
+            let closure = write(edit, false);
+            let error =
+                evaluate(host(), dir, &permissive(), &[], &[closure], &present).unwrap_err();
+            assert!(error.to_string().contains(expected), "{label}: {error}");
+        }
+        // The well-formed envelope from the same helper passes.
+        let closure = write(|_| {}, true);
+        assert!(judge(dir, &permissive(), &[closure])[0].passes());
     }
 }

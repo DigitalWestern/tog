@@ -73,6 +73,9 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
 
 fn preflight(platform: Platform, dir: &Path, strict: bool) -> io::Result<Vec<&'static dyn Tailor>> {
     policy::init(dir, strict)?;
+    // A configured signing key that cannot be loaded fails here, before the
+    // store is opened or any closure is written.
+    crate::comforter::init_signing()?;
     preflight_sync(platform, dir)
 }
 
@@ -96,6 +99,12 @@ fn sync_preflighted(
         return Err(no_inputs());
     }
     print_exception_summary(dir)?;
+    if crate::comforter::signing_key().is_none() {
+        eprintln!(
+            "blanket: closures unsigned; blanket audit reports them outdated \
+             (set BLANKET_SIGNING_KEY=<key file> to sign; 'blanket keygen' makes one)"
+        );
+    }
     Ok(())
 }
 

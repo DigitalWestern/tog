@@ -199,20 +199,28 @@ lock' gate.",
         summary: "would the synced closures pass a policy? (CI admission gate)",
         usage: "blanket audit [--policy <file>] [--json]",
         description: "\
-Reads the exceptions every sync recorded in .blanket/closures/*.json and
-judges them against the policy chain (BLANKET_POLICY or
-~/.blanket/policy.toml, every ancestor's .blanket/policy.toml, BLANKET_STRICT)
-unioned with --policy <file>. Union only tightens: the file can add denials
-but never loosen what the machine or project policy says. Per closure:
-clean, denied (each denied exception's kind, subject, and detail, plus a
-count of permitted ones by kind), stale (its inputs changed since the sync,
-the same check 'blanket status' makes), or unchecked (the closure predates
-input or exception recording). The rustfmt closure 'blanket fmt' writes
-is stale when this binary would record that run differently now (another
-rustfmt pin, or other toolchain components); rerun 'blanket fmt'. Only clean
-passes: an audit of a stale or unchecked record proves nothing. Offline, read-only, no store access, no
-sandbox needed. Exit status 0 when every closure is clean, 1 otherwise.
-A company deny list to start from ships as docs/human/policy-company.toml.",
+Reads the closure records every sync committed to .blanket/closures/*.json,
+verifies each record's signature against the [signing] trusted keys in the
+machine policy (BLANKET_POLICY or ~/.blanket/policy.toml; a project
+.blanket/policy.toml or --policy <file> can only drop keys, never add one),
+and judges the exceptions it records against the policy chain merged with
+--policy <file>. Merging only tightens: the file can add denials but never
+loosen what the machine or project policy says. Per closure, the first that
+applies: bad-signature (tampered or malformed; find out who changed it),
+untrusted (signed by a key the trusted set does not contain), outdated
+(unsigned, or predates input, platform, or exception recording; run
+'blanket sync' once under a trusted key, then commit), stale (its inputs
+changed since the sync, the same check 'blanket status' makes), denied
+(each denied exception's kind, subject, and detail, plus a count of
+permitted ones by kind), unknown (a kind this binary cannot judge), or
+clean. A record that is not trusted is not evaluated further. A detected
+ecosystem with no closure is missing. The rustfmt closure 'blanket fmt'
+writes is stale when this binary would record that run differently now;
+rerun 'blanket fmt'. Only clean passes. Offline, read-only, no store
+access, no sandbox needed. Exit status 0 when every closure is clean and
+none is missing, 1 otherwise, 2 when no trusted key is configured.
+'blanket keygen' creates a signing key; set BLANKET_SIGNING_KEY where sync
+runs. A company deny list to start from ships as docs/human/policy-company.toml.",
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
             JSON_OPTION,
@@ -323,6 +331,23 @@ guessed at. Usable on a copied store from any host.",
         words: &[],
     },
     Spec {
+        name: "keygen",
+        group: Group::Maintain,
+        summary: "create a closure-signing key and print its public key",
+        usage: "blanket keygen <path>",
+        description: "\
+Writes a new Ed25519 signing key to <path> (created exclusively, mode 0600;
+an existing file or symlink is refused, never overwritten) and prints the
+public key on stdout as the [signing] policy table to paste into the
+machine policy. Set BLANKET_SIGNING_KEY=<path> where 'blanket sync' and
+'blanket fmt' run so every closure they write is signed; 'blanket audit'
+accepts only records signed by a key the machine policy trusts. Keep the
+key outside the checkout, the store, and any sandbox read root; a job that
+runs untrusted project code must not hold one.",
+        options: &[HELP_OPTION],
+        words: &[],
+    },
+    Spec {
         name: "store",
         group: Group::Maintain,
         summary: "'store path', 'store roots'",
@@ -377,6 +402,7 @@ ENVIRONMENT:
   BLANKET_STORE           store root (default ~/.blanket/store)
   BLANKET_STRICT=1        refuse every policy exception, like --strict
   BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
+  BLANKET_SIGNING_KEY     key file; sync and fmt sign every closure they write
   NO_COLOR                plain output, like --no-color
 ";
 

@@ -95,6 +95,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         "audit" => parse_audit(rest)?,
         "ls" => parse_ls(rest)?,
         "doctor" => parse_json_only(rest, "doctor")?.map(|json| Command::Doctor { json }),
+        "keygen" => parse_keygen(rest)?,
         "gc" => parse_gc(rest)?,
         "store" => parse_store(rest)?,
         "completions" => parse_completions(rest)?,
@@ -567,6 +568,34 @@ fn validate_x_bin(value: &str) -> Result<(), UsageError> {
         ));
     }
     Ok(())
+}
+
+fn parse_keygen(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut path = None;
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(None),
+            other if other.starts_with('-') && path.is_none() => {
+                return Err(reject("keygen", other))
+            }
+            other => {
+                if path.is_some() {
+                    return Err(UsageError::new(
+                        format!("keygen: unexpected argument '{other}'"),
+                        Some("keygen"),
+                    ));
+                }
+                path = Some(non_empty(other, "<path>", Some("keygen"))?);
+            }
+        }
+    }
+    match path {
+        Some(path) => Ok(Some(Command::Keygen { path })),
+        None => Err(UsageError::new(
+            "keygen needs the path to write the key to",
+            Some("keygen"),
+        )),
+    }
 }
 
 fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
