@@ -70,7 +70,7 @@ ENVIRONMENT:
   BLANKET_STORE           store root (default ~/.blanket/store)
   BLANKET_STRICT=1        refuse every policy exception, like --strict
   BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
-  BLANKET_SIGNING_KEY     key file; sync and fmt sign every closure they write
+  BLANKET_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR                plain output, like --no-color
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'
@@ -195,9 +195,9 @@ sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 Signing: `blanket keygen <path>` writes an Ed25519 key file (mode 0600,
 never overwriting an existing file or symlink) and prints the `[signing]`
 table that trusts it; the private seed is never printed. With
-`BLANKET_SIGNING_KEY=<path>` set, `blanket sync` and `blanket fmt` sign
-every closure they write. The key is loaded once during preflight, before
-the store is opened; a configured key (including an empty path) that is
+`BLANKET_SIGNING_KEY=<path>` set, every command that writes a closure
+(`sync`, `fmt`, `build`, `add`, `remove`, `update`) signs it. The key is
+loaded once, before the store is opened or a manifest is edited; a configured key (including an empty path) that is
 missing, malformed, not a regular file, or readable by group or other fails
 the command, never silently downgrades to unsigned. Unset, the record is
 written unsigned and the sync summary says so. Trust is the machine

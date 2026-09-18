@@ -402,7 +402,7 @@ ENVIRONMENT:
   BLANKET_STORE           store root (default ~/.blanket/store)
   BLANKET_STRICT=1        refuse every policy exception, like --strict
   BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
-  BLANKET_SIGNING_KEY     key file; sync and fmt sign every closure they write
+  BLANKET_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR                plain output, like --no-color
 ";
 
