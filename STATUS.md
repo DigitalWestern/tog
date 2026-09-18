@@ -27,7 +27,8 @@ Cargo, Go, Ruby, Elixir, .NET.
 
 ## What is next
 
-The ordered list is the top of [FOLLOW-UPS.md](FOLLOW-UPS.md):
+The ordered list is issue #73; [FOLLOW-UPS.md](FOLLOW-UPS.md) keeps the
+detail behind each item:
 
 1. Design signed closures for `blanket audit`.
 2. Ship signing and the `outdated` verdict together.
