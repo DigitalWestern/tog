@@ -2,6 +2,7 @@
 //! project policy chain, the exception kinds a sync may wave through, and
 //! the collision checks the store consults at commit time.
 
+use crate::kernel::signing::{self, KeySet};
 use crate::kernel::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -75,6 +76,23 @@ pub struct Policy {
     pub strict: bool,
     #[serde(default)]
     pub deny: BTreeSet<String>,
+    /// The `[signing]` table. In a parsed file it is what that scope
+    /// declared; in a merged chain it is the effective trusted set, `None`
+    /// while no machine-scope policy has introduced one. Absent and empty
+    /// are different states: absent means "not configured" (an operator
+    /// mistake for `blanket audit`), empty means "trust nobody".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing: Option<Signing>,
+}
+
+/// The `[signing]` policy table: the public keys whose closure signatures
+/// `blanket audit` accepts. Every other command parses it and ignores it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Signing {
+    /// `ed25519:<64 hex>` entries, decoded and deduplicated on the key
+    /// bytes. Required: a `[signing]` table that says nothing is refused.
+    pub trusted: KeySet,
 }
 
 static POLICY: OnceLock<Policy> = OnceLock::new();
@@ -146,7 +164,7 @@ fn merge_file(
         }
     };
     let other = parse_file(path, &text)?;
-    union(policy, &other);
+    merge(policy, &other, origin);
     // Only a file that existed and was merged is a source; the optional
     // files that were not there contributed nothing to attribute.
     sources.push(PolicySource::from_file(origin, path, &other));
@@ -177,11 +195,37 @@ fn path_identity(path: &Path) -> Option<PathIdentity> {
 
 /// Union `other` into `policy`. Union only tightens: the result denies
 /// everything `policy` denied plus everything `other` denies, and is strict
-/// if either is. Used by `blanket audit --policy`, so a file handed to the
-/// gate can never loosen the machine or project policy.
+/// if either is. Deny and strictness are scope-free, so this ignores the
+/// `[signing]` table; `merge` applies it by origin.
 pub fn union(policy: &mut Policy, other: &Policy) {
     policy.strict |= other.strict;
     policy.deny.extend(other.deny.iter().cloned());
+}
+
+/// Merge one scope's policy into the chain: `union` for deny and
+/// strictness, and the origin rule for signing trust. Only the machine
+/// scope introduces a trusted set; a project or `--policy` file intersects
+/// with it, so a working tree can drop keys but never vouch for its own.
+/// A scope with no `[signing]` table leaves the set unchanged, and a
+/// project or flag list seen before any machine declaration cannot
+/// initialize it: trust stays unconfigured. Used by `blanket audit
+/// --policy` too, so the file handed to the gate can never loosen the
+/// machine or project policy.
+pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
+    union(policy, other);
+    match origin {
+        SourceOrigin::Machine => {
+            if let Some(declared) = &other.signing {
+                policy.signing = Some(declared.clone());
+            }
+        }
+        SourceOrigin::Project | SourceOrigin::Flag => {
+            if let (Some(effective), Some(declared)) = (policy.signing.as_mut(), &other.signing) {
+                signing::intersect(&mut effective.trusted, &declared.trusted);
+            }
+        }
+        SourceOrigin::Env => {}
+    }
 }
 
 /// Where one contributing policy came from. The serialized names
@@ -231,10 +275,15 @@ pub struct PolicySource {
     pub path: Option<PathBuf>,
     pub strict: bool,
     pub deny: BTreeSet<String>,
+    /// The `[signing] trusted` list this scope declared: `None` when the
+    /// file has no `[signing]` table, `Some` (possibly empty) when it does.
+    /// Shown per scope so a key the machine does not trust is visible in
+    /// the project list that named it.
+    pub trusted: Option<KeySet>,
 }
 
 impl PolicySource {
-    /// The entry for a policy read from `path`, including one unioned in
+    /// The entry for a policy read from `path`, including one merged in
     /// from outside the chain (`blanket audit --policy`).
     pub fn from_file(origin: SourceOrigin, path: &Path, policy: &Policy) -> Self {
         Self {
@@ -242,6 +291,10 @@ impl PolicySource {
             path: Some(path.to_path_buf()),
             strict: policy.strict,
             deny: policy.deny.clone(),
+            trusted: policy
+                .signing
+                .as_ref()
+                .map(|signing| signing.trusted.clone()),
         }
     }
 }
@@ -312,6 +365,7 @@ pub fn load_with_sources(
             path: None,
             strict: true,
             deny: BTreeSet::new(),
+            trusted: None,
         });
     }
     if env_strict {
@@ -320,6 +374,7 @@ pub fn load_with_sources(
             path: None,
             strict: true,
             deny: BTreeSet::new(),
+            trusted: None,
         });
     }
     Ok((policy, sources))
@@ -823,7 +878,8 @@ deny = ["git-dependency"]"#,
         assert!(record_with(
             &Policy {
                 strict: true,
-                deny: BTreeSet::new()
+                deny: BTreeSet::new(),
+                signing: None,
             },
             "x",
             "s",
@@ -1249,5 +1305,236 @@ deny = ["git-dependency"]"#,
         assert!(from_member.strict);
         assert!(from_member.deny.contains("file-collision"));
         assert!(from_member.deny.contains("git-dependency"));
+    }
+
+    fn key(byte: u8) -> signing::PublicKey {
+        signing::PublicKey::from_hex(&hex::encode([byte; 32])).unwrap()
+    }
+
+    fn keys(bytes: &[u8]) -> KeySet {
+        bytes.iter().copied().map(key).collect()
+    }
+
+    fn trusted_policy(set: &KeySet) -> Policy {
+        Policy {
+            signing: Some(Signing {
+                trusted: set.clone(),
+            }),
+            ..Policy::default()
+        }
+    }
+
+    #[test]
+    fn signing_table_parses_keys_and_refuses_malformed_entries() {
+        let path = Path::new("policy.toml");
+        let lower = key(0xab).to_string();
+        let upper = lower.replace("ed25519:", "").to_uppercase();
+        let policy = parse_file(
+            path,
+            &format!("[signing]\ntrusted = [\"{lower}\", \"ed25519:{upper}\"]\n"),
+        )
+        .unwrap();
+        let signing = policy.signing.as_ref().unwrap();
+        assert_eq!(
+            signing.trusted,
+            keys(&[0xab]),
+            "case-insensitive, deduplicated"
+        );
+        assert!(!policy.strict);
+        assert!(policy.deny.is_empty());
+        // Explicitly empty is a declared state, distinct from absent.
+        let empty = parse_file(path, "[signing]\ntrusted = []\n").unwrap();
+        assert_eq!(empty.signing, Some(Signing::default()));
+        let absent = parse_file(path, "deny = []\n").unwrap();
+        assert_eq!(absent.signing, None);
+        // Deny and strict still parse beside the table.
+        let both = parse_file(
+            path,
+            &format!("strict = true\ndeny = [\"git-dependency\"]\n\n[signing]\ntrusted = [\"{lower}\"]\n"),
+        )
+        .unwrap();
+        assert!(both.strict);
+        assert!(both.deny.contains(GIT_DEPENDENCY));
+        assert_eq!(both.signing.unwrap().trusted, keys(&[0xab]));
+        for (text, what) in [
+            ("[signing]\n", "a table that declares nothing"),
+            ("[signing]\ntrusted = [\"nope\"]\n", "not a key"),
+            (
+                "[signing]\ntrusted = [\"ed25519:abcd\"]\n",
+                "too short",
+            ),
+            (
+                "[signing]\ntrusted = [\"rsa:0000000000000000000000000000000000000000000000000000000000000000\"]\n",
+                "another algorithm",
+            ),
+            (
+                "[signing]\ntrusted = [\"ED25519:0000000000000000000000000000000000000000000000000000000000000000\"]\n",
+                "an uppercase prefix",
+            ),
+            ("[signing]\ntrusted = []\nextra = 1\n", "an unknown signing field"),
+            ("[signing]\ntrusted = \"ed25519:00\"\n", "a scalar instead of a list"),
+            ("signing = 1\n", "a scalar table"),
+            ("[signing.trusted]\n", "a nested table"),
+        ] {
+            let error = parse_file(path, text).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{what}");
+            assert!(
+                error.to_string().starts_with("parse policy.toml"),
+                "{what}: {error}"
+            );
+        }
+        // The rendered form is the policy syntax, lowercase.
+        assert_eq!(
+            toml::to_string(&policy).unwrap(),
+            format!("strict = false\ndeny = []\n\n[signing]\ntrusted = [\"{lower}\"]\n")
+        );
+    }
+
+    #[test]
+    fn machine_scope_introduces_trust_and_lower_scopes_only_narrow() {
+        let mut chain = Policy::default();
+        // A project or flag list seen while trust is unconfigured cannot
+        // initialize it.
+        merge(
+            &mut chain,
+            &trusted_policy(&keys(&[1])),
+            SourceOrigin::Project,
+        );
+        assert_eq!(chain.signing, None);
+        merge(&mut chain, &trusted_policy(&keys(&[1])), SourceOrigin::Flag);
+        assert_eq!(chain.signing, None);
+        // The machine scope introduces it.
+        merge(
+            &mut chain,
+            &trusted_policy(&keys(&[1, 2, 3])),
+            SourceOrigin::Machine,
+        );
+        assert_eq!(chain.signing.as_ref().unwrap().trusted, keys(&[1, 2, 3]));
+        // A scope with no table leaves the set unchanged.
+        merge(&mut chain, &Policy::default(), SourceOrigin::Project);
+        merge(&mut chain, &Policy::default(), SourceOrigin::Flag);
+        assert_eq!(chain.signing.as_ref().unwrap().trusted, keys(&[1, 2, 3]));
+        // A project list intersects: it drops keys, never adds them.
+        merge(
+            &mut chain,
+            &trusted_policy(&keys(&[2, 3, 4])),
+            SourceOrigin::Project,
+        );
+        assert_eq!(chain.signing.as_ref().unwrap().trusted, keys(&[2, 3]));
+        // So does the --policy file.
+        merge(
+            &mut chain,
+            &trusted_policy(&keys(&[3, 5])),
+            SourceOrigin::Flag,
+        );
+        assert_eq!(chain.signing.as_ref().unwrap().trusted, keys(&[3]));
+        // Deny and strict still union alongside.
+        merge(
+            &mut chain,
+            &Policy {
+                strict: true,
+                deny: [GIT_DEPENDENCY.to_string()].into_iter().collect(),
+                signing: None,
+            },
+            SourceOrigin::Flag,
+        );
+        assert!(chain.strict);
+        assert!(chain.deny.contains(GIT_DEPENDENCY));
+        assert_eq!(chain.signing.as_ref().unwrap().trusted, keys(&[3]));
+        // An intersection can empty the set; that is a decision, not an
+        // unconfigured state.
+        merge(
+            &mut chain,
+            &trusted_policy(&keys(&[9])),
+            SourceOrigin::Project,
+        );
+        assert_eq!(chain.signing, Some(Signing::default()));
+        // An explicitly empty machine list is the same decision.
+        let mut nobody = Policy::default();
+        merge(
+            &mut nobody,
+            &trusted_policy(&KeySet::new()),
+            SourceOrigin::Machine,
+        );
+        assert_eq!(nobody.signing, Some(Signing::default()));
+        merge(
+            &mut nobody,
+            &trusted_policy(&keys(&[1])),
+            SourceOrigin::Project,
+        );
+        assert_eq!(nobody.signing, Some(Signing::default()));
+        // `union` on its own never touches trust in either direction.
+        let mut plain = Policy::default();
+        union(&mut plain, &trusted_policy(&keys(&[1])));
+        assert_eq!(plain.signing, None);
+        let mut kept = trusted_policy(&keys(&[1, 2]));
+        union(&mut kept, &trusted_policy(&keys(&[3])));
+        assert_eq!(kept.signing.unwrap().trusted, keys(&[1, 2]));
+    }
+
+    #[test]
+    fn load_with_sources_records_each_scopes_trusted_list() {
+        let root = std::env::temp_dir().join(format!(
+            "blanket-policy-signing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        fs::create_dir_all(home.join(".blanket")).unwrap();
+        fs::create_dir_all(project.join(".blanket")).unwrap();
+        let toml_list = |bytes: &[u8]| {
+            let entries: Vec<String> = bytes.iter().map(|b| format!("\"{}\"", key(*b))).collect();
+            format!("[signing]\ntrusted = [{}]\n", entries.join(", "))
+        };
+        fs::write(home.join(".blanket/policy.toml"), toml_list(&[1, 2])).unwrap();
+        fs::write(
+            project.join(".blanket/policy.toml"),
+            format!("deny = [\"git-dependency\"]\n{}", toml_list(&[2, 3])),
+        )
+        .unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+        let (policy, sources) = load_with_sources(&project, true).unwrap();
+        assert_eq!(policy.signing.as_ref().unwrap().trusted, keys(&[2]));
+        assert!(policy.deny.contains(GIT_DEPENDENCY));
+        let fixture = fixture_sources(&sources, &root);
+        assert_eq!(fixture.len(), 2);
+        assert_eq!(fixture[0].origin, SourceOrigin::Machine);
+        assert_eq!(fixture[0].trusted, Some(keys(&[1, 2])));
+        assert_eq!(fixture[1].origin, SourceOrigin::Project);
+        assert_eq!(fixture[1].trusted, Some(keys(&[2, 3])));
+        // The strictness flag source declares no list.
+        let flag = sources
+            .iter()
+            .find(|source| source.origin == SourceOrigin::Flag)
+            .unwrap();
+        assert_eq!(flag.trusted, None);
+        // Without a machine declaration the project list is recorded but
+        // trust stays unconfigured.
+        fs::write(home.join(".blanket/policy.toml"), "deny = []\n").unwrap();
+        let (policy, sources) = load_with_sources(&project, false).unwrap();
+        assert_eq!(policy.signing, None);
+        let fixture = fixture_sources(&sources, &root);
+        assert_eq!(fixture[0].trusted, None);
+        assert_eq!(fixture[1].trusted, Some(keys(&[2, 3])));
+        // An explicitly empty machine list is recorded as `Some([])`.
+        fs::write(
+            home.join(".blanket/policy.toml"),
+            "[signing]\ntrusted = []\n",
+        )
+        .unwrap();
+        let (policy, sources) = load_with_sources(&project, false).unwrap();
+        assert_eq!(policy.signing, Some(Signing::default()));
+        assert_eq!(
+            fixture_sources(&sources, &root)[0].trusted,
+            Some(KeySet::new())
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

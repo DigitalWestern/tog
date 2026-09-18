@@ -387,7 +387,8 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
     archive.rs      archive validation and delegated extraction
     dirhash.rs      Go module dirhash verification
     gitsrc.rs       git sources realized by commit
-    policy.rs       permissive/strict exception policy
+    policy.rs       permissive/strict exception policy and the [signing] trust chain
+    signing.rs      Ed25519 closure signing: key files, canonical bytes, verify
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, migrate.rs maintenance
     objmeta.rs      object-meta/2 records; kind rows are installed by
