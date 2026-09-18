@@ -788,17 +788,6 @@ pub(crate) fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
-    /// The pending-exception list is process-global, so the tests that assert
-    /// on its contents must not overlap — with each other or with any other
-    /// test that records. Same guard the npm_scripts integration tests use:
-    /// take the lock, then start from an empty list.
-    fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        clear();
-        guard
-    }
-
     struct EnvVarGuard {
         name: &'static str,
         previous: Option<std::ffi::OsString>,

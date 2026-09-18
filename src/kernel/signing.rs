@@ -39,15 +39,18 @@ pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
     /// Parse the policy syntax `ed25519:<64 hex>`. Hex is accepted in either
-    /// case; `Display` renders it lowercase.
+    /// case; `Display` renders it lowercase. The `ed25519:` prefix itself is
+    /// exact (lowercase): it names the algorithm, not a value. The input is
+    /// quoted in the error because it comes from a policy file a pull
+    /// request can edit.
     pub fn parse(text: &str) -> Result<Self, String> {
         let Some(hex_part) = text.strip_prefix(KEY_PREFIX) else {
             return Err(format!(
-                "'{text}' is not a public key: expected 'ed25519:<64 hex characters>'"
+                "{text:?} is not a public key: expected 'ed25519:<64 hex characters>'"
             ));
         };
         Self::from_hex(hex_part).ok_or_else(|| {
-            format!("'{text}' is not a public key: expected 64 hex characters after 'ed25519:'")
+            format!("{text:?} is not a public key: expected 64 hex characters after 'ed25519:'")
         })
     }
 
@@ -85,6 +88,10 @@ impl fmt::Debug for PublicKey {
     }
 }
 
+/// Serializes as the prefixed policy syntax (`ed25519:<hex>`), the form
+/// policy files and reports use. The envelope's `signature.key` is the bare
+/// hex from `PublicKey::hex`; `SigningKey::sign` writes it, and a key built
+/// with `serde_json::to_value` would never verify.
 impl Serialize for PublicKey {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
@@ -147,13 +154,22 @@ impl SigningKey {
         if path.as_os_str().is_empty() {
             return Err(refuse("the configured path is empty".into()));
         }
-        let mut file = fs::File::open(path).map_err(|error| {
+        // Non-blocking open: a FIFO at the path must fail the regular-file
+        // check below, not block the command until a writer appears.
+        // O_NONBLOCK has no effect on a regular file.
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        let file = options.open(path).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("signing key {}: {error}", path.display()),
             )
         })?;
-        let metadata = file.metadata()?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| refuse(format!("cannot stat it: {error}")))?;
         if !metadata.is_file() {
             return Err(refuse("not a regular file".into()));
         }
@@ -172,9 +188,16 @@ impl SigningKey {
                 metadata.len()
             )));
         }
+        // The size check above is a fast path; the read itself is bounded
+        // too, so a file whose reported size lies cannot be read whole.
         let mut text = String::new();
-        file.read_to_string(&mut text)
-            .map_err(|_| refuse("not valid UTF-8".into()))?;
+        (&file)
+            .take(MAX_KEY_FILE_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(|error| refuse(format!("cannot read it as UTF-8 text: {error}")))?;
+        if text.len() as u64 > MAX_KEY_FILE_BYTES {
+            return Err(refuse("longer than 1024 bytes; not a key file".into()));
+        }
         let seed = parse_seed(&text).map_err(refuse)?;
         Self::from_seed(&seed)
     }
@@ -325,11 +348,11 @@ pub fn verify(envelope: &Value) -> Verification {
         .keys()
         .find(|name| !matches!(name.as_str(), "alg" | "key" | "sig"))
     {
-        return bad(key, &format!("unexpected signature field '{unexpected}'"));
+        return bad(key, &format!("unexpected signature field {unexpected:?}"));
     }
     match signature.get("alg").and_then(Value::as_str) {
         Some(ALGORITHM) => {}
-        Some(other) => return bad(key, &format!("unsupported signature algorithm '{other}'")),
+        Some(other) => return bad(key, &format!("unsupported signature algorithm {other:?}")),
         None => return bad(key, "the signature names no algorithm"),
     }
     let Some(key) = key else {
@@ -356,6 +379,7 @@ pub fn verify(envelope: &Value) -> Verification {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
@@ -388,6 +412,10 @@ mod tests {
 
     /// The public key of the all-sevens seed, as ring derives it. Pins the
     /// derivation so a `ring` upgrade cannot silently move every key.
+    /// The signature the all-sevens seed produces over
+    /// `{"body":{"n":1},"schema":"closure/1"}`: pins key derivation and the
+    /// canonical bytes together, so a change to either moves it.
+    const FIXED_SIGNATURE: &str = "ec462ca39c39f1a303c2d766857487ba5b5768184685881bd6365d5c96e92a2b9f52d93ae97a92b4c925cf934508f945482f7e4aa46711fbec0d82bd8d48b802";
     const FIXED_SEED_PUBLIC_KEY: &str =
         "ed25519:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 
@@ -515,12 +543,12 @@ mod tests {
         let mut value: Value =
             serde_json::from_str(r#"{"schema":"closure/1","body":{"n":1}}"#).unwrap();
         key.sign(&mut value).unwrap();
-        let signature = value["signature"]["sig"].as_str().unwrap().to_string();
-        // Sign the same value from scratch; the signature bytes must match.
+        assert_eq!(value["signature"]["sig"], FIXED_SIGNATURE);
+        // The same value in another key order signs to the same bytes.
         let mut again: Value =
             serde_json::from_str(r#"{"body":{"n":1},"schema":"closure/1"}"#).unwrap();
         key.sign(&mut again).unwrap();
-        assert_eq!(again["signature"]["sig"], signature);
+        assert_eq!(again["signature"]["sig"], FIXED_SIGNATURE);
     }
 
     #[test]
@@ -731,7 +759,10 @@ mod tests {
             error(Path::new(""))
         );
         let missing = temp.0.join("missing");
-        assert!(error(&missing).contains("missing"), "{}", error(&missing));
+        assert_eq!(
+            SigningKey::load(&missing).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
         assert!(
             error(&temp.0).contains("not a regular file"),
             "{}",
@@ -747,26 +778,59 @@ mod tests {
                 "{mode:o}: {message}"
             );
         }
-        for (name, content) in [
-            ("empty", String::new()),
-            ("newline-only", "\n".to_string()),
-            ("two-lines", format!("ed25519:{seed}\nsecond\n")),
-            ("no-prefix", format!("{seed}\n")),
-            ("wrong-prefix", format!("rsa:{seed}\n")),
-            ("short", format!("ed25519:{}\n", &seed[..62])),
-            ("long", format!("ed25519:{seed}00\n")),
-            ("not-hex", format!("ed25519:{}zz\n", &seed[..62])),
+        for (name, content, expected) in [
+            ("empty", String::new(), "empty"),
+            ("newline-only", "\n".to_string(), "empty"),
+            (
+                "two-lines",
+                format!("ed25519:{seed}\nsecond\n"),
+                "exactly one line",
+            ),
+            ("no-prefix", format!("{seed}\n"), "expected one line"),
+            ("wrong-prefix", format!("rsa:{seed}\n"), "expected one line"),
+            ("short", format!("ed25519:{}\n", &seed[..62]), "found 62"),
+            ("long", format!("ed25519:{seed}00\n"), "found 66"),
+            (
+                "not-hex",
+                format!("ed25519:{}zz\n", &seed[..62]),
+                "64 hex characters",
+            ),
             (
                 "pem",
                 "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".to_string(),
+                "exactly one line",
             ),
-            ("public-syntax-only", format!("ed25519:{seed} # comment\n")),
+            (
+                "seed-with-comment",
+                format!("ed25519:{seed} # comment\n"),
+                "found 74",
+            ),
         ] {
             let path = temp.0.join(name);
             fs::write(&path, content).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
             let message = error(&path);
-            assert!(message.contains("signing key"), "{name}: {message}");
+            assert!(
+                message.starts_with("signing key") && message.contains(expected),
+                "{name}: {message}"
+            );
+        }
+        // A FIFO is refused, not waited on.
+        let fifo = temp.0.join("fifo");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(
+            error(&fifo).contains("not a regular file"),
+            "{}",
+            error(&fifo)
+        );
+        // A file whose reported size lies is still read bounded.
+        if Path::new("/proc/self/environ").exists() {
+            let message = SigningKey::load(Path::new("/proc/self/environ"))
+                .unwrap_err()
+                .to_string();
+            assert!(message.starts_with("signing key"), "{message}");
         }
         let huge = temp.0.join("huge");
         fs::write(&huge, vec![b'a'; 4096]).unwrap();
