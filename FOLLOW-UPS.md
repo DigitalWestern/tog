@@ -34,18 +34,6 @@ by position.
 
 ## Decisions waiting on the owner
 
-- **Identity schema successors.** The commit-time drift check cannot see
-  four kinds of producer drift under the current schemas. Closing each needs
-  a new schema, and a new schema changes every object id of that kind (a
-  store-wide rebuild of those objects), so it is the owner's call:
-
-  | kind | drift it cannot see | successor that closes it |
-  |---|---|---|
-  | `cargo-vendor/1` | a one-crate plan drops its only `crate:` key and becomes the valid empty plan | `cargo-vendor/2`: an explicit crate count |
-  | `python-env/2` | a one-wheel plan drops its only `pkg:` key, or a native sdist drops `native_libs` | `python-env/3`: a digest over the package set plus an explicit native decision |
-  | `node-env/3` | a multi-package plan drops one `pkg:`, `artifact:`, or Linux `native_libs` key | `node-env/4`: a digest over packages and artifacts plus an explicit native decision |
-  | `sdist-build/3` | both halves of `rust`/`vendor` or `native_libs`/`native_linker` are dropped together | `sdist-build/4`: explicit build-mode and native-mode fields |
-
 - **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
   missing-lock generation run the ecosystem's own tool unsandboxed with
   network, outside what `blanket audit` can see. Options: a registry-proxy
