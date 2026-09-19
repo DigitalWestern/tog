@@ -9,7 +9,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-dotnet-e2e-{}-{}",
+            "tog-dotnet-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -27,10 +27,10 @@ impl Drop for TempDir {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -58,7 +58,7 @@ fn published_dll(project: &Path) -> PathBuf {
     std::fs::read_dir(project.join("bin"))
         .unwrap()
         .filter_map(|e| e.ok())
-        .find(|e| e.file_name().to_string_lossy().starts_with("blanket-"))
+        .find(|e| e.file_name().to_string_lossy().starts_with("tog-"))
         .map(|e| e.path().join("proj.dll"))
         .expect("staged bin dir")
 }
@@ -84,7 +84,7 @@ fn assert_realization_does_not_evaluate_user_project(binary: &Path, temp: &TempD
     std::fs::write(csproj, text).unwrap();
     let store = temp.0.join("tripwire-store");
     assert_ok(
-        blanket(binary, &project, &store, &["sync"]),
+        tog(binary, &project, &store, &["sync"]),
         "tripwire sync",
     );
     assert!(
@@ -100,11 +100,11 @@ fn dotnet_sync_sandboxed_build_and_run() {
     let project = temp.0.join("dotnet-hello");
     copy_dotnet_hello(&project);
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
     let version = assert_ok(
-        blanket(&binary, &project, &store, &["run", "dotnet", "--version"]),
+        tog(&binary, &project, &store, &["run", "dotnet", "--version"]),
         "dotnet --version",
     );
     assert!(
@@ -113,7 +113,7 @@ fn dotnet_sync_sandboxed_build_and_run() {
     );
     if cfg!(target_os = "linux") {
         let info = assert_ok(
-            blanket(&binary, &project, &store, &["run", "dotnet", "--info"]),
+            tog(&binary, &project, &store, &["run", "dotnet", "--info"]),
             "dotnet --info",
         );
         // `dotnet --info` pads with variable whitespace; compare fields.
@@ -131,11 +131,11 @@ fn dotnet_sync_sandboxed_build_and_run() {
             "SDK base path is not under the committed store object: {base_path:?}\n{info}"
         );
     }
-    assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
     let dll = published_dll(&project);
     assert!(dll.is_file());
     let out = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -147,12 +147,12 @@ fn dotnet_sync_sandboxed_build_and_run() {
 
     std::fs::remove_dir_all(dll.parent().unwrap()).unwrap();
     assert_ok(
-        blanket(&binary, &project, &store, &["build"]),
+        tog(&binary, &project, &store, &["build"]),
         "build after published output deletion",
     );
     let rebuilt = published_dll(&project);
     let out = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -163,10 +163,10 @@ fn dotnet_sync_sandboxed_build_and_run() {
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
 
     // Build-capable verbs are sandbox-only.
-    let refused = blanket(&binary, &project, &store, &["run", "dotnet", "build"]);
+    let refused = tog(&binary, &project, &store, &["run", "dotnet", "build"]);
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("blanket build dotnet"),
+        String::from_utf8_lossy(&refused.stderr).contains("tog build dotnet"),
         "build verb must be refused at run"
     );
 
@@ -177,6 +177,6 @@ fn dotnet_sync_sandboxed_build_and_run() {
 #[ignore]
 fn dotnet_realization_does_not_evaluate_user_project() {
     let temp = TempDir::new();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     assert_realization_does_not_evaluate_user_project(&binary, &temp);
 }

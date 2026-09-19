@@ -698,7 +698,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "blanket-lock-import-{}-{nonce}",
+            "tog-lock-import-{}-{nonce}",
             std::process::id()
         ));
         let _ = fs::create_dir_all(path.join("packages/lib"));
@@ -1557,7 +1557,7 @@ mod git_import_tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "blanket-lock-git-import-{}-{nonce}",
+            "tog-lock-git-import-{}-{nonce}",
             std::process::id()
         ));
         std::fs::create_dir_all(&path).unwrap();
@@ -1670,7 +1670,7 @@ plugin@1.0.0:
              \x20\x20plugin@https://codeload.github.com/o/r/tar.gz/{commit}: {{}}\n"
         );
         let project = std::env::temp_dir().join(format!(
-            "blanket-gitimport-{}-{}",
+            "tog-gitimport-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -1,4 +1,4 @@
-//! `blanket ls`: list the packages recorded in the project's closures.
+//! `tog ls`: list the packages recorded in the project's closures.
 
 use crate::commands::inspect;
 use crate::commands::shared::project_dir;

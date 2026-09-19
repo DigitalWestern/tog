@@ -2,15 +2,15 @@
 //! network attempt while permissive mode retains it as a cached exception.
 //!
 //! Heavy (realizes Node on first run), so #[ignore]d; tests/acceptance.sh
-//! runs it with a shared BLANKET_STORE:
+//! runs it with a shared TOG_STORE:
 //!     cargo test --test npm_scripts -- --ignored
 
-use blanket::comforter;
-use blanket::kernel::fetch::{self, Digest};
-use blanket::kernel::platform::Platform;
-use blanket::kernel::policy;
-use blanket::kernel::store::Store;
-use blanket::tailors::node::{self, NpmPackage, NpmPlan};
+use tog::comforter;
+use tog::kernel::fetch::{self, Digest};
+use tog::kernel::platform::Platform;
+use tog::kernel::policy;
+use tog::kernel::store::Store;
+use tog::tailors::node::{self, NpmPackage, NpmPlan};
 use sha2::{Digest as Sha2Digest, Sha512};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -20,7 +20,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-npm-scripts-{}-{}",
+            "tog-npm-scripts-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -242,10 +242,10 @@ fn assert_success(output: &Output, label: &str) {
     );
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -256,11 +256,11 @@ fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
 fn network_access_during_install_script_fails() {
     let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
-    if let Ok(dir) = std::env::var("BLANKET_NPM_STRICT_CHILD") {
+    if let Ok(dir) = std::env::var("TOG_NPM_STRICT_CHILD") {
         let _attribution = policy::Attribution::open("node").expect("test attribution");
         policy::init(std::path::Path::new(&dir), false).unwrap();
-        let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
-        let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
+        let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
+        let sri = std::env::var("TOG_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
         let result = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]);
         let err = result.expect_err("install script reaching the network must fail");
@@ -270,7 +270,7 @@ fn network_access_during_install_script_fails() {
         );
         return;
     }
-    let dir = std::env::temp_dir().join(format!("blanket-evil-npm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tog-evil-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // Network probe: succeeds (exit 0) with network, exits 1 without.
@@ -286,12 +286,12 @@ fn network_access_during_install_script_fails() {
             "--ignored",
             "--nocapture",
         ])
-        .env("BLANKET_STORE", dir.join("store"))
-        .env("BLANKET_NPM_STRICT_CHILD", &dir)
-        .env("BLANKET_NPM_TARBALL", &tarball)
-        .env("BLANKET_NPM_SRI", &sri)
-        .env("BLANKET_STRICT", "1")
-        .env_remove("BLANKET_POLICY")
+        .env("TOG_STORE", dir.join("store"))
+        .env("TOG_NPM_STRICT_CHILD", &dir)
+        .env("TOG_NPM_TARBALL", &tarball)
+        .env("TOG_NPM_SRI", &sri)
+        .env("TOG_STRICT", "1")
+        .env_remove("TOG_POLICY")
         .output()
         .unwrap();
     assert!(
@@ -307,20 +307,20 @@ fn network_access_during_install_script_fails() {
 fn permissive_install_script_is_cached_but_rejected_strict() {
     let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
-    if let Ok(dir) = std::env::var("BLANKET_NPM_CACHED_CHILD") {
+    if let Ok(dir) = std::env::var("TOG_NPM_CACHED_CHILD") {
         policy::init(std::path::Path::new(&dir), false).unwrap();
-        let tarball = PathBuf::from(std::env::var("BLANKET_NPM_TARBALL").unwrap());
-        let sri = std::env::var("BLANKET_NPM_SRI").unwrap();
+        let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
+        let sri = std::env::var("TOG_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
         let err = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
             .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
         assert!(err
             .to_string()
-            .contains("blanket sync --fresh will not help"));
+            .contains("tog sync --fresh will not help"));
         return;
     }
-    let dir = std::env::temp_dir().join(format!("blanket-permissive-npm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tog-permissive-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (tarball, sri) = make_pkg_tarball(
@@ -352,12 +352,12 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
             "--ignored",
             "--nocapture",
         ])
-        .env("BLANKET_STORE", dir.join("store"))
-        .env("BLANKET_NPM_CACHED_CHILD", &dir)
-        .env("BLANKET_NPM_TARBALL", &tarball)
-        .env("BLANKET_NPM_SRI", &sri)
-        .env("BLANKET_STRICT", "1")
-        .env_remove("BLANKET_POLICY")
+        .env("TOG_STORE", dir.join("store"))
+        .env("TOG_NPM_CACHED_CHILD", &dir)
+        .env("TOG_NPM_TARBALL", &tarball)
+        .env("TOG_NPM_SRI", &sri)
+        .env("TOG_STRICT", "1")
+        .env_remove("TOG_POLICY")
         .output()
         .unwrap();
     assert!(
@@ -374,7 +374,7 @@ fn benign_install_script_runs_and_output_is_captured() {
     let _policy_guard = policy_guard();
     let _attribution = policy::Attribution::open("node").expect("test attribution");
     let platform = Platform::host().expect("host platform");
-    let dir = std::env::temp_dir().join(format!("blanket-good-npm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tog-good-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (tarball, sri) = make_pkg_tarball(
@@ -415,10 +415,10 @@ fn linux_npm_roundtrip() {
 
     // The lock is generated by the pinned npm bundled with the pinned Node,
     // never by a host npm. Both optional platform packages must be present in
-    // the generated lock before blanket applies its platform selector.
+    // the generated lock before tog applies its platform selector.
     let npm_lock = Command::new(node.join("bin/npm"))
         .current_dir(project)
-        .env("BLANKET_STORE", &store_root)
+        .env("TOG_STORE", &store_root)
         .env(
             "PATH",
             format!(
@@ -502,16 +502,16 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     );
 
     // Lock entries use synthetic HTTPS URLs, while their verified cache
-    // entries are seeded through blanket's normal digest-checked API. This
+    // entries are seeded through tog's normal digest-checked API. This
     // exercises cache reuse without weakening production HTTPS validation.
     seed_verified_fixture(&store, &addon_tarball, &addon_sri);
     seed_verified_fixture(&store, &script_tarball, &script_sri);
     add_fixture_dependency(project, "fixture-addon", &addon_sri);
     add_fixture_dependency(project, "fixture-script", &script_sri);
 
-    let binary = Path::new(env!("CARGO_BIN_EXE_blanket"));
-    let synced = blanket(binary, project, &store_root, &["sync", "--strict"]);
-    assert_success(&synced, "blanket sync --strict");
+    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
+    let synced = tog(binary, project, &store_root, &["sync", "--strict"]);
+    assert_success(&synced, "tog sync --strict");
 
     let closure = comforter::read_closure(project, "node").unwrap();
     let package_paths: Vec<&str> = closure["packages"]
@@ -550,13 +550,13 @@ if (addon.answer() !== 42) process.exit(13);
 esbuild.transformSync('const answer = 42', {loader: 'js'});
 console.log('linux-npm-roundtrip-ok');
 "#;
-    let run = blanket(
+    let run = tog(
         binary,
         project,
         &store_root,
         &["run", "node", "-e", node_check],
     );
-    assert_success(&run, "blanket run Node/esbuild/addon check");
+    assert_success(&run, "tog run Node/esbuild/addon check");
     assert!(String::from_utf8_lossy(&run.stdout).contains("linux-npm-roundtrip-ok"));
 
     // Re-project with identical inputs after clearing every downloaded npm
@@ -574,20 +574,20 @@ console.log('linux-npm-roundtrip-ok');
             .count(),
         0
     );
-    let repeated = blanket(binary, project, &store_root, &["sync", "--strict"]);
+    let repeated = tog(binary, project, &store_root, &["sync", "--strict"]);
     assert_success(&repeated, "offline warm sync --strict");
     let repeated_closure = comforter::read_closure(project, "node").unwrap();
     assert_eq!(
         repeated_closure["env_object"], closure["env_object"],
         "identical inputs produced a different node environment object"
     );
-    let repeated_run = blanket(
+    let repeated_run = tog(
         binary,
         project,
         &store_root,
         &["run", "node", "-e", node_check],
     );
-    assert_success(&repeated_run, "repeat blanket run Node/esbuild/addon check");
+    assert_success(&repeated_run, "repeat tog run Node/esbuild/addon check");
 }
 
 #[test]
@@ -600,7 +600,7 @@ fn skip_download_switch_is_injected_and_recorded() {
     // visible to the lifecycle process, which is what makes the real installer
     // return without touching the denied network.
     let platform = Platform::host().expect("host platform");
-    let dir = std::env::temp_dir().join(format!("blanket-skip-npm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tog-skip-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (tarball, sri) = make_named_pkg_tarball(
@@ -629,9 +629,9 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
     let _policy_guard = policy_guard();
     let _attribution = policy::Attribution::open("test").expect("test attribution");
     // A prebuild-install style script: with the network denied the download can
-    // never succeed, so blanket asks for the source build up front.
+    // never succeed, so tog asks for the source build up front.
     let platform = Platform::host().expect("host platform");
-    let dir = std::env::temp_dir().join(format!("blanket-src-npm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tog-src-npm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (tarball, sri) = make_named_pkg_tarball(

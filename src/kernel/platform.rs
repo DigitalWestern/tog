@@ -1,5 +1,5 @@
 //! Host platform detection (kernel layer): the only place that knows what
-//! machine blanket is running on. Everything else takes an explicit `Platform`.
+//! machine tog is running on. Everything else takes an explicit `Platform`.
 
 use std::env::consts::{ARCH, OS};
 use std::io;
@@ -22,11 +22,11 @@ impl Platform {
                 if Path::new("/lib64/ld-linux-x86-64.so.2").exists() {
                     Ok(Platform::X86_64UnknownLinuxGnu)
                 } else {
-                    Err("unsupported host: Linux x86_64 without glibc (musl?) — blanket pins glibc toolchains (unsupported platform)".to_string())
+                    Err("unsupported host: Linux x86_64 without glibc (musl?) — tog pins glibc toolchains (unsupported platform)".to_string())
                 }
             }
             _ => Err(format!(
-                "unsupported host platform {OS}/{ARCH}: blanket is pinned for aarch64-apple-darwin and x86_64-unknown-linux-gnu (unsupported platform)"
+                "unsupported host platform {OS}/{ARCH}: tog is pinned for aarch64-apple-darwin and x86_64-unknown-linux-gnu (unsupported platform)"
             )),
         }) {
             Ok(platform) => Ok(*platform),
@@ -44,7 +44,7 @@ impl Platform {
         }
     }
 
-    /// The platform a recorded triple names, if blanket supports it.
+    /// The platform a recorded triple names, if tog supports it.
     pub fn from_triple(triple: &str) -> Option<Platform> {
         Platform::ALL.iter().copied().find(|p| p.triple() == triple)
     }

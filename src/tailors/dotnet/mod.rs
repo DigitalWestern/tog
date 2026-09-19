@@ -1,9 +1,9 @@
-//! The .NET tailor: NuGet packages.lock.json (v1, blanket-mandatory),
+//! The .NET tailor: NuGet packages.lock.json (v1, tog-mandatory),
 //! materialization delegated to the pinned NuGet, per-build fresh offline
 //! restore, sandboxed builds only.
 //!
 //! Signed nupkgs' contentHash is a SEMANTIC hash over transformed bytes, so
-//! blanket never compares lock hashes to raw
+//! tog never compares lock hashes to raw
 //! downloads — the pinned NuGet verifies contentHash while installing into
 //! the global-packages layout (locked mode), the same delegated-extractor
 //! pattern as Go, with the full SDK object id in the object identity. The
@@ -255,7 +255,7 @@ pub fn check_global_json(project_dir: &Path) -> io::Result<()> {
     }
     if sdk.get("rollForward").and_then(serde_json::Value::as_str) != Some("disable") {
         return Err(err(
-            "global.json must set \"rollForward\": \"disable\" (blanket pins the SDK exactly)",
+            "global.json must set \"rollForward\": \"disable\" (tog pins the SDK exactly)",
         ));
     }
     Ok(())
@@ -346,10 +346,10 @@ fn xdg_data_home(scratch: &Path) -> PathBuf {
 ///
 /// The NuGet migration sentinel is the load-bearing part. NuGet guards its
 /// first-run migration with a machine-global named mutex ("NuGet-Migrations"),
-/// and blanket hands every invocation a fresh home, so without the sentinel
+/// and tog hands every invocation a fresh home, so without the sentinel
 /// every invocation re-runs that migration and contends for that single
 /// mutex; concurrent syncs then die inside `Mutex.ReleaseMutex`. A home
-/// already marked migrated never takes the mutex, and a directory blanket
+/// already marked migrated never takes the mutex, and a directory tog
 /// just created has nothing to migrate.
 fn prepare_scratch(scratch: &Path) -> io::Result<()> {
     fs::create_dir_all(scratch.join("home"))?;
@@ -358,7 +358,7 @@ fn prepare_scratch(scratch: &Path) -> io::Result<()> {
     fs::write(migrations.join("1"), "")
 }
 
-/// Env for `blanket run`. Build-capable verbs are REJECTED at run: they
+/// Env for `tog run`. Build-capable verbs are REJECTED at run: they
 /// execute arbitrary MSBuild code and are sandbox-only. This env is for
 /// `dotnet <app.dll>`, --version/--info, and compiled-app execution.
 pub fn run_env(
@@ -377,8 +377,8 @@ pub const BUILD_VERBS: &[&str] = &[
     "build", "run", "test", "publish", "pack", "msbuild", "restore", "clean", "watch",
 ];
 
-/// `blanket run`'s guard is advisory: wrappers can bypass it. During
-/// realization and build, blanket never evaluates project code outside the
+/// `tog run`'s guard is advisory: wrappers can bypass it. During
+/// realization and build, tog never evaluates project code outside the
 /// build sandbox. Missing-lock lock generation is the explicit host-side
 /// exception: config and environment are pinned, but project MSBuild code
 /// runs on the host.
@@ -396,7 +396,7 @@ pub fn refused_run_command(cmd: &[String]) -> Option<String> {
         .any(|candidate| candidate.eq_ignore_ascii_case(verb))
     {
         return Some(format!(
-            "`dotnet {verb}` compiles/executes MSBuild code and must run sandboxed: use `blanket build dotnet ...`"
+            "`dotnet {verb}` compiles/executes MSBuild code and must run sandboxed: use `tog build dotnet ...`"
         ));
     }
     if verb.eq_ignore_ascii_case("exec")
@@ -409,7 +409,7 @@ pub fn refused_run_command(cmd: &[String]) -> Option<String> {
         })
     {
         return Some(
-            "`dotnet exec .../MSBuild.dll` executes MSBuild code and must run sandboxed: use `blanket build dotnet ...`"
+            "`dotnet exec .../MSBuild.dll` executes MSBuild code and must run sandboxed: use `tog build dotnet ...`"
                 .to_string(),
         );
     }
@@ -512,7 +512,7 @@ pub fn find_project(dir: &Path) -> io::Result<PathBuf> {
         1 => Ok(found.remove(0)),
         0 => Err(err("no .csproj found")),
         _ => Err(err(
-            "multiple .csproj files; blanket supports one project per directory in v0",
+            "multiple .csproj files; tog supports one project per directory in v0",
         )),
     }
 }
@@ -528,7 +528,7 @@ pub fn has_marker(dir: &Path) -> io::Result<bool> {
         }
     }
     Ok(fs::symlink_metadata(dir.join("packages.lock.json")).is_ok()
-        || fs::symlink_metadata(dir.join(".blanket/closures/dotnet.json")).is_ok())
+        || fs::symlink_metadata(dir.join(".tog/closures/dotnet.json")).is_ok())
 }
 
 fn validate_csproj(path: &Path) -> io::Result<()> {
@@ -740,7 +740,7 @@ pub fn preflight(project_dir: &Path) -> io::Result<(PathBuf, PathBuf)> {
     Ok((csproj, lock_path))
 }
 
-/// Plan from packages.lock.json (v1 only; blanket makes the opt-in lock
+/// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
 /// mandatory). Missing lock delegates a store-SDK restore --use-lock-file
 /// (named resolver mutation, isolated caches).
 pub fn plan_dotnet(
@@ -750,7 +750,7 @@ pub fn plan_dotnet(
 ) -> io::Result<(DotnetPlan, String)> {
     let (mut csproj, mut lock_path) = preflight(project_dir)?;
     if !lock_path.is_file() {
-        eprintln!("blanket: no packages.lock.json; resolving with the store SDK...");
+        eprintln!("tog: no packages.lock.json; resolving with the store SDK...");
         let scratch = store.stage()?;
         let config = scratch.join("nuget.config");
         fs::write(
@@ -850,7 +850,7 @@ pub fn plan_dotnet(
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
         return Err(err(
-            "packages.lock.json changed while planning; re-run blanket sync",
+            "packages.lock.json changed while planning; re-run tog sync",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
@@ -954,12 +954,12 @@ fn rewrite_metadata_source(path: &Path) -> io::Result<()> {
         })?
         .insert(
             "source".to_string(),
-            serde_json::Value::String("blanket-feed".to_string()),
+            serde_json::Value::String("tog-feed".to_string()),
         );
     fs::write(path, serde_json::to_vec(&value)?)
 }
 
-/// Realize the global-packages object: blanket fetches every nupkg into a
+/// Realize the global-packages object: tog fetches every nupkg into a
 /// local folder feed (raw bytes cached by sha256), then the PINNED NuGet
 /// installs from that feed in LOCKED mode — it verifies each package's
 /// semantic contentHash against the lock and writes the exact
@@ -1032,10 +1032,10 @@ pub fn realize_packages(
             .ok_or_else(|| err("plan has no target framework"))?,
     )?;
     if plan.targets.len() > 1 {
-        eprintln!("blanket: synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}");
+        eprintln!("tog: synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}");
     }
     fs::write(
-        verifier.join("blanket-verifier.csproj"),
+        verifier.join("tog-verifier.csproj"),
         synthetic_csproj(plan, tfm),
     )?;
     fs::write(
@@ -1045,7 +1045,7 @@ pub fn realize_packages(
     fs::write(
         verifier.join("nuget.config"),
         format!(
-            "<configuration><packageSources><clear /><add key=\"blanket-feed\" \
+            "<configuration><packageSources><clear /><add key=\"tog-feed\" \
              value=\"{}\" /></packageSources><config><add key=\"updatePackageLastAccessTime\" \
              value=\"false\" /></config></configuration>",
             xml_escape(&feed.display().to_string())
@@ -1124,7 +1124,7 @@ pub fn project_dotnet_env(
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&sdk_obj)
-        .ok_or_else(|| err(".NET SDK object is not in a Blanket store"))?;
+        .ok_or_else(|| err(".NET SDK object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
@@ -1185,7 +1185,7 @@ fn ensure_dotnet_tmp_at(
             false
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // Two blanket processes may race here (concurrent syncs share
+            // Two tog processes may race here (concurrent syncs share
             // this directory by design); losing the race is fine, the
             // validation below still applies to whatever now exists.
             match fs::create_dir(&path) {
@@ -1307,7 +1307,7 @@ fn checked_output_dir(project_dir: &Path, fingerprint: &str) -> io::Result<PathB
             return Err(err(format!("{} must be a directory", bin.display())));
         }
     }
-    let output = bin.join(format!("blanket-{fingerprint}"));
+    let output = bin.join(format!("tog-{fingerprint}"));
     if let Ok(md) = fs::symlink_metadata(&output) {
         if md.file_type().is_symlink() {
             return Err(err(format!("{} must not be a symlink", output.display())));
@@ -1338,8 +1338,8 @@ fn publish_output(
     let bin = output
         .parent()
         .ok_or_else(|| err("output directory has no bin parent"))?;
-    let new = bin.join(format!(".blanket-{fingerprint}.new.{}", std::process::id()));
-    let old = bin.join(format!(".blanket-{fingerprint}.old.{}", std::process::id()));
+    let new = bin.join(format!(".tog-{fingerprint}.new.{}", std::process::id()));
+    let old = bin.join(format!(".tog-{fingerprint}.old.{}", std::process::id()));
     for path in [&new, &old] {
         if fs::symlink_metadata(path).is_ok() {
             return Err(err(format!(
@@ -1407,7 +1407,7 @@ fn publish_output(
             // BOTH versions (the old tree may be partially deleted). Keep
             // the new output and report the leftover.
             eprintln!(
-                "blanket: warning: previous output left at {} ({e}); remove it manually",
+                "tog: warning: previous output left at {} ({e}); remove it manually",
                 old.display()
             );
         }
@@ -1538,7 +1538,7 @@ pub fn build_sandboxed(
         }
     };
     let _ = crate::kernel::store::remove_tree(&scratch);
-    eprintln!("blanket: built into {}", output.display());
+    eprintln!("tog: built into {}", output.display());
     Ok(())
 }
 
@@ -1650,7 +1650,7 @@ mod tests {
         // Canonical base: the validator requires canonical paths, and macOS
         // TMPDIR lives under /var -> /private/var.
         let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "blanket-dn-tmp-{}-{}",
+            "tog-dn-tmp-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1694,7 +1694,7 @@ mod tests {
         let temp = std::env::temp_dir()
             .canonicalize()
             .unwrap()
-            .join(format!("blanket-dotnet-shm-{}", std::process::id()));
+            .join(format!("tog-dotnet-shm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         let uid = invoking_uid().unwrap();
         let dir = ensure_dotnet_tmp_at(&temp, uid, true).unwrap();
@@ -1715,7 +1715,7 @@ mod tests {
     #[test]
     fn every_prepared_scratch_is_already_marked_nuget_migrated() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-dn-mig-{}-{}",
+            "tog-dn-mig-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1744,7 +1744,7 @@ mod tests {
     #[test]
     fn all_dotnet_sandbox_phases_add_only_the_selected_tmp_write_root() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-dn-spec-{}-{}",
+            "tog-dn-spec-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1823,7 +1823,7 @@ mod tests {
     #[test]
     fn global_json_gate() {
         let temp = std::env::temp_dir().join(format!(
-            "blanket-dn-gj-{}-{}",
+            "tog-dn-gj-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1893,7 +1893,7 @@ mod tests {
     #[test]
     fn preflight_rejects_unsafe_project_shapes() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-dn-preflight-{}-{}",
+            "tog-dn-preflight-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1999,7 +1999,7 @@ mod tests {
     #[test]
     fn sdk_extraction_requires_muxer_at_object_root() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-dn-extract-{}-{}",
+            "tog-dn-extract-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2052,7 +2052,7 @@ mod tests {
     #[test]
     fn output_roots_reject_symlinks_and_metadata_source_is_fixed() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-dn-output-{}-{}",
+            "tog-dn-output-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2069,7 +2069,7 @@ mod tests {
 
         let project = base.join("project2");
         fs::create_dir_all(project.join("bin")).unwrap();
-        symlink(&outside, project.join("bin/blanket-fp")).unwrap();
+        symlink(&outside, project.join("bin/tog-fp")).unwrap();
         assert!(checked_output_dir(&project, "fp").is_err());
 
         let metadata = base.join(".nupkg.metadata");
@@ -2077,7 +2077,7 @@ mod tests {
         rewrite_metadata_source(&metadata).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(metadata).unwrap()).unwrap();
-        assert_eq!(value["source"], "blanket-feed");
+        assert_eq!(value["source"], "tog-feed");
 
         let publish_project = base.join("publish-project");
         fs::create_dir_all(publish_project.join("bin")).unwrap();
@@ -2107,10 +2107,10 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(output.join("artifact")).unwrap(), "new");
         assert!(!publish_project
-            .join(format!(".blanket-fp.new.{}", std::process::id()))
+            .join(format!(".tog-fp.new.{}", std::process::id()))
             .exists());
         assert!(!publish_project
-            .join(format!(".blanket-fp.old.{}", std::process::id()))
+            .join(format!(".tog-fp.old.{}", std::process::id()))
             .exists());
 
         let _ = crate::kernel::store::remove_tree(&base);

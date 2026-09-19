@@ -1,8 +1,8 @@
-//! `blanket x <tool>`: run a tool from a registry without adding it to the
+//! `tog x <tool>`: run a tool from a registry without adding it to the
 //! project, cached forever. A synthetic single-requirement plan goes
 //! through the ordinary realize path, so the environment is an
 //! input-addressed store object; the second run is a store hit. Each tool
-//! gets a tiny project directory under `~/.blanket/x/` holding the
+//! gets a tiny project directory under `~/.tog/x/` holding the
 //! projection and its closure, which registers it as a gc root like any
 //! other project.
 
@@ -49,7 +49,7 @@ pub struct CleanRequest {
     pub tool: Option<String>,
 }
 
-const X_REQUEST_FILE: &str = ".blanket/x.json";
+const X_REQUEST_FILE: &str = ".tog/x.json";
 const X_LOCKS_DIR: &str = ".locks";
 
 fn other(message: impl Into<String>) -> io::Error {
@@ -138,7 +138,7 @@ fn ensure_x_metadata_dir(root: &Path) -> io::Result<()> {
         }
     }
     fs::create_dir_all(root)?;
-    let metadata_dir = root.join(".blanket");
+    let metadata_dir = root.join(".tog");
     if let Ok(metadata) = fs::symlink_metadata(&metadata_dir) {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(other(format!(
@@ -211,7 +211,7 @@ fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
     let name = CString::new(name).map_err(|_| {
         other(
             "x: directory entry contains NUL; refusing to clean; \
-             remove the offending entry from ~/.blanket/x by hand",
+             remove the offending entry from ~/.tog/x by hand",
         )
     })?;
     // SAFETY: stat is initialized by fstatat before it is read, and name is
@@ -236,7 +236,7 @@ fn open_directory_at(dirfd: RawFd, name: &[u8]) -> io::Result<fs::File> {
     let name = CString::new(name).map_err(|_| {
         other(
             "x: directory entry contains NUL; refusing to clean; \
-             remove the offending entry from ~/.blanket/x by hand",
+             remove the offending entry from ~/.tog/x by hand",
         )
     })?;
     // SAFETY: name is NUL-terminated for this call and dirfd is borrowed.
@@ -545,7 +545,7 @@ fn write_x_request_inner(
         }
     }
     let tmp = root
-        .join(".blanket")
+        .join(".tog")
         .join(format!(".x.json.tmp.{}", std::process::id()));
     let mut record = serde_json::json!({
         "schema": if store_root.is_some() { "x-request/2" } else { "x-request/1" },
@@ -570,16 +570,16 @@ fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
         if !present.is_empty() {
             return choose_from_project(request, &present);
         }
-        // An existing blanket metadata directory is an explicit project
+        // An existing tog metadata directory is an explicit project
         // boundary, even when the project currently has no manifest. This
         // prevents an unrelated package in an outer checkout from deciding
         // `x`'s registry.
-        if dir.join(".blanket").is_dir() {
+        if dir.join(".tog").is_dir() {
             break;
         }
     }
     Err(other(format!(
-        "x: say which registry provides '{}': 'blanket x py:{0}' (PyPI) or 'blanket x npm:{0}' (npm)",
+        "x: say which registry provides '{}': 'tog x py:{0}' (PyPI) or 'tog x npm:{0}' (npm)",
         request.tool
     )))
 }
@@ -607,7 +607,7 @@ fn choose_from_project(request: &Request, present: &[&str]) -> io::Result<&'stat
             Ok("node")
         }
         (false, false) => Err(other(format!(
-            "x: say which registry provides '{}': 'blanket x py:{0}' (PyPI) or 'blanket x npm:{0}' (npm)",
+            "x: say which registry provides '{}': 'tog x py:{0}' (PyPI) or 'tog x npm:{0}' (npm)",
             request.tool
         ))),
     }
@@ -748,7 +748,7 @@ fn check_projection_target(
                 hex::encode(Sha256::digest(root.canonicalize()?.as_os_str().as_bytes()));
             // New projections are owned by the originating store. Keep a
             // read-only compatibility candidate for pre-root/2 x records,
-            // whose forest lived beside the store under blanket home.
+            // whose forest lived beside the store under tog home.
             let mut forest_bases = vec![store.root.join("forests")];
             if let Some(home) = store.root.parent() {
                 let legacy = home.join("forests");
@@ -881,10 +881,10 @@ struct CleanFilter {
 struct XCandidate {
     path: PathBuf,
     name: OsString,
-    /// The shared `~/.blanket/x` descriptor, not a per-candidate clone. It is
+    /// The shared `~/.tog/x` descriptor, not a per-candidate clone. It is
     /// the same directory for every candidate and is only ever read from, so
     /// cloning it per entry cost one extra descriptor each and put a large
-    /// `~/.blanket/x` against the process descriptor limit before cleanup had
+    /// `~/.tog/x` against the process descriptor limit before cleanup had
     /// removed anything.
     x_dir: Rc<fs::File>,
     directory: fs::File,
@@ -960,7 +960,7 @@ fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return None;
     }
-    let metadata_dir = root.join(".blanket");
+    let metadata_dir = root.join(".tog");
     let metadata = fs::symlink_metadata(&metadata_dir).ok()?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return None;
@@ -973,8 +973,8 @@ fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve a user-controlled ancestor of the cleanup anchor. `$HOME` and
-/// `~/.blanket` are routinely symlinks (the usual "move the cache off the
-/// root disk" setup) and `blanket x` follows them when it creates and
+/// `~/.tog` are routinely symlinks (the usual "move the cache off the
+/// root disk" setup) and `tog x` follows them when it creates and
 /// registers a root, so cleanup follows them too — otherwise it could never
 /// remove what the runner just made. Containment is carried by the no-follow
 /// component walk below the resolved anchor and by the descriptor identity
@@ -1036,9 +1036,9 @@ struct ValidatedXDir {
 }
 
 /// Return the canonical cleanup anchor. The home chain (`$HOME` and
-/// `~/.blanket`) is resolved the way the runner resolves it and the result
+/// `~/.tog`) is resolved the way the runner resolves it and the result
 /// must be a real directory; the final `x` component is never followed.
-/// Missing `.blanket` or `x` means there is nothing to clean; an existing
+/// Missing `.tog` or `x` means there is nothing to clean; an existing
 /// unsafe component is an error.
 fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
     if !x_dir.is_absolute() {
@@ -1047,21 +1047,21 @@ fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
             x_dir.display()
         )));
     }
-    let blanket_dir = x_dir.parent().ok_or_else(|| {
+    let tog_dir = x_dir.parent().ok_or_else(|| {
         other(format!(
-            "x: cleanup directory {} has no .blanket parent; refusing to clean",
+            "x: cleanup directory {} has no .tog parent; refusing to clean",
             x_dir.display()
         ))
     })?;
-    let home_dir = blanket_dir.parent().ok_or_else(|| {
+    let home_dir = tog_dir.parent().ok_or_else(|| {
         other(format!(
             "x: cleanup directory {} has no HOME parent; refusing to clean",
             x_dir.display()
         ))
     })?;
-    let blanket_name = blanket_dir.file_name().ok_or_else(|| {
+    let tog_name = tog_dir.file_name().ok_or_else(|| {
         other(format!(
-            "x: cleanup directory {} has no .blanket parent; refusing to clean",
+            "x: cleanup directory {} has no .tog parent; refusing to clean",
             x_dir.display()
         ))
     })?;
@@ -1077,16 +1077,16 @@ fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
             home_dir.display()
         )));
     };
-    let Some(blanket_canonical) =
-        canonical_real_directory(&home_canonical.join(blanket_name), "$HOME/.blanket")?
+    let Some(tog_canonical) =
+        canonical_real_directory(&home_canonical.join(tog_name), "$HOME/.tog")?
     else {
         return Ok(None);
     };
     // Below the resolved home chain nothing is followed: the `x` component
     // must be a real directory and `open_directory_path` walks the canonical
     // path one no-follow component at a time.
-    let canonical = blanket_canonical.join(x_name);
-    if !existing_real_directory(&canonical, "$HOME/.blanket/x")? {
+    let canonical = tog_canonical.join(x_name);
+    if !existing_real_directory(&canonical, "$HOME/.tog/x")? {
         return Ok(None);
     }
     let expected = fs::symlink_metadata(&canonical)?;
@@ -1105,7 +1105,7 @@ fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
 }
 
 fn has_safe_closures(root: &Path) -> bool {
-    fs::symlink_metadata(root.join(".blanket/closures"))
+    fs::symlink_metadata(root.join(".tog/closures"))
         .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
         .unwrap_or(false)
 }
@@ -1141,7 +1141,7 @@ fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
         if fd_identity(&directory)? != stat_identity(&metadata) {
             continue;
         }
-        let marker = match stat_at(directory.as_raw_fd(), b".blanket") {
+        let marker = match stat_at(directory.as_raw_fd(), b".tog") {
             Ok(marker) if stat_is_real_directory(&marker) => true,
             Ok(_) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -1432,7 +1432,7 @@ fn originating_store(root: &Path) -> io::Result<Option<Store>> {
         }
     }
 
-    let closures = root.join(".blanket/closures");
+    let closures = root.join(".tog/closures");
     let entries = match fs::read_dir(&closures) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1505,7 +1505,7 @@ fn closure_claims_an_object(root: &Path) -> io::Result<bool> {
     {
         return Ok(true);
     }
-    let closures = root.join(".blanket/closures");
+    let closures = root.join(".tog/closures");
     let entries = match fs::read_dir(&closures) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -1626,7 +1626,7 @@ fn registration_for(root: &Path) -> io::Result<Registration> {
 /// ordinary GC pass; deleting a projection is deliberately not object GC.
 pub fn clean(request: CleanRequest) -> io::Result<()> {
     let filter = clean_filter(request)?;
-    let x_dir = home()?.join(".blanket/x");
+    let x_dir = home()?.join(".tog/x");
     let candidates = x_candidates(&x_dir)?;
     let mut matched = 0usize;
     let mut removed = 0usize;
@@ -1638,7 +1638,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             CandidateMatch::NoMatch => continue,
             CandidateMatch::Unrecoverable => {
                 println!(
-                    "blanket: skipped x environment {} (legacy root package could not be recovered; use 'blanket x --clean' with no tool to remove all x environments)",
+                    "tog: skipped x environment {} (legacy root package could not be recovered; use 'tog x --clean' with no tool to remove all x environments)",
                     candidate.path.display()
                 );
                 // A root that was considered and skipped still counts, so a
@@ -1653,16 +1653,16 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         let ecosystem = candidate_ecosystem(&candidate.path);
         // Origin metadata is only a hint until the originating store is
         // protected. Never delete an x projection whose store cannot be
-        // recovered, and never use the caller's current BLANKET_STORE as a
+        // recovered, and never use the caller's current TOG_STORE as a
         // substitute for that provenance.
         let origin = originating_store(&candidate.path)?;
         if origin.is_none() && closure_claims_an_object(&candidate.path)? {
             // An unresolved ownership claim is a named skip, never permission
-            // to delete. The caller's current BLANKET_STORE is not evidence
+            // to delete. The caller's current TOG_STORE is not evidence
             // about this candidate: the projection can belong to a store that
             // is not the one this invocation happens to be pointed at.
             println!(
-                "blanket: skipped x environment {} (it claims store objects whose originating store could not be recovered; restore that store's closure, or remove the directory yourself once you know nothing is using it)",
+                "tog: skipped x environment {} (it claims store objects whose originating store could not be recovered; restore that store's closure, or remove the directory yourself once you know nothing is using it)",
                 candidate.path.display()
             );
             skipped += 1;
@@ -1677,7 +1677,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         };
         let Some(activity) = origin_store.try_activity_exclusive()? else {
             println!(
-                "blanket: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
+                "tog: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
                 candidate.path.display()
             );
             skipped += 1;
@@ -1686,7 +1686,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         let Some(_lock) = lock_x_root_at(candidate.x_dir.as_raw_fd(), &candidate.name, true, true)?
         else {
             println!(
-                "blanket: skipped x environment {} (in use by a running tool; retry later)",
+                "tog: skipped x environment {} (in use by a running tool; retry later)",
                 candidate.path.display()
             );
             skipped += 1;
@@ -1701,7 +1701,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             Some(revalidated_store) if !unowned => {
                 if revalidated_store.root != origin_store.root {
                     println!(
-                        "blanket: skipped x environment {} (originating store changed while it was being locked; retry later)",
+                        "tog: skipped x environment {} (originating store changed while it was being locked; retry later)",
                         candidate.path.display()
                     );
                     skipped += 1;
@@ -1711,7 +1711,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             None if unowned && !closure_claims_an_object(&candidate.path)? => {}
             _ => {
                 println!(
-                    "blanket: skipped x environment {} (origin changed while it was being locked; retry later)",
+                    "tog: skipped x environment {} (origin changed while it was being locked; retry later)",
                     candidate.path.display()
                 );
                 skipped += 1;
@@ -1723,7 +1723,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             Ok(current) => current,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 println!(
-                    "blanket: skipped x environment {} (it disappeared or changed; retry later)",
+                    "tog: skipped x environment {} (it disappeared or changed; retry later)",
                     candidate.path.display()
                 );
                 skipped += 1;
@@ -1733,7 +1733,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         };
         if stat_identity(&current) != candidate.identity || !stat_is_real_directory(&current) {
             println!(
-                "blanket: skipped x environment {} (it disappeared or changed; retry later)",
+                "tog: skipped x environment {} (it disappeared or changed; retry later)",
                 candidate.path.display()
             );
             skipped += 1;
@@ -1746,7 +1746,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         let current = stat_at(candidate.x_dir.as_raw_fd(), candidate.name.as_bytes())?;
         if stat_identity(&current) != candidate.identity || !stat_is_real_directory(&current) {
             println!(
-                "blanket: skipped x environment {} (it disappeared or changed; retry later)",
+                "tog: skipped x environment {} (it disappeared or changed; retry later)",
                 candidate.path.display()
             );
             skipped += 1;
@@ -1773,17 +1773,17 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
             Registration::Found { store, entry } => {
                 store.remove_root_entry_with_activity(&activity, &entry)?;
                 println!(
-                    "blanket: removed x environment {}",
+                    "tog: removed x environment {}",
                     candidate.path.display()
                 );
             }
             Registration::NotFound => println!(
-                "blanket: removed x environment {} (no matching registry entry in its originating store)",
+                "tog: removed x environment {} (no matching registry entry in its originating store)",
                 candidate.path.display()
             ),
             #[cfg(test)]
             Registration::Unknown => println!(
-                "blanket: removed x environment {} (registry entry could not be dropped: originating store not found)",
+                "tog: removed x environment {} (registry entry could not be dropped: originating store not found)",
                 candidate.path.display()
             ),
         }
@@ -1798,24 +1798,24 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         removed += 1;
     }
     if matched == 0 {
-        println!("blanket: x clean: nothing to clean");
+        println!("tog: x clean: nothing to clean");
     } else {
         // A removed node environment also orphans its
         // forests/<project-key>/<projection-id> node_modules forest in the
-        // originating store, which plain `blanket gc` never visits.
+        // originating store, which plain `tog gc` never visits.
         let forests = if removed_node {
-            ", and 'blanket gc --project' also reclaims the node_modules forest each removed node environment used"
+            ", and 'tog gc --project' also reclaims the node_modules forest each removed node environment used"
         } else {
             ""
         };
         println!(
-            "blanket: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'blanket gc'{forests}"
+            "tog: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'tog gc'{forests}"
         );
     }
     Ok(())
 }
 
-/// `blanket x`: `x` has its own cached projection path and therefore does
+/// `tog x`: `x` has its own cached projection path and therefore does
 /// not pass through sync's policy initialization. Load the cwd policy,
 /// including all applicable ancestors, before realization or any cache-hit
 /// checks.
@@ -1863,7 +1863,7 @@ pub fn launch(
     let store = Store::open()?;
     store.require_activity(activity, "x")?;
     let root = x_home
-        .join(".blanket/x")
+        .join(".tog/x")
         .join(x_root_name(&store, platform, ecosystem, package, version));
     let _x_lock = acquire_x_root(&root)?;
     let (executable, path_prefix, env): (PathBuf, Vec<PathBuf>, Vec<(String, PathBuf)>) =
@@ -1910,7 +1910,7 @@ pub fn launch(
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
-                        "'{package}' installed but provides no '{bin}' executable; name it with --from: 'blanket x --from {package} <tool>'"
+                        "'{package}' installed but provides no '{bin}' executable; name it with --from: 'tog x --from {package} <tool>'"
                     )));
                 }
                 (
@@ -1955,7 +1955,7 @@ pub fn launch(
                 }
                 if !executable.is_file() {
                     return Err(other(format!(
-                        "'{package}' installed but provides no '{bin}' executable; name it with --from: 'blanket x --from {package} <tool>'"
+                        "'{package}' installed but provides no '{bin}' executable; name it with --from: 'tog x --from {package} <tool>'"
                     )));
                 }
                 let node_obj = node::ensure_node_for(&store, platform)?;
@@ -2004,7 +2004,7 @@ fn node_cache_root(
         .as_bytes(),
     ));
     Ok(home()?
-        .join(".blanket/x")
+        .join(".tog/x")
         .join(format!("npm-{}-{}", safe(package), &key[..16])))
 }
 
@@ -2065,8 +2065,8 @@ pub(crate) struct CorepackHash {
 }
 
 /// Realize a Node package whose executable is needed by another delegate.
-/// This is the same registered `~/.blanket/x/` environment used by
-/// `blanket x`, so a delegate's second invocation is a normal cache hit.
+/// This is the same registered `~/.tog/x/` environment used by
+/// `tog x`, so a delegate's second invocation is a normal cache hit.
 pub(crate) fn realize_node_tool(
     store: &Store,
     platform: Platform,
@@ -2078,8 +2078,8 @@ pub(crate) fn realize_node_tool(
     validate_exact_version(version)?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let root = node_cache_root(store, platform, package, Some(version))?;
-    // Take the same shared lifecycle lock `blanket x` takes, and hand it back
-    // to the caller. `blanket x --clean` removes a cached root under an
+    // Take the same shared lifecycle lock `tog x` takes, and hand it back
+    // to the caller. `tog x --clean` removes a cached root under an
     // exclusive lock, so without this a cleanup running alongside a
     // dependency edit could delete the delegate's environment out from under
     // it. The caller holds the lock for as long as it uses the root.
@@ -2245,7 +2245,7 @@ fn realize_node(
 ) -> io::Result<()> {
     fs::create_dir_all(root)?;
     let manifest = serde_json::json!({
-        "name": "blanket-x",
+        "name": "tog-x",
         "private": true,
         "dependencies": { package: version.unwrap_or("latest") },
     });
@@ -2323,7 +2323,7 @@ mod tests {
             "python"
         );
         let error = choose_from_project(&request(None), &[]).unwrap_err();
-        assert!(error.to_string().contains("blanket x py:ruff"), "{error}");
+        assert!(error.to_string().contains("tog x py:ruff"), "{error}");
         assert_eq!(
             choose_from_project(&request(None), &["node"]).unwrap(),
             "node"
@@ -2348,7 +2348,7 @@ mod tests {
     #[test]
     fn shared_x_lock_blocks_nonblocking_cleanup_until_runner_exit() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-lock-{}-{}",
+            "tog-x-lock-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2395,7 +2395,7 @@ mod tests {
     #[test]
     fn cleanup_lock_waits_for_runner_recreation() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-lock-race-{}-{}",
+            "tog-x-lock-race-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2427,25 +2427,25 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("runner did not recreate the root after cleanup released its lock");
         runner.join().unwrap();
-        assert!(root.join(".blanket").is_dir());
+        assert!(root.join(".tog").is_dir());
         fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn fd_relative_removal_does_not_follow_replaced_x_directory() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-remove-fd-{}-{}",
+            "tog-x-remove-fd-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        let x_dir = base.join("home/.blanket/x");
+        let x_dir = base.join("home/.tog/x");
         let root = x_dir.join("py-victim-test");
         let victim = base.join("victim");
-        fs::create_dir_all(root.join(".blanket/nested")).unwrap();
-        fs::write(root.join(".blanket/nested/old"), b"old").unwrap();
+        fs::create_dir_all(root.join(".tog/nested")).unwrap();
+        fs::write(root.join(".tog/nested/old"), b"old").unwrap();
         fs::create_dir_all(&victim).unwrap();
         fs::write(victim.join("keep"), b"keep").unwrap();
         std::os::unix::fs::symlink(&victim, root.join("victim-link")).unwrap();
@@ -2459,7 +2459,7 @@ mod tests {
         store::remove_tree_at(root_fd.as_raw_fd()).unwrap();
 
         assert!(victim.join("keep").is_file());
-        assert!(!root.join(".blanket/nested/old").exists());
+        assert!(!root.join(".tog/nested/old").exists());
         drop(root_fd);
         drop(validated);
         fs::remove_dir_all(base).unwrap();
@@ -2468,23 +2468,23 @@ mod tests {
     #[test]
     fn dot_prefixed_entries_are_not_x_candidates() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-lock-entry-{}-{}",
+            "tog-x-lock-entry-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        let x_dir = base.join("home/.blanket/x");
+        let x_dir = base.join("home/.tog/x");
         let root = x_dir.join("py-active");
-        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(root.join(".tog/closures")).unwrap();
         let shared = lock_x_root(&root, false, false)
             .unwrap()
             .expect("active root shared lock");
         let lock_path = x_dir.join(".locks/py-active.lock");
         assert!(lock_path.is_file());
-        fs::create_dir_all(x_dir.join(".locks/.blanket")).unwrap();
-        fs::write(x_dir.join(".locks/.blanket/x.json"), "{}").unwrap();
+        fs::create_dir_all(x_dir.join(".locks/.tog")).unwrap();
+        fs::write(x_dir.join(".locks/.tog/x.json"), "{}").unwrap();
 
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
@@ -2502,7 +2502,7 @@ mod tests {
     #[test]
     fn legacy_clean_matching_reads_exact_generated_package() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-legacy-{}-{}",
+            "tog-x-legacy-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2511,8 +2511,8 @@ mod tests {
         ));
         let exact = base.join("py-ruff-legacy");
         let similar = base.join("py-ruff-lsp-legacy");
-        fs::create_dir_all(exact.join(".blanket")).unwrap();
-        fs::create_dir_all(similar.join(".blanket")).unwrap();
+        fs::create_dir_all(exact.join(".tog")).unwrap();
+        fs::create_dir_all(similar.join(".tog")).unwrap();
         fs::write(exact.join("requirements.in"), "ruff\n").unwrap();
         fs::write(similar.join("requirements.in"), "ruff-lsp\n").unwrap();
         let filter = clean_filter(CleanRequest {
@@ -2524,7 +2524,7 @@ mod tests {
         assert_eq!(old_root_matches(&exact, &filter), CandidateMatch::Match);
         assert_eq!(old_root_matches(&similar, &filter), CandidateMatch::NoMatch);
         let unknown = base.join("py-unknown-legacy");
-        fs::create_dir_all(unknown.join(".blanket")).unwrap();
+        fs::create_dir_all(unknown.join(".tog")).unwrap();
         assert_eq!(
             old_root_matches(&unknown, &filter),
             CandidateMatch::Unrecoverable
@@ -2535,7 +2535,7 @@ mod tests {
     #[test]
     fn clean_records_package_identity_not_executable_name() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-record-{}-{}",
+            "tog-x-record-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2543,7 +2543,7 @@ mod tests {
                 .as_nanos()
         ));
         let root = base.join("npm-scope-foo");
-        fs::create_dir_all(root.join(".blanket")).unwrap();
+        fs::create_dir_all(root.join(".tog")).unwrap();
         write_x_request(&root, "node", "@scope/foo", None, "realizing").unwrap();
         let request = serde_json::from_reader::<_, serde_json::Value>(
             fs::File::open(root.join(X_REQUEST_FILE)).unwrap(),
@@ -2585,7 +2585,7 @@ mod tests {
         // its root), and originating_store compares them exactly; temp_dir()
         // is a symlink alias on macOS (/var -> /private/var).
         let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "blanket-x-registry-{}-{}",
+            "tog-x-registry-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2601,9 +2601,9 @@ mod tests {
         fs::create_dir_all(store.root.join("meta")).unwrap();
         let object = store.root.join("objects").join("a".repeat(40) + "-env");
         fs::create_dir_all(&object).unwrap();
-        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(root.join(".tog/closures")).unwrap();
         fs::write(
-            root.join(".blanket/closures/python.json"),
+            root.join(".tog/closures/python.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -2644,17 +2644,17 @@ mod tests {
     #[test]
     fn realizing_marker_makes_partial_root_a_cleanup_candidate() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-x-partial-{}-{}",
+            "tog-x-partial-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        let root = base.join("home/.blanket/x/py-partial");
+        let root = base.join("home/.tog/x/py-partial");
         ensure_x_metadata_dir(&root).unwrap();
         write_x_request(&root, "python", "ruff", None, "realizing").unwrap();
-        let candidates = x_candidates(&base.join("home/.blanket/x")).unwrap();
+        let candidates = x_candidates(&base.join("home/.tog/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
         fs::remove_dir_all(base).unwrap();
@@ -2662,7 +2662,7 @@ mod tests {
 
     fn temp_base(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "blanket-x-{label}-{}-{}",
+            "tog-x-{label}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2678,7 +2678,7 @@ mod tests {
         write_x_request(root, "python", "ruff", None, "realizing").unwrap();
     }
 
-    /// `$HOME` on another volume is a routine setup, and `blanket x` follows
+    /// `$HOME` on another volume is a routine setup, and `tog x` follows
     /// the symlink when it creates and registers a root. Cleanup has to reach
     /// exactly the same environment or it could never remove what the runner
     /// just made.
@@ -2690,13 +2690,13 @@ mod tests {
         let home = base.join("home");
         std::os::unix::fs::symlink(&real_home, &home).unwrap();
 
-        let x_dir = home.join(".blanket/x");
+        let x_dir = home.join(".tog/x");
         let root = x_dir.join("py-linked-home");
-        // Runner path: creates .blanket/x, .locks and the root itself.
+        // Runner path: creates .tog/x, .locks and the root itself.
         let shared = acquire_x_root(&root).unwrap();
         seed_root(&root);
         assert!(real_home
-            .join(".blanket/x/.locks/py-linked-home.lock")
+            .join(".tog/x/.locks/py-linked-home.lock")
             .is_file());
         drop(shared);
 
@@ -2704,7 +2704,7 @@ mod tests {
         let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
         assert_eq!(
             validated.path,
-            real_home.canonicalize().unwrap().join(".blanket/x")
+            real_home.canonicalize().unwrap().join(".tog/x")
         );
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
@@ -2713,30 +2713,30 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
-    /// The same contract for a symlinked `~/.blanket` — "move the cache off
+    /// The same contract for a symlinked `~/.tog` — "move the cache off
     /// the root disk".
     #[test]
-    fn runner_and_cleanup_agree_about_a_symlinked_blanket_directory() {
-        let base = temp_base("symlinked-blanket");
-        let real_blanket = base.join("volume/blanket");
-        fs::create_dir_all(&real_blanket).unwrap();
+    fn runner_and_cleanup_agree_about_a_symlinked_tog_directory() {
+        let base = temp_base("symlinked-tog");
+        let real_tog = base.join("volume/tog");
+        fs::create_dir_all(&real_tog).unwrap();
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
-        std::os::unix::fs::symlink(&real_blanket, home.join(".blanket")).unwrap();
+        std::os::unix::fs::symlink(&real_tog, home.join(".tog")).unwrap();
 
-        let x_dir = home.join(".blanket/x");
-        let root = x_dir.join("py-linked-blanket");
+        let x_dir = home.join(".tog/x");
+        let root = x_dir.join("py-linked-tog");
         let shared = acquire_x_root(&root).unwrap();
         seed_root(&root);
-        assert!(real_blanket
-            .join("x/.locks/py-linked-blanket.lock")
+        assert!(real_tog
+            .join("x/.locks/py-linked-tog.lock")
             .is_file());
         drop(shared);
 
         let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
         assert_eq!(
             validated.path,
-            real_blanket.canonicalize().unwrap().join("x")
+            real_tog.canonicalize().unwrap().join("x")
         );
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
@@ -2752,10 +2752,10 @@ mod tests {
     fn runner_and_cleanup_both_refuse_a_symlinked_x_directory() {
         let base = temp_base("symlinked-x");
         let home = base.join("home");
-        fs::create_dir_all(home.join(".blanket")).unwrap();
+        fs::create_dir_all(home.join(".tog")).unwrap();
         let elsewhere = base.join("elsewhere");
         fs::create_dir_all(&elsewhere).unwrap();
-        let x_dir = home.join(".blanket/x");
+        let x_dir = home.join(".tog/x");
         std::os::unix::fs::symlink(&elsewhere, &x_dir).unwrap();
 
         let runner = ensure_x_locks_dir(&x_dir).unwrap_err();
@@ -2778,7 +2778,7 @@ mod tests {
     /// is opened.
     #[test]
     fn cleanup_refuses_a_relative_home() {
-        let error = validated_x_dir(Path::new("relative-home/.blanket/x")).unwrap_err();
+        let error = validated_x_dir(Path::new("relative-home/.tog/x")).unwrap_err();
         assert!(error.to_string().contains("is not absolute"), "{error}");
     }
 
@@ -2789,7 +2789,7 @@ mod tests {
     #[test]
     fn cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file() {
         let base = temp_base("lock-unlink");
-        let x_dir = base.join("home/.blanket/x");
+        let x_dir = base.join("home/.tog/x");
         let root = x_dir.join("py-unlink");
         fs::create_dir_all(&root).unwrap();
         let x_fd = open_directory_path(&x_dir.canonicalize().unwrap()).unwrap();
@@ -2880,11 +2880,11 @@ mod tests {
         )
         .unwrap();
 
-        let root = base.join("home/.blanket/x/py-ready");
-        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        let root = base.join("home/.tog/x/py-ready");
+        fs::create_dir_all(root.join(".tog/closures")).unwrap();
         std::os::unix::fs::symlink(&object, root.join(".venv")).unwrap();
         fs::write(
-            root.join(".blanket/closures/python.json"),
+            root.join(".tog/closures/python.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -2917,15 +2917,15 @@ mod tests {
     #[test]
     fn unrecoverable_candidates_count_as_matched() {
         let base = temp_base("unrecoverable");
-        let root = base.join("home/.blanket/x/mystery");
-        fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        let root = base.join("home/.tog/x/mystery");
+        fs::create_dir_all(root.join(".tog/closures")).unwrap();
         let filter = clean_filter(CleanRequest {
             ecosystem: None,
             from: None,
             tool: Some("ruff".into()),
         })
         .unwrap();
-        let candidates = x_candidates(&base.join("home/.blanket/x")).unwrap();
+        let candidates = x_candidates(&base.join("home/.tog/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(
             candidate_matches(&candidates[0], &filter),
@@ -2947,7 +2947,7 @@ mod tests {
         assert_eq!(candidate_ecosystem(&recorded), Some("node"));
 
         let legacy = base.join("npm-legacy");
-        fs::create_dir_all(legacy.join(".blanket")).unwrap();
+        fs::create_dir_all(legacy.join(".tog")).unwrap();
         fs::write(
             legacy.join("package.json"),
             r#"{"dependencies":{"prettier":"1.0.0"}}"#,
@@ -2956,11 +2956,11 @@ mod tests {
         assert_eq!(candidate_ecosystem(&legacy), Some("node"));
 
         let named = base.join("py-named");
-        fs::create_dir_all(named.join(".blanket")).unwrap();
+        fs::create_dir_all(named.join(".tog")).unwrap();
         assert_eq!(candidate_ecosystem(&named), Some("python"));
 
         let unknown = base.join("mystery");
-        fs::create_dir_all(unknown.join(".blanket")).unwrap();
+        fs::create_dir_all(unknown.join(".tog")).unwrap();
         assert_eq!(candidate_ecosystem(&unknown), None);
         fs::remove_dir_all(base).unwrap();
     }

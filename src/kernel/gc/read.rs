@@ -82,7 +82,7 @@ pub(super) fn collect_roots<W: Write>(
                 ),
             ));
         }
-        let closures = root.path.join(".blanket/closures");
+        let closures = root.path.join(".tog/closures");
         match fs::metadata(&closures) {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => {
@@ -90,7 +90,7 @@ pub(super) fn collect_roots<W: Write>(
                     root,
                     &io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        ".blanket/closures is missing (never synced, or removed)",
+                        ".tog/closures is missing (never synced, or removed)",
                     ),
                 ));
             }
@@ -106,14 +106,14 @@ pub(super) fn collect_roots<W: Write>(
         // were removed, or that this pathname no longer resolves to the
         // project that was registered — unmounting a mount point exposes the
         // backing directory underneath, which can carry an empty
-        // `.blanket/closures` of its own and would otherwise be swept as if
+        // `.tog/closures` of its own and would otherwise be swept as if
         // the registered project had agreed it needed nothing.
         if read_closures(store, &project, &mut state, out)? == 0 {
             return Err(unresolvable_root(
                 root,
                 &io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    ".blanket/closures holds no closure files: they were removed, or the \
+                    ".tog/closures holds no closure files: they were removed, or the \
                      path now resolves to a different directory than the one registered \
                      (the backing directory of an unmounted mount point, for example)",
                 ),
@@ -126,7 +126,7 @@ pub(super) fn collect_roots<W: Write>(
 pub(super) fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Error {
     io::Error::other(format!(
         "refusing to sweep: root {} points at {}, which cannot be resolved ({}). Make the \
-         project available at that path, or give up its protection explicitly with `blanket \
+         project available at that path, or give up its protection explicitly with `tog \
          gc --forget {}`. Dry runs stop here too: the records decide what a real sweep \
          would keep.",
         root.key,
@@ -139,7 +139,7 @@ pub(super) fn unresolvable_root(root: &RootEntry, error: &io::Error) -> io::Erro
 pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
     io::Error::other(format!(
         "refusing to sweep: root {} has an unusable registry record at {} ({}). Repair the \
-         record, or give up that project's protection explicitly with `blanket gc --forget \
+         record, or give up that project's protection explicitly with `tog gc --forget \
          {}`. Dry runs stop here too: the records decide what a real sweep would keep.",
         root.key,
         root.registry_path.display(),
@@ -156,7 +156,7 @@ pub(super) fn read_closures<W: Write>(
     state: &mut RootState,
     out: &mut W,
 ) -> io::Result<usize> {
-    let closures = project.join(".blanket/closures");
+    let closures = project.join(".tog/closures");
     let mut found = 0usize;
     for entry in fs::read_dir(&closures)? {
         let entry = entry?;

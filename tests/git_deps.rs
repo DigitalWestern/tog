@@ -4,24 +4,24 @@
 //! The fixture repository is local and served over `file://`, so this needs no
 //! network beyond the pinned Node toolchain.
 
-use blanket::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
-use blanket::kernel::platform::Platform;
-use blanket::kernel::policy;
-use blanket::kernel::store::Store;
-use blanket::tailors::node::{self, NpmPackage, NpmPlan};
+use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
+use tog::kernel::platform::Platform;
+use tog::kernel::policy;
+use tog::kernel::store::Store;
+use tog::tailors::node::{self, NpmPackage, NpmPlan};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.0);
+        let _ = tog::kernel::store::remove_tree(&self.0);
     }
 }
 
 fn temp(tag: &str) -> Temp {
     let path = std::env::temp_dir().join(format!(
-        "blanket-gitdep-{tag}-{}-{}",
+        "tog-gitdep-{tag}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -257,10 +257,10 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     let _attribution = policy::Attribution::open("python").expect("test attribution");
 
     let requirement = format!("gitdep @ {url}@{commit}");
-    let reqs = blanket::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
-    let packages = blanket::tailors::python::pypi::lock_requirements(
+    let reqs = tog::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
+    let packages = tog::tailors::python::pypi::lock_requirements(
         platform,
-        blanket::tailors::python::pypi::Glibc(0, 0),
+        tog::tailors::python::pypi::Glibc(0, 0),
         &reqs,
         "cp312",
     )
@@ -271,12 +271,12 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         "the package carries its git source"
     );
 
-    let plan = blanket::kernel::types::Plan {
+    let plan = tog::kernel::types::Plan {
         ecosystem: "python".into(),
         python_version: "3.12.14".into(),
         packages,
     };
-    let env = blanket::tailors::python::env::realize_env(&store, platform, &plan).expect("realize");
+    let env = tog::tailors::python::env::realize_env(&store, platform, &plan).expect("realize");
     let site = env.join("lib/python3.12/site-packages/gitdep/__init__.py");
     assert_eq!(
         std::fs::read_to_string(&site).unwrap(),
@@ -284,7 +284,7 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     );
 
     // The commit determines the environment: realizing again is a cache hit.
-    let again = blanket::tailors::python::env::realize_env(&store, platform, &plan)
+    let again = tog::tailors::python::env::realize_env(&store, platform, &plan)
         .expect("second realize");
     assert_eq!(env, again);
 }
@@ -321,14 +321,14 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     let lock = format!(
         "version = 3\n\n[[package]]\nname = \"gitdep\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
     );
-    let plan = blanket::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let plan = tog::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
     assert_eq!(plan.crates.len(), 1);
     assert!(
         plan.crates[0].git.is_some(),
         "the crate carries its git source"
     );
 
-    let vendor = blanket::tailors::cargo::realize_vendor(&store, &plan).expect("vendor");
+    let vendor = tog::tailors::cargo::realize_vendor(&store, &plan).expect("vendor");
     let crate_dir = vendor.join("gitdep-1.0.0");
     assert_eq!(
         std::fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -345,6 +345,6 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     );
 
     // Realizing again is a cache hit on the same object.
-    let again = blanket::tailors::cargo::realize_vendor(&store, &plan).expect("second vendor");
+    let again = tog::tailors::cargo::realize_vendor(&store, &plan).expect("second vendor");
     assert_eq!(vendor, again);
 }

@@ -738,7 +738,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "blanket-build-requires-{label}-{}",
+            "tog-build-requires-{label}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&path);
@@ -912,7 +912,7 @@ build-backend = "hatchling.build"
             b"[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
-        let outside = std::env::temp_dir().join(format!("blanket-escape-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tog-escape-{}", std::process::id()));
         let _ = fs::remove_file(&outside);
         symlink(&outside, root.join("Cargo.lock")).unwrap();
         let path = dir.join("symlink-escape.tar.gz");

@@ -82,7 +82,7 @@ pub(super) fn execute<W: Write>(
                         format!(
                             "{error}; the record meta/{meta_name} is orphaned and blocks the \
                              next sweep — restore the removed object or delete the stray record \
-                             with `blanket gc --migrate-metadata`"
+                             with `tog gc --migrate-metadata`"
                         ),
                     )
                 })?;

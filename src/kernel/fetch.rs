@@ -203,7 +203,7 @@ pub(crate) fn download_verified_held(
 
 /// Insert a local file into the verified artifact cache by its computed
 /// sha256 (for artifacts obtained through delegated tools and then verified
-/// by blanket — e.g. Go module zips h1-checked by dirhash). Returns
+/// by tog — e.g. Go module zips h1-checked by dirhash). Returns
 /// (sha256 hex, cache path). Publication mirrors download_verified.
 pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String, PathBuf)> {
     let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn sha1_integrity_accepts_and_rejects_at_verification() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-fetch-test-{}-{}",
+            "tog-fetch-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn cache_lease_refreshes_mtime_and_blocks_gc() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-fetch-lease-test-{}-{}",
+            "tog-fetch-lease-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

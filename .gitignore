@@ -1,4 +1,4 @@
 /target
-.blanket/
+.tog/
 .venv
 __pycache__/

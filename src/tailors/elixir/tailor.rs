@@ -120,13 +120,13 @@ impl Tailor for Elixir {
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let mut prefix = Vec::new();
-        if dir.join(".blanket/closures/elixir.json").exists() {
+        if dir.join(".tog/closures/elixir.json").exists() {
             let store = &ctx.store;
             let platform = ctx.platform;
             let closure = comforter::read_closure(dir, "elixir")?;
             let beam = comforter::closure_object(store, &closure, "beam_object", "elixir/bin/mix")?;
             // The deps projection is a writable clone OUTSIDE the store; verify
-            // it lives under the blanket home and matches the recorded deps id.
+            // it lives under the tog home and matches the recorded deps id.
             let deps_obj = comforter::closure_object(store, &closure, "deps_object", "")?;
             // Never trust the recorded projection path: reconstruct the ONE
             // expected forest path from canonical project + deps id and require
@@ -140,13 +140,13 @@ impl Tailor for Elixir {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "elixir closure projection is not the expected forest path; \
-                     run `blanket sync` first",
+                     run `tog sync` first",
                 ));
             }
             prefix.push(beam.join("elixir/bin").to_string_lossy().into_owned());
             prefix.push(beam.join("otp/bin").to_string_lossy().into_owned());
             let scratch =
-                std::env::temp_dir().join(format!("blanket-mix-run-{}", std::process::id()));
+                std::env::temp_dir().join(format!("tog-mix-run-{}", std::process::id()));
             std::fs::create_dir_all(&scratch)?;
             let (prefixes, remove, set) = elixir::run_env(
                 &beam,
@@ -223,7 +223,7 @@ impl Tailor for Elixir {
             push_hash(&mut c, "SHA-256", &required(eco, &p, "outer_sha256")?);
             push_property(
                 &mut c,
-                "blanket:hex:inner-checksum",
+                "tog:hex:inner-checksum",
                 &required(eco, &p, "inner_sha256")?,
             );
             out.push(c);

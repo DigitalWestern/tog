@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Implicit detection for sync/plan: cargo joins the party only when the
 /// invocation dir is itself a Cargo package (workspace members included).
-/// Without this gate, running blanket in any project nested under an
+/// Without this gate, running tog in any project nested under an
 /// unrelated Cargo workspace would silently project into that parent tree.
 pub fn is_cargo_here(dir: &Path) -> bool {
     dir.join("Cargo.toml").is_file() || dir.join("Cargo.lock").is_file()
@@ -87,7 +87,7 @@ pub fn load_cargo_inputs(
 
 pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> io::Result<()> {
     eprintln!(
-        "blanket: no Cargo.lock; generating it with the store Rust toolchain \
+        "tog: no Cargo.lock; generating it with the store Rust toolchain \
          (network allowed, unsandboxed)..."
     );
     let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
@@ -103,7 +103,7 @@ pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> 
             e.kind(),
             format!(
                 "could not run store Cargo to generate Cargo.lock: {e}; \
-                     use `blanket sync` after fixing the project or network"
+                     use `tog sync` after fixing the project or network"
             ),
         )
     })?;

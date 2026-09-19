@@ -19,13 +19,13 @@ by position.
 
 - **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
   missing-lock generation run the ecosystem's own tool unsandboxed with
-  network, outside what `blanket audit` can see. Options: a registry-proxy
+  network, outside what `tog audit` can see. Options: a registry-proxy
   design round, or refuse those verbs under company policy and require lock
-  edits outside blanket (keeps the door closed but weakens the agent story).
-- **A shared system store at `/opt/blanket/store`:** decide, or defer
+  edits outside tog (keeps the door closed but weakens the agent story).
+- **A shared system store at `/opt/tog/store`:** decide, or defer
   explicitly.
 - **First outside target.** Cheapest visible artifact: a GitHub Action
-  running `blanket sync` under the company policy plus `blanket sbom`, which
+  running `tog sync` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
   namespaces are allowed there.
 - **Is `skipped_optional` an exception at all?** An optional dependency
@@ -81,7 +81,7 @@ by position.
   Rules in `docs/agent/DESIGNS.md` §5.
 - **Descriptor-relative project access in sync.** Every command reads the
   project by pathname, so a same-user process that swaps the project
-  directory mid-sync can make blanket sync the replacement
+  directory mid-sync can make tog sync the replacement
   (`docs/human/LIMITATIONS.md`). Raised by review on 2026-09-16 and declined
   there as pre-existing. Closing it means every tailor reads through a held
   directory descriptor. Probably builds on `src/fsroot.rs`.

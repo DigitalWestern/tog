@@ -168,7 +168,7 @@ pub(crate) enum PatchMatch {
 /// `sha256-<hex>` spelling the prefix is preserved so the pair reads the same.
 ///
 /// pnpm changed both the algorithm and the encoding between major versions and
-/// blanket accepts every form still found in lockfiles:
+/// tog accepts every form still found in lockfiles:
 ///
 /// * pnpm 9 (`lockfileVersion: '9.0'`) writes `createBase32HashFromFile`:
 ///   md5 of the file, RFC 4648 base32, padding stripped, lowercased —
@@ -189,7 +189,7 @@ pub(crate) enum PatchMatch {
 /// (`readNormalizedFile`: `content.split('\r\n').join('\n')`). The md5 form
 /// accepts only that normalized/lossy digest. SHA-256 forms accept either that
 /// digest or the raw-byte digest, preserving compatibility with lockfiles
-/// produced by the earlier blanket implementation. A normalized match must
+/// produced by the earlier tog implementation. A normalized match must
 /// bind the raw bytes separately for environment identity because distinct
 /// invalid UTF-8 byte sequences can normalize to the same text. A raw match
 /// keeps the historical identity unchanged.
@@ -258,7 +258,7 @@ fn base32_lower(bytes: &[u8]) -> String {
 }
 
 /// RFC 1321 md5. Needed only to read pnpm 9's patch hashes, which is not worth
-/// a dependency; this is never used to attest anything blanket itself writes.
+/// a dependency; this is never used to attest anything tog itself writes.
 fn md5(input: &[u8]) -> [u8; 16] {
     /// Per-round left-rotation amounts (RFC 1321 section 3.4).
     const SHIFTS: [u32; 64] = [
@@ -951,7 +951,7 @@ fn plan_pnpm_with_recorder(
     let version = version.trim_end_matches(".0");
     if version != "9" && version != "6" {
         return Err(err(format!(
-            "unsupported pnpm lockfileVersion {:?} (blanket supports 9.0 and 6.0)",
+            "unsupported pnpm lockfileVersion {:?} (tog supports 9.0 and 6.0)",
             yaml_str(root.get("lockfileVersion")).unwrap_or_default()
         )));
     }
@@ -1113,7 +1113,7 @@ mod patch_hash_tests {
     /// (`tests/fixtures/hitrate-linux-2026-09-11.csv`): `paperclipai/paperclip`
     /// at commit ad0ad43 declares `fymctidcjqjhi4cj72qtivlxry` for
     /// `patches/@agentclientprotocol__claude-agent-acp@0.70.0.patch`. That file
-    /// has sha256 `823c105c…d6c` — the value blanket used to print as "got" —
+    /// has sha256 `823c105c…d6c` — the value tog used to print as "got" —
     /// and md5 `2e1829a0624c12747049fea13455778e`, which base32-encodes to the
     /// declared string. It confirms md5, not a truncated sha256, is the input.
     #[test]
@@ -1234,7 +1234,7 @@ mod patch_hash_tests {
     #[test]
     fn normalized_sha256_matches_bind_raw_content_and_raw_matches_do_not() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-pnpm-patch-hash-{}-{}",
+            "tog-pnpm-patch-hash-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1263,7 +1263,7 @@ mod patch_hash_tests {
     #[test]
     fn distinct_raw_files_that_normalize_identically_get_distinct_bindings() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-pnpm-patch-content-{}-{}",
+            "tog-pnpm-patch-content-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -1,6 +1,6 @@
-# Blanket limitations ledger
+# Tog limitations ledger
 
-A standing, honest record of what blanket fails to address or does not get
+A standing, honest record of what tog fails to address or does not get
 right. Items leave this list only when fixed and regression-tested. Each
 entry says what breaks, for whom, and whether it fails loud or silent.
 
@@ -12,10 +12,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Kernel-wide
 
-- **`blanket fmt` is Rust-only**; other ecosystems fail clearly (pinned rustfmt 1.96.1, no
+- **`tog fmt` is Rust-only**; other ecosystems fail clearly (pinned rustfmt 1.96.1, no
   `Cargo.lock`; `status` ignores the rustfmt closure; a sync rustfmt request still records
   `toolchain-component-unavailable` while `fmt` realizes it on demand).
-- **`blanket audit` judges signed records only.** A pass proves that every closure file in
+- **`tog audit` judges signed records only.** A pass proves that every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
   inputs on disk (and that the `rustfmt` record names the rustfmt this binary pins), and
@@ -24,26 +24,26 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
   missing-lock generation during `sync`/`plan`, where uv, npm, cargo, bundler, mix resolve
   with network), nor does it re-verify store bytes, re-check object metadata, or judge what
-  `blanket run`/`x` executed. A job that runs untrusted project code must not hold a signing
-  key. The machine policy is whatever `BLANKET_POLICY` or `$HOME` selects: the gate's
+  `tog run`/`x` executed. A job that runs untrusted project code must not hold a signing
+  key. The machine policy is whatever `TOG_POLICY` or `$HOME` selects: the gate's
   workflow, environment, binary, and machine policy must be controlled outside the
-  untrusted checkout, and pointing `BLANKET_POLICY` at a checkout-controlled file gives that
+  untrusted checkout, and pointing `TOG_POLICY` at a checkout-controlled file gives that
   file machine authority. `projected_at` is authenticated metadata, not an expiry: a genuine
   old record whose recorded inputs still match passes. Any record the gate cannot believe or
   compare (no signature, no recorded inputs, no recorded platform, no exception record)
-  fails as `outdated` rather than passing, so pre-signing projects need one `blanket sync`
-  under a trusted key (and one `blanket fmt` for a `rustfmt` record) before the gate is
-  useful. An exception kind this binary does not know (a record written by a newer blanket)
+  fails as `outdated` rather than passing, so pre-signing projects need one `tog sync`
+  under a trusted key (and one `tog fmt` for a `rustfmt` record) before the gate is
+  useful. An exception kind this binary does not know (a record written by a newer tog)
   fails as `unknown` rather than being permitted. Loud.
 - **GC is conservative around legacy state.** Store jobs hold a shared activity lease; GC
   skips while work is active (older binaries do not know the protocol). `root/2` records
   survive moves, but legacy pathname-only roots and unresolved metadata block the sweep — an
-  unreadable registry record blocks it too, and `blanket gc --forget <key>` is the give-up
+  unreadable registry record blocks it too, and `tog gc --forget <key>` is the give-up
   valve.
-- **The GC safety guarantee has a stated boundary.** It covers cooperating blanket processes
+- **The GC safety guarantee has a stated boundary.** It covers cooperating tog processes
   on a local filesystem with working locks and atomic rename. Not covered: older binaries;
   programs run directly from store paths; malicious same-user modification; descendants
-  outliving the awaited child; orphans after SIGKILL of the supervising blanket; network
+  outliving the awaited child; orphans after SIGKILL of the supervising tog; network
   filesystems, where `flock` is advisory in name only.
 - **Signal delivery has three edges.** Parent-directed TERM is forwarded to the direct child;
   a group-directed TERM reaches parent and child independently and is forwarded too
@@ -51,15 +51,15 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   forwarded — terminal process-group delivery (`^C`) is the supported path. A cancellation
   across the spawn boundary is never dropped. `128 + signal` is a shell-visible exit code, not
   a wait status.
-- **`blanket sync` addresses the project by pathname.** It checks the project directory's
+- **`tog sync` addresses the project by pathname.** It checks the project directory's
   identity before and after waiting for the store lease and refuses if it changed, but a
   same-user process that renames the directory and puts another project at the same path
-  *during* the sync can make blanket sync the replacement under the original's policy and
+  *during* the sync can make tog sync the replacement under the original's policy and
   detected ecosystems. Every command that reads the project behaves this way; closing it
   needs descriptor-relative project access in every tailor. Silent.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
   `fmt` pass the program's status through. A literal `-h` tool argument needs `--` first.
-- **`blanket status` compares recorded inputs only.** `-r` includes, `requirements/` members,
+- **`tog status` compares recorded inputs only.** `-r` includes, `requirements/` members,
   and workspace-member package.json are not recorded. Cargo/Ruby/Elixir/.NET compare the lock
   hash only; Go catches `require`/`replace` only via `go.sum`; pre-field closures show "synced
   (unchecked)".
@@ -69,7 +69,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (`docs/agent/DESIGNS.md`), and the
   generic fetch helper still accepts `file://` — the dormant lock cannot authorize that path.
 - **When the lock ships, one toolchain per lock root**: discovery is anchored at the lock root, so
-  `web/.node-version` is invisible to blanket. A committed lock can aim at any allowlisted
+  `web/.node-version` is invisible to tog. A committed lock can aim at any allowlisted
   provider host; a hostile lock can cause an HTTPS request to a different allowlisted host.
   Reviewing a lock diff is reviewing its URLs.
 - **`add` / `remove` / `update` delegate to store tools with network, unsandboxed** (uv, npm,
@@ -79,12 +79,12 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Membership is the `pnpm-lock.yaml` `importers` list and nothing else. **A member added since
   the last `pnpm install` is not in the lock and cannot be distinguished from a deliberate
   exclusion**, so edits refuse loudly with two remedies: `pnpm install` at the root, or a
-  `.blanket` directory in it.
+  `.tog` directory in it.
 - **Yarn classic edits remain a refusal** (no lockfile-only edit mode); run the Yarn command
-  blanket names. Yarn Berry is not imported (cache-zip checksums are not tarball integrity
+  tog names. Yarn Berry is not imported (cache-zip checksums are not tarball integrity
   values).
-- **`blanket x` covers PyPI and npm**. A removed *node* environment orphans its node_modules
-  forest under `<store>/forests/`, which plain `blanket gc` never visits: only `blanket gc
+- **`tog x` covers PyPI and npm**. A removed *node* environment orphans its node_modules
+  forest under `<store>/forests/`, which plain `tog gc` never visits: only `tog gc
   --project` reclaims it. Cleanup skips candidates whose originating store cannot be
   recovered.
 - **Automatic metadata migration is fail-closed.** A pre-`object-meta/2` store is upgraded in
@@ -100,13 +100,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`;
   source-built gems/addons link host libraries.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
-  the canonical `BLANKET_STORE` root in its identity; moving a store requires re-realizing the
+  the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).
   Both matter only to new callers.
-- **Blanket's security claim is provenance, not runtime containment.** Acquisition and build
+- **Tog's security claim is provenance, not runtime containment.** Acquisition and build
   happen behind one door, builds cannot reach the network, and every closure lists what went
   in and every exception waved through. A hostile package can still put its payload in its
-  build output and run it at `blanket run` time with full network. Do not describe blanket
+  build output and run it at `tog run` time with full network. Do not describe tog
   as stopping malicious code from running.
 - **Sandboxes are cooperative hermeticity, not hostile-code containment.** bubblewrap does not
   scan immutable read roots for Unix sockets (the fmt host-socket scan is Linux-only); build
@@ -115,7 +115,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   replacement after commit is undetected.
 - **Delegated planning runs unsandboxed with user privileges** (uv, npm, cargo, go, bundler):
   a hostile manifest executes code at PLAN time. **Plan caches for go/python lack contained
-  atomic writes**: a symlinked `.blanket` could redirect a cache write outside the project.
+  atomic writes**: a symlinked `.tog` could redirect a cache write outside the project.
 - **Only the Go toolchain tarball goes through the pre-materialization extractor**; CPython,
   Node, Rust, Ruby, .NET, Elixir/OTP and native-library tarballs still rely on the platform
   tar's own defences. The listing is read from the archive's own headers (ustar names and the
@@ -148,9 +148,9 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   (declared-artifacts covers only matching cache locations; Electron-class needs per-version
   declarations). **Git sources are realized only when pinned to a full commit.**
   Branch/tag/bare URLs and ambient Git config fail closed. npm runs a git dep's `prepare`
-  script; blanket does not. Python and Cargo git deps work the same way, but Cargo's are not
+  script; tog does not. Python and Cargo git deps work the same way, but Cargo's are not
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
-  cargo, not blanket.
+  cargo, not tog.
 - **Skipped install-time downloads are not in the closure**: puppeteer- and cypress-class
   packages record `artifact_not_provisioned`, fetched unverified only when the user runs that
   command.
@@ -167,10 +167,10 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   manifests. **Fail-closed rows**: alternative registries; beta/nightly/custom toolchains and
   non-arm64 targets. Loud.
 - **Extra rust-toolchain components** are permissive with `toolchain-component-unavailable`.
-  **`blanket build` covers `build` only** — no sandboxed test/clippy/doc; those run via
-  `blanket run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
+  **`tog build` covers `build` only** — no sandboxed test/clippy/doc; those run via
+  `tog run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
   build cache). **`cargo install` through the wrapper is unmanaged** (lands in
-  `.blanket/cargo-home/bin`, outside the closure).
+  `.tog/cargo-home/bin`, outside the closure).
 
 ## Go
 
@@ -183,7 +183,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   GOPROXY=off errors. **Private modules are unsupported**: GOPROXY forced to proxy.golang.org,
   GOVCS off, GOPRIVATE scrubbed.
 - **The planner runs `go mod tidy` on out-of-sync manifests automatically**, mutating
-  go.mod/go.sum. **`blanket build` stages outputs then moves them**: `-o`-dependent workflows
+  go.mod/go.sum. **`tog build` stages outputs then moves them**: `-o`-dependent workflows
   differ from plain `go build`; `-mod`/`-toolexec`/`-o` are rejected. The plan-cache key
   includes only `*.go` sources — go:embed and non-.go inputs do not invalidate it.
 
@@ -195,7 +195,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   locked json/psych/openssl older than the toolchain's default can Gem::LoadError if something
   activates the default before Bundler setup. Untested matrix; potentially silent.
 - **`bundle exec` compatibility is unproven**: env-based GEM_HOME activation works for
-  `blanket run ruby/rake`; full bundler runtime activation has not been exercised on a real
+  `tog run ruby/rake`; full bundler runtime activation has not been exercised on a real
   Rails-class app.
 - **System /etc/gemrc is still read** (GEMRC=/dev/null blocks only the user file).
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
@@ -214,7 +214,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   "refresh the lock"). **Umbrella projects are untested**. **No rebar3 build for OTP 29 exists
   yet**: the pinned otp-28 escript runs on the 29 VM — a version-skew impurity until upstream
   ships otp-29 builds. **Mix's compilation lock is disabled in-sandbox**, so concurrent
-  unsandboxed `mix compile` against one build root is unprotected; `blanket build` runs
+  unsandboxed `mix compile` against one build root is unprotected; `tog build` runs
   MIX_ENV=dev only. **The Hex/OTP/Elixir matrix is single-pin** (`.tool-versions` and mix.exs
   elixir requirements are not consulted). **The deps projection is whole-tree writable**: one
   dep's build can modify a sibling dep, recorded unattested in the closure.
@@ -226,8 +226,8 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.
   Ancestor SDK inputs (global.json, Directory.Packages.props, Directory.Build.rsp,
   packages.config) fail closed.
-- **Build-capable dotnet verbs are refused at `blanket run`**; everything compiling goes
-  through `blanket build dotnet`, which covers build only (no test/publish verbs). The guard
+- **Build-capable dotnet verbs are refused at `tog run`**; everything compiling goes
+  through `tog build dotnet`, which covers build only (no test/publish verbs). The guard
   is advisory — `sh -c` can bypass it. **Restore-time MSBuild evaluation runs unsandboxed
   during missing-lock generation** (delegated-planning trust; the project's MSBuild code runs
   on the host). **Preflight is a fail-closed text scan, not an XML parse**:
@@ -243,7 +243,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
 ## Real-project proof gaps (all ecosystems)
 
 - Python/npm were proven on Ethan's real projects (CX-Games, deja, Financial-Filing…). Cargo
-  was proven on blanket itself. **Go and Ruby have only been proven on small
+  was proven on tog itself. **Go and Ruby have only been proven on small
   synthetic-but-real-dependency projects** — Go on a hello-world module pulling `rsc.io/quote`
   plus a cgo build; Ruby on rake/racc/nokogiri with nokogiri's native build. No large
-  real-world Go service or Rails app has run under blanket yet.
+  real-world Go service or Rails app has run under tog yet.

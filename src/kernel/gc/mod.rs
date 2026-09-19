@@ -81,7 +81,7 @@ pub struct Report {
 /// `options.project` is set.
 pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Result<Report> {
     let Some(activity) = store.try_activity_exclusive()? else {
-        writeln!(out, "cleanup skipped: a Blanket job is using this store")?;
+        writeln!(out, "cleanup skipped: a Tog job is using this store")?;
         return Ok(Report::default());
     };
     collect_with_activity(store, &activity, options, out)
@@ -102,7 +102,7 @@ pub fn collect_with_activity<W: Write>(
         return Err(io::Error::other(
             "refusing to sweep: the project-root registry is not initialized; register existing "
                 .to_string()
-                + "projects with `blanket gc --register <dir>...` or run `blanket sync` in each "
+                + "projects with `tog gc --register <dir>...` or run `tog sync` in each "
                 + "project",
         ));
     }
@@ -124,7 +124,7 @@ pub fn collect_with_activity<W: Write>(
             io::ErrorKind::InvalidData,
             format!(
                 "refusing to sweep: metadata maintenance left {} uncertified legacy record(s); \
-                 nothing was deleted. Resolve the objects named above and run `blanket gc \
+                 nothing was deleted. Resolve the objects named above and run `tog gc \
                  --migrate-metadata`",
                 migration.unresolved
             ),
@@ -269,7 +269,7 @@ mod tests {
     impl TempStore {
         fn new(label: &str) -> Self {
             let root = std::env::temp_dir().join(format!(
-                "blanket-gc-{label}-{}-{}",
+                "tog-gc-{label}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -386,13 +386,13 @@ mod tests {
     }
 
     fn closure(project: &Path, object: &Path, extra: serde_json::Value) {
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
         let body = serde_json::json!({
             "env_object": object.display().to_string(),
             "extra": extra,
         });
         fs::write(
-            project.join(".blanket/closures/python.json"),
+            project.join(".tog/closures/python.json"),
             serde_json::to_vec(&serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -489,7 +489,7 @@ mod tests {
                     "relocation_schema".into(),
                     "otp-install-cross-minimal/1".into(),
                 ),
-                ("store_root".into(), "/fixture/blanket-store".into()),
+                ("store_root".into(), "/fixture/tog-store".into()),
             ]),
         };
         let fingerprint = crate::tailors::elixir::fingerprint_of_joined(&format!(
@@ -644,7 +644,7 @@ mod tests {
 
         // One legacy record is enough to keep every sweep closed.
         let project = temp.root.join("project");
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
         store.register_root(&project).unwrap();
         let mut out = Vec::new();
         let error = collect(&store, Options::default(), &mut out).unwrap_err();
@@ -794,7 +794,7 @@ mod tests {
         let temp = TempStore::new("forest-v2");
         let store = temp.store();
         let project = temp.root.join("project");
-        fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
         let project = project.canonicalize().unwrap();
         let home = store.root.parent().unwrap();
         let project_key =
@@ -807,7 +807,7 @@ mod tests {
         std::os::unix::fs::symlink(&workspace_forest, project.join("packages/lib/node_modules"))
             .unwrap();
         fs::write(
-            project.join(".blanket/closures/node.json"),
+            project.join(".tog/closures/node.json"),
             serde_json::to_vec(&serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "node",
@@ -1085,7 +1085,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         closure(&project, &store.object_path(&id), serde_json::json!({}));
         store.register_root(&project).unwrap();
-        fs::remove_dir_all(project.join(".blanket/closures")).unwrap();
+        fs::remove_dir_all(project.join(".tog/closures")).unwrap();
 
         let mut output = Vec::new();
         let error = collect(
@@ -1156,7 +1156,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         closure(&project, &store.object_path(&id), serde_json::json!({}));
         let entry = store.register_root(&project).unwrap();
-        for closure in fs::read_dir(project.join(".blanket/closures")).unwrap() {
+        for closure in fs::read_dir(project.join(".tog/closures")).unwrap() {
             fs::remove_file(closure.unwrap().path()).unwrap();
         }
 
@@ -2504,8 +2504,8 @@ mod tests {
         attribution.finish(true).unwrap();
         drop(activity);
         // Crash window: the visible closure is gone, the durable record is not.
-        fs::remove_dir_all(project.join(".blanket/closures")).unwrap();
-        assert!(!project.join(".blanket/closures").exists());
+        fs::remove_dir_all(project.join(".tog/closures")).unwrap();
+        assert!(!project.join(".tog/closures").exists());
 
         let (report, text) = sweep(
             &store,
@@ -2540,7 +2540,7 @@ mod tests {
         let mut refs = crate::comforter::ClosureRefs::new();
         refs.object_id(&store, &activity, &("0".repeat(40) + "-missing-1"))
             .unwrap_err();
-        assert!(!project.join(".blanket/closures").exists());
+        assert!(!project.join(".tog/closures").exists());
         let roots = store.roots().unwrap();
         assert!(
             roots.iter().all(|root| root
@@ -2550,7 +2550,7 @@ mod tests {
                 .unwrap_or(true)),
             "a failed publication wrote a durable record"
         );
-        assert!(!project.join(".blanket/closures").exists());
+        assert!(!project.join(".tog/closures").exists());
         drop(activity);
 
         let (report, text) = sweep(
@@ -2574,7 +2574,7 @@ mod tests {
             let dead = commit(&store, "dead", None);
             age(&store.object_path(&dead));
             let project = temp.root.join("project");
-            fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
             let entry = store.register_root(&project).unwrap();
             fs::remove_dir_all(&project).unwrap();
 
@@ -2599,7 +2599,7 @@ mod tests {
                     // Restore the project to a state a sweep may run over:
                     // an empty closures directory does not count — a
                     // registered project owns at least one closure.
-                    let closure = project.join(".blanket/closures/python.json");
+                    let closure = project.join(".tog/closures/python.json");
                     fs::create_dir_all(closure.parent().unwrap()).unwrap();
                     fs::write(
                         closure,

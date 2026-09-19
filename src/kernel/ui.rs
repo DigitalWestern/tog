@@ -1,6 +1,6 @@
 //! Output conventions (CLI.md): stdout is for results, stderr is for
 //! narration. `--quiet` drops narration, `--verbose` adds decisions and the
-//! command line of every subprocess blanket starts, and color appears only
+//! command line of every subprocess tog starts, and color appears only
 //! on a terminal, only on stderr, only on the words that carry state.
 //!
 //! Quiet is implemented at the file-descriptor level: fd 2 is pointed at
@@ -111,7 +111,7 @@ fn write_error_channel(text: &str) {
 
 /// A failure the command could not recover from. Always visible.
 pub fn error(message: &str) {
-    write_error_channel(&format!("blanket: {}: {message}\n", paint("error", RED)));
+    write_error_channel(&format!("tog: {}: {message}\n", paint("error", RED)));
 }
 
 /// Something the user should know but that did not stop the command.
@@ -120,7 +120,7 @@ pub fn warning(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("blanket: {}: {message}", paint("warning", YELLOW));
+    eprintln!("tog: {}: {message}", paint("warning", YELLOW));
 }
 
 /// Progress narration.
@@ -128,7 +128,7 @@ pub fn note(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("blanket: {message}");
+    eprintln!("tog: {message}");
 }
 
 /// The line each ecosystem prints when its projection is in place.
@@ -142,11 +142,11 @@ pub fn synced(what: &str, target: &std::path::Path) {
 /// Decision-level detail, only under `--verbose`.
 pub fn trace(message: &str) {
     if verbose() {
-        eprintln!("blanket: {} {message}", paint("[verbose]", DIM));
+        eprintln!("tog: {} {message}", paint("[verbose]", DIM));
     }
 }
 
-/// The command line of a subprocess blanket is about to start, only under
+/// The command line of a subprocess tog is about to start, only under
 /// `--verbose`; the bug-report mode's most useful line.
 pub fn trace_command(command: &std::process::Command) {
     if !verbose() {

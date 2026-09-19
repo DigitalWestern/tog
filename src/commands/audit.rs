@@ -1,12 +1,12 @@
-//! `blanket audit` — the CI admission gate over signed closure records.
+//! `tog audit` — the CI admission gate over signed closure records.
 //!
 //! Every sync records the exceptions it waved through in the project's
-//! `.blanket/closures/<ecosystem>.json` (`body.exceptions[]`, kinds in
-//! `policy::KINDS`) and, with `BLANKET_SIGNING_KEY` set, signs the envelope.
+//! `.tog/closures/<ecosystem>.json` (`body.exceptions[]`, kinds in
+//! `policy::KINDS`) and, with `TOG_SIGNING_KEY` set, signs the envelope.
 //! This module answers "would those closures pass policy P?" from the
 //! records alone: no rebuild, no store access, no network, no sandbox. It is
 //! read-only over the project directory (plus the same read-only
-//! object-liveness probes `blanket status` makes).
+//! object-liveness probes `tog status` makes).
 //!
 //! What a pass proves: every closure file's canonical bytes carry a valid
 //! signature from a key the machine policy trusts; every detected ecosystem
@@ -25,7 +25,7 @@
 //!   distinct because their fixes differ.
 //! - A verdict is only computed over a record that still describes the
 //!   project. Freshness reuses `inspect::closure_state`, the per-record
-//!   check behind `blanket status`, applied to every closure file from its
+//!   check behind `tog status`, applied to every closure file from its
 //!   own body: a closure whose inputs changed, whose projection is missing,
 //!   that was synced on another platform, or whose inputs are no longer
 //!   found here is reported `stale`; one that predates input, platform, or
@@ -37,7 +37,7 @@
 //!   trusted-key set only narrows, so the supplied policy can never loosen
 //!   what the machine or project policy says.
 //! - An exception kind this binary does not know (a record written by a
-//!   newer blanket, or by hand) is `unknown`, never permitted: no policy
+//!   newer tog, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
 
 use crate::cli;
@@ -217,8 +217,8 @@ pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
 }
 
 /// The policy an audit judges against: the ordinary chain for `dir`
-/// (BLANKET_POLICY or ~/.blanket/policy.toml, every ancestor's
-/// .blanket/policy.toml, BLANKET_STRICT) merged with `extra`, the parsed
+/// (TOG_POLICY or ~/.tog/policy.toml, every ancestor's
+/// .tog/policy.toml, TOG_STRICT) merged with `extra`, the parsed
 /// `--policy` file and the path it came from. The file can add denials or
 /// strictness and drop trusted keys, never the reverse. Returns the
 /// contributing policies alongside the merged one, in merge order.
@@ -247,7 +247,7 @@ pub fn trusted_keys(policy: &Policy) -> io::Result<&KeySet> {
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "no trusted signing keys configured: add a [signing] table with trusted = [\"ed25519:<64 hex>\"] to the machine policy (BLANKET_POLICY, or ~/.blanket/policy.toml); a project or --policy list can only narrow it. 'blanket keygen <path>' prints the table to paste",
+                "no trusted signing keys configured: add a [signing] table with trusted = [\"ed25519:<64 hex>\"] to the machine policy (TOG_POLICY, or ~/.tog/policy.toml); a project or --policy list can only narrow it. 'tog keygen <path>' prints the table to paste",
             )
         })
 }
@@ -339,7 +339,7 @@ fn freshness(
     present: &[&str],
 ) -> io::Result<Freshness> {
     // A closure is judged against the inputs of the ecosystem that owns it:
-    // the `rustfmt` record `blanket fmt` writes belongs to a Cargo project.
+    // the `rustfmt` record `tog fmt` writes belongs to a Cargo project.
     let owner = tailors::for_closure(&closure.ecosystem)
         .map(|tailor| tailor.id())
         .unwrap_or(closure.ecosystem.as_str());
@@ -361,13 +361,13 @@ fn freshness(
     )?))
 }
 
-/// The command that rewrites a closure: `blanket fmt` for the rustfmt
-/// record, which a sync never touches, and `blanket sync` for every other.
+/// The command that rewrites a closure: `tog fmt` for the rustfmt
+/// record, which a sync never touches, and `tog sync` for every other.
 fn refresh(ecosystem: &str) -> &'static str {
     if ecosystem == "rustfmt" {
-        "blanket fmt"
+        "tog fmt"
     } else {
-        "blanket sync"
+        "tog sync"
     }
 }
 
@@ -404,7 +404,7 @@ fn check_name(closure: &ClosureFile) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .blanket/closures is refused, not judged: remove it or run 'blanket sync'",
+                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .tog/closures is refused, not judged: remove it or run 'tog sync'",
                 closure.path.to_string_lossy(),
                 closure.ecosystem
             ),
@@ -526,7 +526,7 @@ pub fn audit_under(
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "nothing synced in {}; run 'blanket sync' first",
+                "nothing synced in {}; run 'tog sync' first",
                 dir.display()
             ),
         ));
@@ -831,7 +831,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     }
     for ecosystem in &report.missing {
         out.push_str(&format!(
-            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'blanket sync' under a trusted key, then commit\n",
+            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'tog sync' under a trusted key, then commit\n",
             "missing"
         ));
     }
@@ -916,7 +916,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-audit-{label}-{}-{}",
+                "tog-audit-{label}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -990,8 +990,8 @@ mod tests {
                 format!("[signing]\ntrusted = [{}]\n", entries.join(", ")),
             )
             .unwrap();
-            let previous = std::env::var_os("BLANKET_POLICY");
-            std::env::set_var("BLANKET_POLICY", &path);
+            let previous = std::env::var_os("TOG_POLICY");
+            std::env::set_var("TOG_POLICY", &path);
             Self {
                 previous,
                 _dir: dir,
@@ -1002,8 +1002,8 @@ mod tests {
     impl Drop for MachinePolicy {
         fn drop(&mut self) {
             match self.previous.take() {
-                Some(value) => std::env::set_var("BLANKET_POLICY", value),
-                None => std::env::remove_var("BLANKET_POLICY"),
+                Some(value) => std::env::set_var("TOG_POLICY", value),
+                None => std::env::remove_var("TOG_POLICY"),
             }
         }
     }
@@ -1042,7 +1042,7 @@ mod tests {
         })
     }
 
-    /// The body `blanket fmt` writes for `dir` with this binary's pins: a
+    /// The body `tog fmt` writes for `dir` with this binary's pins: a
     /// current `rustfmt` record once `dir` holds Cargo inputs.
     fn rustfmt_body(dir: &Path) -> Value {
         let mut body = rustfmt::pinned_record(host(), dir, "").unwrap();
@@ -1050,7 +1050,7 @@ mod tests {
         body
     }
 
-    /// Write `.blanket/closures/<name>.json`, signed with the test key, and
+    /// Write `.tog/closures/<name>.json`, signed with the test key, and
     /// return it as `closures` would read it.
     fn write_closure(
         dir: &Path,
@@ -1081,7 +1081,7 @@ mod tests {
         key: Option<&SigningKey>,
         after_signing: impl FnOnce(&mut Value),
     ) -> ClosureFile {
-        let closures = dir.join(".blanket/closures");
+        let closures = dir.join(".tog/closures");
         fs::create_dir_all(&closures).unwrap();
         let mut envelope = json!({
             "schema": "closure/1",
@@ -1408,7 +1408,7 @@ mod tests {
         let closures = [with_exceptions(
             &temp.0,
             &[
-                exception("kind-from-a-newer-blanket", "left-pad"),
+                exception("kind-from-a-newer-tog", "left-pad"),
                 exception(SKIPPED_OPTIONAL, "dev"),
             ],
         )];
@@ -1419,13 +1419,13 @@ mod tests {
             assert!(!verdicts[0].passes(), "{policy:?}");
             assert_eq!(
                 verdicts[0].unknown.as_deref().unwrap(),
-                vec![exception("kind-from-a-newer-blanket", "left-pad")]
+                vec![exception("kind-from-a-newer-tog", "left-pad")]
             );
             assert!(!verdicts[0]
                 .permitted
                 .as_ref()
                 .unwrap()
-                .contains_key("kind-from-a-newer-blanket"));
+                .contains_key("kind-from-a-newer-tog"));
         }
         let verdicts = judge(&temp.0, &permissive(), &closures);
         assert!(verdicts[0].denied.as_deref().unwrap().is_empty());
@@ -1444,19 +1444,19 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("    unknown  kind-from-a-newer-blanket  left-pad  "),
+            text.contains("    unknown  kind-from-a-newer-tog  left-pad  "),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
         assert_eq!(value["passed"], false);
         assert_eq!(
             value["closures"][0]["unknown"][0]["kind"],
-            "kind-from-a-newer-blanket"
+            "kind-from-a-newer-tog"
         );
         // And a policy file cannot name it, so it cannot be "allowed" either.
         assert!(policy::parse_file(
             Path::new("p.toml"),
-            "deny = [\"kind-from-a-newer-blanket\"]"
+            "deny = [\"kind-from-a-newer-tog\"]"
         )
         .is_err());
     }
@@ -1513,17 +1513,17 @@ mod tests {
 
     #[test]
     fn effective_policy_unions_the_project_chain_with_the_extra_file() {
-        // The chain also reads BLANKET_POLICY or $HOME, which other tests
+        // The chain also reads TOG_POLICY or $HOME, which other tests
         // and the developer's machine own; assert only that this project's
         // ancestor policy and the extra file both land (superset), never
         // that nothing else did.
         let temp = python_project("chain");
         let root = temp.0.join("workspace");
         let member = root.join("member");
-        fs::create_dir_all(root.join(".blanket")).unwrap();
+        fs::create_dir_all(root.join(".tog")).unwrap();
         fs::create_dir_all(&member).unwrap();
         fs::write(
-            root.join(".blanket/policy.toml"),
+            root.join(".tog/policy.toml"),
             "deny = [\"weak-integrity\"]\n",
         )
         .unwrap();
@@ -1543,7 +1543,7 @@ mod tests {
         let ancestor = sources
             .iter()
             .find(|source| {
-                source.path.as_deref() == Some(root.join(".blanket/policy.toml").as_path())
+                source.path.as_deref() == Some(root.join(".tog/policy.toml").as_path())
             })
             .expect("the workspace-root policy is a source");
         assert_eq!(ancestor.origin, SourceOrigin::Project);
@@ -1560,7 +1560,7 @@ mod tests {
         // A file that does not exist is not a source: the member directory
         // has no policy of its own.
         assert!(!sources.iter().any(|source| {
-            source.path.as_deref() == Some(member.join(".blanket/policy.toml").as_path())
+            source.path.as_deref() == Some(member.join(".tog/policy.toml").as_path())
         }));
     }
 
@@ -1628,7 +1628,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("run 'blanket sync', then audit again (permitted: no exceptions)"),
+            text.contains("run 'tog sync', then audit again (permitted: no exceptions)"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(
             inspect::closure_state(host(), dir, &closures[0]).unwrap(),
             State::Unchecked(
-                "inputs were not recorded by this sync; run 'blanket sync' once to enable checks"
+                "inputs were not recorded by this sync; run 'tog sync' once to enable checks"
                     .into()
             )
         );
@@ -1780,7 +1780,7 @@ mod tests {
         assert!(matches!(verdicts[0].freshness, Freshness::Stale(_)));
     }
 
-    /// `blanket fmt` projects nothing, so its record is compared with the
+    /// `tog fmt` projects nothing, so its record is compared with the
     /// pins: current only when it names the rustfmt this binary would use
     /// for the project, and judged on its exceptions like any other record.
     #[test]
@@ -1860,7 +1860,7 @@ mod tests {
         bare.as_object_mut().unwrap().remove("exceptions");
         let verdicts = judge(dir, &permissive(), &write(bare));
         assert!(
-            matches!(&verdicts[0].freshness, Freshness::Outdated(why) if why.contains("run 'blanket fmt'")),
+            matches!(&verdicts[0].freshness, Freshness::Outdated(why) if why.contains("run 'tog fmt'")),
             "{verdicts:?}"
         );
 
@@ -1875,7 +1875,7 @@ mod tests {
             missing: Vec::new(),
         };
         assert!(
-            matches!(&report.verdicts[0].freshness, Freshness::Outdated(why) if why.contains("blanket fmt")),
+            matches!(&report.verdicts[0].freshness, Freshness::Outdated(why) if why.contains("tog fmt")),
             "{:?}",
             report.verdicts[0]
         );
@@ -1893,7 +1893,7 @@ mod tests {
 
         // Components requested after the run: the version and objects are
         // unchanged, but a new run would record an exception this record
-        // lacks, so it is stale and the fix names `blanket fmt`.
+        // lacks, so it is stale and the fix names `tog fmt`.
         fs::write(
             dir.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = \"stable\"\ncomponents = [\"rustfmt\", \"clippy\"]\n",
@@ -1913,7 +1913,7 @@ mod tests {
         };
         assert!(render(dir, &report, false)
             .unwrap()
-            .contains("run 'blanket fmt', then audit again"));
+            .contains("run 'tog fmt', then audit again"));
         // The record a run under that file writes is current, read without
         // recording anything, and its exception is still judged.
         let mut listed = rustfmt_body(dir);
@@ -2070,12 +2070,12 @@ mod tests {
         let empty = TempDir::new("empty");
         let error = audit(host(), &empty.0, None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("run 'blanket sync' first"));
+        assert!(error.to_string().contains("run 'tog sync' first"));
         // No trusted set anywhere in the chain: refused before any record
         // is read, so the gate cannot be misconfigured into judging.
         drop(_machine);
         let _home = MachinePolicy::trusting("audit-machine-none", &[]);
-        fs::write(std::env::var_os("BLANKET_POLICY").unwrap(), "deny = []\n").unwrap();
+        fs::write(std::env::var_os("TOG_POLICY").unwrap(), "deny = []\n").unwrap();
         let error = audit(host(), dir, Some((flag.as_path(), &extra))).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
         assert!(error.to_string().contains("[signing]"), "{error}");
@@ -2267,7 +2267,7 @@ mod tests {
             let text = render(dir, &report, false).unwrap();
             assert!(
                 text.contains(&format!(
-                    "python  outdated      closure {record}: no signature; run 'blanket sync' once under a trusted key, then commit (not evaluated)\n"
+                    "python  outdated      closure {record}: no signature; run 'tog sync' once under a trusted key, then commit (not evaluated)\n"
                 )),
                 "{text}"
             );
@@ -2386,7 +2386,7 @@ mod tests {
             },
             PolicySource {
                 origin: SourceOrigin::Project,
-                path: Some(PathBuf::from("/p/.blanket/policy.toml")),
+                path: Some(PathBuf::from("/p/.tog/policy.toml")),
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: Some([other_key().public_key()].into_iter().collect()),
@@ -2412,7 +2412,7 @@ mod tests {
             Signature::Untrusted {
                 key: test_key().public_key(),
                 excluded_by: vec![
-                    "project \"/p/.blanket/policy.toml\"".into(),
+                    "project \"/p/.tog/policy.toml\"".into(),
                     "flag \"/f/company.toml\"".into()
                 ],
             }
@@ -2426,7 +2426,7 @@ mod tests {
         let text = render(dir, &report, false).unwrap();
         assert!(
             text.contains(
-                "(excluded by project \"/p/.blanket/policy.toml\", flag \"/f/company.toml\")"
+                "(excluded by project \"/p/.tog/policy.toml\", flag \"/f/company.toml\")"
             ),
             "{text}"
         );
@@ -2446,7 +2446,7 @@ mod tests {
         assert_eq!(
             value["closures"][0]["signature"]["detail"],
             json!([
-                "project \"/p/.blanket/policy.toml\"",
+                "project \"/p/.tog/policy.toml\"",
                 "flag \"/f/company.toml\""
             ])
         );
@@ -2484,7 +2484,7 @@ mod tests {
         let error = evaluate(host(), dir, &Policy::default(), &[], &[], &present).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
-            error.to_string().contains("[signing]") && error.to_string().contains("blanket keygen"),
+            error.to_string().contains("[signing]") && error.to_string().contains("tog keygen"),
             "{error}"
         );
         let mut chain = Policy::default();
@@ -2532,7 +2532,7 @@ mod tests {
         assert!(!report.passes());
         let text = render(dir, &report, false).unwrap();
         assert!(
-            text.contains("cargo    missing       no closure for the cargo inputs found here; run 'blanket sync' under a trusted key, then commit\n"),
+            text.contains("cargo    missing       no closure for the cargo inputs found here; run 'tog sync' under a trusted key, then commit\n"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
@@ -2544,7 +2544,7 @@ mod tests {
         let _machine = MachinePolicy::trusting("missing-machine", &[test_key()]);
         let report = audit(host(), dir, None).unwrap();
         assert_eq!(report.missing, vec!["cargo".to_string()]);
-        fs::remove_file(dir.join(".blanket/closures/python.json")).unwrap();
+        fs::remove_file(dir.join(".tog/closures/python.json")).unwrap();
         let report = audit(host(), dir, None).unwrap();
         assert_eq!(
             report.missing,
@@ -2607,7 +2607,7 @@ mod tests {
             if sign_after {
                 test_key().sign(&mut envelope).unwrap();
             }
-            let closures = dir.join(".blanket/closures");
+            let closures = dir.join(".tog/closures");
             fs::create_dir_all(&closures).unwrap();
             let path = closures.join("python.json");
             fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
@@ -2670,7 +2670,7 @@ mod tests {
         let closure = write(|_| {}, true);
         assert!(judge(dir, &permissive(), &[closure])[0].passes());
         // A file that is valid JSON but not an object at all.
-        let path = dir.join(".blanket/closures/python.json");
+        let path = dir.join(".tog/closures/python.json");
         fs::write(&path, "[1, 2]").unwrap();
         let closure = read_closure(dir, &path);
         let error = evaluate(host(), dir, &permissive(), &[], &[closure], &present).unwrap_err();

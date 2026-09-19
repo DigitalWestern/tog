@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn symlinks_must_stay_inside_checkout_even_through_chains() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-gitsrc-links-{}-{}",
+            "tog-gitsrc-links-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -732,7 +732,7 @@ mod realization_tests {
     }
     fn temp(tag: &str) -> Temp {
         let path = std::env::temp_dir().join(format!(
-            "blanket-gitsrc-{tag}-{}-{}",
+            "tog-gitsrc-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1042,7 +1042,7 @@ pub fn pack_checkout(
         use std::os::unix::ffi::OsStrExt;
         a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes())
     });
-    let list = work.join(".blanket-filelist");
+    let list = work.join(".tog-filelist");
     {
         use std::io::Write;
         use std::os::unix::ffi::OsStrExt;

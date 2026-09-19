@@ -1,4 +1,4 @@
-//! `blanket sync`: preflight every detected ecosystem, then plan, realize,
+//! `tog sync`: preflight every detected ecosystem, then plan, realize,
 //! and project each one through the tailor registry.
 
 use crate::commands::shared::no_inputs;
@@ -26,7 +26,7 @@ pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static
     Ok(present)
 }
 
-/// `blanket sync` from the command line: load policy and preflight every
+/// `tog sync` from the command line: load policy and preflight every
 /// ecosystem before the store is opened. A refused request (an unpinned
 /// patch, a path no root record can hold) must leave no trace: no store
 /// tree created, no maintenance sweep, no lease taken.
@@ -42,7 +42,7 @@ pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<
     let ctx = Context::open(platform, true)?;
     let moved = |detail: String| {
         io::Error::other(format!(
-            "{}: {detail} while waiting for the store; run 'blanket sync' again",
+            "{}: {detail} while waiting for the store; run 'tog sync' again",
             dir.display()
         ))
     };
@@ -101,15 +101,15 @@ fn sync_preflighted(
     print_exception_summary(dir)?;
     if crate::comforter::signing_key().is_none() {
         eprintln!(
-            "blanket: closures unsigned; blanket audit reports them outdated \
-             (set BLANKET_SIGNING_KEY=<key file> to sign; 'blanket keygen' makes one)"
+            "tog: closures unsigned; tog audit reports them outdated \
+             (set TOG_SIGNING_KEY=<key file> to sign; 'tog keygen' makes one)"
         );
     }
     Ok(())
 }
 
 fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
-    let dir = project_dir.join(".blanket/closures");
+    let dir = project_dir.join(".tog/closures");
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -129,8 +129,8 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
     }
     if total > 0 {
         eprintln!(
-            "blanket: {total} exception(s) recorded in .blanket/closures/*.json — \
-             `blanket sync --strict` to refuse them"
+            "tog: {total} exception(s) recorded in .tog/closures/*.json — \
+             `tog sync --strict` to refuse them"
         );
     }
     Ok(())
@@ -146,8 +146,8 @@ mod tests {
 
     impl StoreEnv {
         fn enter(path: &Path) -> Self {
-            let old = std::env::var_os("BLANKET_STORE");
-            std::env::set_var("BLANKET_STORE", path);
+            let old = std::env::var_os("TOG_STORE");
+            std::env::set_var("TOG_STORE", path);
             Self(old)
         }
     }
@@ -155,15 +155,15 @@ mod tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => std::env::set_var("BLANKET_STORE", value),
-                None => std::env::remove_var("BLANKET_STORE"),
+                Some(value) => std::env::set_var("TOG_STORE", value),
+                None => std::env::remove_var("TOG_STORE"),
             }
         }
     }
 
     /// Scrubs every variable `preflight` reads (policy chain, strictness,
     /// and the signing key) so a developer's environment cannot reach a
-    /// test: an exported BLANKET_SIGNING_KEY would otherwise fail preflight
+    /// test: an exported TOG_SIGNING_KEY would otherwise fail preflight
     /// here, or pin a real key for the rest of the test binary.
     struct PolicyEnv {
         home: Option<OsString>,
@@ -176,14 +176,14 @@ mod tests {
         fn enter(home: &Path) -> Self {
             let old = Self {
                 home: std::env::var_os("HOME"),
-                policy: std::env::var_os("BLANKET_POLICY"),
-                strict: std::env::var_os("BLANKET_STRICT"),
-                signing_key: std::env::var_os("BLANKET_SIGNING_KEY"),
+                policy: std::env::var_os("TOG_POLICY"),
+                strict: std::env::var_os("TOG_STRICT"),
+                signing_key: std::env::var_os("TOG_SIGNING_KEY"),
             };
             std::env::set_var("HOME", home);
-            std::env::remove_var("BLANKET_POLICY");
-            std::env::remove_var("BLANKET_STRICT");
-            std::env::remove_var("BLANKET_SIGNING_KEY");
+            std::env::remove_var("TOG_POLICY");
+            std::env::remove_var("TOG_STRICT");
+            std::env::remove_var("TOG_SIGNING_KEY");
             old
         }
     }
@@ -195,16 +195,16 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
             match self.policy.take() {
-                Some(value) => std::env::set_var("BLANKET_POLICY", value),
-                None => std::env::remove_var("BLANKET_POLICY"),
+                Some(value) => std::env::set_var("TOG_POLICY", value),
+                None => std::env::remove_var("TOG_POLICY"),
             }
             match self.strict.take() {
-                Some(value) => std::env::set_var("BLANKET_STRICT", value),
-                None => std::env::remove_var("BLANKET_STRICT"),
+                Some(value) => std::env::set_var("TOG_STRICT", value),
+                None => std::env::remove_var("TOG_STRICT"),
             }
             match self.signing_key.take() {
-                Some(value) => std::env::set_var("BLANKET_SIGNING_KEY", value),
-                None => std::env::remove_var("BLANKET_SIGNING_KEY"),
+                Some(value) => std::env::set_var("TOG_SIGNING_KEY", value),
+                None => std::env::remove_var("TOG_SIGNING_KEY"),
             }
         }
     }

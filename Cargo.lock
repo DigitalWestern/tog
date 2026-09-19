@@ -24,24 +24,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "blanket"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "hex",
- "libc",
- "liblzma",
- "ring",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "toml",
- "ureq",
- "zip",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -665,6 +647,24 @@ checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tog"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "libc",
+ "liblzma",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "toml",
+ "ureq",
+ "zip",
 ]
 
 [[package]]

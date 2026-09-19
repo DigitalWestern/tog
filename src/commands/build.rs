@@ -1,4 +1,4 @@
-//! `blanket build [ecosystem] [args...]`: a sandboxed build for the one
+//! `tog build [ecosystem] [args...]`: a sandboxed build for the one
 //! build-capable ecosystem present, or the named one, through the tailor
 //! registry.
 
@@ -29,7 +29,7 @@ pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
                 [] => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        "blanket build requires a Cargo.toml, go.mod, or mix.exs project",
+                        "tog build requires a Cargo.toml, go.mod, or mix.exs project",
                     ))
                 }
                 many => {
@@ -37,7 +37,7 @@ pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
                         io::ErrorKind::InvalidInput,
                         format!(
                             "multiple build-capable ecosystems found ({}); specify one: \
-                             `blanket build <ecosystem> ...`",
+                             `tog build <ecosystem> ...`",
                             many.iter()
                                 .map(|tailor| tailor.id())
                                 .collect::<Vec<_>>()

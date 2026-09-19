@@ -3,7 +3,7 @@
 //! copy-on-write, four-artifact BEAM toolchain.
 //!
 //! mix.lock is CODE (an Elixir term literal) and Mix itself evals it, so
-//! blanket's planning parses it with a strict AST
+//! tog's planning parses it with a strict AST
 //! grammar under the pinned toolchain (exact 8-field :hex tuples only —
 //! atoms/strings/lists/tuples of literals, nothing callable); the Elixir
 //! release zip has neither Hex nor rebar3, so both are separately pinned;
@@ -32,7 +32,7 @@ const OTP_VERSION: &str = "29.0.5";
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
 // invocation, what gets embedded, or the verification changes, so hex-deps
-// objects and `_build/blanket-*` roots re-derive. Darwin never sees it.
+// objects and `_build/tog-*` roots re-derive. Darwin never sees it.
 const LINUX_RELOCATION_SCHEMA: &str = "otp-install-cross-minimal/1";
 
 struct OtpPin {
@@ -55,7 +55,7 @@ const OTP_PINS: &[OtpPin] = &[
     // manifest alongside the asset in the same release.
     OtpPin {
         platform: Platform::X86_64UnknownLinuxGnu,
-        url: "https://github.com/DigitalWestern/blanket-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz",
+        url: "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz",
         sha256: "18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4",
     },
 ];
@@ -84,7 +84,7 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
             )
         } else {
             (
-                "blanket-toolchains",
+                "tog-toolchains",
                 format!("otp-{OTP_VERSION}-{}-fedora44", pin.platform.triple()),
                 LINUX_RELOCATION_SCHEMA,
             )
@@ -309,7 +309,7 @@ pub(crate) fn fingerprint_of_joined(joined: &str) -> String {
 //   without -cross   ERL_ROOT = TARGET_ERL_ROOT = <ROOT>   (physical == embedded)
 //   with -cross      ERL_ROOT = `pwd`, TARGET_ERL_ROOT = <ROOT>
 // i.e. -cross is the artifact's own separation between the physical tree
-// being written and the prefix baked into text. Blanket stages under
+// being written and the prefix baked into text. Tog stages under
 // <store>/tmp/stage-*/otp and publishes by rename, so it runs Install with
 // cwd = staging otp and <ROOT> = the final object path computed from the
 // identity (<store>/objects/<id>/otp). Nothing is rewritten afterwards; the
@@ -860,7 +860,7 @@ fn probe_otp_runtime(store: &Store, otp_root: &Path, scratch: &Path) -> io::Resu
             "-noshell",
             "-eval",
             "ok = crypto:start(), \
-             32 = byte_size(crypto:hash(sha256, <<\"blanket\">>)), \
+             32 = byte_size(crypto:hash(sha256, <<\"tog\">>)), \
              {ok, _} = application:ensure_all_started(ssl), \
              true = is_list(ssl:versions()), \
              io:format(\"~s~n~s~n\", [erlang:system_info(otp_release), code:root_dir()]), \
@@ -1046,7 +1046,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     result
 }
 
-/// The forced environment for every blanket-controlled mix/elixir run:
+/// The forced environment for every tog-controlled mix/elixir run:
 /// ERL_LIBS-class vars inject code paths or emulator args before Mix's own
 /// controls apply.
 const ENV_REMOVE_PREFIXES: &[&str] = &["MIX_", "HEX_", "REBAR_", "ERL_", "ELIXIR_"];
@@ -1076,7 +1076,7 @@ fn forced_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(St
     ]
 }
 
-/// Env for `blanket run` (MIX_ENV passes through from the user's shell —
+/// Env for `tog run` (MIX_ENV passes through from the user's shell —
 /// it's on the remove-prefix list, so re-set it when present).
 pub fn run_env(
     beam_obj: &Path,
@@ -1120,7 +1120,7 @@ fn beam_path(beam_obj: &Path) -> String {
     )
 }
 
-/// Run the store mix for a delegated edit (`blanket update`).
+/// Run the store mix for a delegated edit (`tog update`).
 pub(crate) fn run_checked(
     store: &Store,
     beam_obj: &Path,
@@ -1315,7 +1315,7 @@ pub fn plan_elixir(
     let lock_path = project_dir.join("mix.lock");
     let scratch = store.stage()?;
     if !lock_path.is_file() {
-        eprintln!("blanket: no mix.lock; resolving with the store mix (network, unsandboxed)...");
+        eprintln!("tog: no mix.lock; resolving with the store mix (network, unsandboxed)...");
         let out = run_mix(
             store,
             beam_obj,
@@ -1349,7 +1349,7 @@ pub fn plan_elixir(
         if !out.status.success() {
             let _ = crate::kernel::store::remove_tree(&scratch);
             return Err(err(format!(
-                "mix.exs and mix.lock are out of sync; run `blanket run mix \
+                "mix.exs and mix.lock are out of sync; run `tog run mix \
                  deps.get` and retry\n{}",
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
@@ -1396,7 +1396,7 @@ pub fn plan_elixir(
     validate_plan(&plan)?;
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
-        return Err(err("mix.lock changed while planning; re-run blanket sync"));
+        return Err(err("mix.lock changed while planning; re-run tog sync"));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }
@@ -1436,7 +1436,7 @@ fn check_dep_tree(dep_dir: &Path, app: &str) -> io::Result<()> {
 }
 
 /// Realize the immutable deps-source object (kind "hex-deps"): every
-/// tarball dual-checksum-verified by blanket (outer = sha256 of the .tar,
+/// tarball dual-checksum-verified by tog (outer = sha256 of the .tar,
 /// inner = sha256(VERSION ++ metadata.config ++ contents.tar.gz)).
 pub fn realize_deps(
     store: &Store,
@@ -1624,7 +1624,7 @@ pub fn project_elixir_env(
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&beam_obj)
-        .ok_or_else(|| err("BEAM object is not in a Blanket store"))?;
+        .ok_or_else(|| err("BEAM object is not in a Tog store"))?;
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let project_lock = store.project_lock(project_dir)?;
@@ -1687,7 +1687,7 @@ pub fn project_elixir_env(
 /// Build root, qualified by the toolchain fingerprint: stale BEAM/native
 /// artifacts across OTP/Elixir upgrades are a real hazard.
 pub fn build_root(platform: Platform, project_dir: &Path) -> io::Result<PathBuf> {
-    Ok(project_dir.join(format!("_build/blanket-{}", beam_fingerprint(platform)?)))
+    Ok(project_dir.join(format!("_build/tog-{}", beam_fingerprint(platform)?)))
 }
 
 /// Sandboxed `mix compile`: network denied, writes only the qualified
@@ -1702,7 +1702,7 @@ pub fn build_sandboxed(
     for arg in args {
         let norm = arg.trim_start_matches('-');
         if norm.starts_with("deps-path") || norm.starts_with("build-path") {
-            return Err(err(format!("{arg}: this flag is managed by blanket")));
+            return Err(err(format!("{arg}: this flag is managed by tog")));
         }
     }
     let project_dir = project_dir.canonicalize()?;
@@ -1752,7 +1752,7 @@ pub fn build_sandboxed(
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let pin = otp_pin(platform).expect("pinned BEAM toolchain for test platform");
     let beam =
-        beam_identity(pin, Path::new("/fixture/blanket-store")).expect("offline BEAM identity");
+        beam_identity(pin, Path::new("/fixture/tog-store")).expect("offline BEAM identity");
     let empty_plan = ElixirPlan {
         otp_version: OTP_VERSION.into(),
         elixir_version: ELIXIR_VERSION.into(),
@@ -1868,7 +1868,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-elixir-{tag}-{}-{}",
+                "tog-elixir-{tag}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1927,7 +1927,7 @@ mod tests {
         let linux = otp_pin(LINUX).unwrap();
         assert_eq!(
             linux.url,
-            "https://github.com/DigitalWestern/blanket-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
+            "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
         );
         assert_eq!(
             linux.sha256,
@@ -1961,13 +1961,13 @@ mod tests {
 
     #[test]
     fn linux_identity_is_separate_and_tracks_recipe_and_store_root() {
-        let root = Path::new("/srv/blanket/store");
+        let root = Path::new("/srv/tog/store");
         let linux = beam_identity(otp_pin(LINUX).unwrap(), root).unwrap();
         let darwin = beam_identity(otp_pin(DARWIN).unwrap(), root).unwrap();
         assert_ne!(linux.object_id(), darwin.object_id());
         assert_eq!(linux.inputs["platform"], "x86_64-unknown-linux-gnu");
         assert_eq!(linux.inputs["relocation_schema"], LINUX_RELOCATION_SCHEMA);
-        assert_eq!(linux.inputs["store_root"], "/srv/blanket/store");
+        assert_eq!(linux.inputs["store_root"], "/srv/tog/store");
         for key in ["otp_sha256", "elixir_sha256", "hex_sha512", "rebar3_sha512"] {
             assert!(linux.inputs.contains_key(key), "{key}");
         }
@@ -1997,11 +1997,11 @@ mod tests {
         let darwin_root = build_root(DARWIN, Path::new("/p")).unwrap();
         assert_eq!(
             linux_root,
-            Path::new("/p").join(format!("_build/blanket-{linux}"))
+            Path::new("/p").join(format!("_build/tog-{linux}"))
         );
         assert_eq!(
             darwin_root,
-            Path::new("/p").join(format!("_build/blanket-{DARWIN_FINGERPRINT}"))
+            Path::new("/p").join(format!("_build/tog-{DARWIN_FINGERPRINT}"))
         );
         assert_ne!(linux_root, darwin_root);
     }
@@ -2487,7 +2487,7 @@ exit 0
     #[test]
     fn build_root_is_beam_qualified() {
         let root = build_root(Platform::Aarch64AppleDarwin, Path::new("/p")).unwrap();
-        assert!(root.display().to_string().contains("_build/blanket-"));
+        assert!(root.display().to_string().contains("_build/tog-"));
         assert_eq!(
             beam_fingerprint(Platform::Aarch64AppleDarwin)
                 .unwrap()

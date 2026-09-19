@@ -90,7 +90,7 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
     for (id, _) in snapshot.meta.iter() {
         if !present.contains(id.as_str()) {
             blocked.push(format!(
-                "metadata for missing object {id}; remove meta/{id}.json with `blanket gc \
+                "metadata for missing object {id}; remove meta/{id}.json with `tog gc \
                  --migrate-metadata` after restoring the object, or delete the stray record"
             ));
         }
@@ -102,7 +102,7 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
         if record.evidence == crate::kernel::objmeta::Evidence::Legacy {
             blocked.push(format!(
                 "object {id} ({}) still carries pre-object-meta/2 metadata; its dependencies are \
-                 not proven, so no sweep can run. Run `blanket gc --migrate-metadata` and resolve \
+                 not proven, so no sweep can run. Run `tog gc --migrate-metadata` and resolve \
                  the records it names",
                 record.describe()
             ));
@@ -141,8 +141,8 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
                 ),
                 None => format!(
                     "root object {id} has no metadata; restore meta/{id}.json, or find the root \
-                     that names it with `blanket store roots` and give up its protection with \
-                     `blanket gc --forget <key>`"
+                     that names it with `tog store roots` and give up its protection with \
+                     `tog gc --forget <key>`"
                 ),
             });
             continue;

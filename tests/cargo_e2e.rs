@@ -1,7 +1,7 @@
 //! End-to-end Cargo tailor test. Heavy: downloads the pinned Rust toolchain
 //! and crates.io closure on first run.
 
-use blanket::kernel::platform::Platform;
+use tog::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,7 +10,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-cargo-e2e-{}-{}",
+            "tog-cargo-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -42,24 +42,24 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
 }
 
-fn blanket_with_tmp(bin: &Path, project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
+fn tog_with_tmp(bin: &Path, project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .env("TMPDIR", tmp)
         .env("HOME", tmp.join("home"))
-        .env("BLANKET_SANDBOX_TESTS", "required")
-        .env_remove("BLANKET_POLICY")
-        .env_remove("BLANKET_STRICT")
+        .env("TOG_SANDBOX_TESTS", "required")
+        .env_remove("TOG_POLICY")
+        .env_remove("TOG_STRICT")
         .args(args)
         .output()
         .unwrap()
@@ -77,7 +77,7 @@ fn assert_ok(output: Output, label: &str) -> String {
 
 fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
     let closure: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(project.join(".blanket/closures/cargo.json")).unwrap(),
+        &std::fs::read(project.join(".tog/closures/cargo.json")).unwrap(),
     )
     .unwrap();
     let objects = store.canonicalize().unwrap().join("objects");
@@ -118,12 +118,12 @@ fn cargo_sync_build_and_run_again_offline() {
         &project,
     );
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
     let (rust_obj, vendor_obj) = assert_cargo_closure(&project, &store);
     let rustc = assert_ok(
-        blanket(&binary, &project, &store, &["run", "rustc", "-vV"]),
+        tog(&binary, &project, &store, &["run", "rustc", "-vV"]),
         "rustc -vV",
     );
     assert!(
@@ -136,11 +136,11 @@ fn cargo_sync_build_and_run_again_offline() {
             .any(|line| { line.trim() == format!("host: {}", Platform::host().unwrap().triple()) }),
         "rustc reported the wrong host:\n{rustc}"
     );
-    assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
     let executable = project.join("target/debug/cargo-hello");
     assert!(executable.is_file());
     let output = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -164,20 +164,20 @@ fn cargo_sync_build_and_run_again_offline() {
     }
 
     // Rebuild from a clean target: everything must come from the store
-    // (network denial is already enforced by `blanket build` itself — the
+    // (network denial is already enforced by `tog build` itself — the
     // seatbelt sandbox cannot nest, so no outer sandbox-exec wrapper here).
     std::fs::remove_dir_all(project.join("target")).unwrap();
     assert!(
         !executable.exists(),
         "the first build result was not removed"
     );
-    assert_ok(blanket(&binary, &project, &store, &["build"]), "rebuild");
+    assert_ok(tog(&binary, &project, &store, &["build"]), "rebuild");
     assert!(executable.is_file());
     let (rebuilt_rust_obj, rebuilt_vendor_obj) = assert_cargo_closure(&project, &store);
     assert_eq!(rebuilt_rust_obj, rust_obj);
     assert_eq!(rebuilt_vendor_obj, vendor_obj);
     let output = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -205,14 +205,14 @@ fn dependency_edit_exception_is_not_published_to_cargo_closure() {
         "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"clippy\"]\n",
     )
     .unwrap();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     assert_ok(
-        blanket_with_tmp(&binary, &project, &store, &tmp, &["update"]),
+        tog_with_tmp(&binary, &project, &store, &tmp, &["update"]),
         "dependency edit and sync",
     );
 
-    let closures = project.join(".blanket/closures");
+    let closures = project.join(".tog/closures");
     let cargo: serde_json::Value =
         serde_json::from_slice(&std::fs::read(closures.join("cargo.json")).unwrap()).unwrap();
     let exceptions = cargo["body"]["exceptions"].as_array().unwrap();

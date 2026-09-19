@@ -1,4 +1,4 @@
-# blanket
+# tog
 
 One binary that owns the outer loop every language ecosystem shares:
 provision a pinned toolchain, realize a locked dependency graph into an
@@ -21,7 +21,7 @@ back atomically.
 
 ## Host prerequisites
 
-Blanket downloads every language toolchain itself, but native builds
+Tog downloads every language toolchain itself, but native builds
 compile against the host C toolchain, and the Linux build sandbox uses
 bubblewrap. On Fedora:
 
@@ -38,12 +38,12 @@ directory to PATH if it is not already there, and installs bash, zsh, and
 fish completions:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalWestern/blanket/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
 ```
 
-Every new terminal has `blanket` from then on. A script cannot change the
+Every new terminal has `tog` from then on. A script cannot change the
 PATH of the terminal that ran it, so it ends by printing the one command
-that finishes the job there (`source ~/.blanket/env`). Options:
+that finishes the job there (`source ~/.tog/env`). Options:
 `--dir=<path>`, `--version=<tag>`, `--no-modify-path`, `--no-completions`;
 the header of [install.sh](install.sh) lists every file it touches.
 
@@ -51,13 +51,13 @@ From source, with a Rust toolchain (`cargo install` puts the binary in
 `~/.cargo/bin`, which rustup already added to PATH):
 
 ```sh
-cargo install --git https://github.com/DigitalWestern/blanket --locked
+cargo install --git https://github.com/DigitalWestern/tog --locked
 # or, inside a checkout:
 cargo install --path . --locked
-blanket completions zsh > ~/.zfunc/_blanket   # bash | zsh | fish; optional
+tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
 ```
 
-Do not `cargo install blanket` from crates.io: that name belongs to an
+Do not `cargo install tog` from crates.io: that name belongs to an
 unrelated crate. Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*` tag.
 
@@ -65,30 +65,30 @@ unrelated crate. Releases are built by
 
 ```sh
 cd your-project     # an EXISTING project works as-is:
-blanket             # realize + project -> ./.venv and/or ./node_modules
-blanket run python app.py       # run inside the projected env(s)
-blanket add requests            # add a dependency with the ecosystem's own tool
-blanket x ruff check .          # run a tool without adding it (like uvx / npx)
-blanket build                   # sandboxed Cargo build (network denied)
-blanket gc --dry-run            # preview unreferenced store/cache cleanup
-blanket doctor                  # host prerequisites, sandbox, store, free space
-blanket --version
+tog             # realize + project -> ./.venv and/or ./node_modules
+tog run python app.py       # run inside the projected env(s)
+tog add requests            # add a dependency with the ecosystem's own tool
+tog x ruff check .          # run a tool without adding it (like uvx / npx)
+tog build                   # sandboxed Cargo build (network denied)
+tog gc --dry-run            # preview unreferenced store/cache cleanup
+tog doctor                  # host prerequisites, sandbox, store, free space
+tog --version
 ```
 
 Full command reference: [docs/human/CLI.md](docs/human/CLI.md), or
-`blanket help <command>`. Exit status: 0 success, 1 command failed, 2
+`tog help <command>`. Exit status: 0 success, 1 command failed, 2
 usage error; `run` passes the program's status through.
 
-Policy is permissive by default; `.blanket/policy.toml` can tighten it
+Policy is permissive by default; `.tog/policy.toml` can tighten it
 (`deny = ["install-script-failed", "git-dependency"]`), or
-`blanket sync --strict` denies every exception.
+`tog sync --strict` denies every exception.
 
-You never install Python or Node yourself: `blanket sync` materializes
+You never install Python or Node yourself: `tog sync` materializes
 pinned, verified toolchains into the store and wires `.venv` /
 `node_modules` to them. A project with both lockfiles gets both
 ecosystems from one sync. Resolution belongs to the ecosystem's own
 pinned tool; realization, verification, and provenance belong to
-blanket.
+tog.
 
 ## Store properties (proven by `tests/acceptance.sh` against real PyPI)
 
@@ -108,9 +108,9 @@ bash tests/acceptance.sh                  # the full end-to-end checklist
 ```
 
 On Linux the sandbox is bubblewrap (`dnf install bubblewrap`); set
-`BLANKET_SANDBOX_TESTS=required` to fail instead of skip when it is missing,
+`TOG_SANDBOX_TESTS=required` to fail instead of skip when it is missing,
 and point `TMPDIR` at a real disk, because a small tmpfs fills. A test that
-sets `BLANKET_STORE` uses a temp dir and holds `store::STORE_ENV_LOCK`; a
+sets `TOG_STORE` uses a temp dir and holds `store::STORE_ENV_LOCK`; a
 test that realizes through a child holds `supervise::SUPERVISION_TEST_LOCK`.
 `tests/architecture.rs` enforces the layering rules, the store lock, and
 that comments describe code rather than cite plans.
@@ -118,8 +118,8 @@ that comments describe code rather than cite plans.
 ## Working across machines
 
 Nothing platform-specific is committed: `.venv`, `node_modules`,
-`.blanket/` are ignored. Each host keeps its own store; toolchain and
+`.tog/` are ignored. Each host keeps its own store; toolchain and
 environment object ids include the platform triple, so a shared store
 never reuses a Mac object on Linux — only the artifact cache is common,
 because artifacts are content-addressed. After switching machines, run
-`blanket sync` once; it is a cache hit if that host has seen the lock.
+`tog sync` once; it is a cache hit if that host has seen the lock.

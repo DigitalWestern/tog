@@ -20,7 +20,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 
 fn temp_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "blanket-manifests-e2e-{}-{}",
+        "tog-manifests-e2e-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -36,10 +36,10 @@ fn temp_root() -> PathBuf {
 fn all_manifest_fixtures_sync_and_run() {
     let root = temp_root();
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let store = std::env::var_os("BLANKET_STORE")
+    let store = std::env::var_os("TOG_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("store"));
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     for (name, package) in [
         ("proj-poetry", "six"),
         ("proj-pdm", "six"),
@@ -52,8 +52,8 @@ fn all_manifest_fixtures_sync_and_run() {
         copy_tree(&fixtures.join(name), &project);
         let output = Command::new(&binary)
             .current_dir(&project)
-            .env("BLANKET_STORE", &store)
-            .env("BLANKET_SANDBOX_TESTS", "required")
+            .env("TOG_STORE", &store)
+            .env("TOG_SANDBOX_TESTS", "required")
             .args(["sync"])
             .output()
             .unwrap();
@@ -65,7 +65,7 @@ fn all_manifest_fixtures_sync_and_run() {
         );
         let run = Command::new(&binary)
             .current_dir(&project)
-            .env("BLANKET_STORE", &store)
+            .env("TOG_STORE", &store)
             .args(["run", "python", "-c", &format!("import {package}")])
             .output()
             .unwrap();
@@ -85,14 +85,14 @@ fn dynamic_vllm_shaped_fixture_syncs_real_dependencies() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let project = root.join("proj-vllm-shaped");
     copy_tree(&fixtures.join("proj-vllm-shaped"), &project);
-    let store = std::env::var_os("BLANKET_STORE")
+    let store = std::env::var_os("TOG_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("store"));
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     let output = Command::new(&binary)
         .current_dir(&project)
-        .env("BLANKET_STORE", &store)
-        .env("BLANKET_SANDBOX_TESTS", "required")
+        .env("TOG_STORE", &store)
+        .env("TOG_SANDBOX_TESTS", "required")
         .args(["sync"])
         .output()
         .unwrap();
@@ -104,7 +104,7 @@ fn dynamic_vllm_shaped_fixture_syncs_real_dependencies() {
     );
     let run = Command::new(&binary)
         .current_dir(&project)
-        .env("BLANKET_STORE", &store)
+        .env("TOG_STORE", &store)
         .args(["run", "python", "-c", "import six, idna"])
         .output()
         .unwrap();

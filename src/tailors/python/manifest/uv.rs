@@ -471,7 +471,7 @@ fn resolve_uv_package<'a>(
         ));
     }
     eprintln!(
-        "blanket: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
+        "tog: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
     );
     Ok(None)
 }
@@ -521,7 +521,7 @@ fn locked_from_uv_package(
         })
         .collect();
     let Some((file, _)) = pypi::select_file(&candidates, tag, platform, glibc) else {
-        eprintln!("blanket: uv.lock has no file compatible with the host for {}; falling back to uv resolution", package.name);
+        eprintln!("tog: uv.lock has no file compatible with the host for {}; falling back to uv resolution", package.name);
         return None;
     };
     let kind = package

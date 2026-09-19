@@ -109,7 +109,7 @@ pub fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
             })
         }
         _ => Ok(State::Unchecked(
-            "inputs were not recorded by this sync; run 'blanket sync' once to enable checks"
+            "inputs were not recorded by this sync; run 'tog sync' once to enable checks"
                 .into(),
         )),
     }

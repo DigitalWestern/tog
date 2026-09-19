@@ -1046,7 +1046,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "blanket-archive-{label}-{}-{}",
+            "tog-archive-{label}-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1252,7 +1252,7 @@ mod tests {
     #[test]
     fn owner_names_containing_spaces_cannot_shift_the_parsed_name() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-archive-owner-{}-{}",
+            "tog-archive-owner-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1676,7 +1676,7 @@ mod tests {
     #[test]
     fn dot_components_do_not_inflate_the_symlink_depth_budget() {
         let base = std::env::temp_dir().join(format!(
-            "blanket-archive-dot-{}-{}",
+            "tog-archive-dot-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

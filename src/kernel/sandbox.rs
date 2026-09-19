@@ -49,7 +49,7 @@ pub struct BuildSpec {
 /// their settings with `/^npm_config_/i`, so `Npm_Config_registry` is as live
 /// as `npm_config_registry`, and removing more of the user's environment is
 /// the safe direction for every other prefix list too) or equals one of
-/// `remove` (exact), then apply `set` last so blanket's values win.
+/// `remove` (exact), then apply `set` last so tog's values win.
 pub fn force_env(
     cmd: &mut Command,
     remove_prefixes: &[&str],
@@ -61,7 +61,7 @@ pub fn force_env(
         // `str::get` rather than `name[..len]`: the index is a byte offset
         // that need not be a char boundary, and `to_string_lossy` turns any
         // invalid byte into a three-byte replacement character, so slicing
-        // panics on env names blanket does not control. Out-of-boundary and
+        // panics on env names tog does not control. Out-of-boundary and
         // too-short both yield `None`, which is "no match".
         let has_prefix = remove_prefixes.iter().any(|prefix| {
             name.get(..prefix.len())
@@ -562,7 +562,7 @@ impl Sandbox<'_> {
             OsString::from("--unshare-ipc"),
             OsString::from("--unshare-uts"),
             OsString::from("--hostname"),
-            OsString::from("blanket"),
+            OsString::from("tog"),
             OsString::from("--unshare-cgroup-try"),
             OsString::from("--die-with-parent"),
             OsString::from("--new-session"),
@@ -858,7 +858,7 @@ fn find_socket_without_following_symlinks(path: &Path) -> io::Result<Option<Path
     Ok(None)
 }
 
-/// `blanket doctor`: is the build sandbox usable on this host? Runs the
+/// `tog doctor`: is the build sandbox usable on this host? Runs the
 /// same preflight the real sandbox runs, so a green answer here means a
 /// green sandboxed build.
 pub fn probe(platform: Platform) -> io::Result<String> {
@@ -912,7 +912,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             "--unshare-ipc",
             "--unshare-uts",
             "--hostname",
-            "blanket",
+            "tog",
             "--unshare-cgroup-try",
             "--die-with-parent",
             "--new-session",
@@ -1036,10 +1036,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     const F_GETFD: std::ffi::c_int = 1;
 
-    /// `BLANKET_SANDBOX_TESTS=required` (any non-empty value) turns every
+    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns every
     /// Linux skip into a panic so CI cannot report skipped checks as passed.
     fn required_sandbox_tests() -> bool {
-        matches!(std::env::var_os("BLANKET_SANDBOX_TESTS"), Some(value) if !value.is_empty())
+        matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
     }
 
     fn linux_ready(test_name: &str) -> bool {
@@ -1076,7 +1076,7 @@ mod tests {
     fn temp_dir(test_name: &str) -> PathBuf {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "blanket-sandbox-{test_name}-{}-{sequence}",
+            "tog-sandbox-{test_name}-{}-{sequence}",
             std::process::id()
         ));
         fs::create_dir(&path).expect("create unique sandbox test directory");
@@ -1213,7 +1213,7 @@ mod tests {
         let cache = home.join(".cache");
         fs::create_dir_all(&cache).unwrap();
         let scratch = cache.join(format!(
-            "blanket-test-ssh-{}",
+            "tog-test-ssh-{}",
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&scratch).unwrap();
@@ -1953,20 +1953,20 @@ mod tests {
     }
 
     /// npm and pnpm read `/^npm_config_/i`; the scrub must be as broad, and
-    /// blanket's forced value must be the only survivor.
+    /// tog's forced value must be the only survivor.
     #[test]
     fn force_env_strips_prefixes_case_insensitively_and_forced_values_win() {
         // Names are test-private so a parallel test never sees a real
         // setting appear; only the prefix is what the scrub keys on.
         let names = [
-            "Npm_Config_blanket_test_registry",
-            "NPM_config_blanket_test_forced",
-            "npm_config_blanket_test_forced",
-            "npm_config_blanket_test_store_dir",
-            "NPM_CONFIG_BLANKET_TEST_STORE_DIR",
-            "PNPM_BLANKET_TEST_HOME",
-            "pnpm_blanket_test_home",
-            "BLANKET_FORCE_ENV_KEEP",
+            "Npm_Config_tog_test_registry",
+            "NPM_config_tog_test_forced",
+            "npm_config_tog_test_forced",
+            "npm_config_tog_test_store_dir",
+            "NPM_CONFIG_TOG_TEST_STORE_DIR",
+            "PNPM_TOG_TEST_HOME",
+            "pnpm_tog_test_home",
+            "TOG_FORCE_ENV_KEEP",
         ];
         for name in names {
             std::env::set_var(name, "user");
@@ -1976,7 +1976,7 @@ mod tests {
             &mut cmd,
             &["npm_config_", "PNPM_"],
             &[],
-            &[("npm_config_blanket_test_forced".into(), "true".into())],
+            &[("npm_config_tog_test_forced".into(), "true".into())],
         );
         let envs: std::collections::BTreeMap<String, Option<String>> = cmd
             .get_envs()
@@ -1991,12 +1991,12 @@ mod tests {
             std::env::remove_var(name);
         }
         for removed in [
-            "Npm_Config_blanket_test_registry",
-            "NPM_config_blanket_test_forced",
-            "npm_config_blanket_test_store_dir",
-            "NPM_CONFIG_BLANKET_TEST_STORE_DIR",
-            "PNPM_BLANKET_TEST_HOME",
-            "pnpm_blanket_test_home",
+            "Npm_Config_tog_test_registry",
+            "NPM_config_tog_test_forced",
+            "npm_config_tog_test_store_dir",
+            "NPM_CONFIG_TOG_TEST_STORE_DIR",
+            "PNPM_TOG_TEST_HOME",
+            "pnpm_tog_test_home",
         ] {
             assert_eq!(
                 envs.get(removed),
@@ -2005,29 +2005,29 @@ mod tests {
             );
         }
         assert_eq!(
-            envs.get("npm_config_blanket_test_forced"),
+            envs.get("npm_config_tog_test_forced"),
             Some(&Some("true".to_string()))
         );
         assert!(
-            !envs.contains_key("BLANKET_FORCE_ENV_KEEP"),
+            !envs.contains_key("TOG_FORCE_ENV_KEEP"),
             "an unrelated variable was touched: {envs:?}"
         );
     }
 
     /// The prefix comparison indexes by byte offset. Env names are not
-    /// blanket's to choose, and `to_string_lossy` widens any invalid byte to
+    /// tog's to choose, and `to_string_lossy` widens any invalid byte to
     /// a three-byte replacement character, so a name can put a multi-byte
     /// character across the offset a prefix length lands on. Slicing there
-    /// panics and takes down every caller — `blanket run` for Ruby, Elixir
+    /// panics and takes down every caller — `tog run` for Ruby, Elixir
     /// and .NET as much as a pnpm edit.
     #[test]
     fn force_env_survives_names_that_straddle_a_prefix_boundary() {
         // "abc" + U+FFFD: the replacement character occupies bytes 3..6, so
         // byte 5 (the length of "PNPM_") is inside it.
-        let straddles = "abc\u{fffd}_blanket_test";
+        let straddles = "abc\u{fffd}_tog_test";
         assert!(!straddles.is_char_boundary(5));
         // A non-UTF-8 name reaches the same place through `to_string_lossy`.
-        let invalid = OsStr::from_bytes(b"abc\xff_blanket_test");
+        let invalid = OsStr::from_bytes(b"abc\xff_tog_test");
         std::env::set_var(straddles, "user");
         std::env::set_var(invalid, "user");
         let mut cmd = Command::new("true");
@@ -2042,7 +2042,7 @@ mod tests {
             .collect();
         std::env::remove_var(straddles);
         std::env::remove_var(invalid);
-        for name in [straddles, "abc\u{fffd}_blanket_test"] {
+        for name in [straddles, "abc\u{fffd}_tog_test"] {
             assert!(
                 !touched.iter().any(|seen| seen == name),
                 "a name matching no prefix was scrubbed: {touched:?}"

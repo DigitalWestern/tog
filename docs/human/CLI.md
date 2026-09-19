@@ -1,4 +1,4 @@
-# Blanket CLI
+# Tog CLI
 
 *Written 2026-09-10. Replaces the 2026-09-06 plan at the repo root: what it
 promised is shipped, so this file describes only what exists. The help screen
@@ -6,12 +6,12 @@ below is the spec, generated from the command table in `src/cli/spec.rs`; if thi
 file and the binary differ, fix this file.*
 
 ```
-blanket 0.1.0 — one command for every package manager
+tog 0.1.0 — one command for every package manager
 
 USAGE:
-  blanket [<options>] <command> [<args>...]
-  blanket                      in a project: the same as 'blanket sync'
-  blanket <script> [<args>...] run a package.json script (like 'npm run')
+  tog [<options>] <command> [<args>...]
+  tog                      in a project: the same as 'tog sync'
+  tog <script> [<args>...] run a package.json script (like 'npm run')
 
 EVERYDAY:
   sync         realize and project the environment(s) from the project's inputs
@@ -40,11 +40,11 @@ MAINTAIN:
   version      print the version
 
 OPTIONS:
-  -C, --directory <dir>  run as if blanket had been started in <dir>
+  -C, --directory <dir>  run as if tog had been started in <dir>
   -q, --quiet            no narration: only errors and results on stdout
   -v, --verbose          show every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
-  -h, --help             print help ('blanket help <command>' for one command)
+  -h, --help             print help ('tog help <command>' for one command)
   -V, --version          print the version
 
 PROJECT INPUTS (any combination; each found ecosystem is synced):
@@ -67,10 +67,10 @@ PROJECT INPUTS (any combination; each found ecosystem is synced):
                           .NET NuGet deps (the lock is mandatory)
 
 ENVIRONMENT:
-  BLANKET_STORE           store root (default ~/.blanket/store)
-  BLANKET_STRICT=1        refuse every policy exception, like --strict
-  BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
-  BLANKET_SIGNING_KEY     key file; every command that writes a closure signs it
+  TOG_STORE           store root (default ~/.tog/store)
+  TOG_STRICT=1        refuse every policy exception, like --strict
+  TOG_POLICY          policy file used instead of ~/.tog/policy.toml
+  TOG_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR                plain output, like --no-color
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'
@@ -81,7 +81,7 @@ pass the program's status through.
 
 - **stdout is results, stderr is narration.** `plan`, `sbom`, `store path`,
   and the `--json` forms write parseable output to stdout and nothing else;
-  progress keeps the `blanket:` prefix on stderr.
+  progress keeps the `tog:` prefix on stderr.
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`sync: unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
@@ -92,25 +92,25 @@ pass the program's status through.
 - **`-C <dir>`** before the command, like make and git.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged; only a *leading*
-  `-h`/`--help` is blanket's, and `--` forces pass-through (`blanket build
+  `-h`/`--help` is tog's, and `--` forces pass-through (`tog build
   --release` works; use `--` if the first tool argument is itself `-h`).
 
 ## Completions
 
-`blanket completions bash|zsh|fish` prints a script generated from the same
+`tog completions bash|zsh|fish` prints a script generated from the same
 command table as the help: commands, per-command options, `store path|roots`,
 `build <ecosystem>`. package.json script names complete under `run` and as
 the first word when a package.json is present.
 
 ## Everyday verbs
 
-**sync** (aliases: `install`, `i`; a bare `blanket` inside a project means
+**sync** (aliases: `install`, `i`; a bare `tog` inside a project means
 `sync`) discovers every ecosystem present in the current directory, realizes
 each locked plan into the store, and projects it (`.venv`, `node_modules`,
-`.blanket/...`); a manifest with no dependencies syncs an interpreter-only
+`.tog/...`); a manifest with no dependencies syncs an interpreter-only
 environment, and `--fresh` drops project-local caches and rebuilds. Policy
-exceptions are recorded in `.blanket/closures/*.json` and summarized;
-`--strict`, `BLANKET_STRICT=1`, or a `.blanket/policy.toml` deny list
+exceptions are recorded in `.tog/closures/*.json` and summarized;
+`--strict`, `TOG_STRICT=1`, or a `.tog/policy.toml` deny list
 refuses them instead.
 
 **add / remove / update** edit the manifest and lock with the ecosystem's own
@@ -130,7 +130,7 @@ refused with both roots named. Ecosystem choice, cheapest rung first:
 3. registry existence checks when one directory holds several manifests — a
    name known to exactly one registry wins, known to several asks at the
    terminal;
-4. non-interactive: the error lists the candidates and the prefixes. Blanket
+4. non-interactive: the error lists the candidates and the prefixes. Tog
    never guesses from the bare name.
 
 Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
@@ -140,14 +140,14 @@ store Cargo and `--no-deps`, so a project that has never been synced needs
 no Cargo.lock or vendor object; `--check` passes rustfmt's status through.
 The run writes a toolchain-only `rustfmt` closure that `ls`/`sbom`/`gc` see,
 `audit` compares with the pin, and `status` ignores. A package.json script named `fmt` wins and runs as
-`blanket run fmt`; an explicit `--eco rust` bypasses the script.
+`tog run fmt`; an explicit `--eco rust` bypasses the script.
 
 **run** executes a command with the PATH and ecosystem variables of the
-nearest projected root (the closest ancestor with `.blanket/closures/`). A
+nearest projected root (the closest ancestor with `.tog/closures/`). A
 package.json script of the same name wins over an executable on PATH and
 runs with the npm lifecycle environment; the exit code passes through.
-`blanket <script>` is the short form for any first word that is not a
-built-in command, and a built-in always wins (`blanket build` is the
+`tog <script>` is the short form for any first word that is not a
+built-in command, and a built-in always wins (`tog build` is the
 sandboxed build, never a script named build).
 
 **x** resolves a tool from PyPI or npm, realizes it as an ordinary store
@@ -155,12 +155,12 @@ environment (a store hit from the second run on), and executes it. Registry:
 a `py:`/`npm:` prefix on the tool, `--py`/`--npm`, or the current project's
 ecosystem (Python first, then Node); outside a project the prefix is
 required. `--from` names the package when the executable is called
-something else (`blanket x --from httpie http`). Sharp edges of `x --clean`:
+something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 
-- It removes cached environments under `~/.blanket/x/`, or only the selected
+- It removes cached environments under `~/.tog/x/`, or only the selected
   tool's (all versions when `@version` is omitted); store objects stay until
-  the next `blanket gc` — for a node tool the summary names
-  `blanket gc --project`, the only pass that reclaims the forest.
+  the next `tog gc` — for a node tool the summary names
+  `tog gc --project`, the only pass that reclaims the forest.
 - It takes flags and an optional tool, never free arguments; exit status is
   0 whenever cleanup completed, and `nothing to clean` prints only when no
   candidate matched — a root skipped as in use is reported.
@@ -177,10 +177,10 @@ mix.exs, `*.csproj`) is found from here upward — name it when several are.
 and checks the projection is in place, naming the changed file otherwise.
 Offline, read-only, exit 0 only when everything is synced. **audit** is the
 CI admission gate: it reads the closure records every sync committed to
-`.blanket/closures/*.json`, authenticates each one, and judges the
-exceptions it records against the policy chain (`BLANKET_POLICY` or
-`~/.blanket/policy.toml`, every ancestor's `.blanket/policy.toml`,
-`BLANKET_STRICT`) merged with `--policy <file>`. Merging only tightens: a
+`.tog/closures/*.json`, authenticates each one, and judges the
+exceptions it records against the policy chain (`TOG_POLICY` or
+`~/.tog/policy.toml`, every ancestor's `.tog/policy.toml`,
+`TOG_STRICT`) merged with `--policy <file>`. Merging only tightens: a
 project or `--policy` file can add denials and drop trusted keys, never the
 reverse; a `--policy` file that is missing or malformed is a usage error
 (exit 2), never ignored, so CI can tell an operator mistake from a denied
@@ -192,17 +192,17 @@ primary closure, each record is current for the inputs on disk, and no
 recorded exception is denied or unknown. It does not prove the signer's
 sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 
-Signing: `blanket keygen <path>` writes an Ed25519 key file (mode 0600,
+Signing: `tog keygen <path>` writes an Ed25519 key file (mode 0600,
 never overwriting an existing file or symlink) and prints the `[signing]`
 table that trusts it; the private seed is never printed. With
-`BLANKET_SIGNING_KEY=<path>` set, every command that writes a closure
+`TOG_SIGNING_KEY=<path>` set, every command that writes a closure
 (`sync`, `fmt`, `build`, `add`, `remove`, `update`) signs it. The key is
 loaded once, before the store is opened or a manifest is edited; a configured key (including an empty path) that is
 missing, malformed, not a regular file, or readable by group or other fails
 the command, never silently downgrades to unsigned. Unset, the record is
 written unsigned and the sync summary says so. Trust is the machine
 policy's `[signing]` table, `trusted = ["ed25519:<64 hex>", ...]`, in
-`BLANKET_POLICY` or `~/.blanket/policy.toml`; a project `.blanket/policy.toml`
+`TOG_POLICY` or `~/.tog/policy.toml`; a project `.tog/policy.toml`
 or the `--policy` file can only intersect with it, so a pull request that
 edits the record and the project policy can only remove trust. With no
 `[signing]` table at machine scope the gate is not configured: exit 2 with
@@ -232,7 +232,7 @@ algorithm; find out who changed it, then regenerate under a trusted key),
 `untrusted` (verifies under a key the effective set does not contain; the
 line names the key and the scopes that exclude it), `outdated` (no
 signature, or a record from before inputs, platform, or the exception
-record were written; run `blanket sync` once under a trusted key, then
+record were written; run `tog sync` once under a trusted key, then
 commit), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
@@ -241,16 +241,16 @@ detail), `unknown` (an exception kind this binary cannot judge), or `clean`
 unsigned record is not evaluated further: freshness is not computed and no
 exception is judged, and the line says `(not evaluated)` rather than
 claiming anything about its contents. A detected ecosystem with no
-`.blanket/closures/<ecosystem>.json` is listed as `missing` and fails the
+`.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
 report; the optional `rustfmt` record is not a substitute for `cargo.json`.
 Only `clean` with nothing missing passes. The `rustfmt` closure
-`blanket fmt` writes projects nothing, so its inputs are the rustfmt object
+`tog fmt` writes projects nothing, so its inputs are the rustfmt object
 it ran, the directory the toolchain file was looked up from, and the
-components that file asked for that blanket does not provide. It is `stale`
+components that file asked for that tog does not provide. It is `stale`
 when any of those, or the Rust object and version beside them, is not what
 this binary would record for the same run now (including a toolchain with
 no pinned rustfmt), and `outdated` when it predates recording inputs;
-either way the fix is `blanket fmt`. A closure file whose `ecosystem` field
+either way the fix is `tog fmt`. A closure file whose `ecosystem` field
 disagrees with its name, or whose envelope is malformed (not `closure/1`,
 no ecosystem string, a non-object body), is refused with exit 1, not
 judged. No rebuild, no store access, no network, no sandbox: it works on a
@@ -273,9 +273,9 @@ and `trusted` (`null` when the file has no `[signing]` table, `[]` when it
 explicitly trusts nobody); file-backed sources also have `path` as a lossy
 UTF-8 string. A non-UTF-8 path also has `path_bytes` as the lowercase hex
 of its raw bytes; that field is present only for non-UTF-8 paths. `origin`
-is `machine` (`BLANKET_POLICY`, or `~/.blanket/policy.toml`), `project` (an
-ancestor's `.blanket/policy.toml`), `flag` (the `--policy <file>` file, and
-nothing else for audit), or `env` (`BLANKET_STRICT=1`). The supplied
+is `machine` (`TOG_POLICY`, or `~/.tog/policy.toml`), `project` (an
+ancestor's `.tog/policy.toml`), `flag` (the `--policy <file>` file, and
+nothing else for audit), or `env` (`TOG_STRICT=1`). The supplied
 `--policy` file is listed after the ordinary chain. The `path` field is
 omitted for strictness-only sources, and `deny` is always an array,
 including when it is empty. A file source is listed when it exists and is
@@ -289,7 +289,7 @@ them in place. Exit 0 when every closure is clean and none is missing, 1
 otherwise, 2 when the gate is misconfigured. A company deny list to start
 from ships as [policy-company.toml](policy-company.toml); every kind it
 names is checked against the binary's kind list by a unit test. **ls** reads
-`.blanket/closures/*.json` (no store access): name, version, and toolchain
+`.tog/closures/*.json` (no store access): name, version, and toolchain
 per package, `-v` adds artifact and store object; the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`, `rustfmt`.
 **plan** prints what `sync` would realize, one JSON document per ecosystem.
@@ -305,7 +305,7 @@ staging; objects touched in the last ten minutes are always kept so a
 concurrent sync cannot lose one. Sharp edges:
 
 - `--forget <key>...` removes protection records by the exact keys printed
-  by `blanket store roots` (`<40-hex key>  <path>`, one line each), matched
+  by `tog store roots` (`<40-hex key>  <path>`, one line each), matched
   as typed including case. It removes only the record, so its objects become
   collectible; it clears even an unusable record without reading any other,
   so a damaged record never blocks recovering from it.
@@ -327,12 +327,12 @@ concurrent sync cannot lose one. Sharp edges:
 **keygen** `<path>` creates a closure-signing key (see **audit** above) and
 prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
-root (`store roots`). **version** prints `blanket 0.1.0`.
+root (`store roots`). **version** prints `tog 0.1.0`.
 
 ## Open questions
 
-- `blanket why <pkg>`: closures record packages, not dependency edges.
-- `sync --frozen` (validate `blanket-toolchain.toml` without touching it)
+- `tog why <pkg>`: closures record packages, not dependency edges.
+- `sync --frozen` (validate `tog-toolchain.toml` without touching it)
   and `update --toolchain` are designed but not implemented.
-- `x` for cargo and go; a `blanket.toml` `[tasks]` table for cross-language
+- `x` for cargo and go; a `tog.toml` `[tasks]` table for cross-language
   scripts — both wait for a real need.

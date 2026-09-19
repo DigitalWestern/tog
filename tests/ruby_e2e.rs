@@ -15,7 +15,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-ruby-e2e-{}-{}",
+            "tog-ruby-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -39,10 +39,10 @@ impl Drop for TempDir {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -159,7 +159,7 @@ fn assert_no_forbidden_prefix(text: &str, staging: &Path, what: &str) {
     }
 }
 
-/// Run the realized interpreter directly (no blanket, scrubbed env) so a
+/// Run the realized interpreter directly (no tog, scrubbed env) so a
 /// host Ruby can never answer for it.
 fn pinned_ruby(ruby: &Path, cwd: &Path, script: &str, label: &str) -> String {
     let output = Command::new(ruby.join("bin/ruby"))
@@ -456,7 +456,7 @@ require "json"
 require "digest"
 require "openssl"
 require "zlib"
-input = "blanket-linux-ruby"
+input = "tog-linux-ruby"
 compressed = Zlib::Deflate.deflate(input)
 abort "zlib round-trip failed" unless Zlib::Inflate.inflate(compressed) == input
 digest = OpenSSL::Digest::SHA256.hexdigest(input)
@@ -499,7 +499,7 @@ fn ruby_sync_native_ext_and_run() {
     }
     let store = temp.0.join("store");
     let staging = store.join("tmp");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     // Hostile .bundle/config must be neutralized (BUNDLE_IGNORE_CONFIG).
     std::fs::create_dir_all(project.join(".bundle")).unwrap();
@@ -513,7 +513,7 @@ fn ruby_sync_native_ext_and_run() {
     if linux {
         // `plan` publishes the Ruby object and prints the gem plan without
         // installing anything, so the toolchain can be gated on its own.
-        let plan = assert_ok(blanket(&binary, &project, &store, &["plan"]), "plan");
+        let plan = assert_ok(tog(&binary, &project, &store, &["plan"]), "plan");
         let plan: serde_json::Value = serde_json::from_str(plan.trim())
             .unwrap_or_else(|e| panic!("plan output is not JSON ({e}): {plan}"));
         let gems = plan["gems"].as_array().unwrap();
@@ -555,7 +555,7 @@ fn ruby_sync_native_ext_and_run() {
 
     // Sandboxed gem realization: racc's C extension, and on Linux nokogiri's
     // vendored libxml2/libxslt, compile here (network denied).
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
 
     let (ruby_obj, _) = find_object(&store, "ruby").expect("Ruby object published");
     let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
@@ -604,7 +604,7 @@ fn ruby_sync_native_ext_and_run() {
 
     if linux {
         let stdlib = assert_ok(
-            blanket(
+            tog(
                 &binary,
                 &project,
                 &store,
@@ -619,7 +619,7 @@ fn ruby_sync_native_ext_and_run() {
     // native extension (.bundle on Darwin, .so on Linux) stayed loadable and
     // the projected env works.
     let out = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -637,7 +637,7 @@ fn ruby_sync_native_ext_and_run() {
     // /usr/bin fallback: a symlink binstub that dangles after the commit
     // rename would otherwise let host rake answer and the check still pass.
     let which = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -658,7 +658,7 @@ fn ruby_sync_native_ext_and_run() {
     // The wrapper itself must execute (relocatable, not a dangling link).
     // Pass the absolute store path as argv[0]; no shell that could quietly
     // fall back to /usr/bin/rake.
-    let direct = blanket(
+    let direct = tog(
         &binary,
         &project,
         &store,
@@ -669,7 +669,7 @@ fn ruby_sync_native_ext_and_run() {
 
     if linux {
         let nokogiri = assert_ok(
-            blanket(
+            tog(
                 &binary,
                 &project,
                 &store,

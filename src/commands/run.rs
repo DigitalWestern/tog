@@ -1,4 +1,4 @@
-//! `blanket run <cmd>`: run a command inside the projected environment.
+//! `tog run <cmd>`: run a command inside the projected environment.
 //! Every tailor contributes its PATH prefixes and environment through
 //! `Tailor::run_env`; the package.json script protocol (npm lifecycle
 //! events, `npm_*` variables) is the one ecosystem-specific piece that stays
@@ -24,7 +24,7 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
             "run: no command given",
         ));
     }
-    // Walk up from cwd to the nearest projected root, so `blanket run`
+    // Walk up from cwd to the nearest projected root, so `tog run`
     // works from workspace subdirectories like npm run does.
     let cwd = ctx.project_dir();
     let dir = projected_root(&cwd);
@@ -60,12 +60,12 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
         None
     };
     if refuse_dotnet_script(
-        std::fs::symlink_metadata(dir.join(".blanket/closures/dotnet.json")).is_ok(),
+        std::fs::symlink_metadata(dir.join(".tog/closures/dotnet.json")).is_ok(),
         script_steps.is_some(),
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "package.json scripts are not run under a .NET projection (MSBuild belongs in the sandbox: use `blanket build dotnet`)",
+            "package.json scripts are not run under a .NET projection (MSBuild belongs in the sandbox: use `tog build dotnet`)",
         ));
     }
     let mut prefix: Vec<String> = Vec::new();
@@ -78,7 +78,7 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "no environment projected here for command '{}'; run `blanket sync` first",
+                "no environment projected here for command '{}'; run `tog sync` first",
                 cmd[0]
             ),
         ));
@@ -101,7 +101,7 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
             .filter(|key| key.to_string_lossy().starts_with("npm_"))
             .collect();
         for (event, script) in steps {
-            eprintln!("blanket: > {event}: {script}");
+            eprintln!("tog: > {event}: {script}");
             let mut step = std::process::Command::new("/bin/sh");
             step.arg("-c").arg(script).current_dir(&dir);
             for (key, value) in &envs {

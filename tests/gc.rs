@@ -1,7 +1,7 @@
 //! Ignored end-to-end coverage for project roots and cross-ecosystem GC.
 //!
 //! Run on a Linux host with a throwaway store:
-//! BLANKET_STORE=$HOME/scratch/tmp/nxgc-store TMPDIR=$HOME/scratch/tmp \
+//! TOG_STORE=$HOME/scratch/tmp/nxgc-store TMPDIR=$HOME/scratch/tmp \
 //! cargo test --test gc -- --ignored --nocapture
 
 use std::fs;
@@ -18,7 +18,7 @@ impl TempDir {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let path = base.join(format!(
-            "blanket-gc-e2e-{}-{}",
+            "tog-gc-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -26,7 +26,7 @@ impl TempDir {
                 .as_nanos()
         ));
         fs::create_dir_all(&path).unwrap();
-        // blanket records object paths under the store's canonicalized root
+        // tog records object paths under the store's canonicalized root
         // and compares them exactly; on macOS the temp dir sits under /var,
         // a symlink to /private/var.
         Self(path.canonicalize().unwrap())
@@ -35,7 +35,7 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.0);
+        let _ = tog::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -53,22 +53,22 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(cwd)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
 }
 
-fn blanket_home(bin: &Path, cwd: &Path, store: &Path, home: &Path, args: &[&str]) -> Output {
+fn tog_home(bin: &Path, cwd: &Path, store: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(cwd)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .env("HOME", home)
-        .env_remove("BLANKET_POLICY")
-        .env_remove("BLANKET_STRICT")
+        .env_remove("TOG_POLICY")
+        .env_remove("TOG_STRICT")
         .env("NO_COLOR", "1")
         .args(args)
         .output()
@@ -113,7 +113,7 @@ fn age(path: &Path) {
     fs::File::open(path).unwrap().set_modified(old).unwrap();
 }
 
-/// Parse `blanket store roots` output: one "<key>  <path>" line per root.
+/// Parse `tog store roots` output: one "<key>  <path>" line per root.
 fn roots_listing(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
@@ -135,10 +135,10 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     let node = temp.0.join("proj-npm");
     copy_tree(&fixtures.join("proj-a"), &python);
     copy_tree(&fixtures.join("proj-npm"), &node);
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    ok(blanket(&bin, &python, &store, &["sync"]), "sync proj-a");
-    ok(blanket(&bin, &node, &store, &["sync"]), "sync proj-npm");
+    ok(tog(&bin, &python, &store, &["sync"]), "sync proj-a");
+    ok(tog(&bin, &node, &store, &["sync"]), "sync proj-npm");
     let node_canonical = node.canonicalize().unwrap();
     fs::remove_dir_all(&node).unwrap();
 
@@ -164,7 +164,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
 
     // A root/2 record carries its own object set, so a deleted project no
     // longer blocks collection and its tools remain protected.
-    let retained = blanket(
+    let retained = tog(
         &bin,
         &python,
         &store,
@@ -191,7 +191,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     );
 
     let keys = roots_listing(&ok(
-        blanket(&bin, &python, &store, &["store", "roots"]),
+        tog(&bin, &python, &store, &["store", "roots"]),
         "store roots",
     ));
     let node_key = keys
@@ -202,7 +202,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
 
     // Dry-run forget simulates only; the record survives.
     let dry = ok(
-        blanket(
+        tog(
             &bin,
             &python,
             &store,
@@ -213,7 +213,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     assert!(dry.contains("would forget root"), "{dry}");
     assert!(
         roots_listing(&ok(
-            blanket(&bin, &python, &store, &["store", "roots"]),
+            tog(&bin, &python, &store, &["store", "roots"]),
             "store roots"
         ))
         .iter()
@@ -222,7 +222,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     );
 
     ok(
-        blanket(
+        tog(
             &bin,
             &python,
             &store,
@@ -248,7 +248,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
             .any(|meta| meta.contains(r#""kind": "node-env""#)),
         "forget unexpectedly swept store objects"
     );
-    ok(blanket(&bin, &python, &store, &["gc"]), "gc");
+    ok(tog(&bin, &python, &store, &["gc"]), "gc");
     let objects = fs::read_dir(store.join("objects"))
         .unwrap()
         .map(|entry| {
@@ -268,7 +268,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         "node object survived GC after its record was forgotten"
     );
     ok(
-        blanket(
+        tog(
             &bin,
             &python,
             &store,
@@ -305,9 +305,9 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
     age(&object);
 
     let project = temp.0.join("never-resynced");
-    fs::create_dir_all(project.join(".blanket/closures")).unwrap();
+    fs::create_dir_all(project.join(".tog/closures")).unwrap();
     fs::write(
-        project.join(".blanket/closures/python.json"),
+        project.join(".tog/closures/python.json"),
         serde_json::json!({
             "schema": "closure/1",
             "ecosystem": "python",
@@ -317,8 +317,8 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
     )
     .unwrap();
 
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
-    let refused = blanket(&bin, &project, &store, &["gc", "--keep-days", "0"]);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    let refused = tog(&bin, &project, &store, &["gc", "--keep-days", "0"]);
     assert!(
         !refused.status.success(),
         "uninitialized GC unexpectedly ran"
@@ -334,7 +334,7 @@ fn gc_upgrade_does_not_collect_unregistered_legacy_project() {
     );
     assert!(object.is_dir(), "default upgrade GC deleted the old object");
 
-    let registered = blanket(
+    let registered = tog(
         &bin,
         &project,
         &store,
@@ -367,10 +367,10 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     let project = temp.0.join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     ok(
-        blanket_home(
+        tog_home(
             &bin,
             &project,
             &store,
@@ -379,15 +379,15 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         ),
         "realize x ruff",
     );
-    let x_dir = home.join(".blanket/x");
+    let x_dir = home.join(".tog/x");
     let ruff_root = fs::read_dir(&x_dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.join(".blanket/x.json").is_file())
+        .find(|path| path.join(".tog/x.json").is_file())
         .expect("ruff x root");
     let ruff_canonical = ruff_root.canonicalize().unwrap();
     let closure: serde_json::Value = serde_json::from_reader(
-        fs::File::open(ruff_root.join(".blanket/closures/python.json")).unwrap(),
+        fs::File::open(ruff_root.join(".tog/closures/python.json")).unwrap(),
     )
     .unwrap();
     let env_object = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
@@ -397,7 +397,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     // projection must make the next run reproject the cached environment.
     fs::remove_file(ruff_root.join(".venv")).unwrap();
     ok(
-        blanket_home(
+        tog_home(
             &bin,
             &project,
             &store,
@@ -409,7 +409,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     assert!(ruff_root.join(".venv").is_symlink());
 
     let roots = ok(
-        blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
+        tog_home(&bin, &project, &store, &home, &["store", "roots"]),
         "x root registration",
     );
     assert!(roots_listing(&roots)
@@ -417,7 +417,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         .any(|(_, path)| Path::new(path) == ruff_canonical));
 
     let cleaned = ok(
-        blanket_home(&bin, &project, &store, &home, &["x", "--clean", "py:ruff"]),
+        tog_home(&bin, &project, &store, &home, &["x", "--clean", "py:ruff"]),
         "clean x ruff",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
@@ -434,7 +434,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         ruff_lock.display()
     );
     let roots = ok(
-        blanket_home(&bin, &project, &store, &home, &["store", "roots"]),
+        tog_home(&bin, &project, &store, &home, &["store", "roots"]),
         "removed x root registration",
     );
     assert!(!roots_listing(&roots)
@@ -449,7 +449,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         .set_modified(SystemTime::now() - Duration::from_secs(11 * 60))
         .unwrap();
     ok(
-        blanket_home(&bin, &project, &store, &home, &["gc", "--keep-days", "0"]),
+        tog_home(&bin, &project, &store, &home, &["gc", "--keep-days", "0"]),
         "gc after x clean",
     );
     assert!(
@@ -460,7 +460,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     // Prewarm pytest so the busy process reaches the test body quickly and
     // the readiness handshake below tests lock inheritance, not PyPI latency.
     ok(
-        blanket_home(
+        tog_home(
             &bin,
             &project,
             &store,
@@ -476,23 +476,23 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("py-pytest-"))
-                && path.join(".blanket/x.json").is_file()
+                && path.join(".tog/x.json").is_file()
         })
         .expect("prewarmed pytest x root");
     let ready = project.join("pytest-started");
     let release = project.join("pytest-release");
     fs::write(
         project.join("test_sleep.py"),
-        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"BLANKET_TEST_READY\"]).write_text(\"ready\")\n    release = Path(os.environ[\"BLANKET_TEST_RELEASE\"])\n    while not release.is_file():\n        time.sleep(0.1)\n",
+        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"TOG_TEST_READY\"]).write_text(\"ready\")\n    release = Path(os.environ[\"TOG_TEST_RELEASE\"])\n    while not release.is_file():\n        time.sleep(0.1)\n",
     )
     .unwrap();
     let running = ChildGuard(Some(
         Command::new(&bin)
             .current_dir(&project)
-            .env("BLANKET_STORE", &store)
+            .env("TOG_STORE", &store)
             .env("HOME", &home)
-            .env("BLANKET_TEST_READY", &ready)
-            .env("BLANKET_TEST_RELEASE", &release)
+            .env("TOG_TEST_READY", &ready)
+            .env("TOG_TEST_RELEASE", &release)
             .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
             .spawn()
             .unwrap(),
@@ -505,7 +505,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         ready.is_file(),
         "pytest did not reach the readiness handshake"
     );
-    let busy = blanket_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]);
+    let busy = tog_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]);
     assert_eq!(busy.status.code(), Some(0), "clean while busy failed");
     let busy_text = String::from_utf8_lossy(&busy.stdout);
     assert!(
@@ -523,7 +523,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     );
 
     let cleaned = ok(
-        blanket_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]),
+        tog_home(&bin, &project, &store, &home, &["x", "--clean", "pytest"]),
         "clean pytest after exit",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");

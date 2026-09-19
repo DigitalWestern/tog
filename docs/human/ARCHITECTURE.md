@@ -1,6 +1,6 @@
-# Blanket architecture
+# Tog architecture
 
-Blanket is a universal realization and environment kernel with
+Tog is a universal realization and environment kernel with
 ecosystem-native planners. One binary that (eventually) replaces per-language
 package managers by owning the outer loop every ecosystem shares: fetch a
 toolchain, lock a dependency graph, materialize it into an immutable store,
@@ -14,13 +14,13 @@ apps with native wheels. Cargo, Go, Ruby, Elixir, and .NET all landed
 (adapter code excluding tests): Python ~1030 lines (pypi+wheel+python+build),
 npm ~1015, cargo ~690, go ~600, ruby ~540, elixir ~620, dotnet ~540. The
 kernel thesis holds. pnpm v9/v6 and Yarn classic lockfile importers shipped
-2026-09-06 (`src/tailors/node/lock_import/`). Current version: blanket 0.1.0.
+2026-09-06 (`src/tailors/node/lock_import/`). Current version: tog 0.1.0.
 
 ## The model
 
 Stolen from Nix, minus the interface.
 
-- **Store** (`~/.blanket/store`, `BLANKET_STORE` overrides): input-addressed
+- **Store** (`~/.tog/store`, `TOG_STORE` overrides): input-addressed
   immutable objects at `objects/<hash16>-<name>-<version>/`. An object's id
   is a hash of its `Identity`: kind, name, version, and every input that
   determines the output (artifact sha256s, dependency object ids). Objects
@@ -35,27 +35,28 @@ Stolen from Nix, minus the interface.
   locks coexist as different objects.
 - **Projection**: a project's `.venv` is one symlink into the store, swapped
   atomically. Rollback = swapping back (instant cache hit). Provenance lives
-  in `.blanket/closure.json`.
+  in `.tog/closure.json`.
 - **Node projection is a forest** (`node-forest/2`): the root `node_modules`
-  is a symlink into `<BLANKET_STORE>/forests/<project-key>/<projection-id>/`,
+  is a symlink into `<TOG_STORE>/forests/<project-key>/<projection-id>/`,
   each workspace importer gets its own symlink, and the immutable env holds
   the same layout. The forest is a writable per-project directory that
   absorbs scratch writes (vite's `.vite` cache, prisma's `.prisma` client)
   while package contents stay read-only in the store. Forests live outside
   the project so test runners never crawl store packages' own test files.
-  Declared-mutable packages (`"blanket": {"mutablePackages": [...]}`) switch
+  Declared-mutable packages (`"tog": {"mutablePackages": [...]}`) switch
   to a whole-tree copy-on-write clone, recorded `unattested` in the closure.
 
 Per design review: **Plan → Realize → Project**. The tailor (adapter) turns
 manifests and lockfiles into a typed `Plan`. The kernel realizes it: verify
 downloads into the cache, provision pinned toolchains, commit objects
 atomically. Projection writes the symlink and the closure JSON. Plans are
-cached in `.blanket/plan.json` keyed by input hash, so unchanged locks never
+cached in `.tog/plan.json` keyed by input hash, so unchanged locks never
 touch the network again.
 
 ## Vocabulary
 
-The blanket theme, used in docs and conversation (code keeps boring
+The blanket theme (a tog is a duvet's warmth rating), used in docs and
+conversation (code keeps boring
 identifiers):
 
 | word | meaning | in code |
@@ -117,30 +118,30 @@ locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
 recorded); with none of these, the store node's bundled npm runs
 `npm install --package-lock-only`. Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over
-ranged manifests, so a bare machine needs nothing installed besides blanket.
+ranged manifests, so a bare machine needs nothing installed besides tog.
 
 **cargo** (`tailors/cargo/`). Rust has no installed-environment analog, so the
 comforter is everything cargo needs to build fully offline: a pinned
 toolchain object (rustc + cargo + rust-std, TOFU-pinned sha256s) plus a
-`cargo-vendor` object of every registry crate, hash-verified, with blanket
+`cargo-vendor` object of every registry crate, hash-verified, with tog
 generated `.cargo-checksum.json`. Vendor identity is the sorted crate
 checksums only, so locks with the same crate set share one object.
-Enforcement is a cargo wrapper under `.blanket/cargo-home/bin/` that execs
+Enforcement is a cargo wrapper under `.tog/cargo-home/bin/` that execs
 the store cargo with `--frozen`; user-supplied `--config` is rejected and
-`RUSTC` is forced. `blanket build` sandboxes the compile with a disposable
+`RUSTC` is forced. `tog build` sandboxes the compile with a disposable
 `CARGO_HOME` (a build script must never be able to rewrite the wrapper that
-later runs unsandboxed). Honest gap: `blanket run cargo build` is
-offline-configured but not sandboxed; use `blanket build`. `blanket fmt`
+later runs unsandboxed). Honest gap: `tog run cargo build` is
+offline-configured but not sandboxed; use `tog build`. `tog fmt`
 realizes a separate pinned `rustfmt` object linked against the Rust object.
 
 **go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
-(`go mod tidy -diff`, then `go mod download -json all`), and blanket
+(`go mod tidy -diff`, then `go mod download -json all`), and tog
 re-verifies every artifact (dirhash h1, byte-for-byte reproduced, plus raw
 sha256) before bytes enter the cache. The comforter is a `go-modcache`
 object. Enforcement is pure environment: `GOTOOLCHAIN=local` (the `auto`
 default silently swaps toolchains), `GOROOT`, `GOENV=off`, `GOPROXY=off`.
-`blanket build` runs `go build -mod=readonly` with the project read-only.
+`tog build` runs `go build -mod=readonly` with the project read-only.
 cgo uses host clang, the standing accepted impurity.
 
 **ruby** (`tailors/ruby/`). Bundler-shaped: lock parsing and platform selection
@@ -151,12 +152,12 @@ the lock's CHECKSUMS or rubygems.org, always platform-qualified (the bare
 endpoint returns the latest-pushed variant). Gems install dependency-first
 inside the network-denied sandbox into one immutable GEM_HOME object;
 binstubs are wrapper scripts, never symlinks (symlinks dangle after the
-store-commit rename; this bit once). Every blanket invocation strips
+store-commit rename; this bit once). Every tog invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.
 
 **elixir** (`tailors/elixir/`). mix.lock is an Elixir term literal that Mix itself
-evaluates as code, so blanket parses it under the pinned toolchain with a
+evaluates as code, so tog parses it under the pinned toolchain with a
 strict AST grammar: exact 8-field `{:hex, ...}` tuples of literals only;
 calls, variables, and legacy tuple shapes are rejected loudly. Hex tarballs
 are dual-checksum verified (outer tar sha256, inner content sha256). The
@@ -164,16 +165,16 @@ are dual-checksum verified (outer tar sha256, inner content sha256). The
 OTP-qualified Hex and rebar3 builds (the legacy `hex.ez` hangs on OTP 29;
 found live). Deps are source trees, realized as a `hex-deps` object and
 projected as a writable clonefile copy so native builds can write into their
-own sources. `blanket build` sandboxes `mix compile`.
+own sources. `tog build` sandboxes `mix compile`.
 
 **dotnet** (`tailors/dotnet/`). NuGet's `packages.lock.json` is opt-in upstream;
-blanket makes it mandatory. The lock's `contentHash` is a semantic hash, so
-blanket never raw-compares: it fetches nupkgs into a local folder feed, then
+tog makes it mandatory. The lock's `contentHash` is a semantic hash, so
+tog never raw-compares: it fetches nupkgs into a local folder feed, then
 the pinned NuGet installs from that feed in locked mode, verifying every
 contentHash. The SDK is the extractor and part of the object identity. Builds
-are the strictest boundary: `blanket run` refuses build-capable verbs
+are the strictest boundary: `tog run` refuses build-capable verbs
 (MSBuild executes arbitrary code and belongs only in the sandbox), and every
-`blanket build` runs a fresh offline locked restore into scratch. `global.json`
+`tog build` runs a fresh offline locked restore into scratch. `global.json`
 must be an exact pin with `rollForward = "disable"`.
 
 ## Toolchain lock
@@ -181,7 +182,7 @@ must be an exact pin with `rollForward = "disable"`.
 Every ecosystem has a pinned toolchain table with exact selection rules;
 the tables and the selectors realization uses live in the per-ecosystem
 modules, with the platform enumeration in `src/kernel/platform.rs`. A
-committed `blanket-toolchain.toml` lock that records the exact toolchain per
+committed `tog-toolchain.toml` lock that records the exact toolchain per
 project is designed but not built; the design is in `docs/agent/DESIGNS.md`.
 
 What has shipped is the catalog the lock will be minted from
@@ -204,7 +205,7 @@ candidate. `SourcePolicy` is the typed endpoint policy retrieval will check
 never a secret, and not part of lock validity; the defaults are data the
 kernel owns, so a new tailor's publisher is added there). `seed` chooses a bundle
 from a pre-lock closure's recorded platform and exact versions and refuses,
-naming `blanket update --toolchain`, when either is missing, when the
+naming `tog update --toolchain`, when either is missing, when the
 version is not in the catalog, or when the bundle is incomplete on the
 other platform: a closure realized on one platform is not evidence for the
 other. Nothing reads the catalog on the sync path yet.
@@ -212,17 +213,17 @@ other. Nothing reads the catalog on the sync path yet.
 ## Permissive by default, strict as a switch
 
 Sync records recoverable verification gaps in each closure and continues;
-`.blanket/policy.toml` denies named kinds (`install-script-failed`,
+`.tog/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
-are only added. `BLANKET_STRICT=1` or `blanket sync --strict` denies every
+are only added. `TOG_STRICT=1` or `tog sync --strict` denies every
 exception. Object-affecting exceptions are written into store metadata and
-rechecked on cache hits, so `--fresh` cannot bypass one. `blanket audit`
+rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
 `--policy` file (merged, so it can only tighten), refuses to pass a stale or
 outdated closure, and touches neither the store nor the network.
 
-Closure records are signed. With `BLANKET_SIGNING_KEY` set, `sync` and `fmt`
+Closure records are signed. With `TOG_SIGNING_KEY` set, `sync` and `fmt`
 load an Ed25519 key once at preflight and the one closure writer
 (`comforter::write_closure_inner`) signs every envelope it publishes over the
 canonical bytes of the whole record (`src/kernel/signing.rs`: the parsed
@@ -234,7 +235,7 @@ the complete envelope it read before believing any field: `bad-signature`,
 `untrusted`, and unsigned `outdated` records are not evaluated further, and a
 detected ecosystem with no primary closure is `missing`. Store identity is
 untouched: the signature lives in the envelope, not in any object's inputs.
-`blanket keygen` creates keys; the developer loop (`run`, `ls`, `status`, ...)
+`tog keygen` creates keys; the developer loop (`run`, `ls`, `status`, ...)
 accepts unsigned records.
 
 Each realization carries a `policy::Attribution` token from the command layer
@@ -256,7 +257,7 @@ time in a network-denied sandbox: writes confined to the package directory
 plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python the
 store CPython. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
-get them via declared artifacts: the project pins `url` + `sha256`, blanket
+get them via declared artifacts: the project pins `url` + `sha256`, tog
 prefetches through the verified cache and plants the file where the package's
 downloader looks. Linux builds needing C libraries get one pinned
 `native-libs/libset/3` object, a fixed conda-forge closure (zlib, OpenSSL,
@@ -272,7 +273,7 @@ and typed projection references, so GC never opens the project's diagnostic
 path: a moved, unmounted, or deleted project keeps its tools protected.
 Legacy pathname-only records stay conservative: if the project cannot be
 read, the whole sweep stops before any deletion, dry run included.
-`blanket store roots` prints each key beside its path. `blanket gc --forget
+`tog store roots` prints each key beside its path. `tog gc --forget
 <key>` is the explicit recovery valve: it removes only the registry file, and
 a root is never removed implicitly.
 
@@ -343,7 +344,7 @@ FOLLOW-UPS.md.
 
 Status, 2026-09-10: implemented and independently reviewed on Linux; the
 macOS gate has not run since this work landed. The boundary:
-it covers cooperating blanket processes on a local filesystem with working
+it covers cooperating tog processes on a local filesystem with working
 advisory locks and atomic rename; not old binaries, not programs launched
 directly from store paths, not malicious same-user changes, not network
 filesystems where `flock` is advisory in name only.
@@ -410,11 +411,11 @@ every tailor and the kernel):
     sync.rs  plan.rs  build.rs  run.rs  fmt.rs  gc.rs  store.rs  completions.rs
     doctor.rs  ls.rs  status.rs   thin verbs over inspect.rs
     inspect.rs      status / ls / doctor: read-only views over closures + store
-    audit.rs        blanket audit: signed closure records judged against a policy
-    keygen.rs       blanket keygen: a closure-signing key and its policy table
+    audit.rs        tog audit: signed closure records judged against a policy
+    keygen.rs       tog keygen: a closure-signing key and its policy table
     deps.rs         add / remove / update, delegated to each ecosystem's tool
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
-    x.rs            blanket x: run a registry tool without adding it to a project
+    x.rs            tog x: run a registry tool without adding it to a project
 
 Kernel (`src/kernel/`, ecosystem-agnostic):
 
@@ -424,7 +425,7 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
     cyclonedx.rs    CycloneDX component builders every tailor's sbom uses
     store/          immutable store: mod.rs Store and locks, objects.rs
                     stage/commit/cache, roots.rs the root registry,
-                    projection.rs projection refs, env.rs BLANKET_STORE,
+                    projection.rs projection refs, env.rs TOG_STORE,
                     fsops.rs descriptor-level filesystem helpers
     fetch.rs        verified downloads
     archive.rs      archive validation and delegated extraction
@@ -447,7 +448,7 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
 
 Comforter (`src/comforter/`): ecosystem-neutral closure records, projection
 symlinks, clone-tree and backup helpers (`mod.rs`) and `status.rs`, the
-projection-currency checks `blanket status` is built from. It names no
+projection-currency checks `tog status` is built from. It names no
 tailor; Python environment realization lives in `tailors/python/env.rs`.
 
 Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
@@ -479,12 +480,12 @@ commands iterate. See docs/human/ADDING-A-TAILOR.md.
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
     cargo/mod.rs           Cargo.lock importer + registry vendor realization
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
-    cargo/rustfmt.rs       pinned formatter component for `blanket fmt`
+    cargo/rustfmt.rs       pinned formatter component for `tog fmt`
     go/mod.rs              module closure via the pinned Go toolchain
     go/inputs.rs           toolchain selection from go.mod, the GoPlan
-    ruby/mod.rs            Bundler-delegated planning, blanket-verified gems
+    ruby/mod.rs            Bundler-delegated planning, tog-verified gems
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
-    dotnet/mod.rs          NuGet packages.lock.json (blanket-mandatory)
+    dotnet/mod.rs          NuGet packages.lock.json (tog-mandatory)
 
 ## Where the rest lives
 

@@ -1,5 +1,5 @@
 //! The content-addressed object store (kernel layer): object paths, atomic
-//! commit, root records, projection bases, and the `BLANKET_STORE` override.
+//! commit, root records, projection bases, and the `TOG_STORE` override.
 
 use crate::kernel::activity::{ActivityMode, StoreActivity};
 use crate::kernel::types::Identity;
@@ -36,8 +36,8 @@ pub use roots::*;
 ///   <root>/cache/sha256/<hash>      verified downloaded artifacts
 ///   <root>/tmp/                     staging for atomic renames
 ///
-/// ponytail: store root defaults to ~/.blanket/store (BLANKET_STORE overrides).
-/// The /opt/blanket/store decision only matters once binary-cache sharing
+/// ponytail: store root defaults to ~/.tog/store (TOG_STORE overrides).
+/// The /opt/tog/store decision only matters once binary-cache sharing
 /// exists; identity format is machine-independent so migration is re-realize.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -46,9 +46,9 @@ pub struct Store {
 
 impl Store {
     pub fn open() -> io::Result<Store> {
-        let root = std::env::var_os("BLANKET_STORE")
+        let root = std::env::var_os("TOG_STORE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".blanket/store"));
+            .unwrap_or_else(|| home().join(".tog/store"));
         fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
         for sub in [
@@ -148,7 +148,7 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-store-test-{}-{}",
+                "tog-store-test-{}-{}",
                 std::process::id(),
                 nanos()
             ));
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn strict_policy_rejects_cached_exceptions() {
-        if std::env::var_os("BLANKET_STORE_STRICT_CHILD").is_some() {
+        if std::env::var_os("TOG_STORE_STRICT_CHILD").is_some() {
             let store = Store::open().unwrap();
             crate::kernel::policy::init(&store.root, false).unwrap();
             let error = store
@@ -494,10 +494,10 @@ mod tests {
                 "store::tests::strict_policy_rejects_cached_exceptions",
                 "--nocapture",
             ])
-            .env("BLANKET_STORE", &store.root)
-            .env("BLANKET_STORE_STRICT_CHILD", "1")
-            .env("BLANKET_STRICT", "1")
-            .env_remove("BLANKET_POLICY")
+            .env("TOG_STORE", &store.root)
+            .env("TOG_STORE_STRICT_CHILD", "1")
+            .env("TOG_STRICT", "1")
+            .env_remove("TOG_POLICY")
             .env("HOME", &temp.0)
             .output()
             .unwrap();

@@ -1,8 +1,8 @@
-# Blanket company policy — the deny list a security team enforces.
+# Tog company policy — the deny list a security team enforces.
 #
-# Install as ~/.blanket/policy.toml (or point BLANKET_POLICY at it) on build
-# machines, commit it as .blanket/policy.toml at a repository root, or hand
-# it to the admission gate: `blanket audit --policy policy-company.toml`.
+# Install as ~/.tog/policy.toml (or point TOG_POLICY at it) on build
+# machines, commit it as .tog/policy.toml at a repository root, or hand
+# it to the admission gate: `tog audit --policy policy-company.toml`.
 # Policies union: this file can only add denials to whatever the machine and
 # project already deny. Every kind named here is one of policy::KINDS; a typo
 # is refused at parse time, never ignored.
@@ -10,7 +10,7 @@
 # `strict` is deliberately not set. strict = true refuses every exception
 # kind, including the routine ones listed at the bottom, and would turn most
 # real projects red for reasons that are not security findings. Deny by
-# kind instead; use `blanket sync --strict` or BLANKET_STRICT=1 for a
+# kind instead; use `tog sync --strict` or TOG_STRICT=1 for a
 # one-off fully strict build.
 
 deny = [
@@ -20,24 +20,24 @@ deny = [
     # half-built. Denied: a failed build step must fail the build.
     "install-script-failed",
 
-    # A lockfile carried only a legacy SHA-1 integrity for a package; blanket
+    # A lockfile carried only a legacy SHA-1 integrity for a package; tog
     # verified it, but SHA-1 collisions are practical, so the lock does not
     # pin the bytes it claims to. Denied: re-lock to get SHA-512 integrity.
     "weak-integrity",
 
     # A package was projected as a writable copy-on-write clone (declared in
-    # "blanket": {"mutablePackages": [...]}) whose runtime contents blanket
+    # "tog": {"mutablePackages": [...]}) whose runtime contents tog
     # cannot attest. Denied: what runs is not what the closure recorded.
     "unattested-mutable-state",
 
     # A manifest named a private index or an index-like option (a Poetry or
-    # uv source, --extra-index-url, --find-links). blanket records the option
+    # uv source, --extra-index-url, --find-links). tog records the option
     # but does not follow it: every package still resolves from the public
     # registry. A package the project meant to take from its private index
     # was therefore taken from the public one instead, which is the
     # dependency-confusion shape. Denied until the private index is either
     # removed from the manifest or served through an approved mirror that
-    # blanket resolves from.
+    # tog resolves from.
     "unattested_index",
 
     # A dependency was taken from a git repository rather than a registry:
@@ -52,7 +52,7 @@ deny = [
 
     # A package's install-time download did not happen: either the project
     # did not declare the artifact (url + sha256) so its download was
-    # skipped, or blanket tried to provision a declared artifact and failed.
+    # skipped, or tog tried to provision a declared artifact and failed.
     # Either way the package is present but the binary it wanted is not in
     # the closure. Denied: declare (or fix) the artifact so it is fetched
     # through the verified cache, or drop the package.
@@ -76,7 +76,7 @@ deny = [
 #                                    was compiled from its (hash-verified)
 #                                    source in the network-denied sandbox;
 #                                    strictly more reproducible, not less.
-#   artifact_provisioned             blanket itself fetched an install-time
+#   artifact_provisioned             tog itself fetched an install-time
 #                                    artifact and verified it against the
 #                                    package's own manifest (trust on first
 #                                    use). Teams that require a project-
@@ -92,12 +92,12 @@ deny = [
 #                                    hash-verified. Commit the lock to make
 #                                    this disappear.
 
-# Closure signing. `blanket audit` accepts only records signed by a key in
+# Closure signing. `tog audit` accepts only records signed by a key in
 # the machine policy's [signing] table; a project or --policy copy of this
 # file can only remove keys from that table, never add one, and without the
 # table at machine scope the gate is not configured (exit 2). Generate a key
-# on the signing machine with `blanket keygen <path>`, set
-# BLANKET_SIGNING_KEY=<path> where `blanket sync` runs, and paste the table
+# on the signing machine with `tog keygen <path>`, set
+# TOG_SIGNING_KEY=<path> where `tog sync` runs, and paste the table
 # it prints here:
 #
 # [signing]

@@ -9,7 +9,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-go-e2e-{}-{}",
+            "tog-go-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -41,10 +41,10 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -70,10 +70,10 @@ fn go_sync_build_and_rebuild_offline() {
         &project,
     );
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
-    assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
+    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
+    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
     let hello = project.join("hello");
     assert!(hello.is_file(), "staged binary moved into project");
     let out = Command::new(&hello)
@@ -83,11 +83,11 @@ fn go_sync_build_and_rebuild_offline() {
     assert!(out.status.success(), "hello executable failed: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello, world.");
 
-    // Clean rebuild: everything must come from the store (blanket build is
+    // Clean rebuild: everything must come from the store (tog build is
     // itself the network-denied sandbox; sandboxes cannot nest on macOS).
     std::fs::remove_file(&hello).unwrap();
     assert_ok(
-        blanket(&binary, &project, &store, &["build", "go"]),
+        tog(&binary, &project, &store, &["build", "go"]),
         "rebuild",
     );
     assert!(hello.is_file());
@@ -98,9 +98,9 @@ fn go_sync_build_and_rebuild_offline() {
     assert!(out.status.success(), "rebuilt hello failed: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello, world.");
 
-    // blanket run uses the pinned toolchain + immutable modcache.
+    // tog run uses the pinned toolchain + immutable modcache.
     let version = assert_ok(
-        blanket(&binary, &project, &store, &["run", "go", "version"]),
+        tog(&binary, &project, &store, &["run", "go", "version"]),
         "run go version",
     );
     assert!(version.contains("go1.27.0"), "{version}");
@@ -109,12 +109,12 @@ fn go_sync_build_and_rebuild_offline() {
     }
 
     let goroot = assert_ok(
-        blanket(&binary, &project, &store, &["run", "go", "env", "GOROOT"]),
+        tog(&binary, &project, &store, &["run", "go", "env", "GOROOT"]),
         "run go env GOROOT",
     );
     let goroot = PathBuf::from(goroot.trim());
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".blanket/closures/go.json")).unwrap(),
+        &std::fs::read_to_string(project.join(".tog/closures/go.json")).unwrap(),
     )
     .unwrap();
     let committed_go = PathBuf::from(
@@ -141,7 +141,7 @@ fn go_sync_build_and_rebuild_offline() {
 
 /*
 #include <stdint.h>
-static int blanket_answer(void) {
+static int tog_answer(void) {
     return 42;
 }
 */
@@ -150,17 +150,17 @@ import "C"
 import "fmt"
 
 func main() {
-    fmt.Println(C.blanket_answer())
+    fmt.Println(C.tog_answer())
 }
 "#,
         )
         .unwrap();
         assert_ok(
-            blanket(&binary, &cgo_project, &store, &["sync"]),
+            tog(&binary, &cgo_project, &store, &["sync"]),
             "Linux cgo sync",
         );
         assert_ok(
-            blanket(&binary, &cgo_project, &store, &["build"]),
+            tog(&binary, &cgo_project, &store, &["build"]),
             "Linux cgo build (requires gcc and glibc-devel)",
         );
         let cgo_binary = cgo_project.join("cgohello");

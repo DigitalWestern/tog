@@ -22,7 +22,7 @@ pub(super) fn workspace_set(plan: &NpmPlan) -> Vec<String> {
 }
 
 pub(super) fn previous_workspace_set(project_dir: &Path) -> Vec<String> {
-    let path = project_dir.join(".blanket/closures/node.json");
+    let path = project_dir.join(".tog/closures/node.json");
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -137,7 +137,7 @@ pub(super) fn managed_projection_symlink_for_store(
     target.starts_with(home.join("forests"))
         || store_root.is_some_and(|root| target.starts_with(root.join("forests")))
         || target.starts_with(home.join("store"))
-        || target.starts_with(project_dir.join(".blanket/nm"))
+        || target.starts_with(project_dir.join(".tog/nm"))
 }
 
 pub(super) fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
@@ -265,7 +265,7 @@ fn projection_project_lock(
 /// package-local dependencies) while its old managed projection remains in the
 /// source tree. Reconcile the previous closure before projecting the new set.
 /// Real directories are user state and retain backup_real_dir semantics; only
-/// symlinks proven to target blanket-owned roots are removed automatically.
+/// symlinks proven to target tog-owned roots are removed automatically.
 ///
 /// Returns (backup paths, pending moves) — nothing is moved yet.
 #[allow(clippy::type_complexity)]
@@ -299,7 +299,7 @@ fn reserve_projection_backups(
         }
     }
     // A real (npm-made) node_modules is moved aside automatically so
-    // pointing blanket at an existing project is one command. Workspace
+    // pointing tog at an existing project is one command. Workspace
     // importers get the same treatment in their source directories.
     if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(nm, store)? {
         pending_backups.push((nm.to_path_buf(), backup.clone()));
@@ -330,7 +330,7 @@ struct ForestPaths {
 
 /// Projection id: env object + mutable declarations + layout schema.
 ///
-/// Forests live OUTSIDE the project (under the blanket home, keyed by project
+/// Forests live OUTSIDE the project (under the tog home, keyed by project
 /// path): anything inside the project gets crawled by test runners and type
 /// checkers, and the forest links into store packages whose own test files
 /// must never be picked up.
@@ -373,7 +373,7 @@ fn forest_paths(
 }
 
 /// Managed projections of workspaces that have left the lockfile: only
-/// symlinks proven to target blanket-owned roots are removed automatically.
+/// symlinks proven to target tog-owned roots are removed automatically.
 fn remove_stale_workspace_links(
     project_dir: &Path,
     store: &Store,
@@ -498,7 +498,7 @@ fn link_workspace_sources(
 
 /// iCloud/Drive-synced folders resurrect each replaced symlink as a
 /// "node_modules 2"-style duplicate. Ones that are symlinks into
-/// blanket-owned paths are ours from earlier projections: remove them (test
+/// tog-owned paths are ours from earlier projections: remove them (test
 /// runners crawl through them otherwise). Anything else is only warned
 /// about — never delete what we didn't create.
 fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
@@ -511,29 +511,29 @@ fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
             continue;
         }
         let p = e.path();
-        // Only targets under blanket-owned roots count as ours — never
+        // Only targets under tog-owned roots count as ours — never
         // delete a user's own symlink on a loose match.
         let is_ours = fs::read_link(&p)
             .map(|t| {
                 t.starts_with(home.join("forests"))
                     || t.starts_with(store.root.join("forests"))
                     || t.starts_with(home.join("store"))
-                    || t.starts_with(project_dir.join(".blanket/nm"))
+                    || t.starts_with(project_dir.join(".tog/nm"))
             })
             .unwrap_or(false);
         if is_ours {
             let _ = fs::remove_file(&p);
-            eprintln!("blanket: removed stale sync-duplicate symlink {name:?}");
+            eprintln!("tog: removed stale sync-duplicate symlink {name:?}");
         } else {
             eprintln!(
-                "blanket: warning: {name:?} looks like a cloud-sync duplicate \
+                "tog: warning: {name:?} looks like a cloud-sync duplicate \
                  of node_modules; consider removing it"
             );
         }
     }
 }
 
-/// The closure record `blanket status` and `blanket gc` read.
+/// The closure record `tog status` and `tog gc` read.
 #[allow(clippy::too_many_arguments)]
 fn node_closure_body(
     env_obj: &Path,
@@ -579,7 +579,7 @@ fn node_closure_body(
     })
 }
 
-/// `project_node_env` plus the input files recorded for `blanket status`
+/// `project_node_env` plus the input files recorded for `tog status`
 /// (package.json and the lockfile the plan came from).
 pub fn project_node_env_recorded(
     project_dir: &Path,
@@ -606,7 +606,7 @@ pub fn project_node_env_recorded(
     // external symlink after the previous closure was written.
     validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
     let store = crate::comforter::store_from_object_path(env_obj)
-        .ok_or_else(|| err("environment object is not in a Blanket store"))?;
+        .ok_or_else(|| err("environment object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
@@ -623,7 +623,7 @@ pub fn project_node_env_recorded(
     let home = store
         .root
         .parent()
-        .ok_or_else(|| err("cannot locate blanket home for legacy forests"))?;
+        .ok_or_else(|| err("cannot locate tog home for legacy forests"))?;
     let (backup_paths, pending_backups) = reserve_projection_backups(
         project_dir,
         &nm,
@@ -680,7 +680,7 @@ pub fn project_node_env_recorded(
     link_workspace_sources(project_dir, plan, proj_dir, forest)?;
     // Old forests are deliberately NOT pruned here: a dev server may still
     // be running from one, and pruning would break it mid-session. They are
-    // cheap symlink trees; explicit `blanket gc` with liveness checks is the
+    // cheap symlink trees; explicit `tog gc` with liveness checks is the
     // collection path.
     remove_sync_duplicate_links(project_dir, &store, home);
 
@@ -695,7 +695,7 @@ pub fn project_node_env_recorded(
         replace_with_symlink(&workspace_nm, &workspace_forest, "workspace-node_modules")?;
     }
 
-    let meta_dir = project_dir.join(".blanket");
+    let meta_dir = project_dir.join(".tog");
     fs::create_dir_all(&meta_dir)?;
     let body = node_closure_body(
         &env_obj,

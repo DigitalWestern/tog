@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use crate::kernel::context::project_dir;
 
-/// Nearest ancestor that is a blanket projection: every tailor writes
-/// `.blanket/closures/<eco>.json`, so that directory is the proof. A plain
+/// Nearest ancestor that is a tog projection: every tailor writes
+/// `.tog/closures/<eco>.json`, so that directory is the proof. A plain
 /// `node_modules` or `.venv` in a subdirectory (a docs site, a vendored
 /// tool) is NOT a projection and must not stop the walk-up.
 pub(crate) fn projected_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
-        .find(|d| d.join(".blanket/closures").is_dir())
+        .find(|d| d.join(".tog/closures").is_dir())
         .unwrap_or(cwd)
         .to_path_buf()
 }
@@ -42,7 +42,7 @@ mod tests {
     fn projected_root_skips_plain_node_modules() {
         let t = TempDir::new();
         let root = t.0.join("proj");
-        std::fs::create_dir_all(root.join(".blanket/closures")).unwrap();
+        std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
         let sub = root.join("docs");
         std::fs::create_dir_all(sub.join("node_modules")).unwrap();
         assert_eq!(projected_root(&sub), root);

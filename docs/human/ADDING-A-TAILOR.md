@@ -35,7 +35,7 @@ Rules the tailor must keep:
   contract, required-input omissions, relation mutations, count mutations,
   and migration-grammar acceptance.
 - Closures are written through `comforter::write_closure` and read through
-  `comforter::read_closure`; `.blanket/closures/<eco>.json` is the proof a
+  `comforter::read_closure`; `.tog/closures/<eco>.json` is the proof a
   project was synced and is what `status`, `ls`, `sbom`, and `audit` read.
 - `prepare`, `sync`, and any closure-producing `build` or `fmt` method receive
   a mutable `policy::Attribution`. Forward that token unchanged to the
@@ -67,7 +67,7 @@ These name ecosystems outside the registry; keep them in step:
   seconds.
 - An e2e test `tests/<eco>_e2e.rs` marked `#[ignore]` that syncs, runs, and
   (if applicable) builds the fixture offline the second time; it takes
-  `supervise::SUPERVISION_TEST_LOCK` and a temp `BLANKET_STORE`.
+  `supervise::SUPERVISION_TEST_LOCK` and a temp `TOG_STORE`.
 - A metadata golden in the `objects.rs` row's test module for every kind:
   a legacy record adapts to the exact dependency set the producer wrote.
 - A row in `tests/acceptance.sh` and in `docs/human/ARCHITECTURE.md`'s

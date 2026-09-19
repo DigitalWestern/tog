@@ -1,4 +1,4 @@
-//! `blanket plan`: print each detected ecosystem's plan as JSON without
+//! `tog plan`: print each detected ecosystem's plan as JSON without
 //! realizing anything, through the tailor registry.
 
 use crate::commands::shared::no_inputs;

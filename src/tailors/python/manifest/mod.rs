@@ -139,7 +139,7 @@ impl Manifest {
             return Ok(());
         }
         let tree_hash = setup_tree_hash(dir)?;
-        let cache_path = dir.join(".blanket/egg-info.json");
+        let cache_path = dir.join(".tog/egg-info.json");
         if let Ok(text) = fs::read_to_string(&cache_path) {
             if let Ok(cache) = serde_json::from_str::<SetupCache>(&text) {
                 if setup_cache_matches(
@@ -221,7 +221,7 @@ impl Manifest {
             platform: platform.triple().to_string(),
             build_toolchain: build::derivation_fingerprint(),
         };
-        fs::create_dir_all(dir.join(".blanket"))?;
+        fs::create_dir_all(dir.join(".tog"))?;
         fs::write(&cache_path, serde_json::to_vec_pretty(&cache)?)?;
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
@@ -245,7 +245,7 @@ fn unreadable(path: &Path, error: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "unreadable_manifest: {}: {error}; this is a broken manifest or a blanket bug",
+            "unreadable_manifest: {}: {error}; this is a broken manifest or a tog bug",
             path.display()
         ),
     )
@@ -355,7 +355,7 @@ mod tests {
 
     fn temp_project(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "blanket-manifest-{name}-{}-{}",
+            "tog-manifest-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -691,7 +691,7 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -742,7 +742,7 @@ files = [{ file = "vendored.whl", hash = "sha256:ccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -775,7 +775,7 @@ files = []
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap_err();
@@ -854,11 +854,11 @@ files = []
         fs::create_dir_all(dir.join("requirements")).unwrap();
         fs::write(dir.join("requirements/cpu.txt"), "six==1.0\n").unwrap();
         fs::write(dir.join("requirements/cuda.txt"), "numpy==1.0\n").unwrap();
-        let default = requirements_directory_candidate(&dir, &BlanketPythonConfig::default())
+        let default = requirements_directory_candidate(&dir, &TogPythonConfig::default())
             .unwrap()
             .unwrap();
         assert_eq!(default.file_name().unwrap(), "cpu.txt");
-        let override_cfg = BlanketPythonConfig {
+        let override_cfg = TogPythonConfig {
             requirements: Some("requirements/cuda.txt".into()),
             extras: BTreeSet::new(),
         };
@@ -952,8 +952,8 @@ files = []
         )
         .unwrap();
         fs::write(dir.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
-        fs::create_dir_all(dir.join(".blanket")).unwrap();
-        fs::write(dir.join(".blanket/lock-source.hash"), "stale\n").unwrap();
+        fs::create_dir_all(dir.join(".tog")).unwrap();
+        fs::write(dir.join(".tog/lock-source.hash"), "stale\n").unwrap();
 
         let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
         assert_eq!(manifest.provenance, "pyproject.toml [project]");
@@ -1029,7 +1029,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
 "#,
         )
         .unwrap();
-        let cfg = BlanketPythonConfig::default();
+        let cfg = TogPythonConfig::default();
         let old = poetry_lock_requirements(
             Platform::X86_64UnknownLinuxGnu,
             &project,
@@ -1088,7 +1088,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1349,7 +1349,7 @@ files = [{ file = "install-dep.whl", hash = "sha256:cccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1393,7 +1393,7 @@ files = [{ file = "bar-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1441,7 +1441,7 @@ files = [{ file = "colorama.whl", hash = "sha256:ccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1491,7 +1491,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &BlanketPythonConfig::default(),
+            &TogPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1691,14 +1691,14 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("setup.py"), "from deps import requirements\n").unwrap();
         fs::write(dir.join("deps.py"), "requirements = ['six']\n").unwrap();
         fs::write(dir.join("requirements.lock.txt"), "stale\n").unwrap();
-        fs::create_dir_all(dir.join(".blanket")).unwrap();
-        fs::write(dir.join(".blanket/egg-info.json"), "cache\n").unwrap();
+        fs::create_dir_all(dir.join(".tog")).unwrap();
+        fs::write(dir.join(".tog/egg-info.json"), "cache\n").unwrap();
         let old = setup_tree_hash(&dir).unwrap();
         fs::write(dir.join("deps.py"), "requirements = ['idna']\n").unwrap();
         let changed = setup_tree_hash(&dir).unwrap();
         assert_ne!(old, changed);
         fs::write(dir.join("requirements.lock.txt"), "different\n").unwrap();
-        fs::write(dir.join(".blanket/egg-info.json"), "different\n").unwrap();
+        fs::write(dir.join(".tog/egg-info.json"), "different\n").unwrap();
         assert_eq!(changed, setup_tree_hash(&dir).unwrap());
         let _ = fs::remove_dir_all(dir);
     }

@@ -1,11 +1,11 @@
 //! Linux-first native-library coverage. Heavy and networked; run with:
-//! `BLANKET_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp
-//! BLANKET_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
+//! `TOG_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp
+//! TOG_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
 
-use blanket::kernel::platform::Platform;
-use blanket::kernel::sandbox::{run_build_spec, BuildSpec};
-use blanket::kernel::store::Store;
-use blanket::tailors::python::nativelibs::{compose_env, ensure_native_libs, size_bytes};
+use tog::kernel::platform::Platform;
+use tog::kernel::sandbox::{run_build_spec, BuildSpec};
+use tog::kernel::store::Store;
+use tog::tailors::python::nativelibs::{compose_env, ensure_native_libs, size_bytes};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -14,7 +14,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "blanket-native-e2e-{}-{}",
+            "tog-native-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -33,7 +33,7 @@ impl Drop for TempDir {
 }
 
 fn required_sandbox_tests() -> bool {
-    matches!(std::env::var_os("BLANKET_SANDBOX_TESTS"), Some(value) if !value.is_empty())
+    matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
 }
 
 fn linux_ready() -> bool {
@@ -81,13 +81,13 @@ fn linux_native_libs_pkg_config_sdist_and_runtime() {
     if !linux_ready() {
         return;
     }
-    let store_path = match std::env::var_os("BLANKET_STORE") {
+    let store_path = match std::env::var_os("TOG_STORE") {
         Some(path) => PathBuf::from(path),
         None if required_sandbox_tests() => {
-            panic!("required native library test needs BLANKET_STORE");
+            panic!("required native library test needs TOG_STORE");
         }
         None => {
-            eprintln!("skip native library test: set BLANKET_STORE to a throwaway store");
+            eprintln!("skip native library test: set TOG_STORE to a throwaway store");
             return;
         }
     };
@@ -126,12 +126,12 @@ unsafe extern "C" {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn blanket_pango_version() -> *const std::ffi::c_char {
+pub unsafe extern "C" fn tog_pango_version() -> *const std::ffi::c_char {
     pango_version_string()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
+pub unsafe extern "C" fn tog_pango_version_is_pinned() -> bool {
     CStr::from_ptr(pango_version_string()).to_bytes() == b"1.50.11"
 }
 "#,
@@ -252,16 +252,16 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
         project.join("requirements.txt"),
     )
     .unwrap();
-    let blanket_bin = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
-    let sync = Command::new(&blanket_bin)
+    let tog_bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    let sync = Command::new(&tog_bin)
         .current_dir(&project)
-        .env("BLANKET_STORE", &store_path)
+        .env("TOG_STORE", &store_path)
         .arg("sync")
         .output()
         .unwrap();
     assert_ok(sync, "manimpango sync");
     let plan: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(project.join(".blanket/plan.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(project.join(".tog/plan.json")).unwrap())
             .unwrap();
     let manimpango = plan["plan"]["packages"]
         .as_array()
@@ -270,16 +270,16 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
         .find(|package| package["name"] == "manimpango")
         .expect("manimpango in plan");
     assert_eq!(manimpango["kind"], "Sdist");
-    assert!(project.join(".blanket/closures/python.json").is_file());
+    assert!(project.join(".tog/closures/python.json").is_file());
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".blanket/closures/python.json")).unwrap(),
+        &std::fs::read_to_string(project.join(".tog/closures/python.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(closure["body"]["native_libs"]["id"], native.id);
 
-    let run = Command::new(&blanket_bin)
+    let run = Command::new(&tog_bin)
         .current_dir(&project)
-        .env("BLANKET_STORE", &store_path)
+        .env("TOG_STORE", &store_path)
         .args([
             "run",
             "python",
@@ -288,10 +288,10 @@ pub unsafe extern "C" fn blanket_pango_version_is_pinned() -> bool {
         ])
         .output()
         .unwrap();
-    let output = assert_ok(run, "blanket run python import manimpango");
+    let output = assert_ok(run, "tog run python import manimpango");
     assert!(
         output.contains("manimpango ok"),
         "unexpected run output: {output}"
     );
-    println!("blanket run python import manimpango: ok");
+    println!("tog run python import manimpango: ok");
 }

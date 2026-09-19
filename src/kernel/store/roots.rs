@@ -194,7 +194,7 @@ impl Store {
             .as_ref()
             .and_then(|entry| entry.record.as_ref())
             .is_none()
-            && project_dir.join(".blanket/closures").is_dir()
+            && project_dir.join(".tog/closures").is_dir()
         {
             import_existing_project_closures(
                 self,
@@ -241,12 +241,12 @@ impl Store {
     /// byte-for-byte unchanged.
     pub fn root_record_from_project(&self, project_dir: &Path) -> io::Result<RootRecord> {
         let project_dir = project_dir.canonicalize()?;
-        let closures = project_dir.join(".blanket/closures");
+        let closures = project_dir.join(".tog/closures");
         if !closures.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{} has no .blanket/closures directory",
+                    "{} has no .tog/closures directory",
                     project_dir.display()
                 ),
             ));
@@ -354,7 +354,7 @@ impl Store {
     }
 
     /// Read the roots registry without validating whether projects still
-    /// exist. `blanket store roots` is an inspection command; GC validates
+    /// exist. `tog store roots` is an inspection command; GC validates
     /// each path before sweeping and never drops stale records implicitly.
     ///
     /// Every key-named entry is reported, including the ones that cannot be
@@ -637,7 +637,7 @@ impl Store {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "unknown root key {key}; `blanket store roots` lists the keys this \
+                        "unknown root key {key}; `tog store roots` lists the keys this \
                          store holds"
                     ),
                 ))
@@ -719,7 +719,7 @@ impl Store {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "invalid root key '{key}': expected 40 hex characters (`blanket store \
+                    "invalid root key '{key}': expected 40 hex characters (`tog store \
                      roots` prints keys)"
                 ),
             ))
@@ -740,7 +740,7 @@ impl Store {
     }
 
     /// Whether a project could be registered at all, without writing
-    /// anything. A project blanket cannot record is a project it cannot
+    /// anything. A project tog cannot record is a project it cannot
     /// protect from its own GC, so the work refuses up front instead of
     /// discovering it after an environment has been realized and projected.
     pub fn check_registrable(project_dir: &Path) -> io::Result<()> {
@@ -945,7 +945,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "parse root registry entry {key}: {error}; use `blanket gc --forget {key}` to drop the record, then re-run sync in that project"
+                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run sync in that project"
                 ),
             )
         })?;
@@ -962,7 +962,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "root registry entry {key} has unknown schema {schema}; this store was written by a newer Blanket, or the record is damaged — upgrade Blanket, or use `blanket gc --forget {key}`"
+                    "root registry entry {key} has unknown schema {schema}; this store was written by a newer Tog, or the record is damaged — upgrade Tog, or use `tog gc --forget {key}`"
                 ),
             ));
         }
@@ -970,7 +970,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "parse root registry entry {key}: {error}; use `blanket gc --forget {key}` to drop the record, then re-run sync in that project"
+                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run sync in that project"
                 ),
             )
         })?;
@@ -999,7 +999,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             io::ErrorKind::InvalidData,
             format!(
                 "legacy root registry entry {key} is padded or spans lines, so it cannot be \
-                 read back exactly; use `blanket gc --forget {key}` to drop the record"
+                 read back exactly; use `tog gc --forget {key}` to drop the record"
             ),
         ));
     }
@@ -1224,7 +1224,7 @@ pub(super) fn import_existing_project_closures(
     record: &mut RootRecord,
     mode: ImportMode,
 ) -> io::Result<()> {
-    let closures = project.join(".blanket/closures");
+    let closures = project.join(".tog/closures");
     let mut files: Vec<PathBuf> = fs::read_dir(&closures)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<io::Result<Vec<_>>>()?;
@@ -1316,7 +1316,7 @@ pub(super) fn unresolvable(result: io::Result<()>, mode: ImportMode) -> io::Resu
             ImportMode::Strict => Err(error),
             ImportMode::DropUnresolvable => {
                 eprintln!(
-                    "blanket: dropping a historical closure reference this store cannot resolve: {error}"
+                    "tog: dropping a historical closure reference this store cannot resolve: {error}"
                 );
                 Ok(false)
             }
@@ -1526,8 +1526,8 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to register {}: the path is not valid UTF-8, so a registry record \
-                 cannot name it exactly. A project blanket cannot record is a project it \
-                 cannot protect from `blanket gc`",
+                 cannot name it exactly. A project tog cannot record is a project it \
+                 cannot protect from `tog gc`",
                 project_dir.display()
             ),
         )
@@ -1537,8 +1537,8 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to register '{text}': the path is padded with whitespace or spans \
-                 lines, so a registry record cannot name it exactly. A project blanket \
-                 cannot record is a project it cannot protect from `blanket gc`"
+                 lines, so a registry record cannot name it exactly. A project tog \
+                 cannot record is a project it cannot protect from `tog gc`"
             ),
         ));
     }

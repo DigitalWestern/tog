@@ -221,7 +221,7 @@ pub(crate) struct SdistIdentityPlan {
 #[cfg(test)]
 fn test_store(label: &str) -> Store {
     let root = std::env::temp_dir().join(format!(
-        "blanket-build-identity-{label}-{}-{}",
+        "tog-build-identity-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -624,7 +624,7 @@ fn prepare_rust(
     // An sdist's vendored crates can themselves come from git sources.
     fs::write(
         cargo_home.join("config.toml"),
-        crate::tailors::cargo::blanket_config_text_for(
+        crate::tailors::cargo::tog_config_text_for(
             &vendor_obj,
             &crate::tailors::cargo::plan_git_sources(&cargo_plan),
         )?,

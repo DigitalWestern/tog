@@ -36,7 +36,7 @@ pub fn component(name: &str, version: &str, purl: String, ecosystem: &str) -> Va
         "name": name,
         "version": version,
         "purl": purl,
-        "properties": [{"name": "blanket:ecosystem", "value": ecosystem}],
+        "properties": [{"name": "tog:ecosystem", "value": ecosystem}],
     })
 }
 
@@ -81,7 +81,7 @@ pub fn toolchain_component(
         "type": "application",
         "name": name,
         "version": version,
-        "properties": [{"name": "blanket:store-id", "value": id}],
+        "properties": [{"name": "tog:store-id", "value": id}],
     }))
 }
 

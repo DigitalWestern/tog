@@ -1,6 +1,6 @@
 # Build the two supported platforms on a version tag and attach them to a
 # GitHub Release. install.sh downloads exactly these asset names, so keep
-# them stable: blanket-<triple>.tar.gz and blanket-<triple>.tar.gz.sha256.
+# them stable: tog-<triple>.tar.gz and tog-<triple>.tar.gz.sha256.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
@@ -58,13 +58,13 @@ jobs:
       # Cargo.toml can invalidate the linker's ad-hoc signature. Re-sign.
       - name: Ad-hoc sign (macOS)
         if: runner.os == 'macOS'
-        run: codesign --force --sign - "target/${{ matrix.triple }}/release/blanket"
+        run: codesign --force --sign - "target/${{ matrix.triple }}/release/tog"
 
       - name: Smoke test
         shell: bash
         run: |
           set -euo pipefail
-          bin="target/${{ matrix.triple }}/release/blanket"
+          bin="target/${{ matrix.triple }}/release/tog"
           "$bin" --version
           "$bin" completions bash >/dev/null
           "$bin" completions zsh >/dev/null
@@ -74,10 +74,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="blanket-${{ matrix.triple }}.tar.gz"
+          asset="tog-${{ matrix.triple }}.tar.gz"
           mkdir -p dist/stage
-          cp "target/${{ matrix.triple }}/release/blanket" dist/stage/blanket
-          tar -C dist/stage -czf "dist/$asset" blanket
+          cp "target/${{ matrix.triple }}/release/tog" dist/stage/tog
+          tar -C dist/stage -czf "dist/$asset" tog
           cd dist
           if command -v sha256sum >/dev/null; then
             sha256sum "$asset" > "$asset.sha256"
@@ -88,7 +88,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: blanket-${{ matrix.triple }}
+          name: tog-${{ matrix.triple }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -118,6 +118,6 @@ jobs:
             gh release upload "$tag" dist/* --clobber
           else
             gh release create "$tag" dist/* \
-              --title "blanket $tag" \
+              --title "tog $tag" \
               --generate-notes
           fi

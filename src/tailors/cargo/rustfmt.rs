@@ -1,4 +1,4 @@
-//! The pinned Rust formatting component used by `blanket fmt`.
+//! The pinned Rust formatting component used by `tog fmt`.
 
 use crate::comforter::status::State;
 use crate::kernel::fetch::{download_verified_held, Digest};
@@ -84,7 +84,7 @@ fn rustfmt_identity(
 /// and ends in the version. `resolved_from` is the directory the toolchain
 /// file was looked up from, relative to the workspace root the closure is
 /// written in, and `unavailable_components` is what that file asked for that
-/// blanket does not provide (the run's `toolchain-component-unavailable`
+/// tog does not provide (the run's `toolchain-component-unavailable`
 /// exception, when non-empty).
 pub fn record_inputs(rustfmt_object: &str, resolved_from: &str, unavailable: &[String]) -> Value {
     json!({
@@ -118,7 +118,7 @@ pub fn pinned_record(platform: Platform, root: &Path, resolved_from: &str) -> io
 pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> {
     if body.get("inputs").is_none() {
         return Ok(State::Unchecked(
-            "rustfmt inputs were not recorded by this run; run 'blanket fmt' once to record them"
+            "rustfmt inputs were not recorded by this run; run 'tog fmt' once to record them"
                 .into(),
         ));
     }
@@ -148,7 +148,7 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
         Ok(pinned) => pinned,
         Err(error) => {
             return Ok(State::Changed(vec![format!(
-                "rustfmt pin (recorded {}, but this blanket pins none here: {error})",
+                "rustfmt pin (recorded {}, but this tog pins none here: {error})",
                 field(body, "/inputs/rustfmt_object")
             )]))
         }
@@ -163,7 +163,7 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
     .filter(|pointer| field(body, pointer) != field(&pinned, pointer))
     .map(|pointer| {
         format!(
-            "rustfmt record {pointer} (recorded {}, this blanket uses {})",
+            "rustfmt record {pointer} (recorded {}, this tog uses {})",
             field(body, pointer),
             field(&pinned, pointer)
         )
@@ -210,7 +210,7 @@ pub fn ensure_rustfmt(
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "rustfmt was paired with an unexpected Rust object; run `blanket sync` first",
+            "rustfmt was paired with an unexpected Rust object; run `tog sync` first",
         ));
     }
     let pin = component(platform)?;
@@ -562,7 +562,7 @@ mod tests {
         );
     }
 
-    /// `blanket fmt` calls this before opening the store, so an unpinned or
+    /// `tog fmt` calls this before opening the store, so an unpinned or
     /// foreign platform is refused ahead of the toolchain download.
     #[test]
     fn preflight_accepts_the_host_and_refuses_a_foreign_platform() {
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn scratch_directories_are_named_so_gc_can_sweep_them() {
         let parent = std::env::temp_dir().join(format!(
-            "blanket-rustfmt-scratch-{}-{}",
+            "tog-rustfmt-scratch-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn rustfmt_object_lib_link_is_relative_to_paired_rust_object() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-rustfmt-link-{}-{}",
+            "tog-rustfmt-link-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

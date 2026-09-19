@@ -518,7 +518,7 @@ mod tests {
                 .unwrap()
                 .as_nanos();
             let path =
-                env::temp_dir().join(format!("blanket-wheel-{}-{suffix}", std::process::id()));
+                env::temp_dir().join(format!("tog-wheel-{}-{suffix}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }

@@ -46,7 +46,7 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
     let Some(activity) = store.try_activity_exclusive()? else {
         writeln!(
             out,
-            "metadata maintenance deferred: a Blanket job is using this store"
+            "metadata maintenance deferred: a Tog job is using this store"
         )?;
         return Ok(MigrationReport::default());
     };

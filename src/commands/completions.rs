@@ -1,4 +1,4 @@
-//! `blanket completions <shell>`: print the shell completion script.
+//! `tog completions <shell>`: print the shell completion script.
 
 use crate::cli;
 use std::io;

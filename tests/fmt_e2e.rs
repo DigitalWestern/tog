@@ -1,7 +1,7 @@
-//! End-to-end coverage for the Rust `blanket fmt` contract.
+//! End-to-end coverage for the Rust `tog fmt` contract.
 //!
 //! Run with a disposable store and a disk-backed TMPDIR:
-//! BLANKET_STORE=<dir> TMPDIR=<disk-dir> BLANKET_SANDBOX_TESTS=required
+//! TOG_STORE=<dir> TMPDIR=<disk-dir> TOG_SANDBOX_TESTS=required
 //! cargo test --target-dir target --test fmt_e2e -- --ignored --nocapture
 
 use std::fs;
@@ -17,7 +17,7 @@ impl TempDir {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let path = base.join(format!(
-            "blanket-fmt-e2e-{}-{}",
+            "tog-fmt-e2e-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -31,7 +31,7 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.0);
+        let _ = tog::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -49,15 +49,15 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    blanket_at(bin, project, store, args)
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+    tog_at(bin, project, store, args)
 }
 
-fn blanket_at(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
-    blanket_env(bin, cwd, store, args, &[])
+fn tog_at(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
+    tog_env(bin, cwd, store, args, &[])
 }
 
-fn blanket_env(
+fn tog_env(
     bin: &Path,
     cwd: &Path,
     store: &Path,
@@ -67,7 +67,7 @@ fn blanket_env(
     let mut command = Command::new(bin);
     command
         .current_dir(cwd)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args);
     for (name, value) in env {
         command.env(name, value);
@@ -102,21 +102,21 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     );
     fs::remove_file(project.join("Cargo.lock")).unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     // `fmt` signs the rustfmt record like every closure; a scratch HOME's
     // machine policy trusts the key so the gate can judge it.
     let key = temp.0.join("signing.key");
-    let public = blanket::kernel::signing::generate(&key).unwrap();
+    let public = tog::kernel::signing::generate(&key).unwrap();
     let home = temp.0.join("home");
-    fs::create_dir_all(home.join(".blanket")).unwrap();
+    fs::create_dir_all(home.join(".tog")).unwrap();
     fs::write(
-        home.join(".blanket/policy.toml"),
+        home.join(".tog/policy.toml"),
         format!("[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
-    let signed: &[(&str, &Path)] = &[("BLANKET_SIGNING_KEY", &key), ("HOME", &home)];
+    let signed: &[(&str, &Path)] = &[("TOG_SIGNING_KEY", &key), ("HOME", &home)];
 
-    let first = blanket_env(&binary, &project, &store, &["fmt", "--check"], signed);
+    let first = tog_env(&binary, &project, &store, &["fmt", "--check"], signed);
     assert_eq!(
         first.status.code(),
         Some(1),
@@ -130,7 +130,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(!project.join("Cargo.lock").exists());
-    assert!(project.join(".blanket/closures/rustfmt.json").is_file());
+    assert!(project.join(".tog/closures/rustfmt.json").is_file());
     let metas = fs::read_dir(store.join("meta"))
         .unwrap()
         .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
@@ -148,7 +148,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         "fmt unexpectedly realized a Cargo vendor object"
     );
     let closure: serde_json::Value =
-        serde_json::from_slice(&fs::read(project.join(".blanket/closures/rustfmt.json")).unwrap())
+        serde_json::from_slice(&fs::read(project.join(".tog/closures/rustfmt.json")).unwrap())
             .unwrap();
     let rust_id = closure["body"]["rust_object"]["id"].as_str().unwrap();
     let rustfmt_id = closure["body"]["rustfmt_object"]["id"].as_str().unwrap();
@@ -157,14 +157,14 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         "the fmt closure must record the rustfmt it ran as its input"
     );
     assert_eq!(
-        blanket::kernel::signing::verify(&closure),
-        blanket::kernel::signing::Verification::Valid(public),
+        tog::kernel::signing::verify(&closure),
+        tog::kernel::signing::Verification::Valid(public),
         "fmt must sign the rustfmt record with the configured key"
     );
     // The record names the pinned rustfmt and is signed by a trusted key,
     // so the gate passes it; the report still fails because the Cargo
     // project was never synced (no cargo.json), which is `missing`.
-    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
         audit.status.code() == Some(1)
@@ -187,7 +187,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         "rustfmt metadata does not retain the Rust object reference"
     );
 
-    let formatted = blanket(&binary, &project, &store, &["fmt"]);
+    let formatted = tog(&binary, &project, &store, &["fmt"]);
     assert!(
         formatted.status.success(),
         "format run failed\nstdout:\n{}\nstderr:\n{}",
@@ -201,7 +201,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     assert!(!project.join("Cargo.lock").exists());
 
     let before = object_ids(&store);
-    let warm = blanket(&binary, &project, &store, &["fmt", "--check"]);
+    let warm = tog(&binary, &project, &store, &["fmt", "--check"]);
     assert!(
         warm.status.success(),
         "warm check failed: {:?}",
@@ -210,11 +210,11 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     assert!(!String::from_utf8_lossy(&warm.stderr).contains("fetching rustfmt"));
     assert_eq!(object_ids(&store), before, "warm fmt created a new object");
 
-    let listed = blanket(&binary, &project, &store, &["ls"]);
+    let listed = tog(&binary, &project, &store, &["ls"]);
     assert!(listed.status.success());
     assert!(String::from_utf8_lossy(&listed.stdout).contains("rustfmt 1.96.1"));
     // `ls` prints a rustfmt row, so `ls rustfmt` must be a legal filter.
-    let listed_one = blanket(&binary, &project, &store, &["ls", "rustfmt"]);
+    let listed_one = tog(&binary, &project, &store, &["ls", "rustfmt"]);
     assert!(
         listed_one.status.success(),
         "ls rustfmt failed\nstdout:\n{}\nstderr:\n{}",
@@ -223,9 +223,9 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
     );
 
     // Every closure consumer must survive the package-free fmt closure:
-    // `sbom` reads every .blanket/closures/*.json and fails the whole
+    // `sbom` reads every .tog/closures/*.json and fails the whole
     // document on the first ecosystem it does not know.
-    let sbom = blanket(&binary, &project, &store, &["sbom"]);
+    let sbom = tog(&binary, &project, &store, &["sbom"]);
     assert!(
         sbom.status.success(),
         "sbom failed after fmt\nstdout:\n{}\nstderr:\n{}",
@@ -258,7 +258,7 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         String::from_utf8_lossy(&sbom.stdout)
     );
 
-    let help = blanket(&binary, &project, &store, &["fmt", "--", "--help"]);
+    let help = tog(&binary, &project, &store, &["fmt", "--", "--help"]);
     assert!(
         help.status.success(),
         "pass-through help failed\nstdout:\n{}\nstderr:\n{}",
@@ -266,10 +266,10 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         String::from_utf8_lossy(&help.stderr)
     );
 
-    // This is cargo-fmt's own argument parser rejecting a malformed blanket
+    // This is cargo-fmt's own argument parser rejecting a malformed tog
     // pass-through flag. Its status is 2, so status 1 would not prove
     // unchanged propagation from the formatter.
-    let bad_tool_flag = blanket(&binary, &project, &store, &["fmt", "--", "--version=bad"]);
+    let bad_tool_flag = tog(&binary, &project, &store, &["fmt", "--", "--version=bad"]);
     let bad_tool_stderr = String::from_utf8_lossy(&bad_tool_flag.stderr).into_owned();
     assert_eq!(
         bad_tool_flag.status.code(),
@@ -277,22 +277,22 @@ fn fmt_is_lockless_cached_sandboxed_and_gc_rooted() {
         "formatter status was not passed through unchanged\nstdout:\n{}\nstderr:\n{bad_tool_stderr}",
         String::from_utf8_lossy(&bad_tool_flag.stdout),
     );
-    // Status 2 is also blanket's own usage exit, so the code alone cannot
-    // tell pass-through from a blanket-side argument rejection: require
-    // cargo-fmt's own diagnostic and the absence of blanket's usage line.
+    // Status 2 is also tog's own usage exit, so the code alone cannot
+    // tell pass-through from a tog-side argument rejection: require
+    // cargo-fmt's own diagnostic and the absence of tog's usage line.
     assert!(
         bad_tool_stderr.contains("bad") && bad_tool_stderr.to_lowercase().contains("cargo fmt"),
         "status 2 did not come from cargo-fmt's own argument parser:\n{bad_tool_stderr}"
     );
     assert!(
-        !bad_tool_stderr.contains("blanket: error:"),
-        "status 2 was blanket's usage error, not the formatter's:\n{bad_tool_stderr}"
+        !bad_tool_stderr.contains("tog: error:"),
+        "status 2 was tog's usage error, not the formatter's:\n{bad_tool_stderr}"
     );
 
     for entry in fs::read_dir(store.join("objects")).unwrap() {
         age(&entry.unwrap().path());
     }
-    let gc = blanket(&binary, &project, &store, &["gc", "--keep-days", "0"]);
+    let gc = tog(&binary, &project, &store, &["gc", "--keep-days", "0"]);
     assert!(
         gc.status.success(),
         "gc failed\nstdout:\n{}\nstderr:\n{}",
@@ -328,17 +328,17 @@ fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
 
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
-    let synced = blanket(&binary, &project, &store, &["sync"]);
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    let synced = tog(&binary, &project, &store, &["sync"]);
     assert!(
         synced.status.success(),
         "sync failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&synced.stdout),
         String::from_utf8_lossy(&synced.stderr)
     );
-    assert!(project.join(".blanket/closures/node.json").is_file());
+    assert!(project.join(".tog/closures/node.json").is_file());
 
-    let run = blanket_at(
+    let run = tog_at(
         &binary,
         &project.join("src"),
         &store,
@@ -358,7 +358,7 @@ fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(
-        !project.join(".blanket/closures/rustfmt.json").exists(),
+        !project.join(".tog/closures/rustfmt.json").exists(),
         "script precedence unexpectedly realized rustfmt"
     );
 }

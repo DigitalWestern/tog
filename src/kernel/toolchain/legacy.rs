@@ -5,7 +5,7 @@
 //! realized on and the exact primary version(s) it records, plus, when the
 //! tailor can verify the closure's runtime object against its pins, the
 //! artifact(s) that object was built from. Anything less refuses and names
-//! `blanket update --toolchain`; the seed never guesses from the shipped
+//! `tog update --toolchain`; the seed never guesses from the shipped
 //! default. A closure proves its own platform only: the other platform's
 //! rows must come from a bundle the catalog already holds complete.
 
@@ -15,7 +15,7 @@ use crate::kernel::platform::Platform;
 use std::io;
 
 /// The next step every refusal names.
-pub const UPDATE_HINT: &str = "run `blanket update --toolchain`";
+pub const UPDATE_HINT: &str = "run `tog update --toolchain`";
 
 /// An artifact a closure's recorded runtime object proves it was built
 /// from: the tailor recomputed the object id from a pin row and it matched.
@@ -192,7 +192,7 @@ mod tests {
     fn assert_refuses(error: io::Error, why: &str) {
         let text = error.to_string();
         assert!(text.contains(why), "{text}");
-        assert!(text.contains("blanket update --toolchain"), "{text}");
+        assert!(text.contains("tog update --toolchain"), "{text}");
         assert!(
             text.starts_with("cannot seed the python toolchain lock"),
             "{text}"

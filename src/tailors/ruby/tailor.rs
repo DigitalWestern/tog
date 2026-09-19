@@ -66,7 +66,7 @@ impl Tailor for Ruby {
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let mut prefix = Vec::new();
-        if dir.join(".blanket/closures/ruby.json").exists() {
+        if dir.join(".tog/closures/ruby.json").exists() {
             let closure = comforter::read_closure(dir, "ruby")?;
             let ruby_obj =
                 comforter::closure_object(&ctx.store, &closure, "ruby_object", "bin/ruby")?;

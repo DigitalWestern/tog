@@ -14,7 +14,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-deps-e2e-{label}-{}-{}",
+            "tog-deps-e2e-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -30,20 +30,20 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.0);
+        let _ = tog::kernel::store::remove_tree(&self.0);
     }
 }
 
 fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
     Command::new(binary)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .env("TMPDIR", tmp.join("tmp"))
         .env("HOME", tmp.join("home"))
-        .env("BLANKET_SANDBOX_TESTS", "required")
+        .env("TOG_SANDBOX_TESTS", "required")
         .env_remove("PNPM_HOME")
-        .env_remove("BLANKET_POLICY")
-        .env_remove("BLANKET_STRICT")
+        .env_remove("TOG_POLICY")
+        .env_remove("TOG_STRICT")
         .args(args)
         .output()
         .unwrap()
@@ -59,7 +59,7 @@ fn assert_ok(output: Output, label: &str) {
 }
 
 fn binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_blanket"))
+    PathBuf::from(env!("CARGO_BIN_EXE_tog"))
 }
 
 fn copy_fixture(temp: &TempDir, fixture: &str) {
@@ -325,7 +325,7 @@ fn pnpm_add_update_remove_roundtrip() {
     assert!(first_env_count >= 1);
     assert_status_synced(&bin, project, &store, &temp);
 
-    let x_root = temp.0.join("home/.blanket/x");
+    let x_root = temp.0.join("home/.tog/x");
     let x_root = std::fs::read_dir(&x_root)
         .unwrap()
         .find_map(|entry| {
@@ -336,7 +336,7 @@ fn pnpm_add_update_remove_roundtrip() {
     let x_lock = x_root.join("package-lock.json");
     let x_lock_mtime = std::fs::metadata(&x_lock).unwrap().modified().unwrap();
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(x_root.join(".blanket/closures/node.json")).unwrap(),
+        &std::fs::read_to_string(x_root.join(".tog/closures/node.json")).unwrap(),
     )
     .unwrap();
     let pnpm = closure["body"]["packages"]
@@ -346,7 +346,7 @@ fn pnpm_add_update_remove_roundtrip() {
         .find(|package| package["path"] == "node_modules/pnpm")
         .unwrap();
     let digest =
-        blanket::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
+        tog::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
     let tarball =
         std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
     let corepack_sha224 = hex::encode(Sha224::digest(&tarball));
@@ -367,7 +367,7 @@ fn pnpm_add_update_remove_roundtrip() {
         "warm pnpm invocation re-resolved the tool"
     );
     assert_eq!(node_env_object_count(&store), first_env_count);
-    assert!(temp.0.join("home/.blanket/x").is_dir());
+    assert!(temp.0.join("home/.tog/x").is_dir());
 
     let wrong_digest = {
         let mut value = corepack_sha224.clone().into_bytes();
@@ -440,7 +440,7 @@ fn pnpm_add_update_remove_roundtrip() {
         lock_before_wrong
     );
 
-    // An algorithm blanket cannot verify names itself, never the version.
+    // An algorithm tog cannot verify names itself, never the version.
     set_package_manager(
         project,
         &format!("pnpm@9.12.3+sha1.{}", &corepack_sha224[..40]),
@@ -527,7 +527,7 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
         "mixed pnpm add",
     );
 
-    let cargo_exceptions = closure_exceptions(&project.join(".blanket/closures/cargo.json"));
+    let cargo_exceptions = closure_exceptions(&project.join(".tog/closures/cargo.json"));
     assert_eq!(
         cargo_exceptions.len(),
         1,
@@ -545,7 +545,7 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
         cargo_exceptions[0]
     );
 
-    let pnpm_exceptions = closure_exceptions(&project.join(".blanket/closures/node.json"));
+    let pnpm_exceptions = closure_exceptions(&project.join(".tog/closures/node.json"));
     assert!(
         pnpm_exceptions
             .iter()
@@ -555,7 +555,7 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
 
     let mut x_closures = Vec::new();
     find_files(
-        &temp.0.join("home/.blanket/x"),
+        &temp.0.join("home/.tog/x"),
         "node.json",
         &mut x_closures,
     );
@@ -600,11 +600,11 @@ fn tree_snapshot(dir: &Path) -> Vec<(String, String)> {
 }
 
 /// Run the store pnpm's real `install` in `project` from a home of its own,
-/// the way the user would after a `blanket` edit realized the tool:
-/// `node_modules/.modules.yaml` then names a store blanket is never given,
+/// the way the user would after a `tog` edit realized the tool:
+/// `node_modules/.modules.yaml` then names a store tog is never given,
 /// which is the starting state every later edit must survive.
 fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
-    let x_root = std::fs::read_dir(temp.0.join("home/.blanket/x"))
+    let x_root = std::fs::read_dir(temp.0.join("home/.tog/x"))
         .unwrap()
         .find_map(|entry| {
             let path = entry.ok()?.path();
@@ -657,7 +657,7 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
 /// is rewritten. An already-installed project — the common starting state,
 /// with `.modules.yaml` naming the user's own store — must therefore be
 /// edited without touching anything under `node_modules`, without leaving a
-/// blanket-internal path in the project, and without any lifecycle script
+/// tog-internal path in the project, and without any lifecycle script
 /// running, `remove` included.
 #[test]
 #[ignore]
@@ -714,8 +714,8 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
     );
 
     // Install the project for real with the store's own pnpm, the way the
-    // user would, from a home that is not blanket's: `.modules.yaml` now
-    // names a store blanket will never be given.
+    // user would, from a home that is not tog's: `.modules.yaml` now
+    // names a store tog will never be given.
     install_with_store_pnpm(&temp, project, &store);
     let modules_yaml = project.join("node_modules/.modules.yaml");
     let recorded = std::fs::read_to_string(&modules_yaml).unwrap();
@@ -750,7 +750,7 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
             let text = std::fs::read_to_string(project.join(file)).unwrap();
             assert!(
                 !text.contains("stage-") && !text.contains(&store.display().to_string()),
-                "pnpm {label} left a blanket-internal path in {file}:\n{text}"
+                "pnpm {label} left a tog-internal path in {file}:\n{text}"
             );
         }
         let leftover: Vec<_> = std::fs::read_dir(store.join("tmp"))
@@ -878,7 +878,7 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         "pnpm workspace root remove",
     );
     installed_unchanged("workspace root remove");
-    // `blanket sync` projects its own node_modules over the user's install
+    // `tog sync` projects its own node_modules over the user's install
     // (moving the existing directory aside, and saying so); that is sync's
     // documented behaviour, not the delegate's, so the snapshot ends here.
     assert_ok(

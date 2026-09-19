@@ -1,6 +1,6 @@
 //! The Cargo tailor's `Tailor` implementation: what `sync`, `plan`, `build`,
 //! `run`, `ls`, `status`, and `sbom` do for a Cargo workspace. It also owns
-//! the `rustfmt` closure that `blanket fmt` writes.
+//! the `rustfmt` closure that `tog fmt` writes.
 
 use crate::comforter;
 use crate::comforter::status::{lock_state, string, State};
@@ -65,7 +65,7 @@ impl Tailor for Cargo {
         let rust_obj = &inputs.rust_obj;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
         if fresh {
-            let cargo_home = inputs.root.join(".blanket/cargo-home");
+            let cargo_home = inputs.root.join(".tog/cargo-home");
             if std::fs::symlink_metadata(&cargo_home).is_ok() {
                 store::remove_tree(&cargo_home)?;
             }
@@ -140,7 +140,7 @@ impl Tailor for Cargo {
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let mut prefix = Vec::new();
-        let cargo_home = dir.join(".blanket/cargo-home");
+        let cargo_home = dir.join(".tog/cargo-home");
         if cargo_home.exists() {
             let closure = comforter::read_closure(dir, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
@@ -202,12 +202,12 @@ impl Tailor for Cargo {
         body: &Value,
     ) -> io::Result<State> {
         Ok(match ecosystem {
-            // `blanket fmt` projects nothing: its record is current when it
+            // `tog fmt` projects nothing: its record is current when it
             // names the rustfmt this binary would use for the project now.
             "rustfmt" => rustfmt::closure_state(platform, dir, body)?,
             "cargo" => {
-                if !dir.join(".blanket/cargo-home").is_dir() {
-                    State::ProjectionMissing(".blanket/cargo-home".into())
+                if !dir.join(".tog/cargo-home").is_dir() {
+                    State::ProjectionMissing(".tog/cargo-home".into())
                 } else {
                     lock_state(dir, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?
                 }
@@ -238,10 +238,10 @@ impl Tailor for Cargo {
                     &version_of(eco, plan, "rust_version")?,
                 )?);
             }
-            // `blanket fmt` writes a toolchain-only closure: no packages, but two
+            // `tog fmt` writes a toolchain-only closure: no packages, but two
             // store objects it pins and keeps live. Like every other arm it emits
             // the toolchain it records (rustfmt, versioned by the resolved Rust
-            // version, the same pairing `blanket ls` shows) plus the paired Rust
+            // version, the same pairing `tog ls` shows) plus the paired Rust
             // object. Closures are visited in sorted name order, so a `cargo`
             // closure naming the very same Rust object has already emitted it;
             // listing it twice would inflate the inventory.
@@ -280,7 +280,7 @@ impl Tailor for Cargo {
         {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                "no Rust project here; run `blanket fmt` from a Cargo project",
+                "no Rust project here; run `tog fmt` from a Cargo project",
             ));
         }
         Ok(())

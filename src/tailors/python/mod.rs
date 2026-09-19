@@ -189,7 +189,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .expect("pinned uv for test platform"),
     );
     let root = std::env::temp_dir().join(format!(
-        "blanket-python-identity-{}-{}",
+        "tog-python-identity-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -330,7 +330,7 @@ pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
 
 /// Pinned uv (resolver delegation target). Single static binary per platform;
 /// realized like any toolchain so a bare machine needs nothing besides
-/// blanket.
+/// tog.
 const UV_VERSION: &str = "0.12.7";
 struct PinnedUv {
     platform: Platform,
