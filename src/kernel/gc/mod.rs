@@ -1587,8 +1587,11 @@ mod tests {
             &mut out,
         )
         .unwrap_err();
+        // A filesystem that reuses the inode number reports the type change
+        // instead of the replacement; both refuse the deletion.
+        let text = error.to_string();
         assert!(
-            error.to_string().contains("was replaced"),
+            text.contains("was replaced") || text.contains("changed file type"),
             "the replacement was not detected: {error}"
         );
         assert!(

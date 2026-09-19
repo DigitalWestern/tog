@@ -1274,9 +1274,15 @@ mod tests {
             text.lines().next().unwrap().starts_with("ok    platform"),
             "{text}"
         );
-        assert!(
-            text.trim_end().ends_with(&detail("project").detail),
-            "{text}"
-        );
+        // The project check is the last line of the report; a host whose
+        // sandbox or C toolchain fails appends a summary after it.
+        let last_check = text
+            .lines()
+            .filter(|line| {
+                line.starts_with("ok  ") || line.starts_with("warn") || line.starts_with("FAIL")
+            })
+            .next_back()
+            .unwrap();
+        assert!(last_check.ends_with(&detail("project").detail), "{text}");
     }
 }
