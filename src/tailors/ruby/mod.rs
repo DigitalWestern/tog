@@ -16,6 +16,7 @@ use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -62,6 +63,43 @@ fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
         .iter()
         .find(|pin| pin.platform == platform)
         .ok_or_else(|| no_pin("ruby", platform))
+}
+
+/// The shipped Ruby catalog: the one pinned portable-ruby bottle per
+/// platform as a single release bundle.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    let artifacts = RUBY_PINS
+        .iter()
+        .map(|pin| {
+            Ok(ArtifactRow::new(
+                pin.platform,
+                "ruby",
+                "homebrew-portable-ruby",
+                RUBY_VERSION,
+                "ruby-toolchain/1",
+                pin.url,
+                Digest::sha256(pin.sha256)?,
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Catalog::new(
+        "ruby",
+        vec![Bundle {
+            release: format!("ruby-{RUBY_VERSION}"),
+            revision: None,
+            primary: vec!["ruby".into()],
+            components: vec![Component::new("ruby", RUBY_VERSION)],
+            artifacts,
+        }],
+    )
+}
+
+/// A pre-lock Ruby closure records the interpreter under `plan.ruby_version`.
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(platform, body, &[("ruby", "/plan/ruby_version")])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

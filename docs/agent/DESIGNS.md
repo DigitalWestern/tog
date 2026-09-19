@@ -167,7 +167,10 @@ bytes, which is what lets publication compare bytes rather than parse trees.
 
 This Node bundle uses shipped pins: npm is embedded in the Node artifact and
 node-gyp inside that bundled npm, so the Node artifact's two platform rows are
-the whole independently-fetched set. Its `.node-version` holds `24.20.0\n`,
+the whole independently-fetched set. (The shipped catalog today lists only
+the `node` component: the pin table records no verified npm or node-gyp
+version, and the catalog invents none. The embedded rows appear once those
+versions are verified at pin time.) Its `.node-version` holds `24.20.0\n`,
 whose sha256 is that input row's digest, and its `package.json` carries no
 `engines.node`, which the second row records rather than omits:
 
@@ -178,7 +181,7 @@ blanket_version = "0.1.0"
 [toolchain.node]
 runtime = "node"
 release = "node-24.20.0-r1"
-bundle_id = "sha256:2b37e2816f777fb287f11e8b188b92645449251a51ec217eb12ed51668093c5f"
+bundle_id = "sha256:683bc7a0c5d38d3fcc9e73a6e55ab75bda308fb66204c4808942e750b5c1266b"
 primary = "node"
 revision = 1
 components = ["node", "bundled-npm", "node-gyp"]
@@ -697,7 +700,7 @@ stays dormant until selection sources and runtime propagation land: the feature
 is off, and the lock is neither written nor required.
 
 0. **Exact selection fixes (landed as two PRs)** — #21 `wp2/python-exact-selection` (`src/pyselect.rs`, `src/python.rs`) and #22 `wp2/go-selected-version` (`src/golang.rs`), each with its own unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
-1. **Shipped-table adapter and source selection** — pin modules, `src/platform.rs`, typed source-policy interface with configurable endpoint defaults, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
+1. **Shipped-table adapter and source selection (landed)** — pin modules, `src/platform.rs`, typed source-policy interface with configurable endpoint defaults, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
 2. **Secure archive extractor (landed; follow-up before a second consumer)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar. Ordered follow-up **2b** replaces column-parsed tar listings with direct header validation before any second consumer adopts the module.
 3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It extends the descriptor-relative primitives currently in `src/store.rs`/`src/project.rs` (which may be extracted as `src/fsroot.rs`) for lock/input-specific rules (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `blanket-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
 4. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
@@ -716,7 +719,10 @@ their use without rewriting the lock.
 
 **Prerequisites.** None outstanding. The old plan held PR 3 (the lock core)
 until GC safety Packages C and D had rewritten `write_closure` and its
-callers; both have shipped.
+callers; both have shipped. PR 1 below landed on 2026-09-18
+(`src/kernel/toolchain/`, described in `docs/human/ARCHITECTURE.md`
+"Toolchain lock"); its entry is kept so the numbering the later PRs cite
+stays intact.
 
 **Design.** "The contract" above is the design after ten adversarial rounds.
 When an implementation PR changes the contract, it updates the contract here
@@ -757,7 +763,7 @@ so this file does not drift from it:
 
 **Remaining ordered PRs** (numbering matches the ordered list at the end of the contract):
 
-**PR 1 — shipped-table adapter and source selection.**
+**PR 1 — shipped-table adapter and source selection (landed 2026-09-18).**
 - *Files:* `src/python.rs:22-85`, `src/npm.rs:122-135`, `src/cargo.rs:25-68`,
   `src/golang.rs:32-45`, `src/ruby.rs`, `src/elixir.rs`, `src/dotnet.rs`,
   `src/platform.rs:83-86`, plus a new selector module.

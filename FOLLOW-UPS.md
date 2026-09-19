@@ -9,10 +9,11 @@ by position.
 
 ## Next up, in order
 
-1. **Toolchain lock (WP2), shipped-table adapter first.** The next large
-   feature: a committed lock naming the exact toolchain per project. Design,
-   remaining PRs, and the recommended order (PR 1 before the lock core) are
-   in `docs/agent/DESIGNS.md` §1.
+1. **Toolchain lock (WP2).** The next large feature: a committed lock
+   naming the exact toolchain per project. PR 1 (the shipped-table adapter
+   and selector, `src/kernel/toolchain/`) is merged; the archive-header
+   follow-up (2b), the dormant lock core (3), runtime propagation (4) and
+   activation (5) remain, in that order, in `docs/agent/DESIGNS.md` §1.
 
 ## Decisions waiting on the owner
 
@@ -103,6 +104,12 @@ by position.
   A kernel-level toolchain/artifact provider would remove both. Each move is
   its own PR: relocate the module, keep object ids byte-identical, then
   delete the allow-list row.
+- **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
+  the small numeric `Version`/specifier subset the toolchain selector needs;
+  `src/tailors/python/pep440.rs` has the full grammar. The Python source
+  reader (toolchain lock PR 3) must lower one into the other and the kernel
+  cannot import the tailor's copy. Hoist `pep440.rs` into `src/kernel/`
+  and have the selector use it, in its own PR.
 - **Unreproduced test flakes.**
   `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
   (2026-09-12) and `tailors::cargo::tests::rejects_symlinked_crate_entries`

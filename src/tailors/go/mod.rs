@@ -17,6 +17,7 @@ use crate::kernel::fetch::{cache_insert, cache_verified_held, download_verified_
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -69,6 +70,51 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
         platform.triple(),
         pins.join(", ")
     )))
+}
+
+/// The shipped Go catalog: one release bundle per pinned Go version.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    // Catalog order is pin-table order: the newest-appended row wins a tie.
+    let mut versions: Vec<&str> = Vec::new();
+    for version in GO_PIN_ROWS.iter().map(|pin| pin.version) {
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
+    let mut bundles = Vec::new();
+    for version in versions {
+        let artifacts = GO_PIN_ROWS
+            .iter()
+            .filter(|pin| pin.version == version)
+            .map(|pin| {
+                Ok(ArtifactRow::new(
+                    pin.platform,
+                    "go",
+                    "go.dev",
+                    version,
+                    "go-toolchain/1",
+                    pin.url,
+                    Digest::sha256(pin.sha256)?,
+                ))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        bundles.push(Bundle {
+            release: format!("go-{version}"),
+            revision: None,
+            primary: vec!["go".into()],
+            components: vec![Component::new("go", version)],
+            artifacts,
+        });
+    }
+    Catalog::new("go", bundles)
+}
+
+/// A pre-lock Go closure records the toolchain under `plan.go_version`.
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(platform, body, &[("go", "/plan/go_version")])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

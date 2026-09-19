@@ -19,6 +19,7 @@ pub mod wheel;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
 use crate::kernel::types::Identity;
 #[cfg(test)]
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
@@ -248,6 +249,76 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     cases.extend(build::live_identity_cases(platform));
     let _ = crate::kernel::store::remove_tree(&store.root);
     cases
+}
+
+/// The python-build-standalone release every CPython row is taken from.
+const CPYTHON_BUILD: &str = "20260825";
+
+/// The shipped Python catalog: one release bundle per pinned CPython
+/// version, each carrying the pinned uv, so a lock minted from it names the
+/// resolver too. Rows carry the pin's URL and digest unchanged; the recipe
+/// ids name the layouts the existing identities already commit to.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    // Catalog order is pin-table order: the newest-appended row wins a tie.
+    let mut versions: Vec<&str> = Vec::new();
+    for version in PYTHONS.iter().map(|pin| pin.version) {
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
+    let mut bundles = Vec::new();
+    for version in versions {
+        let mut artifacts = Vec::new();
+        for pin in PYTHONS.iter().filter(|pin| pin.version == version) {
+            artifacts.push(ArtifactRow::new(
+                pin.platform,
+                "cpython",
+                "python-build-standalone",
+                CPYTHON_BUILD,
+                "cpython/legacy",
+                pin.url,
+                Digest::sha256(pin.sha256)?,
+            ));
+        }
+        for pin in UV {
+            artifacts.push(ArtifactRow::new(
+                pin.platform,
+                "uv",
+                "uv",
+                UV_VERSION,
+                "uv/legacy",
+                pin.url,
+                Digest::sha256(pin.sha256)?,
+            ));
+        }
+        bundles.push(Bundle {
+            release: format!("cpython-{version}"),
+            revision: None,
+            primary: vec!["cpython".into()],
+            components: vec![
+                Component::new("cpython", version),
+                Component::new("uv", UV_VERSION),
+            ],
+            artifacts,
+        });
+    }
+    Catalog::new("python", bundles)
+}
+
+/// A pre-lock Python closure records the selected CPython version under
+/// `python.version` (older closures: `plan.python_version`).
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(
+        platform,
+        body,
+        &[
+            ("cpython", "/python/version"),
+            ("cpython", "/plan/python_version"),
+        ],
+    )
 }
 
 pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {

@@ -9,6 +9,7 @@ use crate::kernel::cyclonedx::{
 };
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
 use crate::tailors::{ClosureListing, PackageRow, Tailor};
@@ -166,6 +167,19 @@ impl Tailor for Node {
             prefix.push(node.join("bin").to_string_lossy().into_owned());
         }
         Ok(prefix)
+    }
+
+    fn toolchain_catalog(&self) -> io::Result<Catalog> {
+        node::toolchain_catalog()
+    }
+
+    fn legacy_toolchain_evidence(
+        &self,
+        _ecosystem: &str,
+        platform: Option<Platform>,
+        body: &Value,
+    ) -> LegacyEvidence {
+        node::legacy_toolchain_evidence(platform, body)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

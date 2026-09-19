@@ -10,6 +10,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence};
 use crate::kernel::ui;
 use crate::tailors::dotnet;
 use crate::tailors::{ClosureListing, PackageRow, Tailor};
@@ -117,6 +118,19 @@ impl Tailor for Dotnet {
             sandbox::force_env(command, &prefixes, &remove, &set);
         }
         Ok(prefix)
+    }
+
+    fn toolchain_catalog(&self) -> io::Result<Catalog> {
+        dotnet::toolchain_catalog()
+    }
+
+    fn legacy_toolchain_evidence(
+        &self,
+        _ecosystem: &str,
+        platform: Option<Platform>,
+        body: &Value,
+    ) -> LegacyEvidence {
+        dotnet::legacy_toolchain_evidence(platform, body)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

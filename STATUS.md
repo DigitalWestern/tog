@@ -22,7 +22,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
 | Policy admission gate (`blanket audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared, including the `rustfmt` record against its pin (2026-09-17). Closure records are signed (`blanket keygen`, `BLANKET_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |
 | `blanket sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
-| Toolchain lock (WP2) | Designed, not built (`docs/agent/DESIGNS.md` §1) |
+| Toolchain lock (WP2) | PR 1 shipped (2026-09-18): the pin tables are catalog rows (`src/kernel/toolchain/`), with the cross-platform selector, the typed source policy and legacy seeding, all unit-tested. No lock file is written yet; the remaining PRs are in `docs/agent/DESIGNS.md` §1 |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
 
 ## What is next

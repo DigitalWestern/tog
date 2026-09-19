@@ -19,6 +19,7 @@ use crate::comforter::status::State;
 use crate::kernel::context::Context;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -184,6 +185,23 @@ pub trait Tailor: Sync {
         &[]
     }
 
+    /// The shipped toolchain catalog: this ecosystem's pin tables as release
+    /// bundles (`kernel::toolchain`), the rows a toolchain lock is minted
+    /// from. Selection and legacy seeding read it; realization keeps reading
+    /// the pin tables, so no object identity changes.
+    fn toolchain_catalog(&self) -> io::Result<Catalog>;
+
+    /// What a closure of this ecosystem written before the toolchain lock
+    /// proves about its toolchain (`kernel::toolchain::seed`): `platform`
+    /// is the closure envelope's platform, `body` the closure body
+    /// `read_closure` returns, from which the exact recorded versions come.
+    fn legacy_toolchain_evidence(
+        &self,
+        ecosystem: &str,
+        platform: Option<Platform>,
+        body: &Value,
+    ) -> LegacyEvidence;
+
     /// The `--eco` word `blanket fmt` accepts for this ecosystem, when it
     /// has a pinned formatter.
     fn fmt_ecosystem(&self) -> Option<&'static str> {
@@ -283,4 +301,215 @@ pub fn detected(dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
         }
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::toolchain::{qualified, seed, Request, SourcePolicy};
+    use serde_json::json;
+
+    const DARWIN: Platform = Platform::Aarch64AppleDarwin;
+    const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    #[test]
+    fn every_tailor_ships_a_complete_catalog_under_the_shipped_source_policy() {
+        let policy = SourcePolicy::shipped();
+        for tailor in registry() {
+            let catalog = tailor.toolchain_catalog().unwrap();
+            assert_eq!(catalog.ecosystem(), tailor.id());
+            assert!(!catalog.bundles().is_empty(), "{}", tailor.id());
+            for bundle in catalog.bundles() {
+                assert!(
+                    bundle.complete_everywhere(),
+                    "{}: release {} is incomplete",
+                    tailor.id(),
+                    bundle.release
+                );
+                for row in &bundle.artifacts {
+                    let authorized =
+                        policy
+                            .authorize(&row.provider, &row.url)
+                            .unwrap_or_else(|error| {
+                                panic!("{}: {}: {error}", tailor.id(), bundle.release)
+                            });
+                    assert_eq!(authorized.publisher, row.provider);
+                    assert!(
+                        row.recipe.contains('/'),
+                        "{}: recipe {}",
+                        tailor.id(),
+                        row.recipe
+                    );
+                }
+            }
+            // The newest complete release is selectable, and the choice is
+            // the same however many times it is made.
+            let first = catalog.select(&Request::newest()).unwrap().bundle_id();
+            let again = catalog.select(&Request::newest()).unwrap().bundle_id();
+            assert_eq!(first, again);
+        }
+    }
+
+    #[test]
+    fn shipped_rows_carry_the_verified_digests_with_their_algorithm() {
+        let sha512_components = [
+            ("dotnet", "dotnet-sdk"),
+            ("elixir", "hex"),
+            ("elixir", "rebar3"),
+        ];
+        let mut seen = 0;
+        for tailor in registry() {
+            let catalog = tailor.toolchain_catalog().unwrap();
+            for bundle in catalog.bundles() {
+                for row in &bundle.artifacts {
+                    let want512 =
+                        sha512_components.contains(&(tailor.id(), row.component.as_str()));
+                    let spelled = qualified(&row.digest);
+                    if want512 {
+                        seen += 1;
+                        assert!(
+                            spelled.starts_with("sha512:"),
+                            "{}: {spelled}",
+                            row.component
+                        );
+                        assert_eq!(spelled.len(), "sha512:".len() + 128);
+                    } else {
+                        assert!(
+                            spelled.starts_with("sha256:"),
+                            "{}: {spelled}",
+                            row.component
+                        );
+                        assert_eq!(spelled.len(), "sha256:".len() + 64);
+                    }
+                }
+            }
+        }
+        // Two platforms each for the SDK, Hex and rebar3.
+        assert_eq!(seen, 6);
+        // Python: five CPython releases, each with the one pinned uv.
+        let python = by_id("python").unwrap().toolchain_catalog().unwrap();
+        assert_eq!(python.bundles().len(), 5);
+        for bundle in python.bundles() {
+            assert_eq!(bundle.components.len(), 2);
+            assert_eq!(bundle.artifacts.len(), 4);
+            assert!(bundle.artifact(LINUX, "uv").is_some());
+        }
+        // BEAM: the pair is primary, OTP first, and the Linux OTP row names
+        // the relocation recipe the Linux identity already commits to.
+        let elixir = by_id("elixir").unwrap().toolchain_catalog().unwrap();
+        let beam = &elixir.bundles()[0];
+        assert_eq!(beam.primary, ["otp", "elixir"]);
+        assert_eq!(
+            beam.artifact(DARWIN, "otp").unwrap().recipe,
+            "beam-toolchain/1"
+        );
+        assert_eq!(
+            beam.artifact(LINUX, "otp").unwrap().recipe,
+            "otp-install-cross-minimal/1"
+        );
+        assert_eq!(
+            beam.artifact(DARWIN, "hex").unwrap().digest,
+            beam.artifact(LINUX, "hex").unwrap().digest
+        );
+        // Rust: rustfmt rides in the same bundle under its own recipe.
+        let cargo = by_id("cargo").unwrap().toolchain_catalog().unwrap();
+        let rust = &cargo.bundles()[0];
+        assert_eq!(rust.components.len(), 4);
+        assert_eq!(rust.artifact(LINUX, "rustfmt").unwrap().recipe, "rustfmt/1");
+        assert_eq!(
+            rust.artifact(LINUX, "rustc").unwrap().recipe,
+            "rust-toolchain/1"
+        );
+    }
+
+    /// A pre-lock closure body per ecosystem, shaped as the writers shape
+    /// it (the platform lives in the envelope, never in the body), recording
+    /// the versions of `bundle`.
+    fn legacy_body(id: &str, bundle: &crate::kernel::toolchain::Bundle) -> Value {
+        let version = |component: &str| bundle.component(component).unwrap().version.clone();
+        match id {
+            "python" => json!({"python": {"version": version("cpython")}, "plan": {}}),
+            "node" => json!({"node_version": version("node")}),
+            "cargo" => json!({"plan": {"rust_version": version("rustc")}}),
+            "go" => json!({"plan": {"go_version": version("go")}}),
+            "ruby" => json!({"plan": {"ruby_version": version("ruby")}}),
+            "elixir" => {
+                json!({"plan": {"otp_version": version("otp"), "elixir_version": version("elixir")}})
+            }
+            "dotnet" => json!({"plan": {"sdk_version": version("dotnet-sdk")}}),
+            other => panic!("no legacy body for {other}"),
+        }
+    }
+
+    #[test]
+    fn legacy_closures_seed_the_release_they_record_or_refuse() {
+        for tailor in registry() {
+            let catalog = tailor.toolchain_catalog().unwrap();
+            let newest = catalog.select(&Request::newest()).unwrap();
+            let body = legacy_body(tailor.id(), newest);
+            assert!(body.get("platform").is_none());
+            for platform in Platform::ALL {
+                let evidence =
+                    tailor.legacy_toolchain_evidence(tailor.id(), Some(*platform), &body);
+                assert_eq!(evidence.platform, Some(*platform));
+                let seeded = seed(&catalog, &evidence)
+                    .unwrap_or_else(|error| panic!("{}: {error}", tailor.id()));
+                assert_eq!(seeded.release, newest.release, "{}", tailor.id());
+            }
+            // No envelope platform: refuse, naming the update verb.
+            let evidence = tailor.legacy_toolchain_evidence(tailor.id(), None, &body);
+            let error = seed(&catalog, &evidence).unwrap_err();
+            assert!(
+                error.to_string().contains("records no platform"),
+                "{}: {error}",
+                tailor.id()
+            );
+            assert!(
+                error.to_string().contains("blanket update --toolchain"),
+                "{}: {error}",
+                tailor.id()
+            );
+            // No recorded version: refuse rather than use the shipped default.
+            let bare = json!({"plan": {}});
+            let evidence = tailor.legacy_toolchain_evidence(tailor.id(), Some(LINUX), &bare);
+            let error = seed(&catalog, &evidence).unwrap_err();
+            assert!(
+                error.to_string().contains("records no"),
+                "{}: {error}",
+                tailor.id()
+            );
+        }
+        // Python's older closures record the version on the plan instead.
+        let python = by_id("python").unwrap();
+        let catalog = python.toolchain_catalog().unwrap();
+        let old = json!({"plan": {"python_version": "3.11.16"}});
+        let seeded = seed(
+            &catalog,
+            &python.legacy_toolchain_evidence("python", Some(DARWIN), &old),
+        )
+        .unwrap();
+        assert_eq!(seeded.component("cpython").unwrap().version, "3.11.16");
+        // A rustfmt closure records the version at the top level.
+        let cargo = by_id("cargo").unwrap();
+        let catalog = cargo.toolchain_catalog().unwrap();
+        let fmt = json!({"rust_version": "1.96.1"});
+        assert!(seed(
+            &catalog,
+            &cargo.legacy_toolchain_evidence("rustfmt", Some(LINUX), &fmt)
+        )
+        .is_ok());
+        // A version the catalog never shipped is unrecoverable.
+        let stranger = json!({"plan": {"rust_version": "1.0.0"}});
+        let error = seed(
+            &catalog,
+            &cargo.legacy_toolchain_evidence("cargo", Some(LINUX), &stranger),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no catalog release has rustc 1.0.0"),
+            "{error}"
+        );
+    }
 }

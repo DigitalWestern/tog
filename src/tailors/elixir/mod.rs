@@ -17,6 +17,7 @@ use crate::kernel::fetch::{download_verified_digest_held, download_verified_held
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -64,6 +65,100 @@ fn otp_pin(platform: Platform) -> io::Result<&'static OtpPin> {
         .iter()
         .find(|pin| pin.platform == platform)
         .ok_or_else(|| no_pin("beam/otp", platform))
+}
+
+/// The shipped BEAM catalog: one release bundle whose primary is the
+/// `(otp, elixir)` pair. OTP is a per-platform build (erlef on Darwin, our
+/// own relocated build on Linux, under the relocation recipe); Elixir, Hex
+/// and rebar3 are platform-neutral BEAM code, so each repeats its one
+/// digest on both platforms. Hex and rebar3 keep the sha512 their publisher
+/// prints.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    let mut artifacts = Vec::new();
+    for pin in OTP_PINS {
+        let (provider, build, recipe) = if pin.platform.is_macos() {
+            (
+                "erlef-otp-builds",
+                format!("OTP-{OTP_VERSION}"),
+                "beam-toolchain/1",
+            )
+        } else {
+            (
+                "blanket-toolchains",
+                format!("otp-{OTP_VERSION}-{}-fedora44", pin.platform.triple()),
+                LINUX_RELOCATION_SCHEMA,
+            )
+        };
+        artifacts.push(ArtifactRow::new(
+            pin.platform,
+            "otp",
+            provider,
+            &build,
+            recipe,
+            pin.url,
+            Digest::sha256(pin.sha256)?,
+        ));
+    }
+    for platform in Platform::ALL {
+        artifacts.push(ArtifactRow::new(
+            *platform,
+            "elixir",
+            "elixir-lang",
+            &format!("v{ELIXIR_VERSION}-otp-29"),
+            "beam-toolchain/1",
+            ELIXIR_URL,
+            Digest::sha256(ELIXIR_SHA256)?,
+        ));
+        artifacts.push(ArtifactRow::new(
+            *platform,
+            "hex",
+            "builds.hex.pm",
+            &format!("hex-{HEX_VERSION}-otp-29"),
+            "beam-toolchain/1",
+            HEX_URL,
+            Digest::sha512(HEX_SHA512)?,
+        ));
+        artifacts.push(ArtifactRow::new(
+            *platform,
+            "rebar3",
+            "builds.hex.pm",
+            &format!("rebar3-{REBAR3_VERSION}-otp-28"),
+            "beam-toolchain/1",
+            REBAR3_URL,
+            Digest::sha512(REBAR3_SHA512)?,
+        ));
+    }
+    Catalog::new(
+        "elixir",
+        vec![Bundle {
+            release: format!("beam-otp{OTP_VERSION}-elixir{ELIXIR_VERSION}"),
+            revision: None,
+            primary: vec!["otp".into(), "elixir".into()],
+            components: vec![
+                Component::new("otp", OTP_VERSION),
+                Component::new("elixir", ELIXIR_VERSION),
+                Component::new("hex", HEX_VERSION),
+                Component::new("rebar3", REBAR3_VERSION),
+            ],
+            artifacts,
+        }],
+    )
+}
+
+/// A pre-lock Elixir closure records both halves of the BEAM pair under
+/// `plan.otp_version` and `plan.elixir_version`.
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(
+        platform,
+        body,
+        &[
+            ("otp", "/plan/otp_version"),
+            ("elixir", "/plan/elixir_version"),
+        ],
+    )
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
