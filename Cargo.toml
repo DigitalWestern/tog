@@ -25,6 +25,8 @@ ureq = "2"
 ring = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
+flate2 = "1"
+liblzma = { version = "0.4", features = ["static"] }
 
 [profile.release]
 strip = true
