@@ -9,10 +9,11 @@ by position.
 
 ## Next up, in order
 
-1. **Toolchain lock (WP2), shipped-table adapter first.** The next large
-   feature: a committed lock naming the exact toolchain per project. Design,
-   remaining PRs, and the recommended order (PR 1 before the lock core) are
-   in `docs/agent/DESIGNS.md` §1.
+1. **Toolchain lock (WP2).** The next large feature: a committed lock
+   naming the exact toolchain per project. PR 1 (the shipped-table adapter
+   and selector, `src/kernel/toolchain/`) is merged; the archive-header
+   follow-up (2b), the dormant lock core (3), runtime propagation (4) and
+   activation (5) remain, in that order, in `docs/agent/DESIGNS.md` §1.
 
 ## Decisions waiting on the owner
 

@@ -11,6 +11,7 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
 use crate::tailors::{ClosureListing, PackageRow, Tailor};
@@ -153,6 +154,14 @@ impl Tailor for Cargo {
             command.env_remove("RUSTUP_TOOLCHAIN");
         }
         Ok(prefix)
+    }
+
+    fn toolchain_catalog(&self) -> io::Result<Catalog> {
+        cargo::toolchain_catalog()
+    }
+
+    fn legacy_toolchain_evidence(&self, ecosystem: &str, body: &Value) -> LegacyEvidence {
+        cargo::legacy_toolchain_evidence(ecosystem, body)
     }
 
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing {

@@ -33,6 +33,7 @@ pub use realize::*;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
 use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
@@ -154,6 +155,46 @@ pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
         .iter()
         .find(|pin| pin.platform == platform)
         .ok_or_else(|| no_pin("nodejs", platform))
+}
+
+/// The shipped Node catalog: one release bundle per pinned Node version.
+/// npm and node-gyp ship inside the Node artifact; the pin table records no
+/// version for them, so they are not listed as components here.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    let mut versions: Vec<&str> = NODE_PINS.iter().map(|pin| pin.version).collect();
+    versions.sort_unstable();
+    versions.dedup();
+    let mut bundles = Vec::new();
+    for version in versions {
+        let artifacts = NODE_PINS
+            .iter()
+            .filter(|pin| pin.version == version)
+            .map(|pin| {
+                Ok(ArtifactRow::new(
+                    pin.platform,
+                    "node",
+                    "nodejs.org",
+                    version,
+                    "nodejs/legacy",
+                    pin.url,
+                    Digest::sha256(pin.sha256)?,
+                ))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        bundles.push(Bundle {
+            release: format!("node-{version}"),
+            revision: None,
+            primary: vec!["node".into()],
+            components: vec![Component::new("node", version)],
+            artifacts,
+        });
+    }
+    Catalog::new("node", bundles)
+}
+
+/// A pre-lock Node closure records its runtime under `node_version`.
+pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(body, &[("node", "/node_version")])
 }
 
 pub fn preflight(platform: Platform) -> io::Result<()> {

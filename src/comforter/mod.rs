@@ -790,6 +790,34 @@ pub(crate) fn store_from_closure_body(body: &serde_json::Value) -> Option<Store>
 }
 
 /// Read a tailor's closure body back (for `blanket run` and friends).
+/// What a closure body says about its toolchain, for legacy seeding of the
+/// toolchain lock: the envelope platform (absent on closures that predate
+/// the field; no host value stands in) and, per component, the first of its
+/// JSON-pointer `fields` that holds a string. Nothing here is verified
+/// against the store; the tailor adds proved artifacts when it can.
+pub fn legacy_toolchain_evidence(
+    body: &serde_json::Value,
+    fields: &[(&str, &str)],
+) -> crate::kernel::toolchain::LegacyEvidence {
+    let mut evidence = crate::kernel::toolchain::LegacyEvidence {
+        platform: body["platform"].as_str().and_then(Platform::from_triple),
+        ..Default::default()
+    };
+    for (component, pointer) in fields {
+        if evidence.version(component).is_some() {
+            continue;
+        }
+        if let Some(version) = body.pointer(pointer).and_then(|v| v.as_str()) {
+            if !version.is_empty() {
+                evidence
+                    .versions
+                    .push((component.to_string(), version.to_string()));
+            }
+        }
+    }
+    evidence
+}
+
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(format!(".blanket/closures/{ecosystem}.json"));
     let text = fs::read_to_string(&path).map_err(|e| {

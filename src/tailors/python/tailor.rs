@@ -8,6 +8,7 @@ use crate::kernel::cyclonedx::{
 };
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
 use crate::tailors::{ClosureListing, PackageRow, Tailor};
@@ -70,6 +71,14 @@ impl Tailor for Python {
             command.env("PYTHONDONTWRITEBYTECODE", "1"); // site-packages is read-only
         }
         Ok(prefix)
+    }
+
+    fn toolchain_catalog(&self) -> io::Result<Catalog> {
+        python::toolchain_catalog()
+    }
+
+    fn legacy_toolchain_evidence(&self, _ecosystem: &str, body: &Value) -> LegacyEvidence {
+        python::legacy_toolchain_evidence(body)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

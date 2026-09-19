@@ -10,6 +10,7 @@ use crate::kernel::cyclonedx::{
 };
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
 use crate::tailors::{ClosureListing, DoctorCheck, PackageRow, Tailor};
@@ -126,6 +127,14 @@ impl Tailor for Go {
             }
         }
         Ok(prefix)
+    }
+
+    fn toolchain_catalog(&self) -> io::Result<Catalog> {
+        go::toolchain_catalog()
+    }
+
+    fn legacy_toolchain_evidence(&self, _ecosystem: &str, body: &Value) -> LegacyEvidence {
+        go::legacy_toolchain_evidence(body)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

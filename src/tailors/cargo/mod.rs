@@ -8,6 +8,9 @@ pub mod tailor;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{
+    ArtifactRow, Bundle, Catalog, Component as BundleComponent, LegacyEvidence,
+};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -85,6 +88,70 @@ fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>
         return Err(no_pin("rust toolchain", platform));
     }
     Ok(components)
+}
+
+/// The shipped Rust catalog: one release bundle per pinned Rust version,
+/// with rustc, rust-std and cargo under the toolchain recipe and rustfmt (the
+/// `blanket fmt` component of the same version) under its own.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    let mut versions: Vec<&str> = RUST_COMPONENTS.iter().map(|c| c.version).collect();
+    versions.sort_unstable();
+    versions.dedup();
+    let mut bundles = Vec::new();
+    for version in versions {
+        let mut components = Vec::new();
+        let mut artifacts = Vec::new();
+        for row in RUST_COMPONENTS.iter().filter(|c| c.version == version) {
+            if !components
+                .iter()
+                .any(|c: &BundleComponent| c.name == row.component)
+            {
+                components.push(BundleComponent::new(row.component, version));
+            }
+            artifacts.push(ArtifactRow::new(
+                row.platform,
+                row.component,
+                "static.rust-lang.org",
+                version,
+                "rust-toolchain/1",
+                row.url,
+                Digest::sha256(row.sha256)?,
+            ));
+        }
+        if rustfmt::RUSTFMT_VERSION == version {
+            components.push(BundleComponent::new("rustfmt", version));
+            for row in rustfmt::RUSTFMT_COMPONENTS {
+                artifacts.push(ArtifactRow::new(
+                    row.platform,
+                    "rustfmt",
+                    "static.rust-lang.org",
+                    version,
+                    "rustfmt/1",
+                    row.url,
+                    Digest::sha256(row.sha256)?,
+                ));
+            }
+        }
+        bundles.push(Bundle {
+            release: format!("rust-{version}"),
+            revision: None,
+            primary: vec!["rustc".into()],
+            components,
+            artifacts,
+        });
+    }
+    Catalog::new("cargo", bundles)
+}
+
+/// A pre-lock cargo closure records the toolchain under `plan.rust_version`;
+/// a rustfmt closure records it at the top level.
+pub fn legacy_toolchain_evidence(ecosystem: &str, body: &serde_json::Value) -> LegacyEvidence {
+    let pointer = if ecosystem == "rustfmt" {
+        "/rust_version"
+    } else {
+        "/plan/rust_version"
+    };
+    crate::comforter::legacy_toolchain_evidence(body, &[("rustc", pointer)])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

@@ -14,15 +14,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RUSTFMT_VERSION: &str = "1.96.1";
+pub(super) const RUSTFMT_VERSION: &str = "1.96.1";
 
-struct RustfmtComponent {
-    platform: Platform,
-    url: &'static str,
-    sha256: &'static str,
+pub(super) struct RustfmtComponent {
+    pub(super) platform: Platform,
+    pub(super) url: &'static str,
+    pub(super) sha256: &'static str,
 }
 
-const RUSTFMT_COMPONENTS: &[RustfmtComponent] = &[
+pub(super) const RUSTFMT_COMPONENTS: &[RustfmtComponent] = &[
     RustfmtComponent {
         platform: Platform::Aarch64AppleDarwin,
         url: "https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz",

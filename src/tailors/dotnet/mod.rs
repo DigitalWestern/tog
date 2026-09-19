@@ -17,6 +17,7 @@ use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -51,6 +52,40 @@ fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
         .iter()
         .find(|pin| pin.platform == platform)
         .ok_or_else(|| no_pin("dotnet-sdk", platform))
+}
+
+/// The shipped .NET catalog: the one pinned SDK per platform as a single
+/// release bundle, keeping the sha512 Microsoft publishes.
+pub fn toolchain_catalog() -> io::Result<Catalog> {
+    let artifacts = SDK_PINS
+        .iter()
+        .map(|pin| {
+            Ok(ArtifactRow::new(
+                pin.platform,
+                "dotnet-sdk",
+                "builds.dotnet.microsoft.com",
+                SDK_VERSION,
+                "dotnet-sdk/1",
+                pin.url,
+                Digest::sha512(pin.sha512)?,
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Catalog::new(
+        "dotnet",
+        vec![Bundle {
+            release: format!("dotnet-sdk-{SDK_VERSION}"),
+            revision: None,
+            primary: vec!["dotnet-sdk".into()],
+            components: vec![Component::new("dotnet-sdk", SDK_VERSION)],
+            artifacts,
+        }],
+    )
+}
+
+/// A pre-lock .NET closure records the SDK under `plan.sdk_version`.
+pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(body, &[("dotnet-sdk", "/plan/sdk_version")])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

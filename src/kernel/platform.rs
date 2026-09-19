@@ -44,6 +44,11 @@ impl Platform {
         }
     }
 
+    /// The platform a recorded triple names, if blanket supports it.
+    pub fn from_triple(triple: &str) -> Option<Platform> {
+        Platform::ALL.iter().copied().find(|p| p.triple() == triple)
+    }
+
     pub fn node_slug(self) -> &'static str {
         match self {
             Platform::Aarch64AppleDarwin => "darwin-arm64",
@@ -139,6 +144,15 @@ mod tests {
             Platform::Aarch64AppleDarwin.triple(),
             Platform::X86_64UnknownLinuxGnu.triple()
         );
+    }
+
+    #[test]
+    fn from_triple_round_trips_and_refuses_strangers() {
+        for platform in Platform::ALL {
+            assert_eq!(Platform::from_triple(platform.triple()), Some(*platform));
+        }
+        assert_eq!(Platform::from_triple("x86_64-apple-darwin"), None);
+        assert_eq!(Platform::from_triple(""), None);
     }
 
     #[test]
