@@ -4,7 +4,7 @@
 //! every key in "packages" is a literal filesystem path — so planning is
 //! pure parsing (no network, no resolution). Realization materializes
 //! exactly that tree as an immutable store object; projection is one
-//! node_modules symlink.
+//! node_modules symlink per importer.
 //!
 //! Installed packages come from registry tarballs or from git sources pinned
 //! to a full commit; an unpinned git source is refused (or skipped with a
@@ -14,8 +14,8 @@
 //!
 //! Trust model: the lockfile is a TRUSTED input. Integrity pins every
 //! tarball's bytes, but `resolved` URLs choose where the GET goes, so a
-//! hostile lockfile is a network capability. A registry allowlist is the
-//! M5 control for that.
+//! hostile lockfile is a network capability. There is no registry
+//! allowlist yet.
 
 pub mod inputs;
 pub mod lock_import;
@@ -820,7 +820,7 @@ mod tests {
 
     /// The identity matrix is reproducible: two builds in the same process
     /// yield the same kinds and the same inputs, case for case, on both
-    /// platforms (Sol r5 #4).
+    /// platforms.
     #[test]
     fn live_identity_cases_are_reproducible() {
         for platform in Platform::ALL {

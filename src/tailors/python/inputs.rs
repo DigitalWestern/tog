@@ -43,13 +43,6 @@ pub fn has_python_input(dir: &Path) -> io::Result<bool> {
     manifest::has_manifest(dir)
 }
 
-/// Plan from project inputs. Planning hits PyPI, so successful plans are
-/// cached in .blanket/plan.json keyed by a hash of the inputs; an unchanged
-/// lock replans offline and instantly.
-/// Plan from project inputs, returning the interpreter selection that was
-/// used. The manifest layer may only learn the constraint after a sandboxed
-/// `setup.py egg_info`, so the selection is made here and handed back to the
-/// caller: planning, realization and the closure all use this one value.
 /// The Python plan, the interpreter selection it was made with, and the
 /// project files it was computed from (recorded in the closure for status).
 pub type PythonPlan = (
@@ -84,6 +77,13 @@ pub fn python_input_records(
     comforter::input_records(dir, &candidates)
 }
 
+/// Plan from project inputs, returning the interpreter selection that was
+/// used. The manifest layer may only learn the constraint after a sandboxed
+/// `setup.py egg_info`, so the selection is made here and handed back to the
+/// caller: planning, realization and the closure all use this one value.
+///
+/// Planning hits PyPI, so successful plans are cached in `.blanket/plan.json`
+/// keyed by a hash of the inputs; an unchanged lock replans offline.
 pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
     let mut manifest = manifest::discover(platform, dir)?;
     let mut selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;

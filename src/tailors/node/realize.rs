@@ -237,8 +237,9 @@ pub(super) fn native_libs_identity_id(
     }
 }
 
-/// Realize the node_modules tree as an immutable store object.
-/// Object content root contains exactly `node_modules/`.
+/// Realize the node_modules tree as an immutable store object. The object
+/// content root holds `node_modules/` plus one
+/// `workspaces/<encoded importer>/node_modules` per workspace importer.
 pub fn realize_node_env(
     store: &Store,
     platform: Platform,
@@ -640,9 +641,9 @@ fn extract_tarball_packages(
                 p.bin = discover_package_bins(&manifest, &p.name, &dest)?;
             }
         }
-        // ponytail: post-extraction size cap (1 GiB/package) — catches
-        // decompression bombs after the fact; a streaming extractor with
-        // preflight limits is the M5 upgrade. Lockfiles are trusted inputs.
+        // Post-extraction size cap (1 GiB/package): catches decompression
+        // bombs after the fact, not before. Lockfiles are trusted inputs, so
+        // this is a backstop rather than the primary defence.
         if dir_size(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: size walk: {e}", p.path)))?
             > 1 << 30
@@ -825,8 +826,7 @@ fn link_package_bins(staged: &Path, packages: &[(NpmPackage, PathBuf)]) -> io::R
                     p.path
                 )));
             }
-            // Relative link: node_modules/.bin/x -> ../<name>/<rel>
-            // Relative link: <importer>/node_modules/.bin/x -> ../<name>/<rel>.
+            // Relative link: [<importer>/]node_modules/.bin/x -> ../<name>/<rel>.
             let link_target = bin_link_target(&p.path, &rel_path.to_string_lossy());
             let link = bin_dir.join(bin_name);
             if link.symlink_metadata().is_ok() {
@@ -946,19 +946,6 @@ pub(super) fn realize_node_env_with_node_object(
     commit_env_object(store, &identity, &staged, &deps)
 }
 
-/// npm lifecycle install scripts, run hermetically: network denied, writes
-/// confined to the package's own directory and a scratch dir, reads limited
-/// to the staged tree + node toolchain + system. This is what makes native
-/// addons (better-sqlite3, bcrypt) work: prebuilt-binary downloads fail
-/// closed and the node-gyp source fallback compiles offline against the
-/// store's node headers.
-///
-/// npm semantics mirrored: preinstall/install/postinstall in that order;
-/// packages with a binding.gyp and no install script get the default
-/// `node-gyp rebuild`. A failure is an exception by default, while strict
-/// policy preserves the fail-closed behavior. Isolation per package: a fresh
-/// scratch HOME each, tool shims in a directory scripts cannot write,
-/// declared artifacts planted per consuming HOME.
 pub(super) enum LifecycleFailure {
     SandboxUnavailable(io::Error),
     Script(io::Error),
@@ -974,6 +961,19 @@ pub(super) fn classify_lifecycle_result(result: io::Result<()>) -> Result<(), Li
     }
 }
 
+/// npm lifecycle install scripts, run hermetically: network denied, writes
+/// confined to the package's own directory and a scratch dir, reads limited
+/// to the staged tree + node toolchain + system. This is what makes native
+/// addons (better-sqlite3, bcrypt) work: prebuilt-binary downloads fail
+/// closed and the node-gyp source fallback compiles offline against the
+/// store's node headers.
+///
+/// npm semantics mirrored: preinstall/install/postinstall in that order;
+/// packages with a binding.gyp and neither an install nor a preinstall
+/// script get the default `node-gyp rebuild`. A failure is an exception by
+/// default, while strict policy preserves the fail-closed behavior. Isolation
+/// per package: a fresh scratch HOME each, tool shims in a directory scripts
+/// cannot write, declared artifacts planted per consuming HOME.
 pub(super) fn run_install_scripts(
     store: &Store,
     platform: Platform,
@@ -1007,8 +1007,8 @@ pub(super) fn run_install_scripts(
 ///
 /// `None` means the package has no lifecycle work at all: no readable
 /// manifest, or no preinstall/install/postinstall and no binding.gyp. A
-/// package with a binding.gyp and no install script gets npm's default
-/// `node-gyp rebuild`.
+/// package with a binding.gyp and neither an install nor a preinstall script
+/// gets npm's default `node-gyp rebuild`.
 fn package_lifecycle_phases(pkg_dir: &Path) -> Option<Vec<(&'static str, String)>> {
     let manifest = fs::read_to_string(pkg_dir.join("package.json")).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;

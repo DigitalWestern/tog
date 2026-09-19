@@ -708,10 +708,11 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 /// Realize the registry closure as a Cargo directory source.
 ///
 /// The Rust toolchain is deliberately **not** a dependency of the result.
-/// `realize_vendor_inner` runs `/usr/bin/tar` and nothing else — no part of
-/// the toolchain is a build input — and `vendor_identity` does not commit to
-/// one, so recording it would let the same identity be published with two
-/// different dependency sets. That divergence is unrecoverable: the second
+/// `realize_vendor_inner` shells out only to `/usr/bin/tar` and the
+/// git-source realizer — no part of the toolchain is a build input — and
+/// `vendor_identity` does not commit to one, so recording it would let the
+/// same identity be published with two different dependency sets. That
+/// divergence is unrecoverable: the second
 /// publication is a cache hit, and `validate_cached_dependency_evidence`
 /// makes a cache hit with different evidence a hard error, so the store
 /// stops being syncable. The toolchain object is retained by the project's
@@ -767,8 +768,7 @@ pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
 
 /// Find the directory inside a realized repository that holds the crate with
 /// this name and locked version: the root when its own Cargo.toml names it,
-/// otherwise a matching workspace member (members live one or two levels
-/// down).
+/// otherwise a matching workspace member (searched up to four levels down).
 fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathBuf> {
     fn package_name(manifest: &Path) -> Option<String> {
         let text = fs::read_to_string(manifest).ok()?;
@@ -1442,7 +1442,7 @@ pub fn project_cargo_env(
     )
 }
 
-/// Build a Cargo project in the existing network-denied seatbelt sandbox.
+/// Build a Cargo project in the network-denied sandbox.
 pub fn build_sandboxed(
     platform: Platform,
     project_dir: &Path,
@@ -1472,7 +1472,7 @@ pub fn build_sandboxed(
     // Disposable per-build CARGO_HOME + config inside the scratch dir: the
     // projected cargo-home must never be writable in-sandbox, or a build
     // script could replace the wrapper that later runs UNsandboxed under
-    // `blanket run`. (Sol review, reproduced.)
+    // `blanket run`.
     let build_home = scratch.join("cargo-home");
     fs::create_dir_all(&build_home)?;
     let config = build_home.join("blanket-config.toml");

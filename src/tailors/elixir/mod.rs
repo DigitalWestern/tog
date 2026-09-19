@@ -2,8 +2,8 @@
 //! eval'd), dual-checksum-verified hex tarballs, source-tree deps projected
 //! copy-on-write, four-artifact BEAM toolchain.
 //!
-//! Sol review 6 shaped this: mix.lock is CODE (an Elixir term literal) and
-//! Mix itself evals it, so blanket's planning parses it with a strict AST
+//! mix.lock is CODE (an Elixir term literal) and Mix itself evals it, so
+//! blanket's planning parses it with a strict AST
 //! grammar under the pinned toolchain (exact 8-field :hex tuples only —
 //! atoms/strings/lists/tuples of literals, nothing callable); the Elixir
 //! release zip has neither Hex nor rebar3, so both are separately pinned;
@@ -594,8 +594,7 @@ fn otp_install_spec(otp_root: &Path, final_root: &Path, scratch: &Path) -> io::R
 /// must fail, not hang). This is a verified-artifact unpack step — sed, cp,
 /// ln, chmod over the staged tree, the same trust class as the tar/unzip
 /// calls around it, not a project build — so it does not go through the
-/// build sandbox (unsupported on Linux because the installer is a verified
-/// unpack step rather than a project build).
+/// build sandbox.
 /// Its result is checked by verify_otp_install, including a whole-tree scan
 /// for the staging prefix and a runtime probe before anything is committed.
 #[cfg(test)]
@@ -955,7 +954,7 @@ fn extract_otp_archive_for(
 }
 
 /// Ensure the composite BEAM toolchain object: otp/ + elixir/ (separate
-/// roots, per Sol — never merge their trees) + archives/ (unpacked Hex) +
+/// roots — never merge their trees) + archives/ (unpacked Hex) +
 /// rebar3 escript.
 pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
@@ -1047,9 +1046,9 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     result
 }
 
-/// The forced environment for every blanket-controlled mix/elixir run
-/// (Sol's door list: ERL_LIBS-class vars inject code paths or emulator
-/// args before Mix's own controls apply).
+/// The forced environment for every blanket-controlled mix/elixir run:
+/// ERL_LIBS-class vars inject code paths or emulator args before Mix's own
+/// controls apply.
 const ENV_REMOVE_PREFIXES: &[&str] = &["MIX_", "HEX_", "REBAR_", "ERL_", "ELIXIR_"];
 const ENV_REMOVE: &[&str] = &["ERTS_BIN", "RUN_ERL_PIPE", "RUN_ERL_LOG", "ERLC_USE_SERVER"];
 
@@ -1293,7 +1292,7 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
             return Err(err(format!("duplicate dep {} in plan", d.app)));
         }
         // Managers reach an atom conversion in the helper AND the .hex
-        // marker bytes: closed allowlist only (Sol review 6, finding 2).
+        // marker bytes: closed allowlist only.
         for m in &d.managers {
             if !matches!(m.as_str(), "mix" | "rebar3" | "rebar" | "make") {
                 return Err(err(format!("{}: unsupported manager {m:?}", d.app)));
@@ -1527,7 +1526,7 @@ pub fn realize_deps(
         check_dep_tree(&dep_dir, &d.app)?;
         // Reserved destinations must not pre-exist in package contents —
         // a shipped symlink named .hex/hex_metadata.config would carry our
-        // writes through the link (Sol review 6, finding 4).
+        // writes through the link.
         for reserved in [".hex", "hex_metadata.config"] {
             if fs::symlink_metadata(dep_dir.join(reserved)).is_ok() {
                 return Err(err(format!(
@@ -1590,7 +1589,7 @@ pub fn realize_deps(
 
 /// The ONE forest path a project's deps projection may live at: derived
 /// from the canonical project dir and the deps object id, never from
-/// closure-recorded strings (Sol review 6, finding 1).
+/// closure-recorded strings.
 pub fn expected_projection(
     store: &Store,
     project_dir: &Path,
@@ -1685,8 +1684,8 @@ pub fn project_elixir_env(
     Ok(proj_dir)
 }
 
-/// Build root, qualified by the toolchain fingerprint (stale BEAM/native
-/// artifacts across OTP/Elixir upgrades are a real hazard — Sol).
+/// Build root, qualified by the toolchain fingerprint: stale BEAM/native
+/// artifacts across OTP/Elixir upgrades are a real hazard.
 pub fn build_root(platform: Platform, project_dir: &Path) -> io::Result<PathBuf> {
     Ok(project_dir.join(format!("_build/blanket-{}", beam_fingerprint(platform)?)))
 }

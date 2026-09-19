@@ -130,8 +130,8 @@ impl Tailor for Elixir {
             let deps_obj = comforter::closure_object(store, &closure, "deps_object", "")?;
             // Never trust the recorded projection path: reconstruct the ONE
             // expected forest path from canonical project + deps id and require
-            // exact canonical equality (Sol: lexical checks admitted foreign
-            // forests, dot-dot tricks, and symlinked dirs).
+            // exact canonical equality — lexical checks admit foreign forests,
+            // dot-dot tricks, and symlinked dirs.
             let projection = elixir::expected_projection(store, dir, &deps_obj)?;
             let recorded = closure["deps_projection"].as_str().map(PathBuf::from);
             if recorded.as_deref().and_then(|p| p.canonicalize().ok()) != Some(projection.clone())

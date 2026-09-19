@@ -37,7 +37,7 @@ impl NativePackage {
     }
 }
 
-// Pinned from conda-forge linux-64/noarch repodata.json at item-12 pin time.
+// Pinned from conda-forge linux-64/noarch repodata.json at pin time.
 // The repodata snapshot contains these packages as tar.bz2 records. Keep
 // noarch records in the closure because Cairo's font metapackage requires
 // them; the platform-specific records remain linux-64.

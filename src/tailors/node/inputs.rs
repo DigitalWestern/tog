@@ -10,9 +10,10 @@ use crate::tailors::node::lock_import;
 use std::io;
 use std::path::Path;
 
-/// A package.json without a package-lock.json (bun/yarn/pnpm projects):
-/// delegate lock generation to npm, mirroring the uv flow for Python.
-/// Resolution is the ecosystem's job; realization is blanket's.
+/// A package.json with no lockfile blanket can import (package-lock.json,
+/// pnpm-lock.yaml, yarn.lock): delegate lock generation to npm, mirroring
+/// the uv flow for Python. Resolution is the ecosystem's job; realization
+/// is blanket's.
 pub fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<()> {
     if !dir.join("package.json").exists()
         || dir.join("package-lock.json").exists()

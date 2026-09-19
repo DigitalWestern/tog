@@ -1,6 +1,4 @@
 //! Wheel installer: unpack a .whl into a target environment, PEP 427 style.
-//!
-//! IMPLEMENTATION CONTRACT (see install_wheel below) — being implemented.
 
 use std::collections::BTreeMap;
 use std::fs;

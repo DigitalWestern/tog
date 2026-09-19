@@ -471,10 +471,10 @@ fn allowed_entries(root: &str) -> Vec<String> {
 }
 
 /// A scratch directory under `store/tmp`. The name is a `stage-` prefix on
-/// purpose: `gc::sweep_stages` only reclaims `store/tmp/stage-*`, so a run
-/// killed by a signal before its `remove_tree` still gets collected. Sweeping
-/// only touches stages older than a day, so a live run's scratch (created
-/// moments ago, and written to throughout) is never swept out from under it.
+/// purpose: `gc::collect` only reclaims `store/tmp/stage-*`, so a run killed
+/// by a signal before its `remove_tree` still gets collected. Sweeping only
+/// touches stages older than a day, so a live run's scratch (created moments
+/// ago, and written to throughout) is never swept out from under it.
 fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(parent)?;
     for attempt in 0..100 {
@@ -562,7 +562,7 @@ mod tests {
         );
     }
 
-    /// `run_fmt` calls this before opening the store, so an unpinned or
+    /// `blanket fmt` calls this before opening the store, so an unpinned or
     /// foreign platform is refused ahead of the toolchain download.
     #[test]
     fn preflight_accepts_the_host_and_refuses_a_foreign_platform() {
@@ -601,8 +601,8 @@ mod tests {
         for prefix in ["stage-rustfmt-run", "stage-rustfmt-probe"] {
             let dir = unique_dir(&parent, prefix).unwrap();
             let name = dir.file_name().unwrap().to_str().unwrap().to_string();
-            // `gc::sweep_stages` reclaims exactly `store/tmp/stage-*`, so a
-            // run interrupted before its cleanup is still collectable.
+            // `gc::collect` reclaims exactly `store/tmp/stage-*`, so a run
+            // interrupted before its cleanup is still collectable.
             assert!(name.starts_with("stage-"), "{name}");
             assert!(name.starts_with(prefix), "{name}");
         }

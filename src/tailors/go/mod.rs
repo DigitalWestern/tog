@@ -1,8 +1,8 @@
 //! The Go tailor: module closure via the pinned Go toolchain, blanket-owned
 //! verification (dirhash h1 + raw sha256), immutable GOMODCACHE objects.
 //!
-//! go.sum is an authentication ledger, not a lock graph (Sol review 4): the
-//! authoritative closure comes from `go mod download -json all` run by the
+//! go.sum is an authentication ledger, not a lock graph: the authoritative
+//! closure comes from `go mod download -json all` run by the
 //! STORE Go in a disposable copy. Blanket then independently re-verifies
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
@@ -176,8 +176,8 @@ fn extract_go_toolchain_inner(
     staged: &Path,
     store: Option<&Store>,
 ) -> io::Result<()> {
-    // List first (src/archive.rs): the layout check below and the
-    // containment rules both run before tar writes anything.
+    // List first: the layout check below and the containment rules both
+    // run before tar writes anything.
     let entries = match store {
         Some(store) => crate::kernel::archive::list_for_store(
             store,
@@ -277,7 +277,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
 /// The forced environment for EVERY blanket-controlled go invocation.
 /// Real process env, never a GOENV file: GOTOOLCHAIN=local stops silent
 /// toolchain swaps, GOROOT pins the stdlib, GOWORK/GOENV=off close the
-/// config side doors (Sol review 4).
+/// config side doors.
 pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, String)> {
     let mut env = vec![
         ("GOTOOLCHAIN".to_string(), "local".to_string()),
@@ -296,8 +296,8 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
         env.push(("GOPROXY".to_string(), "off".to_string()));
         env.push(("GOSUMDB".to_string(), "off".to_string()));
     } else {
-        // Resolver policy is FORCED, never inherited (Sol: an inherited
-        // GOPROXY=file:...+GOSUMDB=off resolves attacker code). Proxy-only,
+        // Resolver policy is FORCED, never inherited: an inherited
+        // GOPROXY=file:...+GOSUMDB=off resolves attacker code. Proxy-only,
         // checksum-db on, VCS fallback off — private modules are a later,
         // explicitly-designed feature.
         env.push((
@@ -359,8 +359,8 @@ fn run_go(
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
 }
 
-/// Toolchain selection from go.mod directives (Sol rules): `go` is a
-/// minimum, `toolchain` a suggestion; pick the lowest pin satisfying both.
+/// Toolchain selection from go.mod directives: `go` is a minimum,
+/// `toolchain` a suggestion; pick the lowest pin satisfying both.
 pub fn resolve_toolchain(platform: Platform, gomod: &str) -> io::Result<&'static str> {
     let pins = go_pins(platform)?;
     let mut min_go: Option<Vec<u64>> = None;
@@ -482,8 +482,8 @@ pub fn reject_workspaces(project_dir: &Path) -> io::Result<()> {
 }
 
 /// Local-path replace directives never appear in `go mod download -json`
-/// output (Go elides them), so they must be rejected from go.mod itself
-/// (Sol: reproduced unverified in-project code entering a build).
+/// output (Go elides them), so they must be rejected from go.mod itself:
+/// otherwise unverified in-project code enters a build.
 pub fn reject_local_replaces(gomod: &str) -> io::Result<()> {
     let mut in_block = false;
     for raw in gomod.lines() {
@@ -581,8 +581,7 @@ const PLANNER_SCHEMA: &str = "go-planner/2";
 
 /// The plan-cache key. The tidy gate's inputs are exactly go.mod + go.sum +
 /// the .go sources, so the key covers all three: a hit proves the last
-/// successful gate's inputs are unchanged, making a re-run redundant (Sol
-/// finding 7, solved by keying instead of re-running).
+/// successful gate's inputs are unchanged, making a re-run redundant.
 fn plan_cache_key(go_version: &str, gomod: &str, gosum: &str, src_digest: &str) -> String {
     hex::encode(Sha256::digest(
         format!("{PLANNER_SCHEMA}\x00{go_version}\x00{gomod}\x00{gosum}\x00{src_digest}")
@@ -887,7 +886,8 @@ pub fn plan_go(
 }
 
 /// Digest of the project's .go sources (the tidy gate's third input).
-/// Sorted (relpath, sha256) pairs; hidden dirs and .blanket are skipped.
+/// Sorted (relpath, sha256) pairs; names starting with `.` or `_` (so
+/// `.blanket` too) are skipped.
 fn source_digest(project_dir: &Path) -> io::Result<String> {
     let mut files: Vec<(String, String)> = Vec::new();
     fn walk(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
@@ -970,9 +970,9 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
             (&m.info_sha256, "info"),
         ] {
             // cache_verified re-hashes the entry: a cache hit is never
-            // trusted (Sol: go skips extraction checks when zip+ziphash
+            // trusted, because go skips extraction checks when zip+ziphash
             // already exist, so a poisoned cache byte would go straight
-            // into the object).
+            // into the object.
             let src = cache_verified_held(store, hash)
                 .map_err(|e| io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version)))?;
             // COPY, never hardlink: builds must not reach the cache.
@@ -1638,7 +1638,7 @@ mod tests {
     #[test]
     fn local_replaces_rejected_from_gomod_text() {
         // Go's download -json ELIDES local replacements entirely, so the
-        // rejection must parse go.mod itself (Sol finding 3, reproduced).
+        // rejection must parse go.mod itself.
         for bad in [
             "module m\n\nreplace example.com/a => ./localdep\n",
             "module m\n\nreplace example.com/a => ../up\n",
@@ -1775,8 +1775,8 @@ mod tests {
         assert!(base.join("v1.5.2.mod").is_file());
         assert!(base.join("v1.5.2.info").is_file());
 
-        // Poisoning regression (Sol finding 1): tamper the cached .info —
-        // staging must refuse instead of copying poisoned bytes.
+        // Poisoning regression: tamper the cached .info — staging must
+        // refuse instead of copying poisoned bytes.
         {
             use std::os::unix::fs::PermissionsExt;
             let mut p = std::fs::metadata(&info_cache).unwrap().permissions();

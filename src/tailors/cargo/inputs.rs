@@ -27,7 +27,7 @@ pub struct CargoInputs {
 
 /// Workspace rooting is delegated to the pinned Cargo itself
 /// (`locate-project --workspace`): an ancestor-walk for Cargo.lock picks an
-/// unrelated outer lock when independent packages nest (Sol review, repro'd).
+/// unrelated outer lock when independent packages nest.
 pub fn locate_cargo_root(rust_obj: &Path, cwd: &Path, store: &store::Store) -> io::Result<PathBuf> {
     let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
     command
@@ -70,7 +70,7 @@ pub fn load_cargo_inputs(
     // record to the workspace root. The preflight checked the invocation
     // directory, so check the root as soon as it is known — before a lock,
     // a vendor object or a cargo-home lands in a workspace that cannot be
-    // registered and so cannot be protected (A-R3 residual class).
+    // registered and so cannot be protected.
     store::Store::check_registrable(&root)?;
     if !root.join("Cargo.lock").is_file() {
         ensure_cargo_lock(&root, &rust_obj, store)?;

@@ -25,8 +25,9 @@ pub(crate) struct ArchiveInfo {
     pub cargo_manifest: Option<PathBuf>,
     pub rust_build: bool,
     /// The archive contains a source form that commonly triggers a native
-    /// compile. This is deliberately a cheap archive-name heuristic: the
-    /// native library object is mounted only for these builds.
+    /// compile. This is deliberately a cheap scan of entry names (a
+    /// `binding.gyp`, or a C/C++/Cython source): the native library object is
+    /// mounted only for these builds.
     pub native_build: bool,
 }
 

@@ -1191,7 +1191,7 @@ fn find_wheel(dir: &Path) -> io::Result<PathBuf> {
 mod tests {
     /// The local sdist fixtures are byte-identical across stores and runs,
     /// so every identity derived from them is reproducible; on Linux the
-    /// planned native sdist identity is checked input for input (Sol r5 #4).
+    /// planned native sdist identity is checked input for input.
     #[test]
     fn local_sdist_fixtures_are_reproducible_across_stores() {
         // Planning inspects the archive through a supervised child; the
@@ -1474,9 +1474,7 @@ mod tests {
 }
 
 /// Realize the pinned setuptools/pip/wheel environment used by sandboxed
-/// metadata probes such as `setup.py egg_info`. The rest of this branch's
-/// former copies of the build helpers were dropped in favour of main's
-/// restructured versions.
+/// metadata probes such as `setup.py egg_info`.
 pub fn ensure_build_environment(
     store: &Store,
     platform: Platform,

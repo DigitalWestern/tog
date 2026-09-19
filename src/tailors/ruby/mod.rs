@@ -1,8 +1,8 @@
 //! The Ruby tailor: Bundler-delegated planning, blanket-verified gems,
 //! immutable GEM_HOME objects, sandboxed native-extension installs.
 //!
-//! Sol review 5 shaped this: platform selection and lock parsing are
-//! DELEGATED to the pinned Ruby's own Bundler/RubyGems (a helper script —
+//! Platform selection and lock parsing are DELEGATED to the pinned Ruby's
+//! own Bundler/RubyGems (a helper script —
 //! Gem::Platform matching has wildcards and specificity scores no hand
 //! parser should reimplement), while every artifact byte is still pinned
 //! and verified by blanket. Bundler's local .bundle/config outranks plain
@@ -31,7 +31,7 @@ const RUBY_VERSION: &str = "3.4.6";
 // itself ships on. Newest PORTABLE artifact (ruby-lang 3.4.x source may be
 // newer; documented gap until a newer portable build exists).
 //
-// Both 3.4.6 bottles were inspected (2026-09-05): root `portable-ruby/3.4.6/`,
+// Both 3.4.6 bottles were inspected: root `portable-ruby/3.4.6/`,
 // no symlinks, `#!/bin/sh` wrappers that `exec "$bindir/ruby"` relative to
 // $0, `--enable-load-relative` (RbConfig prefix follows the object path) and
 // `--with-static-linked-ext` (openssl/zlib/yaml/ffi compiled into
@@ -613,7 +613,8 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
 
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
 /// selection, blanket-pinned hashes (lock CHECKSUMS section when present,
-/// rubygems.org v2 API otherwise). Cached in .blanket/ruby-plan.json.
+/// rubygems.org v2 API otherwise). Never cached: every sync re-derives the
+/// plan from the lock.
 pub fn plan_ruby(
     store: &Store,
     project_dir: &Path,
@@ -637,8 +638,8 @@ pub fn plan_ruby(
     }
     let lock = fs::read_to_string(&lock_path)?;
     // No plan cache: an editable cache with a predictable key is forgeable
-    // authority (Sol review 5). Planning re-derives from the lock every
-    // sync; the store's object cache still makes realizes instant.
+    // authority. Planning re-derives from the lock every sync; the store's
+    // object cache still makes realizes instant.
 
     let scratch = store.stage()?;
     let helper = scratch.join("helper.rb");

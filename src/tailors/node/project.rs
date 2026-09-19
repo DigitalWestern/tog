@@ -34,8 +34,8 @@ pub(super) fn previous_workspace_set(project_dir: &Path) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|workspace| workspace.as_str().map(str::to_string))
-        // Closures written before 2026-09-11 listed workspace-local packages
-        // ("packages/lib/node_modules/c") as workspaces. Nothing under a
+        // Older closures listed workspace-local packages such as
+        // "packages/lib/node_modules/c" as workspaces. Nothing under a
         // node_modules can be a workspace; reconciling such an entry would
         // stat and back up a path inside the old read-only forest.
         .filter(|workspace| !workspace.contains("/node_modules/"))
@@ -183,8 +183,9 @@ pub(super) fn replace_with_symlink(path: &Path, target: &Path, label: &str) -> i
 /// the store — pnpm's proven layout.
 ///
 /// If mutable packages are declared, the whole tree is instead cloned
-/// (APFS copy-on-write) so runtime writes inside those packages succeed and
-/// realpath stays coherent; the closure records them as unattested.
+/// copy-on-write (APFS clone on macOS, reflink on Linux) so runtime writes
+/// inside those packages succeed and realpath stays coherent; the closure
+/// records them as unattested.
 pub fn project_node_env(
     project_dir: &Path,
     env_obj: &Path,
@@ -677,10 +678,10 @@ pub fn project_node_env_recorded(
         fresh,
     )?;
     link_workspace_sources(project_dir, plan, proj_dir, forest)?;
-    // Old forests are deliberately NOT pruned here (Sol review 3): a dev
-    // server may still be running from one, and pruning would break it
-    // mid-session. They are cheap symlink trees; explicit `blanket gc`
-    // with liveness checks is the collection path (M5).
+    // Old forests are deliberately NOT pruned here: a dev server may still
+    // be running from one, and pruning would break it mid-session. They are
+    // cheap symlink trees; explicit `blanket gc` with liveness checks is the
+    // collection path.
     remove_sync_duplicate_links(project_dir, &store, home);
 
     replace_with_symlink(&nm, forest, "node_modules")?;
@@ -728,8 +729,6 @@ pub fn project_node_env_recorded(
 /// One symlink per top-level entry of the object's node_modules; scoped
 /// packages get a real @scope dir with per-package symlinks so new scoped
 /// siblings can be written at runtime.
-// clone_tree moved to project::clone_tree (kernel: elixir needs the same
-// writable copy-on-write projection for source deps).
 pub(super) fn build_forest(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
@@ -752,9 +751,9 @@ pub(super) fn build_forest(src: &Path, dest: &Path) -> io::Result<()> {
 /// npm-compatible mode normalization: tarballs in the wild carry broken
 /// permission bits (e.g. pngjs ships directories without the execute bit,
 /// making them untraversable). npm's extractor ORs minimum modes onto every
-/// entry (0o777-under-umask for dirs, 0o666 for files, exec bits preserved);
-/// we do the same after extraction. Top-down so unreadable dirs get fixed
-/// before we descend into them.
+/// entry; after extraction we do the same, ORing 0o755 onto directories and
+/// 0o644 onto files. Top-down so unreadable dirs get fixed before we descend
+/// into them.
 pub(super) fn normalize_modes(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let md = fs::symlink_metadata(path)?;
