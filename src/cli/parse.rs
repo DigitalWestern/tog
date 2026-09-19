@@ -248,7 +248,7 @@ fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--json" => json = true,
             "-h" | "--help" => return Ok(None),
             // A mistyped flag (`--policy --json`) is a usage error, not a
-            // file name; the same rule every value-taking flag here applies.
+            // file name.
             "--policy" => {
                 let value = args
                     .get(index + 1)
@@ -536,8 +536,8 @@ fn validate_x_text(label: &str, value: &str, allow_slash: bool) -> Result<(), Us
 
 fn validate_x_package(value: &str) -> Result<(), UsageError> {
     // A scoped npm package contains one slash, but a filesystem path must
-    // never be accepted as a package name. Version text is checked by xrun
-    // after splitting package@version; these checks keep argv errors at exit 2.
+    // never be accepted as a package name. Version text is checked by
+    // `validate_x_version_pair`; these checks keep argv errors at exit 2.
     validate_x_text("package", value, true)?;
     if value.starts_with('/')
         || value.starts_with("./")

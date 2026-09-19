@@ -53,7 +53,8 @@ fn changed_lock(dir: &Path, lock: &str, recorded: &str) -> io::Result<Vec<String
     let current = if file.is_file() {
         sha256_file(&file)?
     } else {
-        // `go.sum` may be legitimately absent; main hashes the empty string.
+        // `go.sum` may be legitimately absent; the go tailor records the
+        // hash of the empty string, so match it.
         hex::encode(Sha256::digest(b""))
     };
     Ok(if recorded.is_empty() {
