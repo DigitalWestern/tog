@@ -267,6 +267,60 @@ fn wait_for_state(pid: i32, state: char, what: &str) {
     }
 }
 
+/// A stopped process reads 'T'. A shell that vforks its commands (dash, the
+/// `/bin/sh` on Debian and Ubuntu) and takes the stop mid-vfork stays in 'D'
+/// until the stopped command execs or exits, so a 'D' parent whose every
+/// child is stopped counts as stopped too.
+#[cfg(target_os = "linux")]
+fn wait_until_stopped(pid: i32, what: &str) {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        match proc_state(pid) {
+            Some('T') => return,
+            Some('D') => {
+                let children = proc_children(pid);
+                if !children.is_empty()
+                    && children.iter().all(|child| proc_state(*child) == Some('T'))
+                {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: pid {pid} is in state {:?}, wanted 'T'",
+            proc_state(pid)
+        );
+        std::thread::sleep(TICK);
+    }
+}
+
+/// Every process whose parent is `pid`, from the ppid field of `/proc/*/stat`.
+#[cfg(target_os = "linux")]
+fn proc_children(pid: i32) -> Vec<i32> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(candidate) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(format!("/proc/{candidate}/stat")) else {
+            continue;
+        };
+        let Some(close) = text.rfind(')') else {
+            continue;
+        };
+        let ppid = text[close + 1..]
+            .split_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse::<i32>().ok());
+        if ppid == Some(pid) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
 struct Harness {
     process: Child,
     markers: Markers,
@@ -1093,7 +1147,7 @@ fn terminal_stop_and_continue_covers_the_whole_group() {
         .markers
         .wait_for(&format!("SHELL STOPPED {}", libc::SIGTSTP));
     wait_for_state(supervisor, 'T', "the supervisor to stop");
-    wait_for_state(child, 'T', "the child to stop");
+    wait_until_stopped(child, "the child to stop");
     assert!(!store.is_free(), "a stopped job released the store");
 
     signal(-supervisor, libc::SIGCONT);
