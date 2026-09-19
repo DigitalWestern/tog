@@ -17,11 +17,13 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+mod drop;
 mod migrate;
 mod plan;
 mod read;
 mod sweep;
 
+pub use self::drop::*;
 pub use migrate::*;
 pub use plan::*;
 pub use read::*;
@@ -123,9 +125,10 @@ pub fn collect_with_activity<W: Write>(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "refusing to sweep: metadata maintenance left {} uncertified legacy record(s); \
-                 nothing was deleted. Resolve the objects named above and run `tog gc \
-                 --migrate-metadata`",
+                "refusing to sweep: metadata maintenance left {} unresolved record(s); \
+                 nothing was deleted. Run `tog gc --migrate-metadata` for the full list, then \
+                 repair the records it names or drop the ones you cannot with `tog gc \
+                 --drop-object <id>`",
                 migration.unresolved
             ),
         ));
@@ -648,10 +651,7 @@ mod tests {
         store.register_root(&project).unwrap();
         let mut out = Vec::new();
         let error = collect(&store, Options::default(), &mut out).unwrap_err();
-        assert!(
-            error.to_string().contains("uncertified legacy record"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("unresolved record"), "{error}");
     }
 
     fn age(path: &Path) {
@@ -1486,7 +1486,7 @@ mod tests {
             record.insert("schema".into(), serde_json::json!("object-meta/3"));
         });
 
-        let (result, _) = sweep(
+        let (result, text) = sweep(
             &store,
             Options {
                 keep_days: 0,
@@ -1494,9 +1494,12 @@ mod tests {
             },
         );
         let error = result.unwrap_err().to_string();
+        assert!(error.contains("unresolved record"), "{error}");
+        // The refusal counts; the narration names the record and the way out.
         assert!(
-            error.contains("unknown metadata schema object-meta/3"),
-            "{error}"
+            text.contains("unknown metadata schema object-meta/3")
+                && text.contains("--drop-object"),
+            "{text}"
         );
         assert!(store.object_path(&dead).is_dir(), "a sweep ran anyway");
     }
@@ -1514,7 +1517,7 @@ mod tests {
             );
         });
 
-        let (result, _) = sweep(
+        let (result, text) = sweep(
             &store,
             Options {
                 keep_days: 0,
@@ -1522,9 +1525,10 @@ mod tests {
             },
         );
         let error = result.unwrap_err().to_string();
+        assert!(error.contains("unresolved record"), "{error}");
         assert!(
-            error.contains("malformed or duplicate dependency"),
-            "{error}"
+            text.contains("malformed or duplicate dependency") && text.contains("--drop-object"),
+            "{text}"
         );
     }
 
@@ -1541,7 +1545,7 @@ mod tests {
             edit_record(&store, &id, |record| {
                 record.insert("dependencies".into(), serde_json::json!([traversal]));
             });
-            let (result, _) = sweep(
+            let (result, text) = sweep(
                 &store,
                 Options {
                     keep_days: 0,
@@ -1550,8 +1554,12 @@ mod tests {
             );
             let error = result.unwrap_err().to_string();
             assert!(
-                error.contains("malformed or duplicate dependency"),
+                error.contains("unresolved record"),
                 "{traversal:?} was accepted: {error}"
+            );
+            assert!(
+                text.contains("malformed or duplicate dependency"),
+                "{traversal:?} was accepted: {text}"
             );
         }
     }
@@ -1822,17 +1830,25 @@ mod tests {
             "the completed object deletion was not reported: {text}"
         );
         assert!(
-            error.contains("orphaned") && error.contains("--migrate-metadata"),
+            error.contains("orphaned") && error.contains("--drop-object"),
             "the recovery path is not named: {error}"
         );
 
-        // The leftover record does wedge the next sweep, but the named
-        // recovery path clears it.
+        // The leftover record does wedge the next sweep, and the named
+        // recovery path is the thing that clears it.
         drop(activity);
         let (result, _) = sweep(&store, Options::default());
         assert!(result.is_err(), "a stray record did not block the sweep");
-        let meta_path = meta_dir.join(format!("{dead}.json"));
-        fs::remove_file(&meta_path).unwrap();
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let dropped = drop_objects(&store, &activity, &[dead.clone()], false, &mut out).unwrap();
+        drop(activity);
+        assert_eq!(dropped, 1, "{}", String::from_utf8_lossy(&out));
+        assert!(
+            !meta_dir.join(format!("{dead}.json")).exists(),
+            "the stray record survived: {}",
+            String::from_utf8_lossy(&out)
+        );
         let (result, _) = sweep(&store, Options::default());
         result.unwrap();
     }
@@ -2017,7 +2033,7 @@ mod tests {
             );
             let error = result.unwrap_err().to_string();
             assert!(
-                error.contains("uncertified legacy record"),
+                error.contains("unresolved record"),
                 "--collect-legacy={collect_legacy} authorized a sweep: {error} {text}"
             );
             assert!(store.object_path(&dead).is_dir());
@@ -2848,5 +2864,253 @@ mod tests {
             message.contains("refusing to sweep: invalid stage entry"),
             "{message}"
         );
+    }
+
+    // =======================================================================
+    // Issue #101: a record that no longer hashes to its own id.
+    //
+    // The store this models came from a text rewrite of an identity input
+    // (`~/.blanket/store` -> `~/.tog/store`), which left the stored id as the
+    // hash of the old text. Nothing can read the record, so the fail-closed
+    // sweep refuses — correctly — and before `--drop-object` existed there
+    // was no command that changed the situation.
+    // =======================================================================
+
+    /// Move one hex digit of an id, so the identity inside no longer hashes
+    /// to the name the record is filed under.
+    fn mismatched_id(real: &str) -> String {
+        let mut bytes = real.as_bytes().to_vec();
+        bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+        String::from_utf8(bytes).expect("ascii hex")
+    }
+
+    /// Publish an object under an id its own identity does not produce.
+    /// The object directory is read-only exactly as a real commit leaves it,
+    /// so another object can still name this one as a dependency.
+    fn wedge(store: &Store, name: &str) -> String {
+        let identity = test_identity(name, None);
+        let id = mismatched_id(&identity.object_id());
+        let object = store.object_path(&id);
+        fs::create_dir_all(&object).unwrap();
+        fs::write(object.join("payload"), name).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_mode(permissions.mode() & !0o222);
+        fs::set_permissions(&object, permissions).unwrap();
+        fs::write(
+            store.root.join("meta").join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": id,
+                "identity": identity,
+                "created": 0,
+                "exceptions": [],
+                "refs": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        id
+    }
+
+    fn dropped(store: &Store, ids: &[String], dry_run: bool) -> (io::Result<usize>, String) {
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let result = drop_objects(store, &activity, ids, dry_run, &mut out);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    fn migrated(store: &Store) -> (io::Result<MigrationReport>, String) {
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let result = migrate_metadata(store, &activity, false, &mut out);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    /// The whole issue, end to end: migration reports the record instead of
+    /// refusing on it, the sweep still refuses, and `--drop-object` is the
+    /// thing that unwedges the store.
+    #[test]
+    fn an_unreadable_record_is_reported_droppable_and_unwedges_the_sweep() {
+        let temp = TempStore::new("wedged-record");
+        let store = temp.store();
+        let id = wedge(&store, "wedged");
+        register_objects(&store, &temp.root.join("project"), &[]);
+
+        let (report, text) = migrated(&store);
+        let report = report.expect("migration must report the record, not refuse on it");
+        assert_eq!(report.unresolved, 1, "{text}");
+        assert!(
+            text.contains(&format!("--drop-object {id}")),
+            "the recovery command is not named: {text}"
+        );
+
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        let error = collect_with_activity(&store, &activity, Options::default(), &mut out)
+            .unwrap_err()
+            .to_string();
+        drop(activity);
+        assert!(error.contains("--drop-object"), "{error}");
+        assert!(
+            store.object_path(&id).is_dir(),
+            "the fail-closed sweep deleted something"
+        );
+
+        let (count, text) = dropped(&store, &[id.clone()], true);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        assert!(text.contains(&format!("would drop object {id}")), "{text}");
+        assert!(store.object_path(&id).is_dir(), "a dry run removed it");
+
+        let (count, text) = dropped(&store, &[id.clone()], false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        assert!(text.contains(&format!("dropped object {id}")), "{text}");
+        assert!(!store.object_path(&id).exists(), "{text}");
+        assert!(
+            !store.root.join("meta").join(format!("{id}.json")).exists(),
+            "{text}"
+        );
+
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let mut out = Vec::new();
+        collect_with_activity(&store, &activity, Options::default(), &mut out).unwrap();
+    }
+
+    /// The boundary that keeps `--drop-object` from becoming a second,
+    /// unproven sweep: a record that says for itself what it needs is the
+    /// sweep's business, not this command's.
+    #[test]
+    fn dropping_refuses_an_object_with_usable_metadata() {
+        let temp = TempStore::new("drop-usable");
+        let store = temp.store();
+        let id = commit(&store, "healthy", None);
+
+        let (result, text) = dropped(&store, &[id.clone()], false);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("has usable metadata"), "{error}");
+        assert!(error.contains("--forget"), "{error}");
+        assert!(text.is_empty(), "{text}");
+        assert!(store.object_path(&id).is_dir(), "{error}");
+    }
+
+    /// Dropping a dependency out from under a readable dependent would wedge
+    /// the sweep again, and a sync would not repair it: the dependent's id is
+    /// unchanged, so it is a cache hit and nothing rebuilds the dependency.
+    #[test]
+    fn dropping_a_proven_dependency_requires_dropping_its_dependents() {
+        let temp = TempStore::new("drop-dependents");
+        let store = temp.store();
+        let wedged = wedge(&store, "wedged");
+        let dependent = commit(&store, "dependent", Some(&wedged));
+        let mut whole_set = [wedged.clone(), dependent.clone()];
+        whole_set.sort();
+
+        let (result, text) = dropped(&store, &[wedged.clone()], false);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("--drop-object {} {}", whole_set[0], whole_set[1])),
+            "the whole set is not named: {error}"
+        );
+        assert!(text.is_empty(), "{text}");
+        assert!(store.object_path(&wedged).is_dir(), "{error}");
+
+        let (count, text) = dropped(&store, &whole_set, false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(
+            text.contains(&format!(
+                "dropped object {dependent} (depends on {wedged}, which is being dropped)"
+            )),
+            "the cascade reason is not named: {text}"
+        );
+        assert!(!store.object_path(&wedged).exists(), "{text}");
+        assert!(!store.object_path(&dependent).exists(), "{text}");
+    }
+
+    /// The two half-gone shapes. Either one blocks the sweep on its own, and
+    /// neither has any evidence left worth protecting.
+    #[test]
+    fn a_record_without_its_object_and_an_object_without_its_record_are_droppable() {
+        let temp = TempStore::new("drop-halves");
+        let store = temp.store();
+        let stray_record = commit(&store, "stray-record", None);
+        store::remove_tree(&store.object_path(&stray_record)).unwrap();
+        let bare_object = test_identity("bare-object", None).object_id();
+        fs::create_dir_all(store.object_path(&bare_object)).unwrap();
+
+        let (count, text) = dropped(&store, &[stray_record.clone(), bare_object.clone()], false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(
+            text.contains(&format!(
+                "dropped object {stray_record} (metadata for a missing object)"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "dropped object {bare_object} (object without metadata)"
+            )),
+            "{text}"
+        );
+        assert!(
+            !store
+                .root
+                .join("meta")
+                .join(format!("{stray_record}.json"))
+                .exists(),
+            "{text}"
+        );
+        assert!(!store.object_path(&bare_object).exists(), "{text}");
+    }
+
+    #[test]
+    fn dropping_an_id_the_store_does_not_have_is_an_error() {
+        let temp = TempStore::new("drop-missing");
+        let store = temp.store();
+        let absent = test_identity("absent", None).object_id();
+
+        let (result, text) = dropped(&store, &[absent.clone()], false);
+        let error = result.unwrap_err().to_string();
+        assert_eq!(error, format!("no such object {absent}"), "{text}");
+    }
+
+    /// The warning an operator sees before every single command is not a
+    /// warning, it is noise. It must appear when the store's problem appears,
+    /// again whenever that problem changes, and never in between.
+    #[test]
+    fn deferred_maintenance_is_announced_once_per_store_and_again_when_it_changes() {
+        let temp = TempStore::new("maintenance-once");
+        let store = temp.store();
+        let first = wedge(&store, "wedged-one");
+        let marker = store.root.join("maintenance-deferred");
+
+        let announce = |label: &str| -> String {
+            let mut out = Vec::new();
+            automatic_maintenance(&store, &mut out)
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            String::from_utf8(out).unwrap()
+        };
+
+        let text = announce("first");
+        assert!(text.contains("metadata maintenance deferred"), "{text}");
+        assert!(text.contains(&format!("--drop-object {first}")), "{text}");
+        assert!(
+            text.contains("this warning is shown once per store"),
+            "{text}"
+        );
+        assert!(marker.is_file(), "the marker was not written: {text}");
+
+        let text = announce("second");
+        assert!(text.is_empty(), "the same deferral was repeated: {text}");
+
+        // A second wedged record is new information, so it is announced.
+        let second = wedge(&store, "wedged-two");
+        let text = announce("third");
+        assert!(text.contains(&format!("--drop-object {second}")), "{text}");
+
+        let (count, text) = dropped(&store, &[first, second], false);
+        assert_eq!(count.unwrap(), 2, "{text}");
+        assert!(!marker.exists(), "dropping left the marker behind: {text}");
+        let text = announce("fourth");
+        assert!(text.is_empty(), "a healthy store warned: {text}");
+        assert!(!marker.exists(), "a healthy store kept a marker: {text}");
     }
 }

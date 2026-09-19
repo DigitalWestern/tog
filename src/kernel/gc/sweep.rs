@@ -77,12 +77,13 @@ pub(super) fn execute<W: Write>(
                     &format!("metadata for {}", removal.label),
                 )
                 .map_err(|error| {
+                    let stray = meta_name.strip_suffix(".json").unwrap_or(meta_name);
                     io::Error::new(
                         error.kind(),
                         format!(
                             "{error}; the record meta/{meta_name} is orphaned and blocks the \
-                             next sweep — restore the removed object or delete the stray record \
-                             with `tog gc --migrate-metadata`"
+                             next sweep — restore the removed object, or drop the stray record \
+                             with `tog gc --drop-object {stray}`"
                         ),
                     )
                 })?;

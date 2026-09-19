@@ -77,8 +77,9 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
     for entry in &snapshot.objects {
         if snapshot.meta.get(&entry.id).is_none() {
             blocked.push(format!(
-                "object {} has no usable metadata; rebuild it or restore meta/{}.json",
-                entry.id, entry.id
+                "object {} has no usable metadata; restore meta/{}.json, or drop the object \
+                 with `tog gc --drop-object {}` and let the next sync rebuild it",
+                entry.id, entry.id, entry.id
             ));
         }
     }
@@ -90,8 +91,8 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
     for (id, _) in snapshot.meta.iter() {
         if !present.contains(id.as_str()) {
             blocked.push(format!(
-                "metadata for missing object {id}; remove meta/{id}.json with `tog gc \
-                 --migrate-metadata` after restoring the object, or delete the stray record"
+                "metadata for missing object {id}; restore the object, or drop the stray \
+                 record with `tog gc --drop-object {id}`"
             ));
         }
     }

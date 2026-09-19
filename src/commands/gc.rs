@@ -33,7 +33,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         // An explicitly requested mutation fails loudly; an opportunistic
         // sweep skips quietly. Migration is a requested mutation: a script
         // must be able to tell "migrated" from "never ran".
-        if !args.forget.is_empty() || args.migrate_metadata {
+        if !args.forget.is_empty() || args.migrate_metadata || !args.drop_objects.is_empty() {
             return Err(io::Error::other(
                 "a Tog job is using this store; retry when it finishes",
             ));
@@ -41,6 +41,30 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         writeln!(stdout, "cleanup skipped: a Tog job is using this store")?;
         return Ok(());
     };
+    // Dropping is a targeted removal, not a sweep and not a registry edit.
+    // It shares only `--dry-run`, which every destructive path here honours.
+    if !args.drop_objects.is_empty() {
+        if args.project
+            || args.collect_legacy
+            || args.migrate_metadata
+            || !args.register.is_empty()
+            || !args.forget.is_empty()
+            || args.keep_days.is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--drop-object cannot be combined with other gc options",
+            ));
+        }
+        gc::drop_objects(
+            &store,
+            &activity,
+            &args.drop_objects,
+            args.dry_run,
+            &mut stdout,
+        )?;
+        return Ok(());
+    }
     if args.migrate_metadata {
         if args.project
             || args.collect_legacy

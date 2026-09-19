@@ -132,6 +132,9 @@ pub struct GcArgs {
     pub migrate_metadata: bool,
     pub register: Vec<PathBuf>,
     pub forget: Vec<String>,
+    /// Store object ids to remove outright, with their records. The recovery
+    /// path for a record the sweep cannot read; see `kernel::gc::drop`.
+    pub drop_objects: Vec<String>,
 }
 
 /// Options accepted before the command; they apply to every command.
