@@ -1,9 +1,10 @@
-//! Environment (comforter) realization + projection.
+//! Ecosystem-neutral projection support: closure envelopes and the process
+//! signing key, projection symlinks, clone-tree and backup helpers.
 //!
-//! An environment is itself a store object (venv-shaped, immutable) whose
-//! identity is the python object id plus every locked artifact hash. Two
-//! projects with identical locks share one env object; different locks get
-//! different objects and coexist. Projection into a project is one symlink.
+//! A closure records what one sync realized for one ecosystem, plus the store
+//! references that protect it. Publication registers the durable root record
+//! first and renames the visible `.blanket/closures/<ecosystem>.json` after,
+//! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod status;
 
@@ -198,9 +199,9 @@ impl ClosureRefs {
     }
 }
 
-/// Common closure envelope (Sol review 4): every tailor's provenance lands
-/// at .blanket/closures/<ecosystem>.json with a shared outer shape; the
-/// `body` stays tailor-owned. Written atomically. Store ownership and exact
+/// Common closure envelope: every tailor's provenance lands at
+/// .blanket/closures/<ecosystem>.json with a shared outer shape; the `body`
+/// stays tailor-owned. Written atomically. Store ownership and exact
 /// references are mandatory for production publication.
 pub fn write_closure(
     project_dir: &Path,
@@ -251,7 +252,7 @@ pub(crate) fn write_closure_with_project_lock(
     )
 }
 
-/// Named alias retained for callers that adopted the first root/2 draft.
+/// Alias for `write_closure`.
 pub fn write_closure_with_refs(
     project_dir: &Path,
     ecosystem: &str,
@@ -273,7 +274,7 @@ pub fn write_closure_with_refs(
 }
 
 /// Persist the producer's complete root union before a project projection or
-/// user backup is switched. This is the phase-2 half of closure publication;
+/// user backup is switched. This is the first half of closure publication;
 /// `write_closure` repeats the union after the visible closure is written so
 /// a crash can only leave extra protection.
 pub(crate) fn persist_root_for_refs_with_project_lock(
@@ -862,10 +863,11 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
     Ok(v["body"].clone())
 }
 
-/// Copy-on-write clone of a whole tree (cp -c uses APFS clonefile; plain
-/// copy fallback), then restore user-write bits, which the clone inherits
-/// as read-only from the store. Used for writable projections of immutable
-/// objects (npm mutablePackages, elixir deps trees).
+/// Copy-on-write clone of a whole tree (macOS `cp -Rc` clonefile, Linux
+/// `cp -a --reflink=auto`, plain `cp -R` fallback), then restore user-write
+/// bits, which the clone inherits as read-only from the store. Used for
+/// writable projections of immutable objects (npm mutablePackages, elixir
+/// deps trees).
 pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
     clone_tree_for(src, dest, Platform::host()?)
 }
@@ -955,8 +957,7 @@ fn restore_write_bits(path: &Path) -> io::Result<()> {
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded
 /// path must be exactly the store's path for that id. A project-editable
-/// closure must never inject arbitrary executable paths into `blanket run`
-/// (Sol review 5, reproduced against the ruby closure).
+/// closure must never inject arbitrary executable paths into `blanket run`.
 pub fn closure_object(
     store: &crate::kernel::store::Store,
     closure: &serde_json::Value,
@@ -1041,9 +1042,9 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
     Ok(Some(dest))
 }
 
-/// Store-owned backup variant used by new projections.  The legacy helper
-/// above remains for old callers/importers; its sibling namespace is
-/// retention-only once GC safety B is enabled.
+/// Store-owned backup variant used by new projections: it moves the
+/// directory into `<store>/backups`, which a root record can protect, rather
+/// than the `<blanket-home>/backups` of the legacy helper above.
 pub fn backup_real_dir_for_store(path: &Path, store: &Store) -> io::Result<Option<PathBuf>> {
     let Some(destination) = reserve_backup_real_dir_for_store(path, store)? else {
         return Ok(None);
@@ -1606,8 +1607,8 @@ mod closure_platform_tests {
     }
 
     /// A write that fails after the claim must not count as published: the
-    /// token cannot finish, and the next attribution starts with nothing
-    /// (Sol review r5 #3, r6 #1: the failure is injected deterministically).
+    /// token cannot finish, and the next attribution starts with nothing.
+    /// The failure is injected deterministically.
     #[test]
     fn write_failure_after_claim_leaves_the_next_attribution_clean() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK

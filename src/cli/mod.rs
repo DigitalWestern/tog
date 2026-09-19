@@ -7,14 +7,15 @@
 //! - every option is validated: an unknown flag or stray positional is a
 //!   usage error (exit 2) with a "did you mean" suggestion when one is close;
 //! - `blanket help [<command>]`, `--help`/`-h`, `--version`/`-V` work at the
-//!   top level and `-h`/`--help` inside every command;
+//!   top level and `-h`/`--help` inside every command, first argument only
+//!   where the rest is passed through (`fmt`, `run`, `build`);
 //! - `run` and `build` pass their arguments through to the program untouched
 //!   (only a leading `-h`/`--help` is blanket's; `--` forces pass-through);
 //! - `-C <dir>` runs the command as if started in `<dir>`; `-q`, `-v` and
 //!   `--no-color` set the output conventions (see `ui`);
 //! - a bare `blanket` and an unknown first word are *not* decided here: the
 //!   dispatcher turns them into `sync` inside a project and into a
-//!   package.json script run when one matches (CLI.md 2.1, 2.2).
+//!   package.json script run when one matches.
 //!
 //! Exit status contract: 0 success, 1 the command failed, 2 usage error.
 
