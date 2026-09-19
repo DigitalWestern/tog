@@ -247,11 +247,7 @@ impl Tailor for Node {
             );
             // integrity is an SRI string (base64), not a hex digest;
             // recorded as a property rather than a malformed hash entry.
-            push_property(
-                &mut c,
-                "tog:integrity",
-                &required(eco, &p, "integrity")?,
-            );
+            push_property(&mut c, "tog:integrity", &required(eco, &p, "integrity")?);
             out.push(c);
         }
         out.push(toolchain_component(

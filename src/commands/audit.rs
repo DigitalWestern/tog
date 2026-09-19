@@ -525,10 +525,7 @@ pub fn audit_under(
     if closures.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!(
-                "nothing synced in {}; run 'tog sync' first",
-                dir.display()
-            ),
+            format!("nothing synced in {}; run 'tog sync' first", dir.display()),
         ));
     }
     let present = inspect::detected(dir)?;
@@ -1454,11 +1451,9 @@ mod tests {
             "kind-from-a-newer-tog"
         );
         // And a policy file cannot name it, so it cannot be "allowed" either.
-        assert!(policy::parse_file(
-            Path::new("p.toml"),
-            "deny = [\"kind-from-a-newer-tog\"]"
-        )
-        .is_err());
+        assert!(
+            policy::parse_file(Path::new("p.toml"), "deny = [\"kind-from-a-newer-tog\"]").is_err()
+        );
     }
 
     #[test]
@@ -1542,9 +1537,7 @@ mod tests {
         // --policy file for the other, and that source is merged last.
         let ancestor = sources
             .iter()
-            .find(|source| {
-                source.path.as_deref() == Some(root.join(".tog/policy.toml").as_path())
-            })
+            .find(|source| source.path.as_deref() == Some(root.join(".tog/policy.toml").as_path()))
             .expect("the workspace-root policy is a source");
         assert_eq!(ancestor.origin, SourceOrigin::Project);
         assert!(ancestor.deny.contains(WEAK_INTEGRITY));

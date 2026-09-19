@@ -245,10 +245,7 @@ impl Store {
         if !closures.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "{} has no .tog/closures directory",
-                    project_dir.display()
-                ),
+                format!("{} has no .tog/closures directory", project_dir.display()),
             ));
         }
         let key = root_key(&project_dir);

@@ -4,11 +4,11 @@
 //! TOG_STORE=$HOME/scratch/tmp/nx11-store TMPDIR=$HOME/scratch/tmp
 //! TOG_SANDBOX_TESTS=required cargo test --test build_isolation -- --ignored
 
+use std::process::Command;
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 use tog::kernel::types::{ArtifactKind, LockedPackage, Plan};
 use tog::tailors::python::build;
-use std::process::Command;
 
 fn package(name: &str, version: &str, filename: &str, url: &str, sha256: &str) -> LockedPackage {
     LockedPackage {

@@ -1,9 +1,9 @@
 //! E2e for interpreter selection and warm lock/plan caches (network tests
 //! are ignored; the preflight refusal runs offline).
 
-use tog::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use tog::kernel::platform::Platform;
 
 struct TempDir(PathBuf);
 

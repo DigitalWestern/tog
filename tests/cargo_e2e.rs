@@ -1,9 +1,9 @@
 //! End-to-end Cargo tailor test. Heavy: downloads the pinned Rust toolchain
 //! and crates.io closure on first run.
 
-use tog::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use tog::kernel::platform::Platform;
 
 struct TempDir(PathBuf);
 
@@ -76,10 +76,9 @@ fn assert_ok(output: Output, label: &str) -> String {
 }
 
 fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
-    let closure: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(project.join(".tog/closures/cargo.json")).unwrap(),
-    )
-    .unwrap();
+    let closure: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/cargo.json")).unwrap())
+            .unwrap();
     let objects = store.canonicalize().unwrap().join("objects");
     let object_path = |key: &str| {
         let path = PathBuf::from(closure["body"][key]["path"].as_str().unwrap());

@@ -762,9 +762,7 @@ pub fn plan_ruby(
     // digest provenance will record (Go precedent).
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
-        return Err(err(
-            "Gemfile.lock changed while planning; re-run tog sync",
-        ));
+        return Err(err("Gemfile.lock changed while planning; re-run tog sync"));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }

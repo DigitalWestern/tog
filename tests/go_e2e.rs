@@ -86,10 +86,7 @@ fn go_sync_build_and_rebuild_offline() {
     // Clean rebuild: everything must come from the store (tog build is
     // itself the network-denied sandbox; sandboxes cannot nest on macOS).
     std::fs::remove_file(&hello).unwrap();
-    assert_ok(
-        tog(&binary, &project, &store, &["build", "go"]),
-        "rebuild",
-    );
+    assert_ok(tog(&binary, &project, &store, &["build", "go"]), "rebuild");
     assert!(hello.is_file());
     let out = Command::new(&hello)
         .env("LC_ALL", "en_US.UTF-8")

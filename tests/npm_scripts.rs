@@ -5,15 +5,15 @@
 //! runs it with a shared TOG_STORE:
 //!     cargo test --test npm_scripts -- --ignored
 
+use sha2::{Digest as Sha2Digest, Sha512};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use tog::comforter;
 use tog::kernel::fetch::{self, Digest};
 use tog::kernel::platform::Platform;
 use tog::kernel::policy;
 use tog::kernel::store::Store;
 use tog::tailors::node::{self, NpmPackage, NpmPlan};
-use sha2::{Digest as Sha2Digest, Sha512};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 struct TempDir(PathBuf);
 
@@ -315,9 +315,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         let err = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
             .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
-        assert!(err
-            .to_string()
-            .contains("tog sync --fresh will not help"));
+        assert!(err.to_string().contains("tog sync --fresh will not help"));
         return;
     }
     let dir = std::env::temp_dir().join(format!("tog-permissive-npm-{}", std::process::id()));

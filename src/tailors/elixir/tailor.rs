@@ -145,8 +145,7 @@ impl Tailor for Elixir {
             }
             prefix.push(beam.join("elixir/bin").to_string_lossy().into_owned());
             prefix.push(beam.join("otp/bin").to_string_lossy().into_owned());
-            let scratch =
-                std::env::temp_dir().join(format!("tog-mix-run-{}", std::process::id()));
+            let scratch = std::env::temp_dir().join(format!("tog-mix-run-{}", std::process::id()));
             std::fs::create_dir_all(&scratch)?;
             let (prefixes, remove, set) = elixir::run_env(
                 &beam,

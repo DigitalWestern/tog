@@ -4,13 +4,13 @@
 //! The fixture repository is local and served over `file://`, so this needs no
 //! network beyond the pinned Node toolchain.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
 use tog::kernel::platform::Platform;
 use tog::kernel::policy;
 use tog::kernel::store::Store;
 use tog::tailors::node::{self, NpmPackage, NpmPlan};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 
 struct Temp(PathBuf);
 impl Drop for Temp {
@@ -284,8 +284,8 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     );
 
     // The commit determines the environment: realizing again is a cache hit.
-    let again = tog::tailors::python::env::realize_env(&store, platform, &plan)
-        .expect("second realize");
+    let again =
+        tog::tailors::python::env::realize_env(&store, platform, &plan).expect("second realize");
     assert_eq!(env, again);
 }
 

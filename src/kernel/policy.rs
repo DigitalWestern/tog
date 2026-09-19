@@ -1513,11 +1513,7 @@ deny = ["git-dependency"]"#,
         assert_eq!(fixture[0].trusted, None);
         assert_eq!(fixture[1].trusted, Some(keys(&[2, 3])));
         // An explicitly empty machine list is recorded as `Some([])`.
-        fs::write(
-            home.join(".tog/policy.toml"),
-            "[signing]\ntrusted = []\n",
-        )
-        .unwrap();
+        fs::write(home.join(".tog/policy.toml"), "[signing]\ntrusted = []\n").unwrap();
         let (policy, sources) = load_with_sources(&project, false).unwrap();
         assert_eq!(policy.signing, Some(Signing::default()));
         assert_eq!(

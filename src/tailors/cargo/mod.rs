@@ -1458,9 +1458,7 @@ pub fn build_sandboxed(
     let target = project_child_dir(&project_dir, "target")?;
     let cargo_bin = rust_obj.join("bin/cargo");
     if !cargo_bin.is_file() || !vendor_obj.is_dir() {
-        return Err(err(
-            "cargo environment is incomplete; run `tog sync` first",
-        ));
+        return Err(err("cargo environment is incomplete; run `tog sync` first"));
     }
 
     let store_tmp = rust_obj
@@ -2382,8 +2380,7 @@ mod git_source_tests {
         let commit = "b".repeat(40);
         let source = format!("git+https://github.com/o/r?rev={commit}#{commit}");
         let git = parse_cargo_git_source(&source).unwrap();
-        let text =
-            tog_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
+        let text = tog_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
         assert!(text.contains(&format!("[source.\"{source}\"]")), "{text}");
         assert_eq!(
             text.matches("replace-with").count(),

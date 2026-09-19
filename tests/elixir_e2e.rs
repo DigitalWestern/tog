@@ -95,10 +95,9 @@ fn run_store_bin(bin: &Path, beam: &Path, home: &Path, args: &[&str]) -> Output 
 /// The tailor-owned `body` of the closure envelope tog wrote
 /// (`.tog/closures/elixir.json`, schema closure/1).
 fn closure_body(project: &Path) -> serde_json::Value {
-    let mut envelope: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(project.join(".tog/closures/elixir.json")).unwrap(),
-    )
-    .unwrap();
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/elixir.json")).unwrap())
+            .unwrap();
     assert_eq!(envelope["schema"], "closure/1");
     assert_eq!(envelope["ecosystem"], "elixir");
     envelope["body"].take()

@@ -2728,16 +2728,11 @@ mod tests {
         let root = x_dir.join("py-linked-tog");
         let shared = acquire_x_root(&root).unwrap();
         seed_root(&root);
-        assert!(real_tog
-            .join("x/.locks/py-linked-tog.lock")
-            .is_file());
+        assert!(real_tog.join("x/.locks/py-linked-tog.lock").is_file());
         drop(shared);
 
         let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
-        assert_eq!(
-            validated.path,
-            real_tog.canonicalize().unwrap().join("x")
-        );
+        assert_eq!(validated.path, real_tog.canonicalize().unwrap().join("x"));
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());

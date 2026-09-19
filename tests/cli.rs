@@ -348,10 +348,7 @@ fn failures_exit_1_and_survive_quiet() {
     let out = tog(&project.0, &home.0, &["plan"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
-    assert!(
-        stderr.starts_with("tog: error: no_manifest"),
-        "{stderr}"
-    );
+    assert!(stderr.starts_with("tog: error: no_manifest"), "{stderr}");
 
     // --quiet silences narration but never the error.
     let out = tog(&project.0, &home.0, &["--quiet", "plan"]);
@@ -740,16 +737,8 @@ fn x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does() {
     let root = volume.0.join(".tog/x/py-victim");
     std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
     std::fs::remove_dir_all(linked_tog_home.0.join(".tog")).unwrap();
-    std::os::unix::fs::symlink(
-        volume.0.join(".tog"),
-        linked_tog_home.0.join(".tog"),
-    )
-    .unwrap();
-    let out = tog(
-        &linked_tog_home.0,
-        &linked_tog_home.0,
-        &["x", "--clean"],
-    );
+    std::os::unix::fs::symlink(volume.0.join(".tog"), linked_tog_home.0.join(".tog")).unwrap();
+    let out = tog(&linked_tog_home.0, &linked_tog_home.0, &["x", "--clean"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(stdout.contains("removed x environment"), "{stdout}");
@@ -783,8 +772,7 @@ fn x_clean_refuses_a_symlinked_x_directory_or_a_relative_home() {
     let symlinked_x_home = TempDir::new("x-clean-symlinked-x");
     let x_victim = outside_x.0.join("x/py-victim/.tog/closures");
     std::fs::create_dir_all(&x_victim).unwrap();
-    std::os::unix::fs::symlink(outside_x.0.join("x"), symlinked_x_home.0.join(".tog/x"))
-        .unwrap();
+    std::os::unix::fs::symlink(outside_x.0.join("x"), symlinked_x_home.0.join(".tog/x")).unwrap();
     let out = tog(&symlinked_x_home.0, &symlinked_x_home.0, &["x", "--clean"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
@@ -952,15 +940,11 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
         format!(
             "x/2\0{}\0python\0fake\0\0{}",
             store.display(),
-            tog::kernel::platform::Platform::host()
-                .unwrap()
-                .triple()
+            tog::kernel::platform::Platform::host().unwrap().triple()
         )
         .as_bytes(),
     ));
-    let root = home
-        .join(".tog/x")
-        .join(format!("py-fake-{}", &key[..16]));
+    let root = home.join(".tog/x").join(format!("py-fake-{}", &key[..16]));
     std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
     std::os::unix::fs::symlink(&object, root.join(".venv")).unwrap();
     let body = serde_json::json!({
@@ -2019,8 +2003,7 @@ fn keygen_writes_a_private_key_and_prints_the_policy_table() {
     std::fs::write(home.0.join(".tog/policy.toml"), &stdout).unwrap();
     std::fs::write(project.0.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
     let platform = tog::kernel::platform::Platform::host().unwrap();
-    let mut body =
-        tog::tailors::cargo::rustfmt::pinned_record(platform, &project.0, "").unwrap();
+    let mut body = tog::tailors::cargo::rustfmt::pinned_record(platform, &project.0, "").unwrap();
     body["exceptions"] = serde_json::json!([]);
     let mut envelope = serde_json::json!({
         "schema": "closure/1",
