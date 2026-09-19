@@ -61,8 +61,8 @@ impl Context {
         })
     }
 
-    /// The project directory is the current directory, read each time it is
-    /// asked for: `add`/`remove`/`update` may change directory to the
+    /// The directory `open_in` pinned, or the current directory read fresh
+    /// on every call: `add`/`remove`/`update` may change directory to the
     /// project the edit landed in before running the ordinary sync.
     pub fn project_dir(&self) -> PathBuf {
         self.project_dir.clone().unwrap_or_else(project_dir)

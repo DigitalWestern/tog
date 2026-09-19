@@ -299,7 +299,7 @@ impl PolicySource {
     }
 }
 
-/// Load the user and project policies once, unioning all deny entries.
+/// Load the machine and project policies, unioning all deny entries.
 pub fn load(project_dir: &Path, cli_strict: bool) -> io::Result<Policy> {
     Ok(load_with_sources(project_dir, cli_strict)?.0)
 }

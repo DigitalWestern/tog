@@ -77,7 +77,7 @@ impl AsRef<OsStr> for CacheLease {
 
 /// Fetch a cache entry by sha256, RE-VERIFYING its content (never trust a
 /// cache hit: read-only bits stop accidents, not same-user replacement).
-/// A poisoned entry is deleted and reported missing.
+/// A poisoned entry is deleted and the call fails.
 pub fn cache_verified(store: &Store, sha256: &str) -> io::Result<PathBuf> {
     let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     cache_verified_held(store, sha256).map(CacheLease::into_path)
@@ -164,8 +164,6 @@ fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     })
 }
 
-/// Back-compat convenience for sha256 hex callers. Internal extraction paths
-/// use `download_verified_held` so their lease lasts through consumption.
 /// Fetch a small text file over HTTPS (a checksum manifest, for example).
 ///
 /// There is no hash to check against — this IS the checksum source — so the
@@ -187,6 +185,9 @@ pub fn fetch_text(url: &str) -> io::Result<String> {
     Ok(text)
 }
 
+/// Sha256-hex convenience for callers outside the store. Internal extraction
+/// paths use `download_verified_held` so their lease lasts through
+/// consumption.
 pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<PathBuf> {
     let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     download_verified_held(store, url, sha256).map(CacheLease::into_path)

@@ -1,7 +1,5 @@
 //! Content digests (kernel layer): the validated `Digest` value that
 //! artifact verification, cache addressing, and object metadata share.
-//! The digest type lives here so artifact verification, cache addressing, and
-//! store metadata share one validated representation.
 
 use std::io;
 

@@ -33,7 +33,7 @@ use crate::kernel::activity::{ActivityMode, StoreActivity};
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 
-/// One archive member as tar lists it.
+/// One archive member as the header reader read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub kind: EntryKind,
@@ -95,9 +95,8 @@ fn tar_command(platform: Platform) -> Command {
 
 /// Flags every tar invocation carries. `--numeric-owner` no longer protects a
 /// parser — the listing is read from the header blocks now — but the
-/// delegated extraction writes object bytes, so the command line stays
-/// identical to the previous release: same flags, same order, same
-/// environment.
+/// delegated extraction writes object bytes, so the flags stay fixed: a
+/// different command line would change what lands in an object.
 const TAR_PARSE_FLAGS: [&str; 1] = ["--numeric-owner"];
 
 /// List `archive` by reading its tar headers, cross-checked against the
@@ -678,9 +677,9 @@ fn graphic(text: &str) -> bool {
 /// Refuse anything that could write or point outside the destination once
 /// the first `strip` path components are removed, the way tar's
 /// `--strip-components` removes them. Entries with `strip` or fewer
-/// components are skipped by tar and therefore ignored here, except that
-/// their kind is still checked: a hard link or a device is refused wherever
-/// it sits.
+/// components are skipped by tar, so only their kind and their name are
+/// still checked: a hard link, a device, an absolute name or a `..`
+/// component is refused wherever it sits.
 pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
     let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
     for entry in entries {

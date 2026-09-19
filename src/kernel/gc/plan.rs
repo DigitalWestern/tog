@@ -175,9 +175,9 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot, options: &Options) -> io::Res
     })
 }
 
-/// The transitive closure of `seeds` over proven dependencies. Only called
-/// after the blocking checks above, so a missing record here is impossible
-/// and is simply not traversed.
+/// The transitive closure of `seeds` over proven dependencies. A seed or
+/// dependency with no record is simply not traversed; the marking walk in
+/// `validate` is what reports it as a blockage.
 pub(super) fn reachable(snapshot: &Snapshot, seeds: &HashSet<String>) -> HashSet<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = seeds.iter().cloned().collect();

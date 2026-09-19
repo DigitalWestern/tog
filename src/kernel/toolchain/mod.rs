@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn bundle_id_matches_the_design_example() {
-        // The Node bundle written out in docs/agent/DESIGNS.md §1.
+        // A real Node release: the id below pins the canonical hashing.
         let bundle = Bundle {
             release: "node-24.20.0-r1".into(),
             revision: Some(1),

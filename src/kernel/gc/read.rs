@@ -40,7 +40,7 @@ pub(super) fn collect_roots<W: Write>(
         // A record this store cannot read is the same safety stop as a
         // project that cannot be resolved, and for the same reason: the
         // record exists, so some project is still counting on it, and there
-        // is no way to tell which objects that project needs (A-R2).
+        // is no way to tell which objects that project needs.
         if let Some(reason) = &root.unusable {
             return Err(unusable_root(root, reason));
         }

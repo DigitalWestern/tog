@@ -1176,6 +1176,8 @@ fn set_mtime_epoch(path: &Path) -> io::Result<()> {
             tv_nsec: 0,
         },
     ];
+    // SAFETY: `path` is a NUL-terminated C string that outlives the call and
+    // `times` is a two-element timespec array, which is what utimensat reads.
     let result = unsafe {
         libc::utimensat(
             libc::AT_FDCWD,

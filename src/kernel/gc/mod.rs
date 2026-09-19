@@ -77,7 +77,8 @@ pub struct Report {
     pub backups: usize,
 }
 
-/// Sweep the store and optionally the blanket-home projections.
+/// Sweep the store, and its forest and backup projections when
+/// `options.project` is set.
 pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Result<Report> {
     let Some(activity) = store.try_activity_exclusive()? else {
         writeln!(out, "cleanup skipped: a Blanket job is using this store")?;
@@ -322,8 +323,9 @@ mod tests {
         id
     }
 
-    /// Publish an object and then rewrite its record into the pre-D shape, so
-    /// the adapters and the containment guard have something real to work on.
+    /// Publish an object and then rewrite its record into the pre-object-meta/2
+    /// shape, so the adapters and the containment guard have something real to
+    /// work on.
     fn commit_legacy_fixture(store: &Store, identity: &Identity, refs: Option<&[&str]>) -> String {
         let id = identity.object_id();
         if identity.kind == "not-a-known-kind" {
@@ -520,7 +522,7 @@ mod tests {
     ///
     /// A `hex-deps` record names two digests per dependency: the outer
     /// tarball, which is a real cache address, and the inner content
-    /// checksum, which normally is not. The pre-D reader could not tell them
+    /// checksum, which normally is not. The old reader could not tell them
     /// apart and retained both. If a file happens to sit at the inner
     /// checksum's cache address, certifying only the outer digest would make
     /// the sweep free a file the old reader kept — so the record must stay
@@ -1241,7 +1243,7 @@ mod tests {
     // GC safety acceptance tests.
     //
     // Each name below covers one GC-safety failure mode. The x-cleanup pair
-    // lives with the code it covers, in `xrun::tests`.
+    // lives with the code it covers, in `commands::x`.
     // =======================================================================
 
     /// Register `project` as a durable root/2 record naming `objects`.
@@ -1765,6 +1767,8 @@ mod tests {
     /// every future sweep.
     #[test]
     fn object_removed_but_metadata_unlink_fails_is_reported() {
+        // Root ignores the read-only directory mode this test relies on.
+        // SAFETY: geteuid takes no arguments and always succeeds.
         if unsafe { libc::geteuid() } == 0 {
             return;
         }
@@ -2169,7 +2173,8 @@ mod tests {
         };
         let id = commit_legacy_fixture(&store, &identity, Some(&[]));
 
-        // The shape main.rs uses: maintenance first, then the job's token.
+        // The shape `Context::open` uses: maintenance first, then the job's
+        // token.
         let mut out = Vec::new();
         let report = automatic_maintenance(&store, &mut out).unwrap();
         assert_eq!((report.upgraded, report.unresolved), (1, 0));
@@ -2458,8 +2463,8 @@ mod tests {
     // =======================================================================
     // Cross-component retention cases that this sweep interacts with.
     //
-    // These are root-record and projection retention cases whose behaviour D's
-    // sweep now decides. Other retention cases belong with their owners.
+    // These are root-record and projection retention cases whose behaviour
+    // this sweep decides. Other retention cases belong with their owners.
     // =======================================================================
 
     /// Publication writes the durable record before the closure. A crash in
@@ -2589,8 +2594,8 @@ mod tests {
                 }
                 _ => {
                     // Restore the project to a state a sweep may run over:
-                    // an empty closures directory does not count (A-R4) —
-                    // a registered project owns at least one closure.
+                    // an empty closures directory does not count — a
+                    // registered project owns at least one closure.
                     let closure = project.join(".blanket/closures/python.json");
                     fs::create_dir_all(closure.parent().unwrap()).unwrap();
                     fs::write(
@@ -2762,11 +2767,10 @@ mod tests {
             "a blocked preview still authorized a deletion: {text}"
         );
     }
-    /// Characterization: the read phase's
-    /// structural refusals. Every other gc test drives `read` through a
-    /// healthy store; these pin the four "refusing to sweep" stops that
-    /// guard the object, metadata, cache and stage enumerations, so an
-    /// extraction cannot quietly drop one or reorder them.
+    /// Characterization: the read phase's structural refusals. Every other
+    /// gc test drives `read` through a healthy store; these pin the
+    /// "refusing to sweep" stops that guard the object, metadata, cache and
+    /// stage enumerations, so an extraction cannot quietly drop one.
     fn read_refusal(label: &str, plant: impl FnOnce(&Store)) -> String {
         let temp = TempStore::new(label);
         let store = temp.store();

@@ -196,7 +196,7 @@ fn open_lock(root: &Path) -> io::Result<File> {
     // The descriptor is the object we inspected. Applying permissions by
     // pathname would reopen a replacement if the lock name were swapped
     // between open(2) and chmod(2).
-    // SAFETY: `file` is an open descriptor owned by this lease.
+    // SAFETY: `file` is the open descriptor this function just created.
     if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
         return Err(io::Error::last_os_error());
     }

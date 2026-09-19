@@ -255,6 +255,8 @@ impl Session {
         }
         self.old_mask_saved = true;
 
+        // SAFETY: sigset_t is an opaque C value; sigemptyset initializes it
+        // below before anything reads it.
         let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
         // SAFETY: libc initializes blocked's empty set.
         if unsafe { libc::sigemptyset(&mut blocked) } != 0 {
@@ -280,8 +282,8 @@ impl Session {
             // SAFETY: zeroed is the conventional initialization for the
             // output sigaction which libc fills.
             let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
-            // SAFETY: number is one of the four valid signal constants and
-            // old is a writable output slot.
+            // SAFETY: number is one of the `SIGNALS` constants and old is a
+            // writable output slot.
             if unsafe { libc::sigaction(number, std::ptr::null(), &mut old) } != 0 {
                 return Err(io::Error::last_os_error());
             }

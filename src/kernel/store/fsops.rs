@@ -298,6 +298,7 @@ pub(crate) fn remove_tree_entry_if_same(
         }
         return Err(error);
     };
+    // SAFETY: childfd was returned by openat and ownership moves into File.
     let child = unsafe { fs::File::from_raw_fd(childfd) };
     let actual = fd_stat(child.as_raw_fd())?;
     if !same_inode(&actual, &expected) {
