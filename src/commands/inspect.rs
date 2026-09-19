@@ -1,7 +1,6 @@
 //! `status`, `ls`, `doctor`: read-only views over the project's closures and
-//! the store (CLI.md 2.5–2.7). Nothing here realizes, resolves, or touches
-//! the network; `doctor` is the only function that opens the store, and it
-//! only reads.
+//! the store. Nothing here realizes, resolves, or touches the network;
+//! `doctor` is the only function that opens the store, and it only reads.
 
 use std::fs;
 use std::io::{self, Write};
@@ -1188,10 +1187,9 @@ mod tests {
         let value: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
         assert!(value["checks"].as_array().unwrap().len() >= 8);
     }
-    /// Characterization: `doctor`'s value is
-    /// the order and the wording of what it prints, so pin both. The
-    /// existing `doctor_reports_host_and_project` only asserts that the
-    /// names are present.
+    /// Characterization: `doctor`'s value is the order and the wording of
+    /// what it prints, so pin both. `doctor_reports_host_and_project` only
+    /// checks that each expected check name is somewhere in the list.
     #[test]
     fn doctor_check_order_and_wording_are_fixed() {
         // Same env -> store order as `doctor_reports_host_and_project`.
@@ -1213,9 +1211,9 @@ mod tests {
         }
 
         let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
-        // The store block is first and in this order; the per-tailor probes
-        // follow it; the sandbox and C-toolchain probes close the
-        // platform section; policy and project are always last.
+        // The platform check is first, then the store block in this order;
+        // the per-tailor probes follow it; the sandbox and C-toolchain probes
+        // close the platform section; policy and project are always last.
         assert_eq!(
             &names[..4],
             &["platform", "store", "disk", "toolchains"],

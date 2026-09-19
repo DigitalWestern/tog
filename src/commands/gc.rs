@@ -21,7 +21,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     // cannot both be honoured. Previewing the sweep as though the project
     // were registered would mean protecting a root with no record, which is
     // exactly the resolution rule GC is not allowed to bend; refuse the
-    // combination instead of half-keeping either promise (A-R5).
+    // combination instead of half-keeping either promise.
     if args.dry_run && !args.register.is_empty() {
         return Err(io::Error::other(
             "refusing to combine --dry-run with --register: registering writes a record and a \
