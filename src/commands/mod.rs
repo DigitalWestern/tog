@@ -46,9 +46,9 @@ pub enum Pending {
     },
 }
 
-/// CLI.md 2.1 and 2.2: a bare `blanket` inside a project is `sync`; an
-/// unknown first word that names a package.json script runs it. Anything
-/// else is the usage error the grammar already prepared (exit 2).
+/// A bare `blanket` inside a project is `sync`; an unknown first word that
+/// names a package.json script runs it. Anything else is the usage error
+/// the grammar already prepared (exit 2).
 pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
     match pending {
         Pending::Command(command) => Ok(command),

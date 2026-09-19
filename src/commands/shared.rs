@@ -10,8 +10,7 @@ pub(crate) use crate::kernel::context::project_dir;
 /// Nearest ancestor that is a blanket projection: every tailor writes
 /// `.blanket/closures/<eco>.json`, so that directory is the proof. A plain
 /// `node_modules` or `.venv` in a subdirectory (a docs site, a vendored
-/// tool) is NOT a projection and must not stop the walk-up (Sol, task
-/// runner review).
+/// tool) is NOT a projection and must not stop the walk-up.
 pub(crate) fn projected_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
         .find(|d| d.join(".blanket/closures").is_dir())

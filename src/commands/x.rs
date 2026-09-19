@@ -1,6 +1,6 @@
 //! `blanket x <tool>`: run a tool from a registry without adding it to the
-//! project, cached forever (CLI.md 2.4). A synthetic single-requirement
-//! plan goes through the ordinary realize path, so the environment is an
+//! project, cached forever. A synthetic single-requirement plan goes
+//! through the ordinary realize path, so the environment is an
 //! input-addressed store object; the second run is a store hit. Each tool
 //! gets a tiny project directory under `~/.blanket/x/` holding the
 //! projection and its closure, which registers it as a gc root like any
@@ -276,6 +276,7 @@ fn open_directory_path(path: &Path) -> io::Result<fs::File> {
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: fd is newly opened and ownership moves to the File.
     let mut directory = unsafe { fs::File::from_raw_fd(fd) };
     for component in path.components() {
         let Component::Normal(name) = component else {
@@ -459,6 +460,7 @@ fn lock_x_root(root: &Path, exclusive: bool, nonblocking: bool) -> io::Result<Op
         if nonblocking {
             operation |= libc::LOCK_NB;
         }
+        // SAFETY: flock operates on the owned lock descriptor.
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             let error = io::Error::last_os_error();
             if nonblocking
@@ -1025,17 +1027,19 @@ fn existing_real_directory(path: &Path, label: &str) -> io::Result<bool> {
     }
 }
 
-/// Return the canonical cleanup anchor. The home chain (`$HOME` and
-/// `~/.blanket`) is resolved the way the runner resolves it and the result
-/// must be a real directory; the final `x` component is never followed.
-/// Missing `.blanket` or `x` means there is nothing to clean; an existing
-/// unsafe component is an error.
+/// A cleanup anchor that passed validation: its canonical path and an open
+/// descriptor for that exact directory.
 #[derive(Debug)]
 struct ValidatedXDir {
     path: PathBuf,
     directory: fs::File,
 }
 
+/// Return the canonical cleanup anchor. The home chain (`$HOME` and
+/// `~/.blanket`) is resolved the way the runner resolves it and the result
+/// must be a real directory; the final `x` component is never followed.
+/// Missing `.blanket` or `x` means there is nothing to clean; an existing
+/// unsafe component is an error.
 fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
     if !x_dir.is_absolute() {
         return Err(other(format!(
@@ -1797,8 +1801,8 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         println!("blanket: x clean: nothing to clean");
     } else {
         // A removed node environment also orphans its
-        // ~/.blanket/forests/<project-key>/<projection-id> node_modules
-        // forest, which plain `blanket gc` never visits.
+        // forests/<project-key>/<projection-id> node_modules forest in the
+        // originating store, which plain `blanket gc` never visits.
         let forests = if removed_node {
             ", and 'blanket gc --project' also reclaims the node_modules forest each removed node environment used"
         } else {
@@ -2356,6 +2360,7 @@ mod tests {
         let shared = lock_x_root(&root, false, false)
             .unwrap()
             .expect("shared lock");
+        // SAFETY: fcntl operates on the descriptor owned by `shared`.
         let flags = unsafe { libc::fcntl(shared.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0);
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
@@ -2930,8 +2935,9 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
-    /// The summary names `blanket gc --project` only for node environments,
-    /// whose removal also orphans a `~/.blanket/forests` projection.
+    /// `candidate_ecosystem` decides which environments the clean summary
+    /// calls node, so pin the order it reads: the recorded request, then a
+    /// recovered legacy manifest, then the generated name prefix.
     #[test]
     fn candidate_ecosystem_reads_record_then_manifest_then_name() {
         let base = temp_base("ecosystem");

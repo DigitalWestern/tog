@@ -1,4 +1,4 @@
-//! `add`, `remove`, `update` (CLI.md 2.3).
+//! `add`, `remove`, `update`.
 //!
 //! Doctrine: resolution belongs to the ecosystem's pinned tool, realization
 //! belongs to blanket. Every manifest or lock edit below is delegated to a
@@ -9,9 +9,9 @@
 //! telling the user what to type next. Blanket edits a file itself in exactly
 //! one case: a plain requirements file, where the "tool" is a text append.
 //!
-//! Choosing the ecosystem is the evidence ladder (CLI.md decision 3): an
-//! explicit prefix, the name's shape, the nearest manifest, the registries,
-//! then the human. Never a coin flip.
+//! Choosing the ecosystem is an evidence ladder: an explicit prefix, the
+//! name's shape, the nearest manifest, the registries, then the human.
+//! Never a coin flip.
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -382,7 +382,7 @@ fn get_json(url: &str) -> io::Result<Option<serde_json::Value>> {
     }
 }
 
-/// Rung 3: does the registry know this name? `Some(latest version)`.
+/// Rung 4: does the registry know this name? `Some(latest version)`.
 pub fn registry_lookup(eco: Eco, name: &str) -> io::Result<Option<String>> {
     let lower = name.to_ascii_lowercase();
     let (url, extract): (String, fn(&serde_json::Value) -> Option<String>) = match eco {
@@ -433,7 +433,7 @@ pub fn registry_lookup(eco: Eco, name: &str) -> io::Result<Option<String>> {
     Ok(value.and_then(|value| extract(&value).or_else(|| Some("?".to_string()))))
 }
 
-/// Rung 4/5: the human, or an error when there is no terminal.
+/// Rung 5: the human, or an error when there is no terminal.
 pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
     let described = known
         .iter()
@@ -2384,9 +2384,10 @@ mod tests {
 
     /// pnpm joins `modules-dir` onto every importer's directory and
     /// `virtual-store-dir` onto the lock root. From the project pnpm runs in
-    /// both land in blanket's stage; from any shallower importer the
-    /// modules dir still escapes the project tree, so no importer can be
-    /// pointed at a `.modules.yaml` inside the user's project.
+    /// both land in blanket's stage, and from any shallower importer the
+    /// modules dir still escapes the project tree. A root-computed one lands
+    /// back inside the project for a deeper importer; the linker flags, not
+    /// this path, are what keep that harmless.
     #[test]
     fn pnpm_scratch_paths_resolve_where_pnpm_joins_them() {
         let root =
@@ -2789,26 +2790,26 @@ mod tests {
         // Rung 2 against a project without that ecosystem is an error.
         let error = choose(&spec("github.com/x/y"), &both, &mut lookup, &mut ask).unwrap_err();
         assert!(error.to_string().contains("no go manifest"), "{error}");
-        // Rung 3 skipped when one ecosystem is present, no lookup.
+        // Rung 3: the only ecosystem present decides, no lookup.
         assert_eq!(
             choose(&spec("react"), &[Eco::Node], &mut lookup, &mut ask).unwrap(),
             Eco::Node
         );
         assert!(lookups.borrow().is_empty());
-        // Rung 3: registries decide when exactly one knows the name.
+        // Rung 4: registries decide when exactly one knows the name.
         assert_eq!(
             choose(&spec("react"), &both, &mut lookup, &mut ask).unwrap(),
             Eco::Node
         );
         assert_eq!(lookups.borrow().len(), 2);
-        // Rung 3, nobody knows: error names the explicit spellings.
+        // Rung 4, nobody knows: error names the explicit spellings.
         let error = choose(&spec("nothing"), &both, &mut lookup, &mut ask).unwrap_err();
         assert!(
             error.to_string().contains("py:nothing / npm:nothing"),
             "{error}"
         );
         assert!(asked.borrow().is_empty());
-        // Rung 4: both know it → ask, with the versions.
+        // Rung 5: both know it → ask, with the versions.
         assert_eq!(
             choose(&spec("requests"), &both, &mut lookup, &mut ask).unwrap(),
             Eco::Python

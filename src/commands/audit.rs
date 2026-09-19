@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     /// A python project with a projection and recorded inputs, so a closure
-    /// written by `python_closure` is current until `requirements.txt`
+    /// written from `python_body` is current until `requirements.txt`
     /// changes.
     fn python_project(label: &str) -> TempDir {
         let temp = TempDir::new(label);

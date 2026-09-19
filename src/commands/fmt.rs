@@ -86,13 +86,13 @@ pub fn run(
                 .expect("one ecosystem has a pinned formatter")
         }
     };
+    // The rustfmt record is signed like every closure; a configured key
+    // that cannot be loaded fails here, before the store is opened.
+    crate::comforter::init_signing()?;
     // Top of the formatter path, and deliberately not above the `--eco`
     // dispatch: a delegated package.json `fmt` script needs no formatter
     // pin. The tailor refuses a host with no pinned component here, before
     // the store is opened.
-    // The rustfmt record is signed like every closure; a configured key
-    // that cannot be loaded fails here, before the store is opened.
-    crate::comforter::init_signing()?;
     formatter.fmt_preflight(platform)?;
     let detected = inspect::detected(&cwd)?;
     if ecosystem.is_none() && detected.len() > 1 {

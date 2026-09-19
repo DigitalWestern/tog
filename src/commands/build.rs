@@ -8,7 +8,7 @@ use crate::tailors::{self, Tailor};
 use std::io;
 
 /// Explicit ecosystem, or inferred when exactly one build-capable ecosystem
-/// is present (Sol review 4).
+/// is present.
 pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
     let cwd = ctx.project_dir();
     let explicit = args
