@@ -3113,4 +3113,126 @@ mod tests {
         assert!(text.is_empty(), "a healthy store warned: {text}");
         assert!(!marker.exists(), "a healthy store kept a marker: {text}");
     }
+
+    /// Migration may not certify anything while a record is missing from the
+    /// index. An adapter resolves indirect references by asking for the one
+    /// record that matches, so a skipped record can turn an ambiguity the
+    /// strict reader would have refused into a confident wrong answer.
+    #[test]
+    fn an_unusable_record_holds_migration_of_every_other_legacy_record() {
+        let temp = TempStore::new("migration-held");
+        let store = temp.store();
+        let wedged = wedge(&store, "wedged");
+        let digest = "1".repeat(64);
+        cached_artifact(&store, &digest);
+        let provable = commit_legacy_fixture(
+            &store,
+            &Identity {
+                kind: "cpython".into(),
+                name: "cpython".into(),
+                version: "3.11.9".into(),
+                inputs: BTreeMap::from([
+                    ("artifact_sha256".into(), digest),
+                    ("platform".into(), "x86_64-unknown-linux-gnu".into()),
+                ]),
+            },
+            Some(&[]),
+        );
+        let record_path = store.root.join("meta").join(format!("{provable}.json"));
+        let before = fs::read(&record_path).unwrap();
+
+        let (report, text) = migrated(&store);
+        let report = report.expect("migration must report, not refuse");
+        assert_eq!(report.upgraded, 0, "{text}");
+        assert_eq!(
+            report.unresolved, 2,
+            "the held legacy record was not counted: {text}"
+        );
+        assert!(
+            text.contains("metadata migration held: 1 unusable"),
+            "{text}"
+        );
+        assert_eq!(
+            fs::read(&record_path).unwrap(),
+            before,
+            "a record was rewritten while the index was partial"
+        );
+
+        // With the unusable record gone the index is whole again, so the
+        // provable record migrates on the next pass.
+        let (count, text) = dropped(&store, &[wedged], false);
+        assert_eq!(count.unwrap(), 1, "{text}");
+        let (report, text) = migrated(&store);
+        let report = report.unwrap();
+        assert_eq!((report.upgraded, report.unresolved), (1, 0), "{text}");
+        assert_ne!(fs::read(&record_path).unwrap(), before, "{text}");
+    }
+
+    /// Removal order is a durability choice, not tidiness. A batch that
+    /// fails partway must never leave a readable record naming an id with
+    /// nothing under `objects/`, so the shape checks all happen first.
+    #[test]
+    fn a_record_that_is_not_a_regular_file_refuses_before_any_removal() {
+        let temp = TempStore::new("drop-bad-record");
+        let store = temp.store();
+        let first = wedge(&store, "wedged");
+        // A second id whose record name is a directory: `remove_file` would
+        // fail on it, and it must do so before the first id is touched.
+        let second = test_identity("directory-record", None).object_id();
+        fs::create_dir_all(store.object_path(&second)).unwrap();
+        fs::create_dir_all(store.root.join("meta").join(format!("{second}.json"))).unwrap();
+
+        let (result, text) = dropped(&store, &[first.clone(), second.clone()], false);
+        let error = result.unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!("object {second} metadata is not a regular file"),
+            "{text}"
+        );
+        assert!(text.is_empty(), "{text}");
+        assert!(
+            store.object_path(&first).is_dir()
+                && store
+                    .root
+                    .join("meta")
+                    .join(format!("{first}.json"))
+                    .is_file(),
+            "the refusal removed part of the batch: {error}"
+        );
+    }
+
+    /// The marker may only claim the operator has seen the text once the
+    /// text has actually been written. A failing writer must leave no
+    /// marker, or the warning is silenced for a store nobody warned about.
+    #[test]
+    fn a_failed_warning_write_leaves_no_marker_behind() {
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("stderr is gone"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = TempStore::new("marker-after-write");
+        let store = temp.store();
+        wedge(&store, "wedged");
+        let marker = store.root.join("maintenance-deferred");
+
+        let error = automatic_maintenance(&store, &mut BrokenWriter).unwrap_err();
+        assert!(error.to_string().contains("stderr is gone"), "{error}");
+        assert!(
+            !marker.exists(),
+            "a warning nobody saw was recorded as shown"
+        );
+
+        // The next run, with a working writer, still announces it.
+        let mut out = Vec::new();
+        automatic_maintenance(&store, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("metadata maintenance deferred"), "{text}");
+        assert!(marker.is_file(), "{text}");
+    }
 }

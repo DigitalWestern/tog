@@ -322,9 +322,12 @@ concurrent sync cannot lose one. Sharp edges:
   deletes anything: its job is to list every record that stops the sweep,
   including the ones nothing can read, each with the command that clears it.
   The same migration also runs automatically before the first
-  resource-consuming job, deferred when another job owns the store and
-  retried later. A deferral is printed once per store and again whenever it
-  changes; `tog gc --migrate-metadata` repeats it on demand.
+  resource-consuming job. When it is deferred because records are
+  unresolved, the warning is printed once per store and again whenever the
+  list of records changes, since it would otherwise precede every command
+  until someone acted on it; `tog gc --migrate-metadata` repeats it on
+  demand. A deferral because another Tog job owns the store is transient
+  and still prints every time.
 - `--drop-object <id>...` removes an object and its record outright, for the
   records the sweep cannot use: unusable, still legacy after migration, or
   missing their object (and an object missing its record). Everything in the

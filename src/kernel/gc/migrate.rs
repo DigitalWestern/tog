@@ -92,10 +92,14 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
     if fs::read(&marker).ok().as_deref() == Some(deferral.as_slice()) {
         return Ok(report);
     }
+    // Print first, remember second. The marker's only job is to say "the
+    // operator has already seen exactly this text", so it must not be
+    // written until the text has actually reached them: a marker written
+    // before a failing write would silence the warning on every later run.
+    out.write_all(&deferral)?;
     // We hold the exclusive lease, so this write should not fail. If it
     // does, say nothing about printing once — the claim would be false.
     let recorded = write_deferral_marker(store, &marker, &deferral).is_ok();
-    out.write_all(&deferral)?;
     if recorded {
         writeln!(
             out,
@@ -180,7 +184,47 @@ pub(super) fn migrate_metadata_locked<W: Write>(
         )?;
     }
     report.unresolved = unusable.len();
-    if !index.has_legacy() && unusable.is_empty() {
+    if !unusable.is_empty() {
+        // Nothing is adapted while a record is missing from the index.
+        //
+        // An adapter resolves an indirect reference by asking the index for
+        // the *one* record whose identity produces a fingerprint, and both
+        // "no match" and "more than one match" are refusals. A record that
+        // was skipped is a record the index cannot offer as the second
+        // candidate, so an ambiguity the strict reader would have refused
+        // can come back as a confident unique match — and certify a
+        // dependency set naming the wrong object, which is a licence to
+        // delete the one actually in use.
+        //
+        // So migration stops at reporting. Every legacy record is counted as
+        // unresolved, because none of them has been proven, and the store
+        // stays exactly as it was found.
+        let held = index
+            .iter()
+            .filter(|(_, record)| record.evidence == crate::kernel::objmeta::Evidence::Legacy)
+            .count();
+        writeln!(
+            out,
+            "metadata migration held: {} unusable record(s) must be resolved before legacy \
+             records can be proven",
+            unusable.len()
+        )?;
+        report.unresolved += held;
+        writeln!(
+            out,
+            "metadata migration: 0 upgraded, {} unresolved{}",
+            report.unresolved,
+            if dry_run {
+                " (dry run)"
+            } else if automatic {
+                " (deferred)"
+            } else {
+                ""
+            }
+        )?;
+        return Ok((report, BTreeMap::new()));
+    }
+    if !index.has_legacy() {
         return Ok((report, BTreeMap::new()));
     }
     let cached = present_cache_entries(store)?;

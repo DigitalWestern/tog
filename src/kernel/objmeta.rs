@@ -255,25 +255,32 @@ fn read_index(
             }
             Err(error) => error,
         };
-        if error.kind() == io::ErrorKind::InvalidData {
-            if let Some(unusable) = unusable.as_deref_mut() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                unusable.insert(name, error.to_string());
-                continue;
-            }
+        let Some(unusable) = unusable.as_deref_mut() else {
+            // Strict mode. Every refusal names the record and both commands
+            // that end the deadlock: one lists every other unusable record
+            // in a single pass, the other removes a record that cannot be
+            // repaired.
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; nothing can be swept until this record is usable. Run `tog gc \
+                     --migrate-metadata` to list every unusable record, then drop the ones \
+                     you cannot repair with `tog gc --drop-object <id>` (the next sync \
+                     rebuilds the object)"
+                ),
+            ));
+        };
+        if error.kind() != io::ErrorKind::InvalidData {
+            // A read that failed for a reason other than the record's own
+            // content — a permission, a vanished file — is returned bare.
+            // The advice above names `--migrate-metadata`, and in lenient
+            // mode that is usually the command already running: telling an
+            // operator to rerun the thing that just failed is worse than
+            // telling them nothing.
+            return Err(error);
         }
-        // Every refusal names the record and both commands that end the
-        // deadlock: one lists every other unusable record in a single pass,
-        // the other removes a record that cannot be repaired.
-        return Err(io::Error::new(
-            error.kind(),
-            format!(
-                "{error}; nothing can be swept until this record is usable. Run `tog gc \
-                 --migrate-metadata` to list every unusable record, then drop the ones you \
-                 cannot repair with `tog gc --drop-object <id>` (the next sync rebuilds the \
-                 object)"
-            ),
-        ));
+        let name = entry.file_name().to_string_lossy().into_owned();
+        unusable.insert(name, error.to_string());
     }
     Ok(MetaIndex { entries })
 }

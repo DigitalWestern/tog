@@ -12,6 +12,11 @@
 //! gone, and never when a record that *is* readable still proves it needed.
 //! Everything it removes is content-addressed, so the next sync that needs
 //! the object rebuilds it at the same id.
+//!
+//! Within one invocation it unlinks every record first and only then removes
+//! the object trees, so an error partway through can leave bare objects —
+//! which this same command drops again — but never a readable record
+//! pointing at an id that no longer exists. See `drop_objects`.
 
 use super::*;
 
@@ -68,17 +73,39 @@ pub fn drop_objects<W: Write>(
     refuse_if_still_depended_on(&index, ids, &requested)?;
 
     let mut dropped = 0;
-    for entry in &droppable {
-        if dry_run {
+    if dry_run {
+        for entry in &droppable {
             writeln!(
                 out,
                 "tog: would drop object {} ({})",
                 entry.id, entry.reason
             )?;
-        } else {
-            remove_object_and_record(store, &entry.id)?;
-            writeln!(out, "tog: dropped object {} ({})", entry.id, entry.reason)?;
+            dropped += 1;
         }
+        return Ok(dropped);
+    }
+    // Records first, objects second, across the whole batch rather than per
+    // id. There is no rollback here, so the only thing that can be chosen is
+    // what a crash or an I/O error in the middle leaves behind, and the two
+    // orders are not equally survivable:
+    //
+    //   records first: some bare objects, each droppable again as "object
+    //     without metadata", and every record that is still there still has
+    //     its object.
+    //   objects first: a readable record naming an id with nothing under
+    //     `objects/`, which blocks the sweep and — if something else in the
+    //     batch already proved it a dependency — cannot be rebuilt, because
+    //     the dependent's id is unchanged and a sync would take the cache
+    //     hit.
+    //
+    // Only the first is recoverable with the command the operator already
+    // has, so removal runs in that order.
+    for entry in &droppable {
+        unlink_record(store, &entry.id)?;
+    }
+    for entry in &droppable {
+        remove_object(store, &entry.id)?;
+        writeln!(out, "tog: dropped object {} ({})", entry.id, entry.reason)?;
         dropped += 1;
     }
     if !dry_run {
@@ -114,6 +141,21 @@ fn eligible(
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             Err(error) => return Err(error),
         };
+        // Checked here, in the phase that refuses before anything is
+        // removed, because the removal itself unlinks by pathname: a symlink
+        // or a directory at the record's name is a shape `fs::remove_file`
+        // would either follow or fail on, halfway through a batch.
+        match fs::symlink_metadata(record_path(store, id)) {
+            Ok(stat) if stat.file_type().is_symlink() || !stat.is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("object {id} metadata is not a regular file"),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         if let Some(reason) = unusable.get(&format!("{id}.json")) {
             droppable.insert(id.clone(), reason.clone());
             continue;
@@ -251,28 +293,32 @@ fn refuse_if_still_depended_on(
     ))
 }
 
-/// Object directory first, then the record.
-///
-/// The order matters for a crash in between: a record without its object is
-/// a state every other command already understands and this command can
-/// clear, while an object without its record would look like a legitimate
-/// pre-registry object to nothing at all.
-fn remove_object_and_record(store: &Store, id: &str) -> io::Result<()> {
+/// The record half of a drop. `eligible` has already proved the path is a
+/// regular file or absent, so this never unlinks through a symlink.
+fn unlink_record(store: &Store, id: &str) -> io::Result<()> {
+    match fs::remove_file(record_path(store, id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The object half of a drop.
+fn remove_object(store: &Store, id: &str) -> io::Result<()> {
     let object = store.object_path(id);
     match fs::symlink_metadata(&object) {
         // Published objects are read-only trees; `remove_tree` restores the
         // write bits before unlinking, which is how the store removes its
         // own staged and committed trees everywhere else.
-        Ok(stat) if stat.is_dir() => store::remove_tree(&object)?,
+        Ok(stat) if stat.is_dir() => store::remove_tree(&object),
         // Anything else at that name — a symlink, a stray file — is not an
         // object at all, but it still occupies the id, so it goes too.
-        Ok(_) => fs::remove_file(&object)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    match fs::remove_file(store.root.join("meta").join(format!("{id}.json"))) {
-        Ok(()) => Ok(()),
+        Ok(_) => fs::remove_file(&object),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn record_path(store: &Store, id: &str) -> PathBuf {
+    store.root.join("meta").join(format!("{id}.json"))
 }
