@@ -67,7 +67,8 @@ impl Endpoint {
     /// somewhere else (`.`/`..` segments, backslashes, or a percent-escape
     /// that decodes to `/`, `\`, `.` or `%`) is never covered, so a prefix
     /// cannot be escaped by spelling. Inert escapes such as the `%2B` in a
-    /// python-build-standalone file name are fine.
+    /// python-build-standalone file name are fine; overlong UTF-8 spellings
+    /// are not decoded here, since every shipped endpoint rejects them.
     pub fn covers(&self, url: &str) -> bool {
         let Some(rest) = url.strip_prefix("https://") else {
             return false;
@@ -105,10 +106,11 @@ fn escapes_are_inert(path: &str) -> bool {
             let Some(hex) = bytes.get(i + 1..i + 3) else {
                 return false;
             };
-            let Ok(text) = std::str::from_utf8(hex) else {
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
                 return false;
-            };
-            let Ok(decoded) = u8::from_str_radix(text, 16) else {
+            }
+            let Ok(decoded) = u8::from_str_radix(std::str::from_utf8(hex).expect("hex digits"), 16)
+            else {
                 return false;
             };
             if matches!(decoded, b'/' | b'\\' | b'.' | b'%') {
@@ -304,6 +306,7 @@ mod tests {
             "https://github.com/astral-sh/uv/releases/download/a%2",
             "https://github.com/astral-sh/uv/releases/download/a%zz",
             "https://github.com/astral-sh/uv/releases/download/a%25",
+            "https://github.com/astral-sh/uv/releases/download/a%+5",
         ] {
             assert!(!endpoint.covers(escape), "{escape}");
         }

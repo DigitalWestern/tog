@@ -104,6 +104,12 @@ by position.
   A kernel-level toolchain/artifact provider would remove both. Each move is
   its own PR: relocate the module, keep object ids byte-identical, then
   delete the allow-list row.
+- **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
+  the small numeric `Version`/specifier subset the toolchain selector needs;
+  `src/tailors/python/pep440.rs` has the full grammar. The Python source
+  reader (toolchain lock PR 3) must lower one into the other and the kernel
+  cannot import the tailor's copy. Hoist `pep440.rs` into `src/kernel/`
+  and have the selector use it, in its own PR.
 - **Unreproduced test flakes.**
   `kernel::gitsrc::realization_tests::realizes_a_commit_and_strips_git_metadata`
   (2026-09-12) and `tailors::cargo::tests::rejects_symlinked_crate_entries`

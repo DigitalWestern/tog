@@ -83,7 +83,8 @@ impl Version {
 
     /// `3.12.14` starts with `3.12`; `3.120.0` does not.
     pub fn starts_with(&self, prefix: &Version) -> bool {
-        self.0.len() >= prefix.0.len() && self.0[..prefix.0.len()] == prefix.0[..]
+        let (parts, prefix) = (self.trimmed(), prefix.trimmed());
+        parts.len() >= prefix.len() && parts[..prefix.len()] == prefix[..]
     }
 }
 
@@ -370,6 +371,8 @@ mod tests {
         assert!(v("1.2") < v("1.2.1"));
         assert!(v("3.12.0") > v("3.11.99"));
         assert!(v("24.20.0").starts_with(&v("24.20")));
+        assert!(v("3.12").starts_with(&v("3.12.0")));
+        assert!(v("3.12.0").starts_with(&v("3.12")));
         assert!(!v("3.120.0").starts_with(&v("3.12")));
         assert_eq!(v("9.0.317").to_string(), "9.0.317");
         for bad in ["", "v1", "1..2", "1.02", "1.2-rc1", "3.12.14t", "."] {
@@ -379,10 +382,7 @@ mod tests {
 
     #[test]
     fn specifiers_follow_the_supported_pep440_subset() {
-        let spec = |op, text| Specifier {
-            op,
-            version: v(text),
-        };
+        let spec = |op, text| Specifier::new(op, v(text)).unwrap();
         assert!(spec(Op::Ge, "3.11").matches(&v("3.11.0")));
         assert!(!spec(Op::Lt, "3.11").matches(&v("3.11.0")));
         assert!(spec(Op::Eq, "3.11.2").matches(&v("3.11.2")));
@@ -464,23 +464,14 @@ mod tests {
         let range = Request::newest().with(
             "cpython",
             VersionRequest::Specifiers(vec![
-                Specifier {
-                    op: Op::Ge,
-                    version: v("3.11"),
-                },
-                Specifier {
-                    op: Op::Lt,
-                    version: v("3.13"),
-                },
+                Specifier::new(Op::Ge, v("3.11")).unwrap(),
+                Specifier::new(Op::Lt, v("3.13")).unwrap(),
             ]),
         );
         assert_eq!(catalog.select(&range).unwrap().release, "py312");
         let excluded = Request::newest().with(
             "cpython",
-            VersionRequest::Specifiers(vec![Specifier {
-                op: Op::Ne,
-                version: v("3.14.7"),
-            }]),
+            VersionRequest::Specifiers(vec![Specifier::new(Op::Ne, v("3.14.7")).unwrap()]),
         );
         assert_eq!(catalog.select(&excluded).unwrap().release, "py313");
         // Exact requests match the primary version only: no prefix matching.
