@@ -634,8 +634,8 @@ fn ruby_sync_native_ext_and_run() {
     );
     assert!(out.trim().starts_with("ok 13."), "{out}");
     // The binstub that runs must be the STORE object's wrapper, not a host
-    // /usr/bin fallback (Sol review 5: symlink binstubs dangled after the
-    // commit rename and the old assertion passed via host rake).
+    // /usr/bin fallback: a symlink binstub that dangles after the commit
+    // rename would otherwise let host rake answer and the check still pass.
     let which = assert_ok(
         blanket(
             &binary,

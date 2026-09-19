@@ -276,8 +276,7 @@ struct Harness {
 /// A failing case must not leave a supervisor or its child running: an
 /// orphaned grandchild holds the inherited stdout open, which wedges any
 /// caller reading this suite's output through a pipe. Killing the whole
-/// process group is what the plan means by a harness that terminates and
-/// reaps its own test processes.
+/// process group terminates and reaps every process the case started.
 impl Drop for Harness {
     fn drop(&mut self) {
         if self.reaped {
@@ -665,7 +664,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             let status = supervise::status(&mut command, activity).unwrap();
             code_of(status)
         }
-        // Characterisation only: the plan forbids "fixing" SIGPIPE, so this
+        // Characterisation only: SIGPIPE is deliberately not "fixed", so this
         // records what the toolchain actually hands the child.
         "sigpipe" => {
             let mut command = shell(r#"kill -PIPE $$; printf "SURVIVED\n""#);
@@ -919,10 +918,9 @@ fn sequential_children_preserve_numeric_and_signal_exits() {
 /// concurrent session in one process is refused as busy instead of waiting on
 /// a process-global mutex.
 ///
-/// The rejection is current, deliberate behavior: unit tests that supervise
-/// children from sibling threads serialize on `SUPERVISION_TEST_LOCK`. If
-/// supervision becomes per-operation (FOLLOW-UPS.md, "Supervision redesign"),
-/// delete this case.
+/// The rejection is deliberate: unit tests that supervise children from
+/// sibling threads serialize on `SUPERVISION_TEST_LOCK`. If supervision ever
+/// becomes per-operation, delete this case.
 #[test]
 fn a_second_supervisory_session_is_refused_rather_than_queued() {
     let store = TempStore::new("session-busy");

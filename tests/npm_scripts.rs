@@ -113,8 +113,8 @@ fn plan_for(tarball: &std::path::Path, sri: &str) -> NpmPlan {
     }
 }
 
-/// Same as `make_pkg_tarball`, but the package can be named: the item-5 policy
-/// table is keyed by package name.
+/// Same as `make_pkg_tarball`, but the package can be named: the
+/// skip-download table is keyed by package name.
 fn make_named_pkg_tarball(dir: &std::path::Path, name: &str, script: &str) -> (PathBuf, String) {
     let pkg = dir.join("package");
     let _ = std::fs::remove_dir_all(&pkg);
@@ -157,8 +157,6 @@ fn plan_named(tarball: &std::path::Path, sri: &str, name: &str) -> NpmPlan {
 fn policy_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    // Exceptions recorded by a test that never writes a closure stay pending
-    // for the next one that does, so start each test from an empty list.
     guard
 }
 

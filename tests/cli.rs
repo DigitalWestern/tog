@@ -26,9 +26,9 @@ impl TempDir {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&path).unwrap();
-        // Mark the fixture as a project boundary. The review test directory
-        // can itself live below a developer checkout with package manifests;
-        // ancestor discovery must not make those fixtures non-hermetic.
+        // Mark the fixture as a project boundary. This temp directory can
+        // itself live below a developer checkout with package manifests;
+        // ancestor discovery must not make these fixtures non-hermetic.
         std::fs::create_dir_all(path.join(".blanket")).unwrap();
         Self(path)
     }
@@ -416,7 +416,7 @@ fn store_path_honors_the_store_variable() {
     assert!(out.stdout.is_empty());
 }
 
-// --- CLI.md level two: bare `blanket`, aliases, script shortcut, inspect ---
+// --- bare `blanket`, aliases, the script shortcut, inspect verbs ---
 
 #[test]
 fn bare_blanket_outside_a_project_prints_usage() {
@@ -519,13 +519,13 @@ fn inspect_verbs_offline() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-// --- CLI.md level two, phases C and D: the offline paths of add/remove/x ---
+// --- the offline paths of add/remove/x ---
 
 #[test]
 fn dependency_verbs_offline_paths() {
     let home = TempDir::new("deps");
-    // The review suite may run below a checkout that has its own manifests;
-    // use the filesystem root for the intentional no-project case so the
+    // This suite may run below a checkout that has its own manifests; use
+    // the filesystem root for the intentional no-project case so the
     // ancestor walk cannot discover that unrelated checkout.
     let out = blanket(Path::new("/"), &home.0, &["add", "requests"]);
     assert_eq!(out.status.code(), Some(1));
