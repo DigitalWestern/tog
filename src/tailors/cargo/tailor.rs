@@ -144,7 +144,7 @@ impl Tailor for Cargo {
         if cargo_home.exists() {
             let closure = comforter::read_closure(dir, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
-            // inject arbitrary executable paths (Sol review 5).
+            // inject arbitrary executable paths.
             let rust_obj =
                 comforter::closure_object(&ctx.store, &closure, "rust_object", "bin/rustc")?;
             prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());

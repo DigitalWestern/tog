@@ -47,8 +47,13 @@ fn detect_host_glibc() -> Result<Glibc, String> {
     {
         // The symbol is only declared on glibc targets; if it is unusable,
         // continue to the portable getconf fallback below.
+        // SAFETY: `gnu_get_libc_version` takes no arguments and is present on
+        // every glibc target, which this cfg block restricts us to. Its result
+        // is checked for null below before being read.
         let version = unsafe { gnu_get_libc_version() };
         if !version.is_null() {
+            // SAFETY: the pointer is non-null and glibc owns the NUL-terminated
+            // static string it addresses, so it outlives this borrow.
             if let Ok(version) = unsafe { CStr::from_ptr(version) }.to_str() {
                 if let Some(glibc) = parse_glibc_version(version) {
                     return Ok(glibc);
@@ -315,7 +320,8 @@ pub fn is_skippable_spec(spec: &str) -> bool {
 }
 
 /// Parse pip/uv `--generate-hashes` format. Only exact `==` pins with at
-/// least one sha256 hash are accepted; see doc for rejection rules.
+/// least one sha256 hash are accepted; a git requirement pinned to a commit
+/// is the one exception, since the commit is its verification.
 pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
     let mut reqs = Vec::new();
     for line in logical_lines(text) {
@@ -758,10 +764,10 @@ pub fn plan_python(
     })
 }
 
-/// Resolve a small, temporary requirements text with the store-pinned uv.
-/// Callers own the resulting lock's cache key and persistence; this helper is
-/// deliberately just the reusable uv invocation shared by project and sdist
-/// planning.
+/// Resolve a small, temporary requirements text with the store-pinned uv in a
+/// scratch directory. Callers own the resulting lock's cache key and
+/// persistence; this is deliberately just the uv invocation. Build-requirement
+/// resolution uses it; project locking runs uv in the project directory.
 pub(crate) fn lock_requirement_text_with_uv(
     store: &Store,
     platform: Platform,
@@ -1012,8 +1018,8 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
         let (best5, _) = darwin_select(&files5, "cp312").unwrap();
         assert!(best5.filename.contains("universal2"));
 
-        // Pure wheel with a platform tag (comfy-angle, patchright: hit-rate
-        // run 2026-09-02) — compatible, beats the pure any-platform wheel.
+        // A pure wheel with a platform tag (as shipped by comfy-angle and
+        // patchright) is compatible and beats the pure any-platform wheel.
         let files_plat = vec![
             fc("pkg-1.0-py3-none-any.whl"),
             fc("pkg-1.0-py3-none-macosx_11_0_arm64.whl"),

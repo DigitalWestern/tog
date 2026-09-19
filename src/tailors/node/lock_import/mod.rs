@@ -2,8 +2,8 @@
 //!
 //! This is deliberately a small parser for the machine-written subsets used
 //! here. It is not a general YAML implementation: anchors, aliases, folded
-//! scalars, and arbitrary YAML tags are rejected. The graph is normalized to
-//! the npm tailor's literal node_modules paths before realization.
+//! scalars, and arbitrary YAML tags are unsupported. The graph is normalized
+//! to the npm tailor's literal node_modules paths before realization.
 
 use crate::kernel::fetch::Digest;
 use crate::kernel::platform::Platform;
@@ -273,7 +273,7 @@ fn existing_ancestor(
 }
 
 /// A dependency the lockfile could not resolve to a package. Returning `Ok`
-/// means the traversal skips it (optional dependencies are recorded as a
+/// means the traversal skips it (an optional git dependency is recorded as a
 /// policy exception first); a required one is fatal.
 fn skip_external_dependency(dependency: &Dependency, detail: &str) -> io::Result<()> {
     if !dependency.optional {

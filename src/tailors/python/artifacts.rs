@@ -3,10 +3,10 @@
 //! Install scripts run with the network denied, so a package that downloads
 //! something at install time fails unless blanket does one of three things:
 //! provision the file first (declared artifacts, see `BlanketConfig`), tell the
-//! installer to skip the download, or make it build from source. This module
-//! holds the second and third: a small table of packages whose skip switch is
-//! documented by the package itself, and detection of the prebuilt-binary
-//! downloaders that already know how to compile instead.
+//! installer to skip the download, or make it build from source. All three
+//! live here: provisioning for electron, a small table of packages whose skip
+//! switch is documented by the package itself, and detection of the
+//! prebuilt-binary downloaders that already know how to compile instead.
 //!
 //! Every entry's environment variable was read out of the package's own
 //! source, not from memory; add entries the same way.
@@ -24,7 +24,7 @@ pub struct SkipDownload {
     pub hint: &'static str,
 }
 
-/// Verified against each package's published source on 2026-09-06.
+/// Every entry was verified against the package's published source.
 pub const SKIP_DOWNLOADS: &[SkipDownload] = &[
     SkipDownload {
         // lib/puppeteer/getConfiguration.js: getBooleanEnvVar('PUPPETEER_SKIP_DOWNLOAD')
@@ -122,8 +122,6 @@ pub fn electron_cache_directory(release_url: &str) -> String {
     hex::encode(Sha256::digest(release_url.as_bytes()))
 }
 
-/// Download electron's zip and its checksum file into `scratch` so the
-/// package's own installer finds them with the network denied.
 /// Resolve electron's zip name and sha256 for this platform, caching the
 /// release's checksum manifest in the store.
 ///
@@ -176,8 +174,6 @@ fn resolve_electron(
     Ok((sha256, sums, release_url, zip_name))
 }
 
-/// The identity input a provisioned artifact contributes, if any. Returns None
-/// for packages blanket does not provision.
 /// The one decision behind every `provisioned:` identity input: does the
 /// producer provision an artifact for this package at all? Returns the
 /// normalized version it would resolve. The producer and the `node-env`

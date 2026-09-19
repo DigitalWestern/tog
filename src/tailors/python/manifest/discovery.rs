@@ -90,8 +90,9 @@ pub fn has_manifest(dir: &Path) -> io::Result<bool> {
     Ok(requirements_directory_candidate(dir, &config(dir)?)?.is_some())
 }
 
-/// Item 8 owns interpreter-input collection. Keep the manifest boundary's
-/// error class around it so preflight and planning report the same diagnosis.
+/// Interpreter-input collection lives in `pyselect`. Keep the manifest
+/// boundary's error class around it so preflight and planning report the same
+/// diagnosis.
 pub fn python_inputs(dir: &Path) -> io::Result<PythonInputs> {
     pyselect::collect_project_inputs(dir).map_err(|e| unreadable(&dir.join("pyproject.toml"), e))
 }

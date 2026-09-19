@@ -2,8 +2,8 @@
 //! materialization delegated to the pinned NuGet, per-build fresh offline
 //! restore, sandboxed builds only.
 //!
-//! Sol review 7 shaped this: signed nupkgs' contentHash is a SEMANTIC hash
-//! over transformed bytes, so blanket never compares lock hashes to raw
+//! Signed nupkgs' contentHash is a SEMANTIC hash over transformed bytes, so
+//! blanket never compares lock hashes to raw
 //! downloads — the pinned NuGet verifies contentHash while installing into
 //! the global-packages layout (locked mode), the same delegated-extractor
 //! pattern as Go, with the full SDK object id in the object identity. The
@@ -30,7 +30,7 @@ use std::process::Command;
 
 const SDK_VERSION: &str = "9.0.317";
 // Official Microsoft release-metadata checksum channel (HTTPS; hashes
-// published, not cryptographically signed — honest wording per Sol).
+// published, not cryptographically signed).
 struct SdkPin {
     platform: Platform,
     url: &'static str,
@@ -230,7 +230,7 @@ fn extract_sdk_archive_for(store: &Store, tarball: &Path, staged: &Path) -> io::
     Ok(())
 }
 
-/// global.json gate (Sol): exact pin, rollForward disable, no redirection.
+/// global.json gate: exact pin, rollForward disable, no redirection.
 pub fn check_global_json(project_dir: &Path) -> io::Result<()> {
     let path = project_dir.join("global.json");
     if !regular_file_if_present(&path, "global.json")? {
@@ -358,9 +358,9 @@ fn prepare_scratch(scratch: &Path) -> io::Result<()> {
     fs::write(migrations.join("1"), "")
 }
 
-/// Env for `blanket run`. Build-capable verbs are REJECTED at run (they
-/// execute arbitrary MSBuild code — sandbox-only, per Sol); this env is
-/// for `dotnet <app.dll>`, --version/--info, and compiled-app execution.
+/// Env for `blanket run`. Build-capable verbs are REJECTED at run: they
+/// execute arbitrary MSBuild code and are sandbox-only. This env is for
+/// `dotnet <app.dll>`, --version/--info, and compiled-app execution.
 pub fn run_env(
     sdk_obj: &Path,
     packages: &Path,
@@ -1416,7 +1416,7 @@ fn publish_output(
 }
 
 /// Sandboxed build: fresh offline locked restore into scratch obj, attest
-/// assets, then build --no-restore. Project obj/ is never authority (Sol).
+/// assets, then build --no-restore. Project obj/ is never authority.
 pub fn build_sandboxed(
     platform: Platform,
     project_dir: &Path,
