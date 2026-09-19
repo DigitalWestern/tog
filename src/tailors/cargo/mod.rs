@@ -92,7 +92,7 @@ fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>
 
 /// The shipped Rust catalog: one release bundle per pinned Rust version,
 /// with rustc, rust-std and cargo under the toolchain recipe and rustfmt (the
-/// `blanket fmt` component of the same version) under its own.
+/// `tog fmt` component of the same version) under its own.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
     // Catalog order is pin-table order: the newest-appended row wins a tie.
     let mut versions: Vec<&str> = Vec::new();
@@ -373,12 +373,12 @@ pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&
     resolve_toolchain_choice(platform, project_dir).map(|choice| choice.version)
 }
 
-/// What the nearest toolchain file asks for, as far as blanket answers it.
+/// What the nearest toolchain file asks for, as far as tog answers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolchainChoice {
     /// The pinned Rust version the file resolves to.
     pub version: &'static str,
-    /// Requested components blanket does not provide, in file order.
+    /// Requested components tog does not provide, in file order.
     pub unavailable: Vec<String>,
 }
 
@@ -504,7 +504,7 @@ fn resolve_channel(
         let pin = newest_pin(platform)?;
         if effects {
             eprintln!(
-                "blanket: {} resolves stable to pinned Rust {pin}",
+                "tog: {} resolves stable to pinned Rust {pin}",
                 path.display()
             );
         }
@@ -730,7 +730,7 @@ pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
 ///
 /// Cargo writes `git+<url>?rev=<ref>#<commit>` (also `?branch=`/`?tag=`, and
 /// sometimes no query at all). The fragment is always the resolved commit,
-/// which is what blanket realizes; the whole string is kept because the
+/// which is what tog realizes; the whole string is kept because the
 /// generated config's `[source."…"]` key must match it exactly.
 pub(crate) fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
     let rest = source.strip_prefix("git+")?;
@@ -1252,15 +1252,15 @@ pub fn lock_digest(lock_toml: &str) -> String {
 /// replaced by the vendor directory, because cargo matches these keys against
 /// the lockfile's source string verbatim; without them it would try to reach
 /// the network for a git dependency.
-pub(crate) fn blanket_config_text_for(
+pub(crate) fn tog_config_text_for(
     vendor_obj: &Path,
     git_sources: &[CargoGitSource],
 ) -> io::Result<String> {
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
     let mut text = format!(
         "[source.crates-io]\n\
-         replace-with = \"blanket-vendor\"\n\
-         [source.blanket-vendor]\n\
+         replace-with = \"tog-vendor\"\n\
+         [source.tog-vendor]\n\
          directory = {vendor}\n"
     );
     let mut seen = BTreeSet::new();
@@ -1283,7 +1283,7 @@ pub(crate) fn blanket_config_text_for(
             "[source.{key}]\n\
              git = {url}\n\
              {reference}\
-             replace-with = \"blanket-vendor\"\n"
+             replace-with = \"tog-vendor\"\n"
         ));
     }
     text.push_str("[net]\noffline = true\n");
@@ -1322,12 +1322,12 @@ pub(crate) fn project_git_sources(project_dir: &Path) -> Vec<CargoGitSource> {
 }
 
 /// A later `--config` outranks ours; letting one through would let a hostile
-/// invocation swap the vendor source while provenance still claims blanket's.
+/// invocation swap the vendor source while provenance still claims tog's.
 fn reject_user_config(args: &[String]) -> io::Result<()> {
     for arg in args {
         if arg == "--config" || arg.starts_with("--config=") {
             return Err(err(
-                "--config is managed by blanket (it enforces the verified vendor source); \
+                "--config is managed by tog (it enforces the verified vendor source); \
                  put project settings in .cargo/config.toml instead",
             ));
         }
@@ -1353,20 +1353,20 @@ pub fn project_cargo_env(
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&rust_obj)
-        .ok_or_else(|| err("Rust object is not in a Blanket store"))?;
+        .ok_or_else(|| err("Rust object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let meta_dir = project_dir.join(".blanket");
+    let meta_dir = project_dir.join(".tog");
     fs::create_dir_all(&meta_dir)?;
-    let cargo_home = project_child_dir(&project_dir, ".blanket/cargo-home")?;
+    let cargo_home = project_child_dir(&project_dir, ".tog/cargo-home")?;
     // bin gets its own containment check: a symlinked bin would carry the
     // wrapper write outside the project.
-    let bin_dir = project_child_dir(&project_dir, ".blanket/cargo-home/bin")?;
-    let config = cargo_home.join("blanket-config.toml");
+    let bin_dir = project_child_dir(&project_dir, ".tog/cargo-home/bin")?;
+    let config = cargo_home.join("tog-config.toml");
     let wrapper = bin_dir.join("cargo");
 
     write_atomic(
         &config,
-        blanket_config_text_for(&vendor_obj, &plan_git_sources(plan))?.as_bytes(),
+        tog_config_text_for(&vendor_obj, &plan_git_sources(plan))?.as_bytes(),
         None,
     )?;
 
@@ -1375,7 +1375,7 @@ pub fn project_cargo_env(
     let wrapper_text = format!(
         "#!/bin/sh\n\
          for a in \"$@\"; do case \"$a\" in --config|--config=*)\n\
-           echo 'blanket: --config is managed by blanket' >&2; exit 2;; esac; done\n\
+           echo 'tog: --config is managed by tog' >&2; exit 2;; esac; done\n\
          export CARGO_HOME=\"{}\"\n\
          export RUSTC=\"{}\"\n\
          export RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=\n\
@@ -1459,7 +1459,7 @@ pub fn build_sandboxed(
     let cargo_bin = rust_obj.join("bin/cargo");
     if !cargo_bin.is_file() || !vendor_obj.is_dir() {
         return Err(err(
-            "cargo environment is incomplete; run `blanket sync` first",
+            "cargo environment is incomplete; run `tog sync` first",
         ));
     }
 
@@ -1472,13 +1472,13 @@ pub fn build_sandboxed(
     // Disposable per-build CARGO_HOME + config inside the scratch dir: the
     // projected cargo-home must never be writable in-sandbox, or a build
     // script could replace the wrapper that later runs UNsandboxed under
-    // `blanket run`.
+    // `tog run`.
     let build_home = scratch.join("cargo-home");
     fs::create_dir_all(&build_home)?;
-    let config = build_home.join("blanket-config.toml");
+    let config = build_home.join("tog-config.toml");
     fs::write(
         &config,
-        blanket_config_text_for(&vendor_obj, &project_git_sources(&project_dir))?,
+        tog_config_text_for(&vendor_obj, &project_git_sources(&project_dir))?,
     )?;
     let mut argv = vec![
         cargo_bin
@@ -1751,17 +1751,17 @@ mod tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => env::set_var("BLANKET_STORE", value),
-                None => env::remove_var("BLANKET_STORE"),
+                Some(value) => env::set_var("TOG_STORE", value),
+                None => env::remove_var("TOG_STORE"),
             }
         }
     }
 
     fn with_temp_store(f: impl FnOnce(&Store, &Path)) {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let temp = TempDir::new("blanket-cargo-store");
-        let old = env::var_os("BLANKET_STORE");
-        env::set_var("BLANKET_STORE", temp.path());
+        let temp = TempDir::new("tog-cargo-store");
+        let old = env::var_os("TOG_STORE");
+        env::set_var("TOG_STORE", temp.path());
         let _env = StoreEnv(old);
         let store = Store::open().unwrap();
         f(&store, temp.path());
@@ -1868,7 +1868,7 @@ checksum = "{hash_b}"
     fn resolves_toolchain_files_and_pins() {
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("blanket-cargo-toolchain");
+        let temp = TempDir::new("tog-cargo-toolchain");
         let project = temp.path().join("project/child");
         fs::create_dir_all(&project).unwrap();
         let root = project.parent().unwrap();
@@ -1943,7 +1943,7 @@ checksum = "{hash_b}"
     fn resolves_linux_toolchain_files_targets_and_policy() {
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("blanket-cargo-linux-toolchain");
+        let temp = TempDir::new("tog-cargo-linux-toolchain");
         let project = temp.path().join("project/child");
         fs::create_dir_all(&project).unwrap();
         let root = project.parent().unwrap();
@@ -2010,7 +2010,7 @@ checksum = "{hash_b}"
     fn rustfmt_toolchain_component_is_recorded_as_unavailable_under_permissive_policy() {
         let _exception_guard = exception_guard();
         let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("blanket-cargo-rustfmt-policy");
+        let temp = TempDir::new("tog-cargo-rustfmt-policy");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -2090,7 +2090,7 @@ checksum = "{hash_b}"
         let platform = Platform::X86_64UnknownLinuxGnu;
         let components = rust_components(platform).unwrap();
 
-        let correct = TempDir::new("blanket-rust-layout-correct");
+        let correct = TempDir::new("tog-rust-layout-correct");
         let archives = make_component_archives(
             correct.path(),
             &components,
@@ -2106,13 +2106,13 @@ checksum = "{hash_b}"
             .join(format!("lib/rustlib/{}", platform.triple()))
             .is_dir());
 
-        let missing = TempDir::new("blanket-rust-layout-missing");
+        let missing = TempDir::new("tog-rust-layout-missing");
         let archives = make_component_archives(missing.path(), &components, platform, None);
         let staged = missing.path().join("staged");
         fs::create_dir(&staged).unwrap();
         assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
 
-        let wrong = TempDir::new("blanket-rust-layout-wrong");
+        let wrong = TempDir::new("tog-rust-layout-wrong");
         let archives = make_component_archives(
             wrong.path(),
             &components,
@@ -2219,7 +2219,7 @@ checksum = "{hash_b}"
     fn cargo_env_is_refused_for_a_root_that_cannot_be_registered() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("blanket-cargo-unrecordable");
+        let temp = TempDir::new("tog-cargo-unrecordable");
         let root = temp.path().join("ws ");
         fs::create_dir_all(&root).unwrap();
         let plan = CargoPlan {
@@ -2238,7 +2238,7 @@ checksum = "{hash_b}"
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
-            !root.join(".blanket").exists(),
+            !root.join(".tog").exists(),
             "projected into a workspace no record can name"
         );
         attribution.discard();
@@ -2248,7 +2248,7 @@ checksum = "{hash_b}"
     fn projects_cargo_config_wrapper_and_closure() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("blanket-cargo-project");
+        let temp = TempDir::new("tog-cargo-project");
         let project = temp.path().join("project");
         let rust = temp.path().join("objects/rust-id");
         let vendor = temp.path().join("objects/vendor-id");
@@ -2265,12 +2265,12 @@ checksum = "{hash_b}"
         project_cargo_env(&project, &rust, &vendor, &plan, &digest, &mut attribution).unwrap();
         attribution.finish(true).unwrap();
 
-        let home = project.join(".blanket/cargo-home").canonicalize().unwrap();
+        let home = project.join(".tog/cargo-home").canonicalize().unwrap();
         let vendor = vendor.canonicalize().unwrap();
         let rust = rust.canonicalize().unwrap();
-        let config = fs::read_to_string(home.join("blanket-config.toml")).unwrap();
+        let config = fs::read_to_string(home.join("tog-config.toml")).unwrap();
         assert!(config.contains("[source.crates-io]"));
-        assert!(config.contains("replace-with = \"blanket-vendor\""));
+        assert!(config.contains("replace-with = \"tog-vendor\""));
         assert!(config.contains(&format!("directory = \"{}\"", vendor.display())));
         assert!(config.contains("[net]\noffline = true"));
 
@@ -2306,16 +2306,16 @@ checksum = "{hash_b}"
     fn projection_refuses_symlinked_bin_escape() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
-        let temp = TempDir::new("blanket-cargo-symlink-bin");
+        let temp = TempDir::new("tog-cargo-symlink-bin");
         let project = temp.path().join("project");
         let outside = temp.path().join("outside");
         let rust = temp.path().join("objects/rust-id");
         let vendor = temp.path().join("objects/vendor-id");
-        fs::create_dir_all(project.join(".blanket/cargo-home")).unwrap();
+        fs::create_dir_all(project.join(".tog/cargo-home")).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::create_dir_all(rust.join("bin")).unwrap();
         fs::create_dir_all(&vendor).unwrap();
-        std::os::unix::fs::symlink(&outside, project.join(".blanket/cargo-home/bin")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".tog/cargo-home/bin")).unwrap();
         let plan = CargoPlan {
             rust_version: "1.96.1".into(),
             crates: vec![],
@@ -2343,7 +2343,7 @@ checksum = "{hash_b}"
             .unwrap_err()
             .to_string();
             assert!(
-                error.contains("--config is managed by blanket"),
+                error.contains("--config is managed by tog"),
                 "{bad}: {error}"
             );
         }
@@ -2383,7 +2383,7 @@ mod git_source_tests {
         let source = format!("git+https://github.com/o/r?rev={commit}#{commit}");
         let git = parse_cargo_git_source(&source).unwrap();
         let text =
-            blanket_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
+            tog_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
         assert!(text.contains(&format!("[source.\"{source}\"]")), "{text}");
         assert_eq!(
             text.matches("replace-with").count(),
@@ -2397,12 +2397,12 @@ mod git_source_tests {
         // replaced with the same reference kind, not with rev.
         let branch_source = format!("git+https://github.com/o/r?branch=main#{commit}");
         let branch = parse_cargo_git_source(&branch_source).unwrap();
-        let branch_text = blanket_config_text_for(Path::new("/store/vendor"), &[branch]).unwrap();
+        let branch_text = tog_config_text_for(Path::new("/store/vendor"), &[branch]).unwrap();
         assert!(branch_text.contains("branch = \"main\""), "{branch_text}");
         assert!(!branch_text.contains("rev = "), "{branch_text}");
         let tag_source = format!("git+https://github.com/o/r?tag=v1#{commit}");
         let tag = parse_cargo_git_source(&tag_source).unwrap();
-        let tag_text = blanket_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
+        let tag_text = tog_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
         assert!(tag_text.contains("tag = \"v1\""), "{tag_text}");
         assert!(text.trim_end().ends_with("offline = true"), "{text}");
     }
@@ -2445,7 +2445,7 @@ mod git_source_tests {
     #[test]
     fn git_crate_selection_uses_the_locked_version() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-cargo-selection-{}-{}",
+            "tog-cargo-selection-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2473,7 +2473,7 @@ mod git_source_tests {
     #[test]
     fn workspace_inheritance_and_relocated_symlinks_fail_closed() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-cargo-workspace-{}-{}",
+            "tog-cargo-workspace-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

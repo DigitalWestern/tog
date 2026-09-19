@@ -25,7 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// One row of `blanket ls`.
+/// One row of `tog ls`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageRow {
     pub name: String,
@@ -41,7 +41,7 @@ pub struct ClosureListing {
     pub packages: Vec<PackageRow>,
 }
 
-/// One `blanket doctor` line contributed by a tailor.
+/// One `tog doctor` line contributed by a tailor.
 #[derive(Debug, Clone)]
 pub struct DoctorCheck {
     pub name: &'static str,
@@ -52,7 +52,7 @@ pub struct DoctorCheck {
 fn unsupported(id: &str, verb: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("blanket {verb} does not support {id}"),
+        format!("tog {verb} does not support {id}"),
     )
 }
 
@@ -67,7 +67,7 @@ pub trait Tailor: Sync {
     /// The ecosystem name: closure file stem, `ls` vocabulary, plan JSON.
     fn id(&self) -> &'static str;
 
-    /// Does this tailor own the closure file `.blanket/closures/<name>.json`?
+    /// Does this tailor own the closure file `.tog/closures/<name>.json`?
     /// A tailor that writes a second closure kind (cargo's `rustfmt`)
     /// overrides this.
     fn owns_closure(&self, name: &str) -> bool {
@@ -93,13 +93,13 @@ pub trait Tailor: Sync {
         Ok(())
     }
 
-    /// `blanket plan`: the plan as pretty-printed JSON text, without
+    /// `tog plan`: the plan as pretty-printed JSON text, without
     /// realizing anything. `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
     fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>>;
 
-    /// `blanket sync`: plan, realize, project, and narrate with
+    /// `tog sync`: plan, realize, project, and narrate with
     /// `ui::synced`. Returns whether anything was synced.
     fn sync(
         &self,
@@ -109,18 +109,18 @@ pub trait Tailor: Sync {
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool>;
 
-    /// Can `blanket build <id>` name this ecosystem at all?
+    /// Can `tog build <id>` name this ecosystem at all?
     fn builds(&self) -> bool {
         false
     }
 
-    /// `blanket build` inference: is there something of this ecosystem to
+    /// `tog build` inference: is there something of this ecosystem to
     /// build from `cwd`? (Ancestor search where the ecosystem supports it.)
     fn build_present(&self, _cwd: &Path) -> io::Result<bool> {
         Ok(false)
     }
 
-    /// The directory `blanket build` roots at for this ecosystem from `cwd`.
+    /// The directory `tog build` roots at for this ecosystem from `cwd`.
     fn build_root(&self, _cwd: &Path) -> io::Result<PathBuf> {
         Err(unsupported(self.id(), "build"))
     }
@@ -137,7 +137,7 @@ pub trait Tailor: Sync {
         Err(unsupported(self.id(), "build"))
     }
 
-    /// `blanket run`: the PATH prefixes and environment this ecosystem's
+    /// `tog run`: the PATH prefixes and environment this ecosystem's
     /// projection under `dir` contributes to `command`. `cwd` is where the
     /// user ran from (a workspace subdirectory); `cmd` is the command line,
     /// for ecosystems that refuse some commands.
@@ -152,10 +152,10 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
-    /// `blanket ls`: what a closure of this ecosystem lists.
+    /// `tog ls`: what a closure of this ecosystem lists.
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing;
 
-    /// `blanket status`: is the closure's projection still current?
+    /// `tog status`: is the closure's projection still current?
     fn closure_state(
         &self,
         platform: Platform,
@@ -164,12 +164,12 @@ pub trait Tailor: Sync {
         body: &Value,
     ) -> io::Result<State>;
 
-    /// `blanket doctor`: project-level checks specific to this ecosystem.
+    /// `tog doctor`: project-level checks specific to this ecosystem.
     fn doctor(&self, _platform: Platform, _dir: &Path) -> Vec<DoctorCheck> {
         Vec::new()
     }
 
-    /// `blanket sbom`: CycloneDX components for a closure of this ecosystem.
+    /// `tog sbom`: CycloneDX components for a closure of this ecosystem.
     fn sbom_components(
         &self,
         ecosystem: &str,
@@ -202,25 +202,25 @@ pub trait Tailor: Sync {
         body: &Value,
     ) -> LegacyEvidence;
 
-    /// The `--eco` word `blanket fmt` accepts for this ecosystem, when it
+    /// The `--eco` word `tog fmt` accepts for this ecosystem, when it
     /// has a pinned formatter.
     fn fmt_ecosystem(&self) -> Option<&'static str> {
         None
     }
 
-    /// `blanket fmt`, before the store is opened: refuse a host with no
+    /// `tog fmt`, before the store is opened: refuse a host with no
     /// pinned formatter component.
     fn fmt_preflight(&self, _platform: Platform) -> io::Result<()> {
         Err(unsupported(self.id(), "fmt"))
     }
 
-    /// `blanket fmt`, before the store is opened: is there a project of this
+    /// `tog fmt`, before the store is opened: is there a project of this
     /// ecosystem to format from `cwd`?
     fn fmt_check_project(&self, _cwd: &Path) -> io::Result<()> {
         Err(unsupported(self.id(), "fmt"))
     }
 
-    /// `blanket fmt`: realize the formatter, record its closure, and run it
+    /// `tog fmt`: realize the formatter, record its closure, and run it
     /// sandboxed over the workspace `cwd` belongs to.
     fn fmt(
         &self,
@@ -254,7 +254,7 @@ pub fn by_id(id: &str) -> Option<&'static dyn Tailor> {
     registry().iter().copied().find(|tailor| tailor.id() == id)
 }
 
-/// The tailor that wrote `.blanket/closures/<name>.json`, if any.
+/// The tailor that wrote `.tog/closures/<name>.json`, if any.
 pub fn for_closure(name: &str) -> Option<&'static dyn Tailor> {
     registry()
         .iter()
@@ -465,7 +465,7 @@ mod tests {
                 tailor.id()
             );
             assert!(
-                error.to_string().contains("blanket update --toolchain"),
+                error.to_string().contains("tog update --toolchain"),
                 "{}: {error}",
                 tailor.id()
             );

@@ -1,4 +1,4 @@
-//! `blanket status`: is each recorded closure still in sync with its inputs?
+//! `tog status`: is each recorded closure still in sync with its inputs?
 
 use crate::cli;
 use crate::commands::inspect;

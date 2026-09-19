@@ -308,7 +308,7 @@ pub(super) fn collect_workspace_manifests(
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "node_modules" || name == ".git" || name == ".blanket" {
+        if name == "node_modules" || name == ".git" || name == ".tog" {
             continue;
         }
         let path = entry.path();

@@ -1,4 +1,4 @@
-//! `blanket keygen <path>`: create a closure-signing key and print the
+//! `tog keygen <path>`: create a closure-signing key and print the
 //! `[signing]` policy table that trusts it.
 //!
 //! The key file is created exclusively with mode 0600 and never overwrites
@@ -13,7 +13,7 @@ use std::path::Path;
 pub fn run(path: &Path) -> io::Result<i32> {
     let public = signing::generate(path)?;
     ui::note(&format!(
-        "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set BLANKET_SIGNING_KEY={} where 'blanket sync' runs",
+        "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set TOG_SIGNING_KEY={} where 'tog sync' runs",
         path.display(),
         path.display()
     ));
@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn the_printed_snippet_is_a_policy_that_trusts_the_key() {
         let temp = std::env::temp_dir().join(format!(
-            "blanket-keygen-{}-{}",
+            "tog-keygen-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

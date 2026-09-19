@@ -1,12 +1,12 @@
 //! `add`, `remove`, `update`.
 //!
 //! Doctrine: resolution belongs to the ecosystem's pinned tool, realization
-//! belongs to blanket. Every manifest or lock edit below is delegated to a
+//! belongs to tog. Every manifest or lock edit below is delegated to a
 //! store tool (uv, the store node's npm, pinned pnpm, cargo, go, bundler, mix)
 //! running unsandboxed with network — the same trust boundary as
 //! missing-lockfile generation. Where no pinned tool can make the edit,
-//! blanket **refuses with the exact line and file**; that is still one tool
-//! telling the user what to type next. Blanket edits a file itself in exactly
+//! tog **refuses with the exact line and file**; that is still one tool
+//! telling the user what to type next. Tog edits a file itself in exactly
 //! one case: a plain requirements file, where the "tool" is a text append.
 //!
 //! Choosing the ecosystem is an evidence ladder: an explicit prefix, the
@@ -367,7 +367,7 @@ fn get_json(url: &str) -> io::Result<Option<serde_json::Value>> {
     let agent = ureq::AgentBuilder::new()
         .https_only(true)
         .timeout(std::time::Duration::from_secs(20))
-        .user_agent("blanket (https://github.com/DigitalWestern/blanket)")
+        .user_agent("tog (https://github.com/DigitalWestern/tog)")
         .build();
     match agent.get(url).call() {
         Ok(response) => {
@@ -453,7 +453,7 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
     let mut stderr = io::stderr();
     writeln!(
         stderr,
-        "blanket: '{name}' exists on {}. Which one?",
+        "tog: '{name}' exists on {}. Which one?",
         described.join(" and ")
     )?;
     for (index, (eco, version)) in known.iter().enumerate() {
@@ -467,7 +467,7 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
     }
     let stdin = io::stdin();
     loop {
-        write!(stderr, "blanket: [1-{}] ", known.len())?;
+        write!(stderr, "tog: [1-{}] ", known.len())?;
         stderr.flush()?;
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
@@ -656,9 +656,9 @@ pub enum PyShape {
     Poetry,
     Pdm,
     /// `requirements.in` compiled into `requirements.txt` (pip-tools / uv
-    /// convention): blanket edits the .in and recompiles.
+    /// convention): tog edits the .in and recompiles.
     PipCompile,
-    /// A plain requirements file blanket re-locks into requirements.lock.txt.
+    /// A plain requirements file tog re-locks into requirements.lock.txt.
     Requirements(PathBuf),
     Setup,
     RequirementsDir,
@@ -720,19 +720,19 @@ fn python(
     match shape {
         PyShape::Poetry => Err(other(match verb {
             Verb::Add => format!(
-                "this is a Poetry project and Poetry is not a pinned tool: add {} under [tool.poetry.dependencies] in pyproject.toml (or run 'poetry add {}'), then 'blanket'",
+                "this is a Poetry project and Poetry is not a pinned tool: add {} under [tool.poetry.dependencies] in pyproject.toml (or run 'poetry add {}'), then 'tog'",
                 python_line(texts),
                 texts.join(" ")
             ),
             Verb::Remove => format!(
-                "this is a Poetry project: remove {} from [tool.poetry.dependencies] in pyproject.toml (or run 'poetry remove {}'), then 'blanket'",
+                "this is a Poetry project: remove {} from [tool.poetry.dependencies] in pyproject.toml (or run 'poetry remove {}'), then 'tog'",
                 names.join(", "),
                 names.join(" ")
             ),
-            Verb::Update => "this is a Poetry project: run 'poetry update' (or 'poetry lock'), then 'blanket'".to_string(),
+            Verb::Update => "this is a Poetry project: run 'poetry update' (or 'poetry lock'), then 'tog'".to_string(),
         })),
         PyShape::Pdm => Err(other(format!(
-            "this is a PDM project (pdm.lock) and PDM is not a pinned tool: run 'pdm {} {}', then 'blanket'",
+            "this is a PDM project (pdm.lock) and PDM is not a pinned tool: run 'pdm {} {}', then 'tog'",
             match verb {
                 Verb::Add => "add",
                 Verb::Remove => "remove",
@@ -742,17 +742,17 @@ fn python(
         ))),
         PyShape::Setup => Err(other(match verb {
             Verb::Add => format!(
-                "dependencies live in install_requires here: add {} to setup.cfg [options] install_requires (or setup.py), then 'blanket'",
+                "dependencies live in install_requires here: add {} to setup.cfg [options] install_requires (or setup.py), then 'tog'",
                 python_line(texts)
             ),
             Verb::Remove => format!(
-                "dependencies live in install_requires here: remove {} from setup.cfg / setup.py, then 'blanket'",
+                "dependencies live in install_requires here: remove {} from setup.cfg / setup.py, then 'tog'",
                 names.join(", ")
             ),
-            Verb::Update => "install_requires projects re-lock on every 'blanket sync' (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'blanket'".to_string(),
+            Verb::Update => "install_requires projects re-lock on every 'tog sync' (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'tog'".to_string(),
         })),
         PyShape::RequirementsDir => Err(other(format!(
-            "dependencies live under requirements/ here: edit the file that applies (requirements/common.txt, base.txt, ...) to {} {}, then 'blanket'",
+            "dependencies live under requirements/ here: edit the file that applies (requirements/common.txt, base.txt, ...) to {} {}, then 'tog'",
             match verb {
                 Verb::Add => "add",
                 Verb::Remove => "remove",
@@ -817,7 +817,7 @@ fn python(
                 // The ordinary sync re-locks when the source hash changes; a
                 // stale stamp from an unchanged source (update with no lock
                 // yet) is cleared so sync resolves afresh.
-                let stamp = project.join(".blanket/lock-source.hash");
+                let stamp = project.join(".tog/lock-source.hash");
                 if stamp.is_file() {
                     fs::remove_file(&stamp)?;
                 }
@@ -1047,7 +1047,7 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     for _ in 0..100 {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(
-            ".{file_name}.blanket-edit-{stamp}-{}-{counter}",
+            ".{file_name}.tog-edit-{stamp}-{}-{counter}",
             std::process::id()
         ));
         match OpenOptions::new()
@@ -1256,7 +1256,7 @@ fn package_manager_version(
             })?;
             let parsed = xrun::CorepackAlgo::parse(algo).ok_or_else(|| {
                 other(format!(
-                    "{}: packageManager hash algorithm {algo:?} is not supported; blanket verifies {}; drop the suffix or re-pin with one of those",
+                    "{}: packageManager hash algorithm {algo:?} is not supported; tog verifies {}; drop the suffix or re-pin with one of those",
                     package_json.display(),
                     xrun::CorepackAlgo::SUPPORTED
                 ))
@@ -1396,7 +1396,7 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
         .map_err(|error| other(format!("read {}: {error}", lock_path.display())))?;
     let importers = crate::tailors::node::lock_import::pnpm_lock_importers(&text).map_err(|error| {
         other(format!(
-            "{}: {error}; blanket reads workspace membership from this file, so it must parse. If it is the result of an unresolved merge conflict, resolve the conflict or delete the file and run 'pnpm install' in {} to regenerate it, then run blanket again",
+            "{}: {error}; tog reads workspace membership from this file, so it must parse. If it is the result of an unresolved merge conflict, resolve the conflict or delete the file and run 'pnpm install' in {} to regenerate it, then run tog again",
             lock_path.display(),
             root.display()
         ))
@@ -1415,7 +1415,7 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
 /// when that root's `pnpm-lock.yaml` lists the project among its importers.
 /// Any other ancestor lock is a boundary.
 ///
-/// The third variant is not an advisory flag a caller may drop: blanket
+/// The third variant is not an advisory flag a caller may drop: tog
 /// cannot tell a member added since the last install from a project the
 /// workspace deliberately excludes, so each caller has to say what it does
 /// about that, and anything that would write a lockfile must refuse.
@@ -1433,7 +1433,7 @@ fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
     if let Some(lock_name) = node_lock_at(project) {
         return Ok(own(lock_name));
     }
-    if project.join(".blanket").is_dir() {
+    if project.join(".tog").is_dir() {
         return Ok(own("package-lock.json"));
     }
     for ancestor in project.ancestors().skip(1) {
@@ -1455,7 +1455,7 @@ fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
                 PnpmMembership::NotAWorkspace => break,
             }
         }
-        if ancestor.join(".blanket").is_dir() {
+        if ancestor.join(".tog").is_dir() {
             break;
         }
     }
@@ -1491,12 +1491,12 @@ fn is_yarn_berry(root: &Path) -> bool {
 fn yarn_refusal(root: &Path, verb: Verb, texts: &[String], dev: bool) -> io::Error {
     if is_yarn_berry(root) {
         return other(
-            "this project uses Yarn Berry; Berry cache checksums are not npm tarball integrity values; convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only', then 'blanket'",
+            "this project uses Yarn Berry; Berry cache checksums are not npm tarball integrity values; convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only', then 'tog'",
         );
     }
     let tool_verb = verb.command();
     other(format!(
-        "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'blanket' (it imports yarn.lock)",
+        "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'tog' (it imports yarn.lock)",
         if dev && verb == Verb::Add { " -D" } else { "" },
         texts.iter().map(|text| format!(" {text}")).collect::<String>()
     ))
@@ -1540,7 +1540,7 @@ fn node_delegate_args(
     ));
     // pnpm falls back to `~/.pnpm-store` whenever its default store would
     // land on a different filesystem from the project: outside the project,
-    // outside the blanket store, and never reclaimed by `gc`.
+    // outside the tog store, and never reclaimed by `gc`.
     args.push(format!("--config.store-dir={}", scratch.store_dir));
     if workspace_root {
         args.push("-w".into());
@@ -1572,7 +1572,7 @@ fn node_delegate_args(
 /// current lockfile lives. pnpm joins both paths onto a project directory
 /// (`path.join`, so an absolute value would land inside the project), hence
 /// the relative spellings. Nothing is created at either path; the stage
-/// exists so the paths resolve somewhere blanket owns, and it is removed when
+/// exists so the paths resolve somewhere tog owns, and it is removed when
 /// the delegate returns (a leftover has the `stage-` name `gc::sweep_stages`
 /// reclaims).
 struct PnpmScratch {
@@ -1654,7 +1654,7 @@ fn node(
         NodeLock::PnpmWorkspaceMember { root } => ("pnpm-lock.yaml".to_string(), root),
         NodeLock::UnlistedUnderPnpmWorkspace { workspace_root } => {
             return Err(other(format!(
-                "{} sits under the pnpm workspace {} but {} does not list it as an importer, so blanket cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run blanket again. If it is deliberately outside the workspace, put a .blanket directory in {} to make it its own root. Blanket refuses rather than write a package-lock.json inside a pnpm workspace",
+                "{} sits under the pnpm workspace {} but {} does not list it as an importer, so tog cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run tog again. If it is deliberately outside the workspace, put a .tog directory in {} to make it its own root. Tog refuses rather than write a package-lock.json inside a pnpm workspace",
                 project.display(),
                 workspace_root.display(),
                 workspace_root.join("pnpm-lock.yaml").display(),
@@ -1741,7 +1741,7 @@ fn node(
     // reads or writes the user's pnpm config, store or registry metadata
     // cache) and the scratch its modules state is pointed at (see
     // `PnpmScratch`). It is removed when the delegate returns; a leftover
-    // from a killed run carries the `stage-` name `blanket gc` sweeps.
+    // from a killed run carries the `stage-` name `tog gc` sweeps.
     let stage = store.stage()?;
     let package_path = project.join("package.json");
     let result = (|| -> io::Result<()> {
@@ -1779,7 +1779,7 @@ fn node(
             .env("XDG_STATE_HOME", &pnpm_state);
         // `npm_config_ignore_scripts` is set after the `npm_config_` strip
         // (which `force_env` applies case-insensitively, the way npm and pnpm
-        // read `/^npm_config_/i`), so it is blanket's value, not the user's.
+        // read `/^npm_config_/i`), so it is tog's value, not the user's.
         // It is the only way to say "run no lifecycle script" to
         // `pnpm remove`, whose parser rejects the `--ignore-scripts` flag;
         // `add` and `update` carry the flag too, and `--lockfile-only`
@@ -1978,11 +1978,11 @@ fn elixir_delegate(
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(other(format!(
-                "there is no 'mix add': put {lines} in the deps list of mix.exs, then 'blanket' (it runs mix deps.get and re-locks)"
+                "there is no 'mix add': put {lines} in the deps list of mix.exs, then 'tog' (it runs mix deps.get and re-locks)"
             )))
         }
         Verb::Remove => Err(other(format!(
-            "there is no 'mix remove': delete {} from the deps list of mix.exs, then 'blanket'",
+            "there is no 'mix remove': delete {} from the deps list of mix.exs, then 'tog'",
             texts
                 .iter()
                 .map(|name| format!("{{:{name}, ...}}"))
@@ -2017,12 +2017,12 @@ fn dotnet_refuse(
     let names = texts.join(" ");
     Err(other(match verb {
         Verb::Add => format!(
-            "blanket never evaluates MSBuild outside the sandbox, and 'dotnet add package' restores: run 'dotnet add package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'blanket'"
+            "tog never evaluates MSBuild outside the sandbox, and 'dotnet add package' restores: run 'dotnet add package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'"
         ),
         Verb::Remove => format!(
-            "run 'dotnet remove package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'blanket'"
+            "run 'dotnet remove package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'"
         ),
-        Verb::Update => "edit the PackageReference versions, run 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'blanket'".to_string(),
+        Verb::Update => "edit the PackageReference versions, run 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'".to_string(),
     }))
 }
 
@@ -2040,7 +2040,7 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
         ui::note(line);
     }
     if no_sync {
-        ui::note("--no-sync: review the change, then run 'blanket'");
+        ui::note("--no-sync: review the change, then run 'tog'");
         edit_attribution.discard();
         return Ok(());
     }
@@ -2165,7 +2165,7 @@ mod tests {
 
     /// Corepack has written three hash algorithms over its life; every one it
     /// writes is a pin, so none of them may be misdiagnosed as an inexact
-    /// version. An algorithm blanket cannot verify is refused by name.
+    /// version. An algorithm tog cannot verify is refused by name.
     #[test]
     fn corepack_hash_suffixes_accept_every_supported_algorithm() {
         let package_json = Path::new("package.json");
@@ -2218,7 +2218,7 @@ mod tests {
     #[test]
     fn missing_pnpm_package_manager_names_lock_format_without_floating_suggestion() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-node-package-manager-{}",
+            "tog-node-package-manager-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -2239,13 +2239,13 @@ mod tests {
     /// `pnpm-lock.yaml` decides membership, so the two shapes that used to
     /// send `add` down the npm branch — writing a stray `package-lock.json`
     /// inside a pnpm workspace — resolve correctly: an alternation group,
-    /// which pnpm's glob engine supports and blanket's matcher never did, and
+    /// which pnpm's glob engine supports and tog's matcher never did, and
     /// a block sequence at the parent key's own indent, which is ordinary
-    /// hand-written YAML that blanket's lockfile-shaped parser rejects.
+    /// hand-written YAML that tog's lockfile-shaped parser rejects.
     #[test]
     fn workspace_membership_comes_from_the_lock_not_the_glob() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-ws-importers-{}-{}",
+            "tog-ws-importers-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2259,7 +2259,7 @@ mod tests {
             "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  apps/web: {}\n",
         )
         .unwrap();
-        // Both hostile-to-blanket shapes at once: alternation, at indent 0.
+        // Both hostile-to-tog shapes at once: alternation, at indent 0.
         fs::write(
             root.join("pnpm-workspace.yaml"),
             "packages:\n- '(apps|libs)/*'\n",
@@ -2384,14 +2384,14 @@ mod tests {
 
     /// pnpm joins `modules-dir` onto every importer's directory and
     /// `virtual-store-dir` onto the lock root. From the project pnpm runs in
-    /// both land in blanket's stage, and from any shallower importer the
+    /// both land in tog's stage, and from any shallower importer the
     /// modules dir still escapes the project tree. A root-computed one lands
     /// back inside the project for a deeper importer; the linker flags, not
     /// this path, are what keep that harmless.
     #[test]
     fn pnpm_scratch_paths_resolve_where_pnpm_joins_them() {
         let root =
-            std::env::temp_dir().join(format!("blanket-pnpm-scratch-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-pnpm-scratch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let stage = root.join("store/tmp/stage-1");
         let lock_root = root.join("proj");
@@ -2473,7 +2473,7 @@ mod tests {
     #[test]
     fn a_backslash_in_a_directory_name_takes_pnpms_own_slash_importer_key() {
         let root =
-            std::env::temp_dir().join(format!("blanket-pnpm-backslash-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-pnpm-backslash-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages").join("a\\b")).unwrap();
         fs::write(
@@ -2488,7 +2488,7 @@ mod tests {
                 PnpmMembership::Listed
             ),
             "pnpm 9.12.3 writes the importer key packages/a/b for the on-disk \
-             directory packages/a\\b, so blanket must normalise the same way"
+             directory packages/a\\b, so tog must normalise the same way"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -2496,7 +2496,7 @@ mod tests {
     #[test]
     fn a_project_the_workspace_lock_does_not_list_refuses_instead_of_selecting_npm() {
         let root =
-            std::env::temp_dir().join(format!("blanket-pnpm-unlisted-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-pnpm-unlisted-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages/listed")).unwrap();
         fs::create_dir_all(root.join("packages/added-since-install")).unwrap();
@@ -2531,7 +2531,7 @@ mod tests {
     #[test]
     fn a_settings_only_pnpm_workspace_yaml_does_not_make_a_single_package_repo_a_workspace() {
         let root =
-            std::env::temp_dir().join(format!("blanket-pnpm-settings-only-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-pnpm-settings-only-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("examples/demo")).unwrap();
         fs::write(
@@ -2568,7 +2568,7 @@ mod tests {
     #[test]
     fn node_lock_selection_prefers_own_lock_and_reads_workspace_membership_from_the_lock() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-node-lock-selection-{}",
+            "tog-node-lock-selection-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -2597,19 +2597,19 @@ mod tests {
                 excluded,
                 NodeLock::UnlistedUnderPnpmWorkspace { ref workspace_root } if workspace_root == &root
             ),
-            "blanket does not reimplement pnpm's exclusion globs, so a project \
+            "tog does not reimplement pnpm's exclusion globs, so a project \
              the lock does not list is ambiguous and must refuse rather than \
              guess npm"
         );
 
-        fs::create_dir_all(independent.join(".blanket")).unwrap();
+        fs::create_dir_all(independent.join(".tog")).unwrap();
         assert_eq!(
             selected(&independent),
             ("package-lock.json".to_string(), independent.clone()),
-            "a .blanket directory is how a project inside a workspace tree \
+            "a .tog directory is how a project inside a workspace tree \
              declares itself its own root"
         );
-        fs::remove_dir_all(independent.join(".blanket")).unwrap();
+        fs::remove_dir_all(independent.join(".tog")).unwrap();
 
         fs::write(independent.join("package-lock.json"), "{}\n").unwrap();
         assert_eq!(
@@ -2622,7 +2622,7 @@ mod tests {
         assert_eq!(selected(&member), ("package-lock.json".to_string(), member));
 
         let boundary = root.join("packages/boundary");
-        fs::create_dir_all(boundary.join(".blanket")).unwrap();
+        fs::create_dir_all(boundary.join(".tog")).unwrap();
         assert_eq!(
             selected(&boundary),
             ("package-lock.json".to_string(), boundary)
@@ -2633,7 +2633,7 @@ mod tests {
     #[test]
     fn ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-node-lock-boundaries-{}",
+            "tog-node-lock-boundaries-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -2660,7 +2660,7 @@ mod tests {
     #[test]
     fn unmatched_pnpm_workspace_is_a_boundary_to_an_outer_workspace() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-nested-pnpm-boundary-{}",
+            "tog-nested-pnpm-boundary-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -2688,7 +2688,7 @@ mod tests {
     #[test]
     fn mixed_sync_roots_are_rejected_before_delegation() {
         let root =
-            std::env::temp_dir().join(format!("blanket-mixed-sync-roots-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-mixed-sync-roots-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages/member")).unwrap();
         fs::write(
@@ -2714,7 +2714,7 @@ mod tests {
     #[test]
     fn yarn_berry_uses_conversion_refusal_without_delegation() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-yarn-berry-detection-{}",
+            "tog-yarn-berry-detection-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -2835,7 +2835,7 @@ mod tests {
         assert_eq!(requirement_name("--hash=sha256:abc"), None);
         assert_eq!(requirement_name(""), None);
 
-        let temp = std::env::temp_dir().join(format!("blanket-deps-{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("tog-deps-{}", std::process::id()));
         fs::create_dir_all(&temp).unwrap();
         let file = temp.join("requirements.txt");
         fs::write(&file, "# pinned\nsix==1.16.0\n-r extra.txt\n").unwrap();
@@ -2859,7 +2859,7 @@ mod tests {
     #[test]
     fn requirement_edits_are_logical_lossless_and_ambiguous_edits_fail() {
         let temp =
-            std::env::temp_dir().join(format!("blanket-deps-logical-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-deps-logical-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
         let file = temp.join("requirements.txt");
@@ -2903,12 +2903,12 @@ mod tests {
         use std::os::unix::fs::symlink;
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = std::env::temp_dir().join(format!("blanket-deps-atomic-{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("tog-deps-atomic-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
         let file = temp.join("requirements.txt");
         let target = temp.join("outside");
-        let old_temp = file.with_extension(format!("blanket-edit.{}", std::process::id()));
+        let old_temp = file.with_extension(format!("tog-edit.{}", std::process::id()));
         fs::write(&file, "six\n").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&target, "must remain\n").unwrap();
@@ -2926,7 +2926,7 @@ mod tests {
 
     #[test]
     fn python_shapes_follow_the_sync_order() {
-        let temp = std::env::temp_dir().join(format!("blanket-shape-{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("tog-shape-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
         assert!(python_shape(&temp).is_err());

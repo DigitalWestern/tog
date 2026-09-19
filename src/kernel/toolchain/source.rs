@@ -12,7 +12,7 @@
 use super::invalid;
 use std::io;
 
-/// A named reference to a credential held outside blanket (an environment
+/// A named reference to a credential held outside tog (an environment
 /// variable or keychain entry an operator configures). Never the secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialRef {
@@ -194,8 +194,8 @@ impl SourcePolicy {
         github_publisher(&mut policy, "erlef-otp-builds", "erlef/otp_builds");
         github_publisher(
             &mut policy,
-            "blanket-toolchains",
-            "DigitalWestern/blanket-toolchains",
+            "tog-toolchains",
+            "DigitalWestern/tog-toolchains",
         );
         github_publisher(&mut policy, "elixir-lang", "elixir-lang/elixir");
         for (id, base) in [

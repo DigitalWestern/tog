@@ -1,12 +1,12 @@
-//! The Ruby tailor: Bundler-delegated planning, blanket-verified gems,
+//! The Ruby tailor: Bundler-delegated planning, tog-verified gems,
 //! immutable GEM_HOME objects, sandboxed native-extension installs.
 //!
 //! Platform selection and lock parsing are DELEGATED to the pinned Ruby's
 //! own Bundler/RubyGems (a helper script —
 //! Gem::Platform matching has wildcards and specificity scores no hand
 //! parser should reimplement), while every artifact byte is still pinned
-//! and verified by blanket. Bundler's local .bundle/config outranks plain
-//! env vars, so every blanket-controlled invocation scrubs BUNDLE_*/RUBY*
+//! and verified by tog. Bundler's local .bundle/config outranks plain
+//! env vars, so every tog-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
 pub mod objects;
@@ -304,7 +304,7 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
         .map(|(path, _)| path)
 }
 
-/// The forced environment for EVERY blanket-controlled ruby/bundler run.
+/// The forced environment for EVERY tog-controlled ruby/bundler run.
 /// Removal lists close the .bundle/config and preload side doors.
 const ENV_REMOVE_PREFIXES: &[&str] = &["BUNDLE_", "BUNDLER_"];
 const ENV_REMOVE: &[&str] = &[
@@ -338,7 +338,7 @@ fn forced_env(project_dir: &Path, gem_home: &Path) -> Vec<(String, String)> {
     ]
 }
 
-/// Env applied by `blanket run` for a projected ruby environment.
+/// Env applied by `tog run` for a projected ruby environment.
 pub fn run_env(
     project_dir: &Path,
     gems_obj: &Path,
@@ -350,7 +350,7 @@ pub fn run_env(
     )
 }
 
-/// Run a store Ruby tool for a delegated edit (`blanket add` and friends):
+/// Run a store Ruby tool for a delegated edit (`tog add` and friends):
 /// same environment as planning, failure carries the tool's stderr.
 pub(crate) fn run_checked(
     store: &Store,
@@ -451,7 +451,7 @@ end
 if mode == "check"
   # Gemfile/lock equivalence + ruby-version gate. This mode EVALS THE
   # GEMFILE (arbitrary ruby, delegated resolver trust): its stdout is
-  # never parsed by blanket — only the exit status counts, so a hostile
+  # never parsed by tog — only the exit status counts, so a hostile
   # Gemfile cannot forge plan data through this process.
   require "bundler"
   gemfile, lockfile = ARGV
@@ -612,7 +612,7 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
 }
 
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
-/// selection, blanket-pinned hashes (lock CHECKSUMS section when present,
+/// selection, tog-pinned hashes (lock CHECKSUMS section when present,
 /// rubygems.org v2 API otherwise). Never cached: every sync re-derives the
 /// plan from the lock.
 pub fn plan_ruby(
@@ -625,7 +625,7 @@ pub fn plan_ruby(
     }
     let lock_path = project_dir.join("Gemfile.lock");
     if !lock_path.is_file() {
-        eprintln!("blanket: no Gemfile.lock; resolving with the store bundler...");
+        eprintln!("tog: no Gemfile.lock; resolving with the store bundler...");
         let scratch = store.stage()?;
         let out = run_ruby(store, ruby_obj, project_dir, &scratch, &["bundle", "lock"])?;
         let _ = crate::kernel::store::remove_tree(&scratch);
@@ -763,7 +763,7 @@ pub fn plan_ruby(
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
         return Err(err(
-            "Gemfile.lock changed while planning; re-run blanket sync",
+            "Gemfile.lock changed while planning; re-run tog sync",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
@@ -929,7 +929,7 @@ pub fn project_ruby_env(
     let ruby_obj = ruby_obj.canonicalize()?;
     let gems_obj = gems_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&ruby_obj)
-        .ok_or_else(|| err("Ruby object is not in a Blanket store"))?;
+        .ok_or_else(|| err("Ruby object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
@@ -1028,7 +1028,7 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-ruby-unit-{}-{}",
+                "tog-ruby-unit-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

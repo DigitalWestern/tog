@@ -557,7 +557,7 @@ fn bin_link_target(path: &str, bin: &str) -> PathBuf {
     )
 }
 
-/// A project-declared build input: a URL + sha256 that blanket prefetches
+/// A project-declared build input: a URL + sha256 that tog prefetches
 /// into the verified artifact cache and plants at `path` (relative to the
 /// sandbox HOME) before install scripts run. This is how packages that
 /// "download prebuilt binaries at install time" (old sharp, etc.) build
@@ -573,37 +573,37 @@ pub struct DeclaredArtifact {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct BlanketConfig {
+pub struct TogConfig {
     pub mutable_packages: Vec<String>,
     pub artifacts: Vec<DeclaredArtifact>,
 }
 
-/// Strictly parse the optional `"blanket"` config field of package.json.
+/// Strictly parse the optional `"tog"` config field of package.json.
 /// Unknown keys and malformed values are hard errors: this config weakens
 /// or extends the trust boundary, so typos must not be silently ignored.
-pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
+pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
     let v: serde_json::Value =
         serde_json::from_str(pkg_json).map_err(|e| err(format!("package.json: {e}")))?;
-    let cfg = match v.get("blanket") {
-        None => return Ok(BlanketConfig::default()),
+    let cfg = match v.get("tog") {
+        None => return Ok(TogConfig::default()),
         Some(c) => c
             .as_object()
-            .ok_or_else(|| err("package.json: \"blanket\" must be an object"))?,
+            .ok_or_else(|| err("package.json: \"tog\" must be an object"))?,
     };
     for key in cfg.keys() {
         if key != "mutablePackages" && key != "artifacts" {
-            return Err(err(format!("package.json: unknown blanket key {key:?}")));
+            return Err(err(format!("package.json: unknown tog key {key:?}")));
         }
     }
-    let mut out = BlanketConfig::default();
+    let mut out = TogConfig::default();
     if let Some(list) = cfg.get("mutablePackages") {
         let arr = list
             .as_array()
-            .ok_or_else(|| err("blanket.mutablePackages must be an array"))?;
+            .ok_or_else(|| err("tog.mutablePackages must be an array"))?;
         for item in arr {
             let name = item
                 .as_str()
-                .ok_or_else(|| err("blanket.mutablePackages entries must be strings"))?;
+                .ok_or_else(|| err("tog.mutablePackages entries must be strings"))?;
             let bare = name.strip_prefix('@').unwrap_or(name);
             let ok = !name.is_empty()
                 && name.matches('/').count() == if name.starts_with('@') { 1 } else { 0 }
@@ -611,7 +611,7 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c));
             if !ok {
-                return Err(err(format!("blanket.mutablePackages: bad name {name:?}")));
+                return Err(err(format!("tog.mutablePackages: bad name {name:?}")));
             }
             out.mutable_packages.push(name.to_string());
         }
@@ -619,14 +619,14 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
     if let Some(list) = cfg.get("artifacts") {
         let arr = list
             .as_array()
-            .ok_or_else(|| err("blanket.artifacts must be an array"))?;
+            .ok_or_else(|| err("tog.artifacts must be an array"))?;
         for item in arr {
             let url = item["url"].as_str().unwrap_or_default();
             let sha256 = item["sha256"].as_str().unwrap_or_default();
             let path = item["path"].as_str().unwrap_or_default();
             if !url.starts_with("https://") {
                 return Err(err(format!(
-                    "blanket.artifacts: url must be https ({url:?})"
+                    "tog.artifacts: url must be https ({url:?})"
                 )));
             }
             if sha256.len() != 64
@@ -635,7 +635,7 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
             {
                 return Err(err(
-                    "blanket.artifacts: sha256 must be 64 lowercase hex chars",
+                    "tog.artifacts: sha256 must be 64 lowercase hex chars",
                 ));
             }
             let path_ok = !path.is_empty()
@@ -644,7 +644,7 @@ pub fn parse_blanket_config(pkg_json: &str) -> io::Result<BlanketConfig> {
                     .split('/')
                     .all(|c| !c.is_empty() && c != "." && c != "..");
             if !path_ok {
-                return Err(err(format!("blanket.artifacts: unsafe path {path:?}")));
+                return Err(err(format!("tog.artifacts: unsafe path {path:?}")));
             }
             out.artifacts.push(DeclaredArtifact {
                 url: url.into(),
@@ -671,7 +671,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     // contents written below are idempotent, and the tree is left for the
     // OS temp cleanup rather than removed under a concurrent caller.
     let root = std::env::temp_dir().join(format!(
-        "blanket-node-identity-fixture-{}-{}",
+        "tog-node-identity-fixture-{}-{}",
         std::process::id(),
         platform.triple()
     ));
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn patch_identity_spelling_binds_pnpm_9_content_by_sha256() {
         let store = Store {
-            root: PathBuf::from("/nonexistent/blanket-test-store"),
+            root: PathBuf::from("/nonexistent/tog-test-store"),
         };
         let node_obj = PathBuf::from("/nonexistent/nodejs");
         let identity_for = |patch: NpmPatch| {
@@ -963,7 +963,7 @@ mod tests {
     #[test]
     fn darwin_binding_gyp_keeps_legacy_identity_inputs() {
         let store = Store {
-            root: PathBuf::from("/nonexistent/blanket-test-store"),
+            root: PathBuf::from("/nonexistent/tog-test-store"),
         };
         assert_eq!(
             native_libs_identity_id(&store, Platform::Aarch64AppleDarwin, true).unwrap(),
@@ -1015,7 +1015,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root =
-            std::env::temp_dir().join(format!("blanket-npm-cold-{}-{nonce}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-npm-cold-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
@@ -1139,7 +1139,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "blanket-npm-lifecycle-{}-{nonce}",
+            "tog-npm-lifecycle-{}-{nonce}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -1213,7 +1213,7 @@ mod tests {
     #[test]
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
         let root =
-            std::env::temp_dir().join(format!("blanket-npm-darwin-warm-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-npm-darwin-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
@@ -1285,7 +1285,7 @@ mod tests {
     #[test]
     fn linux_warm_sync_uses_persisted_archive_classification() {
         let root =
-            std::env::temp_dir().join(format!("blanket-npm-linux-warm-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tog-npm-linux-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
@@ -1387,7 +1387,7 @@ mod tests {
     #[test]
     fn realize_node_env_rejects_foreign_platform_before_store_access() {
         let store = Store {
-            root: PathBuf::from("/nonexistent/blanket-test-store"),
+            root: PathBuf::from("/nonexistent/tog-test-store"),
         };
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -1518,11 +1518,11 @@ mod tests {
 
     #[test]
     fn previous_workspace_set_drops_workspace_local_package_entries() {
-        let dir = std::env::temp_dir().join(format!("blanket-prev-ws-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tog-prev-ws-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         fs::write(
-            dir.join(".blanket/closures/node.json"),
+            dir.join(".tog/closures/node.json"),
             r#"{"body":{"workspaces":["packages/lib","packages/lib/node_modules/c","tools/node_modules-shim"]}}"#,
         )
         .unwrap();
@@ -1538,7 +1538,7 @@ mod tests {
 
     #[test]
     fn discovers_string_object_and_legacy_directory_bins() {
-        let dir = std::env::temp_dir().join(format!("blanket-npm-bin-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tog-npm-bin-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("cli")).unwrap();
         fs::write(dir.join("cli/a"), "a").unwrap();
@@ -1606,7 +1606,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("blanket-npm-projection-{nonce}"));
+        let root = std::env::temp_dir().join(format!("tog-npm-projection-{nonce}"));
         let project = root.join("project");
         let env = root.join("home/store/objects/env");
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -1680,7 +1680,7 @@ mod tests {
             .is_symlink());
 
         let envelope: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(project.join(".blanket/closures/node.json")).unwrap(),
+            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(envelope["schema"], "closure/1");
@@ -1731,7 +1731,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("blanket-npm-stale-workspace-{nonce}"));
+        let root = std::env::temp_dir().join(format!("tog-npm-stale-workspace-{nonce}"));
         let project = root.join("project");
         let env = root.join("home/store/objects/env");
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -1813,7 +1813,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("blanket-npm-symlinked-tmp-{nonce}"));
+        let root = std::env::temp_dir().join(format!("tog-npm-symlinked-tmp-{nonce}"));
         let real = root.join("real");
         let alias = root.join("alias");
         let home = alias.join("home");
@@ -1837,7 +1837,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("blanket-npm-external-workspace-{nonce}"));
+        let root = std::env::temp_dir().join(format!("tog-npm-external-workspace-{nonce}"));
         let project = root.join("project");
         let external = root.join("external");
         fs::create_dir_all(&project).unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("blanket-npm-unsafe-workspace-{nonce}"));
+        let root = std::env::temp_dir().join(format!("tog-npm-unsafe-workspace-{nonce}"));
         let project = root.join("project");
         let external = root.join("external");
         fs::create_dir_all(&project).unwrap();
@@ -2135,34 +2135,34 @@ mod tests {
     }
 
     #[test]
-    fn blanket_config_parsing() {
-        let empty = parse_blanket_config(r#"{"name":"x"}"#).unwrap();
+    fn tog_config_parsing() {
+        let empty = parse_tog_config(r#"{"name":"x"}"#).unwrap();
         assert!(empty.mutable_packages.is_empty() && empty.artifacts.is_empty());
         let ok =
-            parse_blanket_config(r#"{"blanket":{"mutablePackages":["b","@prisma/engines","b"]}}"#)
+            parse_tog_config(r#"{"tog":{"mutablePackages":["b","@prisma/engines","b"]}}"#)
                 .unwrap();
         assert_eq!(
             ok.mutable_packages,
             vec!["@prisma/engines".to_string(), "b".to_string()]
         );
         // unknown key, bad names, wrong types: hard errors
-        assert!(parse_blanket_config(r#"{"blanket":{"mutable":["a"]}}"#).is_err());
-        assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":["../x"]}}"#).is_err());
-        assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":"a"}}"#).is_err());
-        assert!(parse_blanket_config(r#"{"blanket":{"mutablePackages":[""]}}"#).is_err());
-        assert!(parse_blanket_config(r#"{"blanket":[]}"#).is_err());
+        assert!(parse_tog_config(r#"{"tog":{"mutable":["a"]}}"#).is_err());
+        assert!(parse_tog_config(r#"{"tog":{"mutablePackages":["../x"]}}"#).is_err());
+        assert!(parse_tog_config(r#"{"tog":{"mutablePackages":"a"}}"#).is_err());
+        assert!(parse_tog_config(r#"{"tog":{"mutablePackages":[""]}}"#).is_err());
+        assert!(parse_tog_config(r#"{"tog":[]}"#).is_err());
         // artifacts: happy path + validation
-        let a = parse_blanket_config(
-            r#"{"blanket":{"artifacts":[{"url":"https://x/y.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":".npm/_libvips/y.tar"}]}}"#,
+        let a = parse_tog_config(
+            r#"{"tog":{"artifacts":[{"url":"https://x/y.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":".npm/_libvips/y.tar"}]}}"#,
         )
         .unwrap();
         assert_eq!(a.artifacts.len(), 1);
-        assert!(parse_blanket_config(
-            r#"{"blanket":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#
+        assert!(parse_tog_config(
+            r#"{"tog":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#
         )
         .is_err());
-        assert!(parse_blanket_config(
-            r#"{"blanket":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#
+        assert!(parse_tog_config(
+            r#"{"tog":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#
         )
         .is_err());
     }

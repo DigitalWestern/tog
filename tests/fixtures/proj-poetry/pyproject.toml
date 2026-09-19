@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "proj-poetry"
 version = "0.1.0"
-description = "blanket Poetry manifest fixture"
-authors = ["blanket <blanket@example.invalid>"]
+description = "tog Poetry manifest fixture"
+authors = ["tog <tog@example.invalid>"]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.15"

@@ -2,7 +2,7 @@
 //!
 //! These are the supervision cases that need a real process tree: a supervisor in its own process, a real child, and real
 //! signal delivery. This binary re-executes itself with
-//! `BLANKET_SUPERVISE_SCENARIO` set; the ignored `supervisor_harness` test
+//! `TOG_SUPERVISE_SCENARIO` set; the ignored `supervisor_harness` test
 //! below then plays the supervisor and prints markers the cases wait for.
 //!
 //! No case uses a sleep to synchronise with an unobserved event. Progress is
@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use blanket::kernel::activity::{ActivityMode, StoreActivity};
-use blanket::kernel::store::Store;
-use blanket::kernel::supervise;
+use tog::kernel::activity::{ActivityMode, StoreActivity};
+use tog::kernel::store::Store;
+use tog::kernel::supervise;
 
 /// Every wait in this file is bounded. A blown deadline fails the case with
 /// the output collected so far rather than hanging the suite.
@@ -37,7 +37,7 @@ const TICK: Duration = Duration::from_millis(2);
 
 fn unique(label: &str) -> String {
     format!(
-        "blanket-supervise-{label}-{}-{}",
+        "tog-supervise-{label}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -46,7 +46,7 @@ fn unique(label: &str) -> String {
     )
 }
 
-/// A disposable store. Never point `BLANKET_STORE` at a real store.
+/// A disposable store. Never point `TOG_STORE` at a real store.
 struct TempStore {
     root: PathBuf,
 }
@@ -109,7 +109,7 @@ impl TempStore {
 
 impl Drop for TempStore {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.root);
+        let _ = tog::kernel::store::remove_tree(&self.root);
     }
 }
 
@@ -392,15 +392,15 @@ fn spawn_harness(
     };
     command
         .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-        .env("BLANKET_SUPERVISE_SCENARIO", scenario)
-        .env("BLANKET_SUPERVISE_STORE", &store.root)
+        .env("TOG_SUPERVISE_SCENARIO", scenario)
+        .env("TOG_SUPERVISE_STORE", &store.root)
         .env("RUST_BACKTRACE", "1")
-        .env_remove("BLANKET_STORE");
+        .env_remove("TOG_STORE");
     if let Some(inner) = inner {
-        command.env("BLANKET_SUPERVISE_INNER", inner);
+        command.env("TOG_SUPERVISE_INNER", inner);
     }
     if let Some(fifo) = fifo {
-        command.env("BLANKET_SUPERVISE_FIFO", fifo);
+        command.env("TOG_SUPERVISE_FIFO", fifo);
     }
     let markers;
     match pty {
@@ -542,10 +542,10 @@ impl Drop for Pty {
 #[test]
 #[ignore = "re-executed as the supervisor for the cases in this file"]
 fn supervisor_harness() {
-    let Ok(scenario) = std::env::var("BLANKET_SUPERVISE_SCENARIO") else {
+    let Ok(scenario) = std::env::var("TOG_SUPERVISE_SCENARIO") else {
         return;
     };
-    let root = PathBuf::from(std::env::var_os("BLANKET_SUPERVISE_STORE").unwrap());
+    let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
     let store = Store {
         root: root.canonicalize().unwrap(),
     };
@@ -573,11 +573,11 @@ fn code_of(status: ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
-fn blanket_command(args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_blanket"));
+fn tog_command(args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
     command.args(args).env(
-        "BLANKET_STORE",
-        std::env::var_os("BLANKET_SUPERVISE_STORE").unwrap(),
+        "TOG_STORE",
+        std::env::var_os("TOG_SUPERVISE_STORE").unwrap(),
     );
     command
 }
@@ -587,7 +587,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // Announces its pid, traps TERM, and blocks inside the trap on a FIFO
         // so the case can inspect the world mid-termination.
         "term-during-wait" => {
-            let fifo = std::env::var("BLANKET_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
             let mut command = shell(&format!(
                 r#"trap 'printf "CHILD_TERM\n"; read line < "{fifo}"; exit 45' TERM
                    printf "CHILDPID %d\nREADY\n" $$
@@ -631,7 +631,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // announces itself on the FIFO, so the second attempt is made while
         // the first child is provably still running.
         "session-busy" => {
-            let fifo = std::env::var("BLANKET_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
             let mut outcome = String::new();
             std::thread::scope(|scope| {
                 let holder = scope.spawn(|| {
@@ -688,8 +688,8 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // A failed spawn must not leave a session installed: the next child
         // still runs, and a later TERM still kills the supervisor normally.
         "spawn-fail" => {
-            let fifo = std::env::var("BLANKET_SUPERVISE_FIFO").unwrap();
-            let mut missing = Command::new("/nonexistent/blanket-supervise-probe");
+            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let mut missing = Command::new("/nonexistent/tog-supervise-probe");
             match supervise::status(&mut missing, activity) {
                 Ok(status) => say(&format!("UNEXPECTED {}", code_of(status))),
                 Err(error) => say(&format!("ERR {:?}", error.kind())),
@@ -759,12 +759,12 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // this layer the supervisor's group would be orphaned and the kernel
         // would discard terminal stop signals instead of delivering them.
         "shell" => {
-            let inner = std::env::var("BLANKET_SUPERVISE_INNER").unwrap();
+            let inner = std::env::var("TOG_SUPERVISE_INNER").unwrap();
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                .env("BLANKET_SUPERVISE_SCENARIO", inner)
-                .env_remove("BLANKET_SUPERVISE_INNER");
+                .env("TOG_SUPERVISE_SCENARIO", inner)
+                .env_remove("TOG_SUPERVISE_INNER");
             // SAFETY: setpgid only touches the post-fork child.
             unsafe {
                 command.pre_exec(|| {
@@ -823,14 +823,14 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // A nested exclusive command must report busy rather than wait for a
         // lease its own parent holds.
         "nested-gc" => {
-            let mut command = blanket_command(&["gc", "--dry-run"]);
+            let mut command = tog_command(&["gc", "--dry-run"]);
             let status = supervise::status(&mut command, activity).unwrap();
             say(&format!("NESTED {}", code_of(status)));
             code_of(status)
         }
         // A nested read-only command must simply finish.
         "nested-roots" => {
-            let mut command = blanket_command(&["store", "roots"]);
+            let mut command = tog_command(&["store", "roots"]);
             let status = supervise::status(&mut command, activity).unwrap();
             say(&format!("NESTED {}", code_of(status)));
             code_of(status)
@@ -1071,13 +1071,13 @@ fn children_do_not_inherit_the_activity_descriptor() {
     let text = harness.markers.text();
     assert!(
         !text.contains(".lock"),
-        "a child inherited a Blanket lock descriptor:\n{text}"
+        "a child inherited a Tog lock descriptor:\n{text}"
     );
     store.wait_until_free();
 }
 
 /// SIGPIPE is characterised, not "fixed". The child gets the
-/// toolchain's default disposition rather than Blanket's inherited ignore.
+/// toolchain's default disposition rather than Tog's inherited ignore.
 #[test]
 fn sigpipe_reaches_the_child_with_the_toolchain_default() {
     let store = TempStore::new("sigpipe");
@@ -1231,7 +1231,7 @@ fn a_nested_exclusive_command_reports_busy() {
     harness.markers.settle();
     let text = harness.markers.text();
     assert!(
-        text.contains("cleanup skipped: a Blanket job is using this store"),
+        text.contains("cleanup skipped: a Tog job is using this store"),
         "nested gc did not report busy:\n{text}"
     );
     assert!(

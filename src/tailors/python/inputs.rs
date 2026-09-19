@@ -52,7 +52,7 @@ pub type PythonPlan = (
 );
 
 /// Candidate input files for the status record: the manifest that won, the
-/// interpreter request, and every lock blanket reads or writes.
+/// interpreter request, and every lock tog reads or writes.
 pub fn python_input_records(
     dir: &Path,
     manifest: &manifest::Manifest,
@@ -82,7 +82,7 @@ pub fn python_input_records(
 /// `setup.py egg_info`, so the selection is made here and handed back to the
 /// caller: planning, realization and the closure all use this one value.
 ///
-/// Planning hits PyPI, so successful plans are cached in `.blanket/plan.json`
+/// Planning hits PyPI, so successful plans are cached in `.tog/plan.json`
 /// keyed by a hash of the inputs; an unchanged lock replans offline.
 pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
     let mut manifest = manifest::discover(platform, dir)?;
@@ -102,7 +102,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
                     return Err(error);
                 };
                 eprintln!(
-                    "blanket: setup.py metadata probe failed; using the requirements directory convention: {error}"
+                    "tog: setup.py metadata probe failed; using the requirements directory convention: {error}"
                 );
                 fallback.python = manifest.python.clone();
                 manifest = fallback;
@@ -130,7 +130,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
         manifest.provenance.push_str(" (empty manifest)");
     }
-    eprintln!("blanket: python inputs: {}", manifest.provenance);
+    eprintln!("tog: python inputs: {}", manifest.provenance);
     let input = manifest.input.clone();
     let source = manifest.requirements_text();
     let resolver_source = manifest.resolver_text();
@@ -173,10 +173,10 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     } else if is_fully_pinned(&source) && resolver_source == source {
         None
     } else {
-        let path = dir.join(".blanket/manifest-requirements.txt");
-        std::fs::create_dir_all(dir.join(".blanket"))?;
+        let path = dir.join(".tog/manifest-requirements.txt");
+        std::fs::create_dir_all(dir.join(".tog"))?;
         let mut text = if manifest.has_constraints() {
-            let constraints = dir.join(".blanket/manifest-constraints.txt");
+            let constraints = dir.join(".tog/manifest-constraints.txt");
             std::fs::write(&constraints, manifest.constraints_text())?;
             format!(
                 "{}-c {}\n",
@@ -203,7 +203,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) => {
                 eprintln!(
-                    "blanket: requirements.txt is pinned but not directly \
+                    "tog: requirements.txt is pinned but not directly \
                      consumable ({e}); re-locking for this platform with uv..."
                 );
                 locked_requirements(
@@ -229,7 +229,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         )?
     };
 
-    // These are project-local .blanket caches, not store identities; one
+    // These are project-local .tog caches, not store identities; one
     // re-plan after moving a project between platforms is acceptable.
     let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
         pypi::host_glibc()?
@@ -239,7 +239,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     // The lock may have just been (re)written above: hash it now.
     let inputs = python_input_records(dir, &manifest)?;
     let input_hash = planner_input_hash(platform, pin.version, &text, glibc);
-    let cache_path = dir.join(".blanket/plan.json");
+    let cache_path = dir.join(".tog/plan.json");
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
             if v["input_hash"] == input_hash.as_str() {
@@ -251,7 +251,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     }
 
     let plan = pypi::plan_python(platform, &text, pin.version)?;
-    std::fs::create_dir_all(dir.join(".blanket"))?;
+    std::fs::create_dir_all(dir.join(".tog"))?;
     std::fs::write(
         &cache_path,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -337,11 +337,11 @@ pub fn locked_requirements(
     compile_path: Option<&Path>,
 ) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
-    let stamp_path = dir.join(".blanket/lock-source.hash");
+    let stamp_path = dir.join(".tog/lock-source.hash");
     let source_hash = if compile_path.is_some_and(|path| {
         !path
             .components()
-            .any(|component| component.as_os_str() == ".blanket")
+            .any(|component| component.as_os_str() == ".tog")
     }) {
         let path = compile_path.expect("checked above");
         let tree_hash = manifest::requirements_tree_hash(path)?;
@@ -357,8 +357,8 @@ pub fn locked_requirements(
             return Ok(lock);
         }
     }
-    eprintln!("blanket: {input} is not hash-pinned; resolving with the store uv...");
-    // Store-pinned uv, not host uv: a bare machine needs only blanket.
+    eprintln!("tog: {input} is not hash-pinned; resolving with the store uv...");
+    // Store-pinned uv, not host uv: a bare machine needs only tog.
     let uv = python::ensure_uv_for(store, platform)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut command = std::process::Command::new(&uv);
@@ -386,7 +386,7 @@ pub fn locked_requirements(
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
     }
-    std::fs::create_dir_all(dir.join(".blanket"))?;
+    std::fs::create_dir_all(dir.join(".tog"))?;
     std::fs::write(&stamp_path, &source_hash)?;
     std::fs::read_to_string(&lock_path)
 }
@@ -396,7 +396,7 @@ pub fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
 }
 
 /// Stamp deciding whether `uv pip compile` must re-run. Deliberately NOT
-/// platform-qualified: `.blanket/lock-source.hash` is per-machine state and
+/// platform-qualified: `.tog/lock-source.hash` is per-machine state and
 /// the format is byte-identical to the pre-port one, so existing darwin
 /// stamps stay valid after the Linux port (platform lives in
 /// `planner_input_hash`, which keys the plan cache).

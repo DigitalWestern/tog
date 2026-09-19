@@ -271,7 +271,7 @@ pub(crate) fn realize_env_at_depth(
 }
 
 /// Project an env into a project directory: `.venv` symlink (atomic swap)
-/// plus closure-envelope provenance (.blanket/closures/python.json).
+/// plus closure-envelope provenance (.tog/closures/python.json).
 pub fn project_env(
     project_dir: &Path,
     env_obj: &Path,
@@ -330,7 +330,7 @@ pub(super) fn project_env_inner(
 ) -> io::Result<()> {
     let venv = project_dir.join(".venv");
     let store = store_from_object_path(env_obj)
-        .ok_or_else(|| io::Error::other("environment object is not in a Blanket store"))?;
+        .ok_or_else(|| io::Error::other("environment object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let project_lock = store.project_lock(project_dir)?;
@@ -404,7 +404,7 @@ mod tests {
 
     fn test_store(label: &str) -> Store {
         let root = std::env::temp_dir().join(format!(
-            "blanket-project-identity-{label}-{}",
+            "tog-project-identity-{label}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -511,7 +511,7 @@ mod tests {
     }
 
     fn write_closure(dir: &Path, platform: Option<&str>) {
-        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         let mut v = serde_json::json!({
             "schema": "closure/1",
             "ecosystem": "python",
@@ -520,7 +520,7 @@ mod tests {
         if let Some(platform) = platform {
             v["platform"] = serde_json::Value::String(platform.to_string());
         }
-        fs::write(dir.join(".blanket/closures/python.json"), v.to_string()).unwrap();
+        fs::write(dir.join(".tog/closures/python.json"), v.to_string()).unwrap();
     }
 
     fn closure_test_body(store: &Store) -> serde_json::Value {

@@ -1,4 +1,4 @@
-//! `blanket store roots` / `blanket store path`: read-only store diagnostics.
+//! `tog store roots` / `tog store path`: read-only store diagnostics.
 //! Kernel only; work without a valid host platform.
 
 use crate::kernel::store;

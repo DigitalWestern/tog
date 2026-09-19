@@ -23,7 +23,7 @@ pub fn load_go_inputs(
     let plan = go::plan_go(store, platform, dir, &go_obj)?;
     if plan.go_version != go_version {
         return Err(io::Error::other(format!(
-            "go.mod selected Go {go_version}, but planning selected {}; re-run blanket sync after keeping go.mod unchanged",
+            "go.mod selected Go {go_version}, but planning selected {}; re-run tog sync after keeping go.mod unchanged",
             plan.go_version
         )));
     }

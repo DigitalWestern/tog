@@ -659,7 +659,7 @@ fn extract_tarball_packages(
 
 /// Git packages: the realized commit IS the package content. npm would run
 /// the package's `prepare` script here (git deps are installed from source);
-/// blanket does not, because that script is unsandboxed build logic with its
+/// tog does not, because that script is unsandboxed build logic with its
 /// own dependency needs — the exception says so rather than pretending.
 fn place_git_packages(
     store: &Store,
@@ -693,7 +693,7 @@ fn place_git_packages(
         }
         fs::create_dir_all(&dest)?;
         let staging = dest.with_file_name(format!(
-            ".blanket-git-{}",
+            ".tog-git-{}",
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
         let _ = crate::kernel::store::remove_tree(&staging);
@@ -720,7 +720,7 @@ fn place_git_packages(
             crate::kernel::policy::record(
                 crate::kernel::policy::GIT_DEPENDENCY,
                 &format!("{}@{}", p.name, p.version),
-                "package has a `prepare` script; blanket does not run it for git sources",
+                "package has a `prepare` script; tog does not run it for git sources",
             )?;
         }
         if p.bin.is_empty() {
@@ -834,7 +834,7 @@ fn link_package_bins(staged: &Path, packages: &[(NpmPackage, PathBuf)]) -> io::R
                 // declare `playwright`). npm keeps the first hoisted claim;
                 // plan order is sorted, so first-wins is deterministic.
                 eprintln!(
-                    "blanket: warning: bin {bin_name:?} already claimed; \
+                    "tog: warning: bin {bin_name:?} already claimed; \
                      skipping the one from {}",
                     p.path
                 );
@@ -1181,7 +1181,7 @@ fn lifecycle_base_envs(
 /// A documented skip switch turns a doomed fetch into a recorded exception
 /// naming what the user runs later; a prebuilt-binary downloader is told to
 /// compile instead, which is the path it would have fallen back to anyway
-/// once the network denied it. Provisioning comes first: if blanket can
+/// once the network denied it. Provisioning comes first: if tog can
 /// supply the artifact, the package is really installed rather than skipped.
 fn apply_artifact_policy(
     store: &Store,
@@ -1220,7 +1220,7 @@ fn apply_artifact_policy(
             // A provisioning failure is not fatal: the install script still
             // runs and fails loudly on its own if it needs the artifact.
             eprintln!(
-                "blanket: {}: could not provision its artifact: {error}",
+                "tog: {}: could not provision its artifact: {error}",
                 p.name
             );
             crate::kernel::policy::record(
@@ -1269,7 +1269,7 @@ fn run_package_phases(
     activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<()> {
     for (phase, script) in phases {
-        eprintln!("blanket: {} {}: {phase} (sandboxed)", p.name, p.version);
+        eprintln!("tog: {} {}: {phase} (sandboxed)", p.name, p.version);
         let envs_phase: Vec<(String, String)> = envs
             .iter()
             .cloned()
@@ -1292,7 +1292,7 @@ fn run_package_phases(
             Err(LifecycleFailure::Script(e)) => e,
         };
         let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
-                    \"blanket\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
+                    \"tog\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
                     placed where the package's downloader caches them (see README).";
         let error = e.to_string();
         let detail = format!(
@@ -1423,8 +1423,8 @@ mod patch_snapshot_tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => std::env::set_var("BLANKET_STORE", value),
-                None => std::env::remove_var("BLANKET_STORE"),
+                Some(value) => std::env::set_var("TOG_STORE", value),
+                None => std::env::remove_var("TOG_STORE"),
             }
         }
     }
@@ -1492,8 +1492,8 @@ mod patch_snapshot_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = crate::kernel::testutil::TempDir::new();
-        let old_store = std::env::var_os("BLANKET_STORE");
-        std::env::set_var("BLANKET_STORE", temp.0.join("store"));
+        let old_store = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", temp.0.join("store"));
         let _store_env = StoreEnv(old_store);
         let store = Store::open().unwrap();
 

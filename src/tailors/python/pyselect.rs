@@ -1,7 +1,7 @@
 //! CPython constraint parsing and selection.
 //!
 //! Version parsing and matching lives in `pep440`; this module only collects
-//! interpreter inputs and chooses one of blanket's pinned CPython builds. It
+//! interpreter inputs and chooses one of tog's pinned CPython builds. It
 //! is pure once project files have been collected: selection never consults
 //! the host Python or a package index.
 
@@ -81,12 +81,12 @@ impl PythonSelection {
     pub fn selection_message(&self) -> String {
         if let Some(raw) = &self.explicit_request {
             format!(
-                "blanket: python {} selected (.python-version \"{}\" from .python-version)",
+                "tog: python {} selected (.python-version \"{}\" from .python-version)",
                 self.pin.version, raw
             )
         } else {
             format!(
-                "blanket: python {} selected (requires-python \"{}\" from {})",
+                "tog: python {} selected (requires-python \"{}\" from {})",
                 self.pin.version,
                 self.constraint.as_deref().unwrap_or("*"),
                 self.constraint_source
@@ -198,7 +198,7 @@ pub fn select_python_with_inputs(
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
-                "blanket: .python-version \"{}\" violates declared Python constraint {}; honoring explicit request",
+                "tog: .python-version \"{}\" violates declared Python constraint {}; honoring explicit request",
                 explicit.raw, declared
             ));
         }
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn poetry_python_table_comes_from_interpreter_constraints() {
-        let temp = std::env::temp_dir().join(format!("blanket-pyselect-{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("tog-pyselect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
         std::fs::write(

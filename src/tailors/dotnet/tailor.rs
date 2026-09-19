@@ -99,10 +99,10 @@ impl Tailor for Dotnet {
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let mut prefix = Vec::new();
-        if dir.join(".blanket/closures/dotnet.json").exists() {
+        if dir.join(".tog/closures/dotnet.json").exists() {
             // This prevents accidental unsandboxed builds, not deliberate bypasses
             // through wrappers such as `sh -c`; during realization and build,
-            // blanket never evaluates project code outside its sandbox. Missing-lock
+            // tog never evaluates project code outside its sandbox. Missing-lock
             // lock generation is the explicit host-side exception.
             if let Some(reason) = dotnet::refused_run_command(cmd) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
@@ -112,7 +112,7 @@ impl Tailor for Dotnet {
             let packages = comforter::closure_object(&ctx.store, &closure, "packages_object", "")?;
             prefix.push(sdk.to_string_lossy().into_owned());
             let scratch =
-                std::env::temp_dir().join(format!("blanket-dn-run-{}", std::process::id()));
+                std::env::temp_dir().join(format!("tog-dn-run-{}", std::process::id()));
             std::fs::create_dir_all(&scratch)?;
             let (prefixes, remove, set) = dotnet::run_env(&sdk, &packages, &scratch);
             sandbox::force_env(command, &prefixes, &remove, &set);
@@ -179,7 +179,7 @@ impl Tailor for Dotnet {
             // sha512, base64 — not a raw file digest.
             push_property(
                 &mut c,
-                "blanket:nuget:contentHash",
+                "tog:nuget:contentHash",
                 &required(eco, &p, "content_hash")?,
             );
             out.push(c);

@@ -5,7 +5,7 @@
 //! (staging gone, host Erlang/Elixir off the effective PATH): OTP release
 //! 29 / 29.0.5, Elixir 1.20.4, `:code.root_dir()` inside the object,
 //! crypto (sha256 compared against Rust), ssl startup, the sandboxed
-//! `blanket build`, a `mix run --no-compile` application probe, a rebuild
+//! `tog build`, a `mix run --no-compile` application probe, a rebuild
 //! after deleting the qualified build output, and object immutability.
 
 use sha2::{Digest, Sha256};
@@ -19,7 +19,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-elixir-e2e-{}-{}",
+            "tog-elixir-e2e-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -51,10 +51,10 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -92,11 +92,11 @@ fn run_store_bin(bin: &Path, beam: &Path, home: &Path, args: &[&str]) -> Output 
         .unwrap()
 }
 
-/// The tailor-owned `body` of the closure envelope blanket wrote
-/// (`.blanket/closures/elixir.json`, schema closure/1).
+/// The tailor-owned `body` of the closure envelope tog wrote
+/// (`.tog/closures/elixir.json`, schema closure/1).
 fn closure_body(project: &Path) -> serde_json::Value {
     let mut envelope: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(project.join(".blanket/closures/elixir.json")).unwrap(),
+        &std::fs::read(project.join(".tog/closures/elixir.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(envelope["schema"], "closure/1");
@@ -137,11 +137,11 @@ fn elixir_sync_sandboxed_build_and_run() {
     let store = temp.0.join("store");
     let home = temp.0.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     // Realize the composite BEAM object; everything below uses only its
-    // committed path (read from the closure blanket wrote).
-    assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
+    // committed path (read from the closure tog wrote).
+    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync");
     let closure = closure_body(&project);
     let beam = PathBuf::from(closure["beam_object"]["path"].as_str().unwrap());
     let fingerprint = closure["beam_fingerprint"].as_str().unwrap().to_string();
@@ -164,7 +164,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     // OTP-side probes from the committed object.
     let otp_version = std::fs::read_to_string(otp.join("releases/29/OTP_VERSION")).unwrap();
     assert_eq!(otp_version.trim(), "29.0.5");
-    let expected_hash = hex::encode(Sha256::digest(b"blanket"));
+    let expected_hash = hex::encode(Sha256::digest(b"tog"));
     let erl = assert_ok(
         run_store_bin(
             &otp.join("bin/erl"),
@@ -176,7 +176,7 @@ fn elixir_sync_sandboxed_build_and_run() {
                 "ok = crypto:start(), \
                  io:format(\"release=~s~n\", [erlang:system_info(otp_release)]), \
                  io:format(\"root=~s~n\", [code:root_dir()]), \
-                 io:format(\"sha256=~s~n\", [string:lowercase(binary:encode_hex(crypto:hash(sha256, <<\"blanket\">>)))]), \
+                 io:format(\"sha256=~s~n\", [string:lowercase(binary:encode_hex(crypto:hash(sha256, <<\"tog\">>)))]), \
                  {ok, _} = application:ensure_all_started(ssl), \
                  {supported, Supported} = lists:keyfind(supported, 1, ssl:versions()), \
                  true = length(Supported) > 0, \
@@ -194,9 +194,9 @@ fn elixir_sync_sandboxed_build_and_run() {
     assert!(erl.contains(&format!("sha256={expected_hash}\n")), "{erl}");
     assert!(erl.contains("ssl=["), "{erl}");
 
-    // Elixir side, through `blanket run` (its PATH puts the object first).
+    // Elixir side, through `tog run` (its PATH puts the object first).
     let ex = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -207,7 +207,7 @@ fn elixir_sync_sandboxed_build_and_run() {
                 "IO.puts(\"elixir=\" <> System.version()); \
                  IO.puts(\"otp=\" <> System.otp_release()); \
                  IO.puts(\"root=\" <> List.to_string(:code.root_dir())); \
-                 IO.puts(\"sha256=\" <> Base.encode16(:crypto.hash(:sha256, \"blanket\"), case: :lower)); \
+                 IO.puts(\"sha256=\" <> Base.encode16(:crypto.hash(:sha256, \"tog\"), case: :lower)); \
                  {:ok, _} = Application.ensure_all_started(:ssl); \
                  IO.puts(\"ssl=\" <> inspect(:ssl.versions()[:supported]))",
             ],
@@ -227,8 +227,8 @@ fn elixir_sync_sandboxed_build_and_run() {
     // rebar3, jason via mix), network denied; then the app probe WITHOUT
     // compiling, so a failed sandboxed build cannot be repaired by this
     // unsandboxed run.
-    assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
-    let build_dir = project.join(format!("_build/blanket-{fingerprint}"));
+    assert_ok(tog(&binary, &project, &store, &["build"]), "build");
+    let build_dir = project.join(format!("_build/tog-{fingerprint}"));
     assert!(
         build_dir.join("dev/lib/ex_real/ebin").is_dir(),
         "{}",
@@ -245,7 +245,7 @@ fn elixir_sync_sandboxed_build_and_run() {
         "-e",
         "IO.puts(\"e2e: \" <> ExReal.hello())",
     ];
-    let out = assert_ok(blanket(&binary, &project, &store, &probe), "run");
+    let out = assert_ok(tog(&binary, &project, &store, &probe), "run");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
 
     // Drop the qualified build output and refresh the projection (removes
@@ -254,7 +254,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     remove_tree(&build_dir);
     assert!(!build_dir.exists());
     assert_ok(
-        blanket(&binary, &project, &store, &["sync", "--fresh"]),
+        tog(&binary, &project, &store, &["sync", "--fresh"]),
         "sync --fresh",
     );
     let closure_again = closure_body(&project);
@@ -266,11 +266,11 @@ fn elixir_sync_sandboxed_build_and_run() {
         closure_again["deps_object"]["path"],
         closure["deps_object"]["path"]
     );
-    assert_ok(blanket(&binary, &project, &store, &["build"]), "rebuild");
-    let out = assert_ok(blanket(&binary, &project, &store, &probe), "rerun");
+    assert_ok(tog(&binary, &project, &store, &["build"]), "rebuild");
+    let out = assert_ok(tog(&binary, &project, &store, &probe), "rerun");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
     let vsn = assert_ok(
-        blanket(&binary, &project, &store, &["run", "elixir", "--version"]),
+        tog(&binary, &project, &store, &["run", "elixir", "--version"]),
         "elixir version",
     );
     assert!(vsn.contains("1.20.4"), "{vsn}");
@@ -280,7 +280,7 @@ fn elixir_sync_sandboxed_build_and_run() {
         assert_ne!(fingerprint, DARWIN_FINGERPRINT);
         assert_ne!(
             build_dir,
-            project.join(format!("_build/blanket-{DARWIN_FINGERPRINT}"))
+            project.join(format!("_build/tog-{DARWIN_FINGERPRINT}"))
         );
     } else {
         assert_eq!(fingerprint, DARWIN_FINGERPRINT);

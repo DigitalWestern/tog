@@ -10,10 +10,10 @@ use crate::tailors::node::lock_import;
 use std::io;
 use std::path::Path;
 
-/// A package.json with no lockfile blanket can import (package-lock.json,
+/// A package.json with no lockfile tog can import (package-lock.json,
 /// pnpm-lock.yaml, yarn.lock): delegate lock generation to npm, mirroring
 /// the uv flow for Python. Resolution is the ecosystem's job; realization
-/// is blanket's.
+/// is tog's.
 pub fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<()> {
     if !dir.join("package.json").exists()
         || dir.join("package-lock.json").exists()
@@ -25,15 +25,15 @@ pub fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> 
     for other in ["bun.lock", "bun.lockb"] {
         if dir.join(other).exists() {
             eprintln!(
-                "blanket: note: {other} found; generating package-lock.json via npm \
+                "tog: note: {other} found; generating package-lock.json via npm \
                  (versions resolve fresh — they may differ from {other})"
             );
             break;
         }
     }
-    eprintln!("blanket: no package-lock.json; resolving with the store npm...");
+    eprintln!("tog: no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
-    // blanket. npm-cli's shebang is `env node`, so the store bin leads PATH.
+    // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
     let node = node::ensure_node_for(store, platform)?;
     let path = format!(
         "{}:{}",

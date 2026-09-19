@@ -1,14 +1,14 @@
 //! Electron provisioning. Heavy: downloads the real release
 //! zip (~100 MB), so it is ignored by default.
 
-use blanket::kernel::platform::Platform;
-use blanket::kernel::store::Store;
+use tog::kernel::platform::Platform;
+use tog::kernel::store::Store;
 use std::path::{Path, PathBuf};
 
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.0);
+        let _ = tog::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -27,7 +27,7 @@ fn store_at(root: &Path) -> Store {
 fn electron_is_provisioned_where_its_installer_looks() {
     let platform = Platform::host().expect("host platform");
     let root = Temp(std::env::temp_dir().join(format!(
-        "blanket-electron-{}-{}",
+        "tog-electron-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -41,7 +41,7 @@ fn electron_is_provisioned_where_its_installer_looks() {
 
     // A real, published release.
     let version = "39.0.0";
-    let provisioning = blanket::tailors::python::artifacts::provision(
+    let provisioning = tog::tailors::python::artifacts::provision(
         &store, platform, "electron", version, &scratch,
     )
     .expect("provision")
@@ -55,7 +55,7 @@ fn electron_is_provisioned_where_its_installer_looks() {
         .expect("the installer's cache variable is set");
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
     let dir = cache_root
-        .join(blanket::tailors::python::artifacts::electron_cache_directory(&release_url));
+        .join(tog::tailors::python::artifacts::electron_cache_directory(&release_url));
     let (os, arch) = match platform {
         Platform::Aarch64AppleDarwin => ("darwin", "arm64"),
         Platform::X86_64UnknownLinuxGnu => ("linux", "x64"),
@@ -75,7 +75,7 @@ fn electron_is_provisioned_where_its_installer_looks() {
         std::fs::metadata(&zip).unwrap().len() > 10 << 20,
         "the zip should be a real release artifact"
     );
-    // The zip blanket stored is the one upstream's manifest names.
+    // The zip tog stored is the one upstream's manifest names.
     let listed = std::fs::read_to_string(&sums).unwrap();
     assert!(
         listed.contains(&format!("electron-v{version}-{os}-{arch}.zip")),

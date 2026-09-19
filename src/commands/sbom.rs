@@ -1,6 +1,6 @@
-//! `blanket sbom` — CycloneDX 1.5 JSON from the closure envelopes.
+//! `tog sbom` — CycloneDX 1.5 JSON from the closure envelopes.
 //!
-//! Pure format translation: reads every .blanket/closures/<eco>.json the
+//! Pure format translation: reads every .tog/closures/<eco>.json the
 //! project has and emits one SBOM document. No network, no new inputs —
 //! the closures already carry names, versions, and pinned hashes.
 
@@ -50,7 +50,7 @@ fn eco_components(eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<(
 
 /// Build the CycloneDX document for every closure in the project.
 pub fn generate(project_dir: &Path) -> io::Result<Value> {
-    let dir = project_dir.join(".blanket/closures");
+    let dir = project_dir.join(".tog/closures");
     let mut entries: Vec<String> = match fs::read_dir(&dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
@@ -62,7 +62,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
     };
     entries.sort();
     if entries.is_empty() {
-        return Err(err("no closures found; run `blanket sync` first"));
+        return Err(err("no closures found; run `tog sync` first"));
     }
     let mut components = Vec::new();
     let mut exception_properties = Vec::new();
@@ -83,7 +83,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| err(format!("{eco} closure: exception missing 'detail'")))?;
                 exception_properties.push(json!({
-                    "name": format!("blanket:exception:{kind}"),
+                    "name": format!("tog:exception:{kind}"),
                     "value": format!("{subject}: {detail}"),
                 }));
             }
@@ -97,8 +97,8 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
         "version": 1,
         "metadata": {
             "tools": [{
-                "vendor": "blanket",
-                "name": "blanket",
+                "vendor": "tog",
+                "name": "tog",
                 "version": env!("CARGO_PKG_VERSION"),
             }],
             "properties": exception_properties,
@@ -113,7 +113,7 @@ pub fn run(output: Option<&Path>) -> io::Result<()> {
     match output {
         Some(path) => {
             std::fs::write(path, text + "\n")?;
-            eprintln!("blanket: SBOM written to {}", path.display());
+            eprintln!("tog: SBOM written to {}", path.display());
         }
         None => println!("{text}"),
     }
@@ -127,14 +127,14 @@ mod tests {
     #[test]
     fn sbom_from_synthetic_closures() {
         let dir = std::env::temp_dir().join(format!(
-            "blanket-sbom-test-{}-{}",
+            "tog-sbom-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         let write = |eco: &str, body: Value| {
             let envelope = json!({
                 "schema": "closure/1",
@@ -143,7 +143,7 @@ mod tests {
                 "body": body,
             });
             fs::write(
-                dir.join(format!(".blanket/closures/{eco}.json")),
+                dir.join(format!(".tog/closures/{eco}.json")),
                 serde_json::to_vec(&envelope).unwrap(),
             )
             .unwrap();
@@ -183,7 +183,7 @@ mod tests {
                 }],
             }),
         );
-        // The toolchain-only closure `blanket fmt` writes: no packages, and
+        // The toolchain-only closure `tog fmt` writes: no packages, and
         // an SBOM must survive it rather than fail the whole document.
         write(
             "rustfmt",
@@ -212,7 +212,7 @@ mod tests {
             .iter()
             .filter(|c| c["type"] == "application")
             .flat_map(|c| c["properties"].as_array().unwrap())
-            .filter(|p| p["name"] == "blanket:store-id")
+            .filter(|p| p["name"] == "tog:store-id")
             .filter_map(|p| p["value"].as_str())
             .collect();
         // Closures are processed in name order: node, python, then rustfmt.
@@ -225,11 +225,11 @@ mod tests {
         assert_eq!(env_names, ["node-env", "python-env", "rust", "rustfmt"]);
         let properties = doc["metadata"]["properties"].as_array().unwrap();
         assert!(properties.iter().any(|p| {
-            p["name"] == "blanket:exception:requirement-skipped"
+            p["name"] == "tog:exception:requirement-skipped"
                 && p["value"] == ".: project-local requirement"
         }));
         assert!(properties.iter().any(|p| {
-            p["name"] == "blanket:exception:install-script-failed"
+            p["name"] == "tog:exception:install-script-failed"
                 && p["value"] == "node_modules/a: postinstall: network-denied"
         }));
         fs::remove_dir_all(&dir).unwrap();
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn no_closures_is_a_loud_error() {
-        let dir = std::env::temp_dir().join(format!("blanket-sbom-empty-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tog-sbom-empty-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         assert!(generate(&dir).is_err());
         fs::remove_dir_all(&dir).unwrap();

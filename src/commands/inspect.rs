@@ -29,7 +29,7 @@ pub fn detected(dir: &Path) -> io::Result<Vec<&'static str>> {
         .collect())
 }
 
-/// One `.blanket/closures/<ecosystem>.json`, envelope fields lifted out.
+/// One `.tog/closures/<ecosystem>.json`, envelope fields lifted out.
 #[derive(Debug, Clone)]
 pub struct ClosureFile {
     pub ecosystem: String,
@@ -52,7 +52,7 @@ pub struct ClosureFile {
 /// `project::read_closure`, which refuses them.
 pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
     let mut out = Vec::new();
-    let entries = match fs::read_dir(dir.join(".blanket/closures")) {
+    let entries = match fs::read_dir(dir.join(".tog/closures")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(out),
         Err(error) => return Err(error),
@@ -71,7 +71,7 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{:?}: {error}; run 'blanket sync'",
+                    "{:?}: {error}; run 'tog sync'",
                     entry.path().to_string_lossy()
                 ),
             )
@@ -134,9 +134,9 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
     if listings.is_empty() {
         let message = match filter {
             Some(name) if !closures(dir)?.is_empty() => {
-                format!("no {name} closure here; 'blanket ls' lists what is synced")
+                format!("no {name} closure here; 'tog ls' lists what is synced")
             }
-            _ => "nothing synced here; run 'blanket sync' first".to_string(),
+            _ => "nothing synced here; run 'tog sync' first".to_string(),
         };
         return Err(io::Error::new(io::ErrorKind::NotFound, message));
     }
@@ -299,16 +299,16 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
     for row in rows {
         let line = match &row.state {
             State::Synced => format!("synced      ({})", row.summary),
-            State::NotSynced => "not synced  run 'blanket sync'".to_string(),
+            State::NotSynced => "not synced  run 'tog sync'".to_string(),
             State::Changed(files) => format!(
-                "changed     {} since the last sync; run 'blanket sync'",
+                "changed     {} since the last sync; run 'tog sync'",
                 files.join(", ")
             ),
             State::ProjectionMissing(what) => {
-                format!("missing     {what} is not the synced projection; run 'blanket sync'")
+                format!("missing     {what} is not the synced projection; run 'tog sync'")
             }
             State::ForeignPlatform(platform) => {
-                format!("elsewhere   synced on {platform}; run 'blanket sync' on this host")
+                format!("elsewhere   synced on {platform}; run 'tog sync' on this host")
             }
             State::Unchecked(why) => format!("synced      ({}) — {why}", row.summary),
         };
@@ -420,7 +420,7 @@ fn host_platform_check(checks: &mut Vec<Check>) -> Option<Platform> {
             checks.push(check(
                 "platform",
                 Level::Fail,
-                format!("{error}; blanket supports macOS arm64 and Linux x86_64"),
+                format!("{error}; tog supports macOS arm64 and Linux x86_64"),
             ));
             None
         }
@@ -464,7 +464,7 @@ fn store_writable_check(store: &Store, checks: &mut Vec<Check>) {
             "store",
             Level::Fail,
             format!(
-                "{} is not writable: {error}; set BLANKET_STORE to a directory you own",
+                "{} is not writable: {error}; set TOG_STORE to a directory you own",
                 store.root.display()
             ),
         )),
@@ -483,7 +483,7 @@ fn disk_check(store: &Store, checks: &mut Vec<Check>) {
                 Level::Ok
             };
             let hint = if level == Level::Warn {
-                "; toolchains and native library sets need several GiB, 'blanket gc' frees space"
+                "; toolchains and native library sets need several GiB, 'tog gc' frees space"
             } else {
                 ""
             };
@@ -503,7 +503,7 @@ fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
         Ok(toolchains) if toolchains.is_empty() => checks.push(check(
             "toolchains",
             Level::Ok,
-            "none realized yet; the first 'blanket sync' downloads what the project needs",
+            "none realized yet; the first 'tog sync' downloads what the project needs",
         )),
         Ok(toolchains) => checks.push(check("toolchains", Level::Ok, toolchains.join(", "))),
         Err(error) => checks.push(check("toolchains", Level::Warn, error.to_string())),
@@ -522,7 +522,7 @@ fn store_checks(checks: &mut Vec<Check>) {
         Err(error) => checks.push(check(
             "store",
             Level::Fail,
-            format!("cannot open the store: {error}; set BLANKET_STORE to a writable directory"),
+            format!("cannot open the store: {error}; set TOG_STORE to a writable directory"),
         )),
     }
 }
@@ -576,7 +576,7 @@ fn platform_checks(platform: Platform, dir: &Path, checks: &mut Vec<Check>) {
         Err(error) => checks.push(check(
             "sandbox",
             Level::Fail,
-            format!("{error}; sdists, npm install scripts, and 'blanket build' need it"),
+            format!("{error}; sdists, npm install scripts, and 'tog build' need it"),
         )),
     }
     c_toolchain_check(platform, checks);
@@ -584,29 +584,29 @@ fn platform_checks(platform: Platform, dir: &Path, checks: &mut Vec<Check>) {
 
 /// Which policy sources are in force, in the order they are consulted.
 fn policy_check(dir: &Path, checks: &mut Vec<Check>) {
-    let strict = std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
-    let policy_file = std::env::var_os("BLANKET_POLICY")
+    let strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
+    let policy_file = std::env::var_os("TOG_POLICY")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME")
-                .map(|home| Path::new(&home).join(".blanket/policy.toml"))
+                .map(|home| Path::new(&home).join(".tog/policy.toml"))
                 .filter(|path| path.is_file())
         });
     let mut policy = Vec::new();
     if strict {
-        policy.push("BLANKET_STRICT=1".to_string());
+        policy.push("TOG_STRICT=1".to_string());
     }
     if let Some(path) = policy_file {
         policy.push(path.display().to_string());
     }
-    if dir.join(".blanket/policy.toml").is_file() {
-        policy.push(".blanket/policy.toml".to_string());
+    if dir.join(".tog/policy.toml").is_file() {
+        policy.push(".tog/policy.toml".to_string());
     }
     checks.push(check(
         "policy",
         Level::Ok,
         if policy.is_empty() {
-            "permissive (no policy file, BLANKET_STRICT unset)".to_string()
+            "permissive (no policy file, TOG_STRICT unset)".to_string()
         } else {
             policy.join(", ")
         },
@@ -636,12 +636,12 @@ fn project_check(dir: &Path, checks: &mut Vec<Check>) {
                 Level::Ok,
                 if unsynced.is_empty() {
                     format!(
-                        "{} (synced; 'blanket status' checks the inputs)",
+                        "{} (synced; 'tog status' checks the inputs)",
                         found.join(", ")
                     )
                 } else {
                     format!(
-                        "{} found; not synced yet: {} (run 'blanket sync')",
+                        "{} found; not synced yet: {} (run 'tog sync')",
                         found.join(", "),
                         unsynced.join(", ")
                     )
@@ -728,7 +728,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-inspect-{label}-{}-{}",
+                "tog-inspect-{label}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -747,7 +747,7 @@ mod tests {
     }
 
     fn write_closure(dir: &Path, ecosystem: &str, platform: &str, body: Value) {
-        let closures = dir.join(".blanket/closures");
+        let closures = dir.join(".tog/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::write(
             closures.join(format!("{ecosystem}.json")),
@@ -854,7 +854,7 @@ mod tests {
         let empty = TempDir::new("ls-empty");
         let error = ls(&empty.0, None, false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("run 'blanket sync' first"));
+        assert!(error.to_string().contains("run 'tog sync' first"));
         let error = ls(&temp.0, Some("python"), false, false);
         assert!(error.is_ok());
         let missing = {
@@ -942,7 +942,7 @@ mod tests {
         assert_eq!(rows[0].state, State::Synced);
         assert_eq!(
             rows[1].state,
-            State::ProjectionMissing(".blanket/cargo-home".into())
+            State::ProjectionMissing(".tog/cargo-home".into())
         );
         assert_eq!(rows[2].state, State::Synced);
         let text = render_status(dir, &rows, false).unwrap();
@@ -951,7 +951,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("cargo   missing     .blanket/cargo-home"),
+            text.contains("cargo   missing     .tog/cargo-home"),
             "{text}"
         );
 
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(
             rows[2].state,
             State::Unchecked(
-                "recorded Go version is missing; run 'blanket sync' once to record the selected toolchain"
+                "recorded Go version is missing; run 'tog sync' once to record the selected toolchain"
                     .into()
             )
         );
@@ -992,7 +992,7 @@ mod tests {
         // Edit the manifest and the lock: both reported by name.
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
         fs::write(dir.join("go.sum"), "changed\n").unwrap();
-        fs::create_dir_all(dir.join(".blanket/cargo-home")).unwrap();
+        fs::create_dir_all(dir.join(".tog/cargo-home")).unwrap();
         let rows = status(platform, dir).unwrap();
         assert_eq!(
             rows[0].state,
@@ -1146,19 +1146,19 @@ mod tests {
         // Process-global test state follows env -> supervision -> store ->
         // attribution (see the comment on `commands::sync`'s
         // failed_tailor_sync test). `doctor`'s policy check reads
-        // BLANKET_POLICY and $HOME, so the env lock is taken first.
+        // TOG_POLICY and $HOME, so the env lock is taken first.
         let _env = crate::kernel::policy::test_env_lock();
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new("doctor");
         let store = temp.0.join("store");
-        let old_store = std::env::var_os("BLANKET_STORE");
-        std::env::set_var("BLANKET_STORE", &store);
+        let old_store = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", &store);
         let checks = doctor(&temp.0);
         match old_store {
-            Some(value) => std::env::set_var("BLANKET_STORE", value),
-            None => std::env::remove_var("BLANKET_STORE"),
+            Some(value) => std::env::set_var("TOG_STORE", value),
+            None => std::env::remove_var("TOG_STORE"),
         }
         let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
         for expected in [
@@ -1200,14 +1200,14 @@ mod tests {
         let temp = TempDir::new("doctor-order");
         let store = temp.0.join("store");
         fs::write(temp.0.join("go.mod"), "module example.com/m\n\ngo 1.27.0\n").unwrap();
-        fs::create_dir_all(temp.0.join(".blanket")).unwrap();
-        fs::write(temp.0.join(".blanket/policy.toml"), "").unwrap();
-        let old_store = std::env::var_os("BLANKET_STORE");
-        std::env::set_var("BLANKET_STORE", &store);
+        fs::create_dir_all(temp.0.join(".tog")).unwrap();
+        fs::write(temp.0.join(".tog/policy.toml"), "").unwrap();
+        let old_store = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", &store);
         let checks = doctor(&temp.0);
         match old_store {
-            Some(value) => std::env::set_var("BLANKET_STORE", value),
-            None => std::env::remove_var("BLANKET_STORE"),
+            Some(value) => std::env::set_var("TOG_STORE", value),
+            None => std::env::remove_var("TOG_STORE"),
         }
 
         let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
@@ -1255,18 +1255,18 @@ mod tests {
         );
         assert_eq!(
             detail("toolchains").detail,
-            "none realized yet; the first 'blanket sync' downloads what the project needs"
+            "none realized yet; the first 'tog sync' downloads what the project needs"
         );
         assert_eq!(detail("policy").level, Level::Ok);
         assert!(
-            detail("policy").detail.ends_with(".blanket/policy.toml"),
+            detail("policy").detail.ends_with(".tog/policy.toml"),
             "{}",
             detail("policy").detail
         );
         assert_eq!(detail("project").level, Level::Ok);
         assert_eq!(
             detail("project").detail,
-            "go found; not synced yet: go (run 'blanket sync')"
+            "go found; not synced yet: go (run 'tog sync')"
         );
 
         let text = render_doctor(&checks, false).unwrap();

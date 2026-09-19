@@ -1,4 +1,4 @@
-//! `blanket doctor`: environment health checks over the project and store.
+//! `tog doctor`: environment health checks over the project and store.
 
 use crate::cli;
 use crate::commands::inspect;

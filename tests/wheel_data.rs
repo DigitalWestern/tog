@@ -9,7 +9,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-wheel-data-{}-{}",
+            "tog-wheel-data-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -41,10 +41,10 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -69,18 +69,18 @@ fn greenlet_headers_are_installed_and_importable() {
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-greenlet"),
         &project,
     );
-    let store = std::env::var_os("BLANKET_STORE")
+    let store = std::env::var_os("TOG_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| temp.0.join("store"));
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
     assert_ok(
-        blanket(&binary, &project, &store, &["sync"]),
-        "blanket sync",
+        tog(&binary, &project, &store, &["sync"]),
+        "tog sync",
     );
 
     let closure: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+        &std::fs::read(project.join(".tog/closures/python.json")).unwrap(),
     )
     .unwrap();
     let env = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
@@ -97,7 +97,7 @@ fn greenlet_headers_are_installed_and_importable() {
     );
 
     let output = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -109,7 +109,7 @@ fn greenlet_headers_are_installed_and_importable() {
             ]
             .as_slice(),
         ),
-        "blanket run python",
+        "tog run python",
     );
     assert_eq!(output.trim(), "3.5.5");
 }

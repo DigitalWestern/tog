@@ -7,7 +7,7 @@
 //! reported, not enforced, so drift is visible in `cargo test` output.
 //!
 //! Three housekeeping rules are enforced the same way: a test that sets
-//! `BLANKET_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
+//! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
 //! than cite plan documents or review rounds, and `docs/agent/` holds only
 //! its two files.
 
@@ -390,22 +390,22 @@ fn blank_literals(text: &str) -> String {
     out
 }
 
-/// `BLANKET_STORE` is process-global. A test that sets or clears it without
+/// `TOG_STORE` is process-global. A test that sets or clears it without
 /// holding `store::STORE_ENV_LOCK` redirects a concurrent test to the real
 /// store, so any file that touches the variable must name the lock.
 #[test]
 fn store_env_writes_hold_the_lock() {
     let mut violations = Vec::new();
     for (relative, text) in all_sources() {
-        let writes = text.contains("set_var(\"BLANKET_STORE\"")
-            || text.contains("remove_var(\"BLANKET_STORE\"");
+        let writes = text.contains("set_var(\"TOG_STORE\"")
+            || text.contains("remove_var(\"TOG_STORE\"");
         if writes && !text.contains("STORE_ENV_LOCK") {
             violations.push(relative);
         }
     }
     assert!(
         violations.is_empty(),
-        "files that write BLANKET_STORE without STORE_ENV_LOCK:\n  {}",
+        "files that write TOG_STORE without STORE_ENV_LOCK:\n  {}",
         violations.join("\n  ")
     );
 }

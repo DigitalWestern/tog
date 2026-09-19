@@ -9,7 +9,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-run-scripts-{}-{}",
+            "tog-run-scripts-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -27,10 +27,10 @@ impl Drop for TempDir {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -53,8 +53,8 @@ fn package_json_script_runs_inside_projected_env() {
     .unwrap();
 
     let store = temp.0.join("store");
-    let binary = Path::new(env!("CARGO_BIN_EXE_blanket"));
-    let synced = blanket(&binary, project, &store, &["sync"]);
+    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
+    let synced = tog(&binary, project, &store, &["sync"]);
     assert!(
         synced.status.success(),
         "sync failed\nstdout:\n{}\nstderr:\n{}",
@@ -65,7 +65,7 @@ fn package_json_script_runs_inside_projected_env() {
     let subdir = project.join("subdir");
     std::fs::create_dir(&subdir).unwrap();
     let init_cwd = subdir.canonicalize().unwrap();
-    let first = blanket(&binary, &subdir, &store, &["run", "test"]);
+    let first = tog(&binary, &subdir, &store, &["run", "test"]);
     assert!(
         first.status.success(),
         "run test failed\nstdout:\n{}\nstderr:\n{}",
@@ -77,6 +77,6 @@ fn package_json_script_runs_inside_projected_env() {
         format!("pretest\ntest\n{}\nfx\nposttest\n", init_cwd.display())
     );
 
-    let second = blanket(&binary, &subdir, &store, &["run", "test", "fail"]);
+    let second = tog(&binary, &subdir, &store, &["run", "test", "fail"]);
     assert_eq!(second.status.code(), Some(3));
 }

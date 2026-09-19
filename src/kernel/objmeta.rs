@@ -147,7 +147,7 @@ impl MetaIndex {
                     error.kind(),
                     format!(
                         "{error}; nothing can be swept until this record is usable — run \
-                         `blanket gc --migrate-metadata` for the full list, then restore or \
+                         `tog gc --migrate-metadata` for the full list, then restore or \
                          rebuild the objects it names"
                     ),
                 )
@@ -2632,7 +2632,7 @@ mod tests {
             .insert("relocation_schema".into(), "store-relocation/1".into());
         beam_darwin_relocated
             .inputs
-            .insert("store_root".into(), "/fixture/blanket-store".into());
+            .insert("store_root".into(), "/fixture/tog-store".into());
         let reason = check_identity_grammar(&beam_darwin_relocated).unwrap_err();
         assert!(reason.contains("BEAM relocation relation"), "{reason}");
     }

@@ -3,11 +3,11 @@
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
 
-use blanket::kernel::platform::Platform;
+use tog::kernel::platform::Platform;
 #[cfg(debug_assertions)]
-use blanket::kernel::store::ObjectDeps;
-use blanket::kernel::store::Store;
-use blanket::kernel::types::*;
+use tog::kernel::store::ObjectDeps;
+use tog::kernel::store::Store;
+use tog::kernel::types::*;
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
 #[cfg(debug_assertions)]
@@ -25,7 +25,7 @@ struct TempStore(PathBuf);
 impl TempStore {
     fn new() -> Self {
         let base = std::env::temp_dir().join(format!(
-            "blanket-kernel-smoke-{}-{}",
+            "tog-kernel-smoke-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -42,7 +42,7 @@ impl TempStore {
 #[cfg(debug_assertions)]
 impl Drop for TempStore {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.0);
+        let _ = tog::kernel::store::remove_tree(&self.0);
     }
 }
 
@@ -64,7 +64,7 @@ fn realize_env_and_run_python() {
         }],
     };
 
-    let env = blanket::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
+    let env = tog::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
         .expect("realize");
     assert!(env.join("bin/python").exists());
     assert!(env.join("pyvenv.cfg").is_file());
@@ -85,7 +85,7 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 = blanket::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
+    let env2 = tog::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
         .expect("realize again");
     assert_eq!(env, env2);
 }
@@ -96,7 +96,7 @@ fn tailor_grammar_drift_panics_before_publishing() {
     // This regression commits through the kernel directly, so it keeps an
     // explicit installation even though public tailor realization entry
     // points now self-install their rows.
-    blanket::tailors::install_kinds();
+    tog::tailors::install_kinds();
     let temp = TempStore::new();
     let store = Store {
         root: temp.0.canonicalize().unwrap(),

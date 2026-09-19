@@ -1,12 +1,12 @@
 # Hit rate
 
-How often `blanket sync` works with zero configuration on popular real
+How often `tog sync` works with zero configuration on popular real
 repositories. It is a measurement, not a gate, but run it before merging
 anything that touches npm projection or the store's real-directory checks.
 
 **Method.** `python3 tests/hitrate.py --repos tests/fixtures/hitrate-repos.lock`
 takes 30 top-starred Python and 30 top-starred npm repositories pinned to
-fixed commits, shallow-clones each, and runs `blanket sync` against a
+fixed commits, shallow-clones each, and runs `tog sync` against a
 throwaway store with a 600 s cap. Each failure is classified by the
 `RULES` regexes in `tests/hitrate.py`. Raw results are dated CSVs under
 `tests/fixtures/`; they are historical records and are never rewritten. A
@@ -25,7 +25,7 @@ full 60-repo run takes about 95 minutes on the Linux box.
 Only Python and npm are measured. Earlier runs (2026-09-02 macOS,
 2026-09-05/06 Linux) are in git history and in their CSVs.
 
-## Linux x86_64 — 2026-09-11 (m6-fedora, blanket fb8b1d6, pinned 60)
+## Linux x86_64 — 2026-09-11 (m6-fedora, tog fb8b1d6, pinned 60)
 
 Command: `cargo build --release`, then `python3 tests/hitrate.py --repos
 tests/fixtures/hitrate-repos.lock --work … --out … --timeout 600 --keep`,
@@ -66,7 +66,7 @@ company-policy column ignores both; its two denials are autoresearch
 ### npm: 21 → 20, and what moved
 
 Eight npm oks became misses since 2026-09-05 at the same pinned commits;
-five of the eight are blanket regressions, not repo changes:
+five of the eight are tog regressions, not repo changes:
 
 | repo | class | reason | status |
 |---|---|---|---|
@@ -94,7 +94,7 @@ ant-design), `install-script-failed` (gstack, uptime-kuma, tabby),
 ### Re-measurement of the three fixed repos
 
 Re-run of gemini-cli, create-react-app and pi at their pinned commits with
-a release build of this branch (`BLANKET_BIN=…/target-fixed/release/blanket`,
+a release build of this branch (`TOG_BIN=…/target-fixed/release/tog`,
 throwaway store), permissive and `--strict`:
 
 | repo | permissive | strict | note |
@@ -104,7 +104,7 @@ throwaway store), permissive and `--strict`:
 | earendil-works/pi | ok, 90 s, 2 exceptions (`built_from_source` canvas@3.2.3, `install-script-failed`) | policy_denied (`built_from_source`) | `packages/agent/node_modules` workspace-local packages now present; company-policy miss (`install-script-failed`) |
 
 A second create-react-app sync with a fresh store confirmed that the 435
-exceptions printed to stderr are exactly the 435 in `.blanket/closures/node.json`:
+exceptions printed to stderr are exactly the 435 in `.tog/closures/node.json`:
 the closure is a truthful record of what strict would refuse.
 
 The literal `--strict` pass over all 60 with the unfixed binary: **python

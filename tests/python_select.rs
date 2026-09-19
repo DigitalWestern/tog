@@ -1,7 +1,7 @@
 //! E2e for interpreter selection and warm lock/plan caches (network tests
 //! are ignored; the preflight refusal runs offline).
 
-use blanket::kernel::platform::Platform;
+use tog::kernel::platform::Platform;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,7 +10,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-python-select-{}-{}",
+            "tog-python-select-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -42,11 +42,11 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
-    blanket_env(bin, project, store, args, &[])
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+    tog_env(bin, project, store, args, &[])
 }
 
-fn blanket_env(
+fn tog_env(
     bin: &Path,
     project: &Path,
     store: &Path,
@@ -56,7 +56,7 @@ fn blanket_env(
     let mut command = Command::new(bin);
     command
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args);
     for (name, value) in env {
         command.env(name, value);
@@ -92,24 +92,24 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-py311"),
         &project,
     );
-    let store = std::env::var_os("BLANKET_STORE")
+    let store = std::env::var_os("TOG_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| temp.0.join("store"));
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     // The sync signs its closure with a key made here, and a machine policy
     // in a scratch HOME trusts it: the gate then passes the real record.
     let key = temp.0.join("signing.key");
-    let public = blanket::kernel::signing::generate(&key).unwrap();
+    let public = tog::kernel::signing::generate(&key).unwrap();
     let home = temp.0.join("home");
-    std::fs::create_dir_all(home.join(".blanket")).unwrap();
+    std::fs::create_dir_all(home.join(".tog")).unwrap();
     std::fs::write(
-        home.join(".blanket/policy.toml"),
+        home.join(".tog/policy.toml"),
         format!("[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
-    let signed: &[(&str, &Path)] = &[("BLANKET_SIGNING_KEY", &key), ("HOME", &home)];
+    let signed: &[(&str, &Path)] = &[("TOG_SIGNING_KEY", &key), ("HOME", &home)];
 
-    let first = blanket_env(&binary, &project, &store, &["sync"], signed);
+    let first = tog_env(&binary, &project, &store, &["sync"], signed);
     let first_stderr = String::from_utf8_lossy(&first.stderr);
     assert!(first.status.success(), "first sync failed: {first_stderr}");
     assert!(
@@ -121,16 +121,16 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         "a signed sync must not warn about unsigned closures: {first_stderr}"
     );
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".blanket/closures/python.json")).unwrap(),
+        &std::fs::read_to_string(project.join(".tog/closures/python.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(closure["signature"]["alg"], "ed25519");
     assert_eq!(closure["signature"]["key"], public.hex());
     assert_eq!(
-        blanket::kernel::signing::verify(&closure),
-        blanket::kernel::signing::Verification::Valid(public)
+        tog::kernel::signing::verify(&closure),
+        tog::kernel::signing::Verification::Valid(public)
     );
-    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
         audit.status.success()
@@ -144,19 +144,19 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     // Editing the committed record is caught: no exception is judged. The
     // edit adds an exception the sync did not record, so the value changes
     // whatever the real sync recorded.
-    let path = project.join(".blanket/closures/python.json");
+    let path = project.join(".tog/closures/python.json");
     let mut edited = closure.clone();
     edited["body"]["exceptions"] = serde_json::json!([
         {"kind": "git-dependency", "subject": "left-pad", "detail": "hand-added"}
     ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
-    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert_eq!(audit.status.code(), Some(1));
     assert_eq!(report["closures"][0]["verdict"], "bad-signature");
     std::fs::write(&path, serde_json::to_vec_pretty(&closure).unwrap()).unwrap();
     // An unsigned sync says so and its record is outdated.
-    let unsigned = blanket_env(
+    let unsigned = tog_env(
         &binary,
         &project,
         &store,
@@ -173,18 +173,18 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         "{}",
         String::from_utf8_lossy(&unsigned.stderr)
     );
-    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert_eq!(audit.status.code(), Some(1));
     assert_eq!(report["closures"][0]["verdict"], "outdated");
     assert_eq!(report["closures"][0]["signature"]["state"], "unsigned");
-    let resigned = blanket_env(&binary, &project, &store, &["sync"], signed);
+    let resigned = tog_env(&binary, &project, &store, &["sync"], signed);
     assert!(
         resigned.status.success(),
         "{}",
         String::from_utf8_lossy(&resigned.stderr)
     );
-    let audit = blanket_env(&binary, &project, &store, &["audit", "--json"], signed);
+    let audit = tog_env(&binary, &project, &store, &["audit", "--json"], signed);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
     assert!(
         audit.status.success() && report["closures"][0]["verdict"] == "clean",
@@ -200,7 +200,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     );
 
     let run = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store,
@@ -211,18 +211,18 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
                 "import sys,six; print(sys.version_info[:2])",
             ],
         ),
-        "blanket run python",
+        "tog run python",
     );
     assert_eq!(run.trim(), "(3, 11)");
 
-    let plan_path = project.join(".blanket/plan.json");
+    let plan_path = project.join(".tog/plan.json");
     let lock_path = project.join("requirements.lock.txt");
-    let stamp_path = project.join(".blanket/lock-source.hash");
+    let stamp_path = project.join(".tog/lock-source.hash");
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
     let lock_mtime = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
     let stamp_mtime = std::fs::metadata(&stamp_path).unwrap().modified().unwrap();
 
-    let second = blanket_env(&binary, &project, &store, &["sync"], signed);
+    let second = tog_env(&binary, &project, &store, &["sync"], signed);
     assert_ok(second, "warm sync");
     assert_eq!(
         std::fs::metadata(&plan_path).unwrap().modified().unwrap(),
@@ -251,9 +251,9 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     std::fs::write(project.join(".python-version"), "3.12.3\n").unwrap();
     std::fs::write(project.join("requirements.txt"), "").unwrap();
     let store = temp.0.join("store");
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    let output = blanket(&binary, &project, &store, &["sync"]);
+    let output = tog(&binary, &project, &store, &["sync"]);
     assert_eq!(
         output.status.code(),
         Some(1),

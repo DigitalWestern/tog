@@ -2,9 +2,9 @@
 //!
 //! go.sum's `h1:` values are NOT hashes of the zip bytes — they hash the
 //! module's file *list*: one line per file, `<sha256 hex>  <name>\n`,
-//! sorted, then sha256 of the concatenation, base64-encoded. Blanket
+//! sorted, then sha256 of the concatenation, base64-encoded. Tog
 //! verifies these itself so Go module bytes enter the kernel's front door
-//! under blanket's own check, not go's.
+//! under tog's own check, not go's.
 
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -130,7 +130,7 @@ mod tests {
         assert!(hash_zip(&fixture("quote-v1.5.2.zip"), "rsc.io/other", "v1.5.2").is_err());
 
         let tampered =
-            std::env::temp_dir().join(format!("blanket-dirhash-tamper-{}.mod", std::process::id()));
+            std::env::temp_dir().join(format!("tog-dirhash-tamper-{}.mod", std::process::id()));
         let mut content = fs::read(fixture("quote-v1.5.2.mod")).unwrap();
         content[0] ^= 1;
         fs::write(&tampered, content).unwrap();

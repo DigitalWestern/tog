@@ -1,4 +1,4 @@
-//! Lifetime protection for operations that consume a Blanket store.
+//! Lifetime protection for operations that consume a Tog store.
 //!
 //! The cache lease in `fetch` deliberately has different sharing semantics;
 //! this module owns the operation-level reader/writer lock.  A lease is an
@@ -226,7 +226,7 @@ fn lock_file(file: &File, mode: ActivityMode, nonblocking: bool) -> io::Result<b
 }
 
 /// A live operation lease.  The OS descriptor is intentionally
-/// close-on-exec: the Blanket process, not a child tool, owns the protection.
+/// close-on-exec: the Tog process, not a child tool, owns the protection.
 #[derive(Debug)]
 pub struct StoreActivity {
     root: PathBuf,
@@ -326,7 +326,7 @@ mod tests {
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "blanket-activity-{label}-{}-{}",
+            "tog-activity-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

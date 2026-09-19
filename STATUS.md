@@ -1,8 +1,8 @@
-# STATUS — where blanket is, and what is next
+# STATUS — where tog is, and what is next
 
 Updated 2026-09-18.
 
-## What blanket is
+## What tog is
 
 One binary that owns the outer loop every language ecosystem shares:
 provision a pinned toolchain, lock a dependency graph, realize it into an
@@ -20,8 +20,8 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Other ecosystems | Fixture-proven only (`tests/`) |
 | Store GC (root protection, object metadata, fail-closed sweep) | Shipped and independently reviewed on Linux |
 | Module layout | Refactor finished 2026-09-12: one folder per layer, the `Tailor` trait and registry, layering enforced by `tests/architecture.rs` (rules in `docs/human/ARCHITECTURE.md`) |
-| Policy admission gate (`blanket audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared, including the `rustfmt` record against its pin (2026-09-17). Closure records are signed (`blanket keygen`, `BLANKET_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |
-| `blanket sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
+| Policy admission gate (`tog audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared, including the `rustfmt` record against its pin (2026-09-17). Closure records are signed (`tog keygen`, `TOG_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |
+| `tog sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
 | Toolchain lock (WP2) | PR 1 shipped (2026-09-18): the pin tables are catalog rows (`src/kernel/toolchain/`), with the cross-platform selector, the typed source policy and legacy seeding, all unit-tested. PR 2b shipped: tar headers read directly. No lock file is written yet; the remaining PRs are in `docs/agent/DESIGNS.md` §1 |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
 

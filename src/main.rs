@@ -1,9 +1,9 @@
-//! The `blanket` binary: parse argv, set up output, resolve the implicit
+//! The `tog` binary: parse argv, set up output, resolve the implicit
 //! forms, and hand the command to `commands::dispatch`.
 
-use blanket::cli;
-use blanket::commands;
-use blanket::kernel::ui;
+use tog::cli;
+use tog::commands;
+use tog::kernel::ui;
 use std::process::exit;
 
 fn main() {

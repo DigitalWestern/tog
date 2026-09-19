@@ -10,7 +10,7 @@ pub(crate) mod doctor;
 pub(crate) mod fmt;
 pub(crate) mod gc;
 /// `pub` on purpose: the read-only closure/status views were public before
-/// the move and stay reachable as `blanket::commands::inspect`.
+/// the move and stay reachable as `tog::commands::inspect`.
 pub mod inspect;
 pub(crate) mod keygen;
 pub(crate) mod ls;
@@ -36,7 +36,7 @@ use std::process::exit;
 /// What argv asked for, once the grammar has had its say.
 pub enum Pending {
     Command(cli::Command),
-    /// Bare `blanket`: sync inside a project, usage outside.
+    /// Bare `tog`: sync inside a project, usage outside.
     Implicit,
     /// An unknown first word: a package.json script if one matches.
     Script {
@@ -46,7 +46,7 @@ pub enum Pending {
     },
 }
 
-/// A bare `blanket` inside a project is `sync`; an unknown first word that
+/// A bare `tog` inside a project is `sync`; an unknown first word that
 /// names a package.json script runs it. Anything else is the usage error
 /// the grammar already prepared (exit 2).
 pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
@@ -62,7 +62,7 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
                 });
             }
             eprint!(
-                "blanket: no project in {}: nothing to sync here.\n\n{}",
+                "tog: no project in {}: nothing to sync here.\n\n{}",
                 cwd.display(),
                 cli::usage()
             );

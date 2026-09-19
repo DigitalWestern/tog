@@ -11,7 +11,7 @@ const VERSION_WORDS: [&str; 3] = ["-V", "--version", "version"];
 const HELP_WORDS: [&str; 3] = ["-h", "--help", "help"];
 
 fn version_text() -> String {
-    format!("blanket {VERSION}\n")
+    format!("tog {VERSION}\n")
 }
 
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
@@ -130,7 +130,7 @@ fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
         Some(name) => spec(name).map(help).ok_or_else(|| {
             UsageError::new(
                 with_suggestion(
-                    format!("no help for '{name}': not a blanket command"),
+                    format!("no help for '{name}': not a tog command"),
                     name,
                     COMMANDS.iter().map(|spec| spec.name),
                 ),
@@ -354,7 +354,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     }
     match name {
         "add" if positional.is_empty() => Err(UsageError::new(
-            "add: no package given (e.g. 'blanket add requests', 'blanket add npm:react@18')",
+            "add: no package given (e.g. 'tog add requests', 'tog add npm:react@18')",
             Some("add"),
         )),
         "add" => Ok(Some(Command::Add {
@@ -442,7 +442,7 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
             }));
         }
         return Err(UsageError::new(
-            "x: no tool given (e.g. 'blanket x ruff check .', 'blanket x npm:prettier --write .')",
+            "x: no tool given (e.g. 'tog x ruff check .', 'tog x npm:prettier --write .')",
             Some("x"),
         ));
     };
@@ -721,7 +721,7 @@ fn valid_root_key(value: &str) -> Result<String, UsageError> {
     } else {
         Err(UsageError::new(
             format!(
-                "'{value}' is not a root key: expected 40 hex characters (`blanket store \
+                "'{value}' is not a root key: expected 40 hex characters (`tog store \
                  roots` prints keys)"
             ),
             Some("gc"),
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(message(&["deploy"]), "unknown command 'deploy'");
         assert_eq!(
             render_usage_error("unknown command 'deploy'", None),
-            "blanket: error: unknown command 'deploy'\nRun 'blanket --help' for usage.\n"
+            "tog: error: unknown command 'deploy'\nRun 'tog --help' for usage.\n"
         );
         assert_eq!(message(&["--fresh", "sync"]), "unknown option '--fresh'");
         assert_eq!(
@@ -1028,7 +1028,7 @@ mod tests {
             &["version"],
             &["help", "version"],
         ] {
-            assert_eq!(printed(words), format!("blanket {VERSION}\n"), "{words:?}");
+            assert_eq!(printed(words), format!("tog {VERSION}\n"), "{words:?}");
         }
         for spec in COMMANDS {
             assert_eq!(
@@ -1082,12 +1082,12 @@ mod tests {
         assert_eq!(message(&["sync", "now"]), "sync: unexpected argument 'now'");
         assert_eq!(
             parse(&argv(&["sync", "now"])).unwrap_err().render(),
-            "blanket: error: sync: unexpected argument 'now'\nRun 'blanket help sync' for usage.\n"
+            "tog: error: sync: unexpected argument 'now'\nRun 'tog help sync' for usage.\n"
         );
     }
 
     #[test]
-    fn fmt_grammar_separates_blanket_flags_from_tool_args() {
+    fn fmt_grammar_separates_tog_flags_from_tool_args() {
         assert_eq!(
             command(&["fmt"]),
             Command::Fmt {
@@ -1195,7 +1195,7 @@ mod tests {
             message(&["audit", "python"]),
             "audit: unexpected argument 'python'"
         );
-        assert!(printed(&["audit", "-h"]).contains("blanket audit [--policy <file>] [--json]"));
+        assert!(printed(&["audit", "-h"]).contains("tog audit [--policy <file>] [--json]"));
         assert_eq!(
             command(&["doctor", "--json"]),
             Command::Doctor { json: true }
@@ -1214,7 +1214,7 @@ mod tests {
                 json: true
             }
         );
-        // The row `blanket fmt` makes `ls` print is a word `ls` accepts.
+        // The row `tog fmt` makes `ls` print is a word `ls` accepts.
         assert_eq!(
             command(&["ls", "rustfmt"]),
             Command::Ls {
@@ -1477,7 +1477,7 @@ mod tests {
         );
         assert_eq!(
             message(&["gc", "--forget", "nope"]),
-            "'nope' is not a root key: expected 40 hex characters (`blanket store roots` \
+            "'nope' is not a root key: expected 40 hex characters (`tog store roots` \
              prints keys)"
         );
         assert_eq!(message(&["gc", "--keep-days"]), "--keep-days needs <n>");
@@ -1577,7 +1577,7 @@ mod tests {
             message(&["--quite", "plan"]),
             "unknown option '--quite'; did you mean '--quiet'?"
         );
-        assert_eq!(printed(&["-V"]), format!("blanket {VERSION}\n"));
+        assert_eq!(printed(&["-V"]), format!("tog {VERSION}\n"));
         assert!(run(&["-v", "plan"]).options.verbose);
         assert_eq!(message(&["sync", "-q"]), "sync: unknown option '-q'");
         assert_eq!(

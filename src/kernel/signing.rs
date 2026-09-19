@@ -1,6 +1,6 @@
 //! Closure signing (kernel layer): Ed25519 key files, the canonical bytes a
 //! signature covers, sign and verify, and the trusted-key set the policy
-//! chain accumulates for `blanket audit`.
+//! chain accumulates for `tog audit`.
 //!
 //! A signature proves that a closure envelope was written by a sync holding
 //! a particular private key. It covers the envelope parsed as a JSON value
@@ -388,7 +388,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-signing-{label}-{}-{}",
+                "tog-signing-{label}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

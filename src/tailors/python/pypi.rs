@@ -99,7 +99,7 @@ pub struct Requirement {
 }
 
 /// Parse `name @ git+URL@<40-hex commit>`, optionally with
-/// `#subdirectory=path`. Anything less pinned is not a requirement blanket can
+/// `#subdirectory=path`. Anything less pinned is not a requirement tog can
 /// lock, and the caller reports it.
 pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
     let (name, reference) = spec.split_once('@')?;
@@ -224,7 +224,7 @@ pub fn is_requirement_option(line: &str) -> bool {
         || first.starts_with("--constraint=")
 }
 
-/// Index configuration is deliberately data-only: blanket reports it as an
+/// Index configuration is deliberately data-only: tog reports it as an
 /// unattested input and never follows the configured index during locking.
 pub fn unattested_index_options(text: &str) -> Vec<String> {
     logical_lines(text)
@@ -289,7 +289,7 @@ pub fn skippable_specs(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether a requirement is project-local or a direct reference that blanket
+/// Whether a requirement is project-local or a direct reference that tog
 /// cannot turn into a verified registry package.
 pub fn is_skippable_spec(spec: &str) -> bool {
     let spec = spec.trim();
@@ -400,7 +400,7 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
         }
         if hashes.is_empty() {
             return Err(err(format!(
-                "{spec}: blanket requires hash-pinned requirements; \
+                "{spec}: tog requires hash-pinned requirements; \
                  generate with: uv pip compile --generate-hashes"
             )));
         }

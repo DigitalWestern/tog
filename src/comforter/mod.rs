@@ -3,7 +3,7 @@
 //!
 //! A closure records what one sync realized for one ecosystem, plus the store
 //! references that protect it. Publication registers the durable root record
-//! first and renames the visible `.blanket/closures/<ecosystem>.json` after,
+//! first and renames the visible `.tog/closures/<ecosystem>.json` after,
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod status;
@@ -24,13 +24,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static CLOSURE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The closure-signing key for this invocation: `Some(None)` once preflight
-/// found no `BLANKET_SIGNING_KEY`, `Some(Some(key))` once it loaded one,
+/// found no `TOG_SIGNING_KEY`, `Some(Some(key))` once it loaded one,
 /// `None` before preflight ran. Every closure a command writes is signed
 /// with this one key or none: there is no per-write choice.
 static SIGNING_KEY: std::sync::Mutex<Option<Option<std::sync::Arc<SigningKey>>>> =
     std::sync::Mutex::new(None);
 
-/// Load the closure-signing key named by `BLANKET_SIGNING_KEY`, once, before
+/// Load the closure-signing key named by `TOG_SIGNING_KEY`, once, before
 /// any store is opened or closure written. An unset variable means every
 /// closure is written unsigned. A set variable, including an empty one,
 /// must name a loadable key file (regular, mode 0600, one `ed25519:<64
@@ -43,13 +43,13 @@ pub fn init_signing() -> io::Result<()> {
     if slot.is_some() {
         return Ok(());
     }
-    let key = match std::env::var_os("BLANKET_SIGNING_KEY") {
+    let key = match std::env::var_os("TOG_SIGNING_KEY") {
         None => None,
         Some(path) => Some(std::sync::Arc::new(
             SigningKey::load(Path::new(&path)).map_err(|error| {
                 io::Error::new(
                     error.kind(),
-                    format!("BLANKET_SIGNING_KEY: {error}; unset it to write unsigned closures"),
+                    format!("TOG_SIGNING_KEY: {error}; unset it to write unsigned closures"),
                 )
             })?,
         )),
@@ -59,7 +59,7 @@ pub fn init_signing() -> io::Result<()> {
 }
 
 /// The loaded signing key, or `None` when none is configured (or preflight
-/// never ran, in which case closures are written unsigned and `blanket
+/// never ran, in which case closures are written unsigned and `tog
 /// audit` reports them outdated).
 pub fn signing_key() -> Option<std::sync::Arc<SigningKey>> {
     SIGNING_KEY
@@ -200,7 +200,7 @@ impl ClosureRefs {
 }
 
 /// Common closure envelope: every tailor's provenance lands at
-/// .blanket/closures/<ecosystem>.json with a shared outer shape; the `body`
+/// .tog/closures/<ecosystem>.json with a shared outer shape; the `body`
 /// stays tailor-owned. Written atomically. Store ownership and exact
 /// references are mandatory for production publication.
 pub fn write_closure(
@@ -345,8 +345,8 @@ fn write_closure_inner(
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
     Store::check_registrable(&project_dir)?;
-    let blanket_dir = project_dir.join(".blanket");
-    let closures_dir = blanket_dir.join("closures");
+    let tog_dir = project_dir.join(".tog");
+    let closures_dir = tog_dir.join("closures");
     // Keep the per-project transaction lock through both durable root
     // publication and the visible closure rename. A second producer cannot
     // observe a root from one generation paired with a closure from another.
@@ -361,14 +361,14 @@ fn write_closure_inner(
     // Path-based create/open/rename would let a swapped parent redirect a
     // closure write after the lexical containment checks below.
     let project_fd = open_directory(&project_dir, "project directory")?;
-    mkdir_at(project_fd.as_raw_fd(), ".blanket", &blanket_dir)?;
-    let blanket_fd = open_directory_at(project_fd.as_raw_fd(), ".blanket", &blanket_dir)?;
-    mkdir_at(blanket_fd.as_raw_fd(), "closures", &closures_dir)?;
-    let closures_fd = open_directory_at(blanket_fd.as_raw_fd(), "closures", &closures_dir)?;
+    mkdir_at(project_fd.as_raw_fd(), ".tog", &tog_dir)?;
+    let tog_fd = open_directory_at(project_fd.as_raw_fd(), ".tog", &tog_dir)?;
+    mkdir_at(tog_fd.as_raw_fd(), "closures", &closures_dir)?;
+    let closures_fd = open_directory_at(tog_fd.as_raw_fd(), "closures", &closures_dir)?;
 
     for (path, label) in [
-        (&blanket_dir, ".blanket"),
-        (&closures_dir, ".blanket/closures"),
+        (&tog_dir, ".tog"),
+        (&closures_dir, ".tog/closures"),
     ] {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
@@ -441,7 +441,7 @@ fn write_closure_inner(
     });
     // Sign the value that is about to be pretty-printed: the signature
     // covers every envelope field and the whole body, exceptions included.
-    // `blanket audit` rebuilds the same canonical bytes from the file.
+    // `tog audit` rebuilds the same canonical bytes from the file.
     if let Some(key) = signing_key() {
         key.sign(&mut envelope)?;
     }
@@ -602,7 +602,7 @@ pub(crate) fn replace_project_symlink(path: &Path, target: &Path, label: &str) -
     }
     let counter = CLOSURE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temporary = format!(
-        ".{}.blanket-swap.{}.{}.{}",
+        ".{}.tog-swap.{}.{}.{}",
         destination.to_string_lossy(),
         std::process::id(),
         std::time::SystemTime::now()
@@ -820,19 +820,19 @@ pub fn legacy_toolchain_evidence(
     evidence
 }
 
-/// Read a tailor's closure body back (for `blanket run` and friends).
+/// Read a tailor's closure body back (for `tog run` and friends).
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
-    let path = project_dir.join(format!(".blanket/closures/{ecosystem}.json"));
+    let path = project_dir.join(format!(".tog/closures/{ecosystem}.json"));
     let text = fs::read_to_string(&path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("read {}: {e}; run `blanket sync` first", path.display()),
+            format!("read {}: {e}; run `tog sync` first", path.display()),
         )
     })?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse {}: {e}; run `blanket sync` first", path.display()),
+            format!("parse {}: {e}; run `tog sync` first", path.display()),
         )
     })?;
     if let Some(recorded) = v["platform"].as_str() {
@@ -841,7 +841,7 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "{}: closure was projected on {recorded}; this host is {}; run `blanket sync` here",
+                    "{}: closure was projected on {recorded}; this host is {}; run `tog sync` here",
                     path.display(),
                     host.triple()
                 ),
@@ -855,7 +855,7 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{}: unknown closure schema/ecosystem; re-run `blanket sync`",
+                "{}: unknown closure schema/ecosystem; re-run `tog sync`",
                 path.display()
             ),
         ));
@@ -957,7 +957,7 @@ fn restore_write_bits(path: &Path) -> io::Result<()> {
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded
 /// path must be exactly the store's path for that id. A project-editable
-/// closure must never inject arbitrary executable paths into `blanket run`.
+/// closure must never inject arbitrary executable paths into `tog run`.
 pub fn closure_object(
     store: &crate::kernel::store::Store,
     closure: &serde_json::Value,
@@ -967,7 +967,7 @@ pub fn closure_object(
     let bad = |msg: &str| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("closure {key}: {msg}; run `blanket sync` first"),
+            format!("closure {key}: {msg}; run `tog sync` first"),
         )
     };
     let id = closure[key]["id"]
@@ -993,9 +993,9 @@ pub fn closure_object(
     Ok(path)
 }
 
-/// If `path` is a real directory (a pre-blanket install), move it out of the
-/// project into `<blanket-home>/backups/` so no tool (tsc, vitest, eslint)
-/// ever crawls it again. blanket-home is derived from the env object's store
+/// If `path` is a real directory (a pre-tog install), move it out of the
+/// project into `<tog-home>/backups/` so no tool (tsc, vitest, eslint)
+/// ever crawls it again. tog-home is derived from the env object's store
 /// (`<store>/objects/<id>` -> store parent), so tests with temp stores back
 /// up into the temp dir, never the real one. Returns the backup location.
 pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf>> {
@@ -1006,8 +1006,8 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
     let home = env_obj
         .parent() // objects/
         .and_then(|p| p.parent()) // store root
-        .and_then(|p| p.parent()) // blanket home
-        .ok_or_else(|| io::Error::other("cannot locate blanket home for backup"))?;
+        .and_then(|p| p.parent()) // tog home
+        .ok_or_else(|| io::Error::other("cannot locate tog home for backup"))?;
     let backups = home.join("backups");
     fs::create_dir_all(&backups)?;
     let project = path
@@ -1035,7 +1035,7 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
         )
     })?;
     eprintln!(
-        "blanket: moved existing {} to {} (delete it once you're happy)",
+        "tog: moved existing {} to {} (delete it once you're happy)",
         path.display(),
         dest.display()
     );
@@ -1044,7 +1044,7 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
 
 /// Store-owned backup variant used by new projections: it moves the
 /// directory into `<store>/backups`, which a root record can protect, rather
-/// than the `<blanket-home>/backups` of the legacy helper above.
+/// than the `<tog-home>/backups` of the legacy helper above.
 pub fn backup_real_dir_for_store(path: &Path, store: &Store) -> io::Result<Option<PathBuf>> {
     let Some(destination) = reserve_backup_real_dir_for_store(path, store)? else {
         return Ok(None);
@@ -1194,7 +1194,7 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
     source_dir.sync_all()?;
     backups_dir.sync_all()?;
     eprintln!(
-        "blanket: moved existing {} to {} (delete it once you're happy)",
+        "tog: moved existing {} to {} (delete it once you're happy)",
         path.display(),
         destination.display()
     );
@@ -1256,7 +1256,7 @@ pub(crate) fn store_from_object_path(path: &Path) -> Option<Store> {
 }
 
 /// A project file the plan was computed from, recorded in the closure so
-/// `blanket status` can tell whether the projection is still current
+/// `tog status` can tell whether the projection is still current
 /// without re-planning. Additive closure field (`inputs`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InputRecord {
@@ -1306,7 +1306,7 @@ mod closure_platform_tests {
 
     fn test_store(label: &str) -> Store {
         let root = std::env::temp_dir().join(format!(
-            "blanket-project-identity-{label}-{}",
+            "tog-project-identity-{label}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -1413,7 +1413,7 @@ mod closure_platform_tests {
     }
 
     fn write_closure(dir: &Path, platform: Option<&str>) {
-        fs::create_dir_all(dir.join(".blanket/closures")).unwrap();
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
         let mut v = serde_json::json!({
             "schema": "closure/1",
             "ecosystem": "python",
@@ -1422,14 +1422,14 @@ mod closure_platform_tests {
         if let Some(platform) = platform {
             v["platform"] = serde_json::Value::String(platform.to_string());
         }
-        fs::write(dir.join(".blanket/closures/python.json"), v.to_string()).unwrap();
+        fs::write(dir.join(".tog/closures/python.json"), v.to_string()).unwrap();
     }
 
     #[test]
     fn closures_are_refused_for_a_project_that_cannot_be_registered() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let dir = std::env::temp_dir().join(format!("blanket-unrecordable-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tog-unrecordable-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let project = dir.join("project ");
         fs::create_dir_all(&project).unwrap();
@@ -1449,7 +1449,7 @@ mod closure_platform_tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
-            !project.join(".blanket").exists(),
+            !project.join(".tog").exists(),
             "wrote into a project no record can name"
         );
         attribution.finish(false).unwrap();
@@ -1463,7 +1463,7 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let host = Platform::host().unwrap();
         let foreign = Platform::ALL.iter().copied().find(|p| *p != host).unwrap();
-        let dir = std::env::temp_dir().join(format!("blanket-closure-plat-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tog-closure-plat-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
         write_closure(&dir, Some(foreign.triple()));
@@ -1517,7 +1517,7 @@ mod closure_platform_tests {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let project = std::env::temp_dir().join(format!(
-            "blanket-closure-durable-{}-{}",
+            "tog-closure-durable-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1551,7 +1551,7 @@ mod closure_platform_tests {
         drop(activity);
 
         // The closure envelope is provenance...
-        assert!(project.join(".blanket/closures/python.json").is_file());
+        assert!(project.join(".tog/closures/python.json").is_file());
         // ...but the durable root record is what protects the object, and it
         // must name exactly the references the producer supplied.
         let roots = store.roots().unwrap();
@@ -1576,7 +1576,7 @@ mod closure_platform_tests {
         )
         .unwrap();
         let project = std::env::temp_dir().join(format!(
-            "blanket-closure-non-object-{}-{}",
+            "tog-closure-non-object-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1600,7 +1600,7 @@ mod closure_platform_tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(crate::kernel::policy::pending().len(), 1);
-        assert!(!project.join(".blanket").exists());
+        assert!(!project.join(".tog").exists());
         attribution.discard();
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(store.root);
@@ -1623,7 +1623,7 @@ mod closure_platform_tests {
         )
         .unwrap();
         let project = std::env::temp_dir().join(format!(
-            "blanket-closure-write-fails-{}-{}",
+            "tog-closure-write-fails-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1631,7 +1631,7 @@ mod closure_platform_tests {
                 .as_nanos()
         ));
         let store = test_store("closure-write-fails");
-        let closures = project.join(".blanket/closures");
+        let closures = project.join(".tog/closures");
         // A directory squatting on the closure's destination name makes the
         // final rename fail, after the claim and after the temp file was
         // written. Works for any user on Linux and macOS.
@@ -1676,7 +1676,7 @@ mod closure_platform_tests {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let project = std::env::temp_dir().join(format!(
-            "blanket-closure-normal-{}-{}",
+            "tog-closure-normal-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1696,7 +1696,7 @@ mod closure_platform_tests {
         attribution.finish(true).unwrap();
 
         let closure: serde_json::Value = serde_json::from_slice(
-            &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+            &fs::read(project.join(".tog/closures/python.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(closure["ecosystem"], "python");
@@ -1704,7 +1704,7 @@ mod closure_platform_tests {
             closure["body"]["store_object"].as_str(),
             Some(store.object_path("closure-test").to_str().unwrap())
         );
-        assert!(project.join(".blanket/closures").is_dir());
+        assert!(project.join(".tog/closures").is_dir());
 
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(store.root);
@@ -1717,7 +1717,7 @@ mod closure_platform_tests {
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let project = std::env::temp_dir().join(format!(
-            "blanket-closure-signed-{}-{}",
+            "tog-closure-signed-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1742,7 +1742,7 @@ mod closure_platform_tests {
         written.unwrap();
         attribution.finish(true).unwrap();
         let closure: serde_json::Value = serde_json::from_slice(
-            &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+            &fs::read(project.join(".tog/closures/python.json")).unwrap(),
         )
         .unwrap();
         // The signature covers the envelope as written, exceptions included.
@@ -1774,7 +1774,7 @@ mod closure_platform_tests {
         .unwrap();
         attribution.finish(true).unwrap();
         let closure: serde_json::Value = serde_json::from_slice(
-            &fs::read(project.join(".blanket/closures/python.json")).unwrap(),
+            &fs::read(project.join(".tog/closures/python.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1786,14 +1786,14 @@ mod closure_platform_tests {
     }
 
     #[test]
-    fn write_closure_rejects_symlinked_blanket_without_creating_outside_closures() {
+    fn write_closure_rejects_symlinked_tog_without_creating_outside_closures() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let root = std::env::temp_dir().join(format!(
-            "blanket-closure-blanket-symlink-{}-{}",
+            "tog-closure-tog-symlink-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1802,10 +1802,10 @@ mod closure_platform_tests {
         ));
         let project = root.join("project");
         let outside = root.join("outside");
-        let store = test_store("closure-blanket-symlink");
+        let store = test_store("closure-tog-symlink");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, project.join(".blanket")).unwrap();
+        symlink(&outside, project.join(".tog")).unwrap();
 
         let error = super::write_closure_legacy(
             &project,
@@ -1814,7 +1814,7 @@ mod closure_platform_tests {
             &mut attribution,
         )
         .unwrap_err();
-        assert!(error.to_string().contains(".blanket"), "{error}");
+        assert!(error.to_string().contains(".tog"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
@@ -1831,7 +1831,7 @@ mod closure_platform_tests {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let root = std::env::temp_dir().join(format!(
-            "blanket-closure-closures-symlink-{}-{}",
+            "tog-closure-closures-symlink-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1841,9 +1841,9 @@ mod closure_platform_tests {
         let project = root.join("project");
         let outside = root.join("outside");
         let store = test_store("closure-closures-symlink");
-        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, project.join(".blanket/closures")).unwrap();
+        symlink(&outside, project.join(".tog/closures")).unwrap();
 
         let error = super::write_closure_legacy(
             &project,
@@ -1852,7 +1852,7 @@ mod closure_platform_tests {
             &mut attribution,
         )
         .unwrap_err();
-        assert!(error.to_string().contains(".blanket/closures"), "{error}");
+        assert!(error.to_string().contains(".tog/closures"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 

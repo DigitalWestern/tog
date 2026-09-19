@@ -1,4 +1,4 @@
-//! `blanket gc`: store garbage collection and root-registry maintenance.
+//! `tog gc`: store garbage collection and root-registry maintenance.
 //! Kernel only; works without a valid host platform.
 
 use crate::cli;
@@ -25,7 +25,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     if args.dry_run && !args.register.is_empty() {
         return Err(io::Error::other(
             "refusing to combine --dry-run with --register: registering writes a record and a \
-             dry run writes nothing. Register the project, then preview with `blanket gc \
+             dry run writes nothing. Register the project, then preview with `tog gc \
              --dry-run`",
         ));
     }
@@ -35,10 +35,10 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         // must be able to tell "migrated" from "never ran".
         if !args.forget.is_empty() || args.migrate_metadata {
             return Err(io::Error::other(
-                "a Blanket job is using this store; retry when it finishes",
+                "a Tog job is using this store; retry when it finishes",
             ));
         }
-        writeln!(stdout, "cleanup skipped: a Blanket job is using this store")?;
+        writeln!(stdout, "cleanup skipped: a Tog job is using this store")?;
         return Ok(());
     };
     if args.migrate_metadata {
@@ -87,13 +87,13 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
             let record = store.root_record_from_project(project)?;
             writeln!(
                 stdout,
-                "blanket: would register root {} ({} objects)",
+                "tog: would register root {} ({} objects)",
                 record.project_path.display(),
                 record.objects.len()
             )?;
         } else {
             let entry = store.register_root_from_project_with_activity(&activity, project)?;
-            writeln!(stdout, "blanket: registered root {}", entry.path.display())?;
+            writeln!(stdout, "tog: registered root {}", entry.path.display())?;
         }
     }
     for key in &args.forget {
@@ -101,16 +101,16 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
             let entry = store.lookup_root(key)?;
             writeln!(
                 stdout,
-                "blanket: would forget root {key} ({})",
+                "tog: would forget root {key} ({})",
                 entry.describe()
             )?;
         } else {
             let entry = store.forget_root_with_activity(&activity, key)?;
-            writeln!(stdout, "blanket: forgot root {key} ({})", entry.describe())?;
+            writeln!(stdout, "tog: forgot root {key} ({})", entry.describe())?;
         }
     }
     // Forgetting is the explicit recovery action, not an implicit sweep. A
-    // later `blanket gc` may collect objects that are no longer protected;
+    // later `tog gc` may collect objects that are no longer protected;
     // this invocation must only change the requested registry records.
     if !options.dry_run && !args.forget.is_empty() {
         return Ok(());
@@ -120,7 +120,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     let verb = if dry_run { "would free" } else { "freed" };
     writeln!(
         stdout,
-        "blanket: gc {verb} {} MB ({} objects, {} cached artifacts)",
+        "tog: gc {verb} {} MB ({} objects, {} cached artifacts)",
         report.freed_bytes / (1024 * 1024),
         report.objects,
         report.cached_artifacts

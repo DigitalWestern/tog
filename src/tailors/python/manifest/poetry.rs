@@ -8,7 +8,7 @@ pub(super) fn poetry_manifest(
     dir: &Path,
     value: &toml::Value,
     _source: &str,
-    cfg: &BlanketPythonConfig,
+    cfg: &TogPythonConfig,
     python_version: &str,
 ) -> io::Result<Manifest> {
     let poetry = value
@@ -393,7 +393,7 @@ pub(super) fn poetry_lock_requirements(
     platform: Platform,
     pyproject: &toml::Value,
     lock: &toml::Value,
-    cfg: &BlanketPythonConfig,
+    cfg: &TogPythonConfig,
     python_version: &str,
 ) -> io::Result<Vec<String>> {
     let packages = lock
@@ -1222,7 +1222,7 @@ pub(super) fn check_poetry_content_hash(
     let json = python_json_spacing(&compact).into_bytes();
     let actual = hex::encode(Sha256::digest(json));
     if actual != expected {
-        eprintln!("blanket: warning: poetry.lock content-hash disagrees with pyproject.toml; preferring the lock");
+        eprintln!("tog: warning: poetry.lock content-hash disagrees with pyproject.toml; preferring the lock");
         crate::kernel::policy::record(
             crate::kernel::policy::LOCK_DISAGREEMENT,
             "poetry.lock",

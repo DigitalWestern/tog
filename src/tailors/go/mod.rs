@@ -1,9 +1,9 @@
-//! The Go tailor: module closure via the pinned Go toolchain, blanket-owned
+//! The Go tailor: module closure via the pinned Go toolchain, tog-owned
 //! verification (dirhash h1 + raw sha256), immutable GOMODCACHE objects.
 //!
 //! go.sum is an authentication ledger, not a lock graph: the authoritative
 //! closure comes from `go mod download -json all` run by the
-//! STORE Go in a disposable copy. Blanket then independently re-verifies
+//! STORE Go in a disposable copy. Tog then independently re-verifies
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
 
@@ -274,7 +274,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
         .map(|(path, _)| path)
 }
 
-/// The forced environment for EVERY blanket-controlled go invocation.
+/// The forced environment for EVERY tog-controlled go invocation.
 /// Real process env, never a GOENV file: GOTOOLCHAIN=local stops silent
 /// toolchain swaps, GOROOT pins the stdlib, GOWORK/GOENV=off close the
 /// config side doors.
@@ -310,7 +310,7 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
     env
 }
 
-/// Run the store Go for a delegated edit (`blanket add` and friends).
+/// Run the store Go for a delegated edit (`tog add` and friends).
 pub(crate) fn run_checked(
     store: &Store,
     go_obj: &Path,
@@ -524,7 +524,7 @@ pub fn reject_local_replaces(gomod: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// A plan (fresh or loaded from the .blanket cache) is untrusted input:
+/// A plan (fresh or loaded from the .tog cache) is untrusted input:
 /// every field that becomes a cache address or identity input is validated.
 fn validate_plan(plan: &GoPlan) -> io::Result<()> {
     let hex_ok = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
@@ -576,7 +576,7 @@ pub fn module_path(gomod: &str) -> io::Result<String> {
 }
 
 /// Schema tag baked into the plan-cache key: a bump makes every existing
-/// `.blanket/go-plan.json` miss instead of being read under new rules.
+/// `.tog/go-plan.json` miss instead of being read under new rules.
 const PLANNER_SCHEMA: &str = "go-planner/2";
 
 /// The plan-cache key. The tidy gate's inputs are exactly go.mod + go.sum +
@@ -633,7 +633,7 @@ fn tidy_gate(
     }
     // Out-of-sync manifest: run the ecosystem's resolver, the same
     // delegated mutation as uv pip compile / cargo generate-lockfile.
-    eprintln!("blanket: go.mod/go.sum need updating; resolving with the store go mod tidy...");
+    eprintln!("tog: go.mod/go.sum need updating; resolving with the store go mod tidy...");
     let out = run_go(
         store,
         go_obj,
@@ -672,7 +672,7 @@ fn download_closure(
     if !gosum.is_empty() {
         fs::write(work.join("go.sum"), gosum)?;
     }
-    eprintln!("blanket: computing Go module closure with the store toolchain...");
+    eprintln!("tog: computing Go module closure with the store toolchain...");
     run_go(
         store,
         go_obj,
@@ -713,7 +713,7 @@ fn closure_from_download(
     Ok(modules)
 }
 
-/// Blanket-owned verification of one download entry: recompute both
+/// Tog-owned verification of one download entry: recompute both
 /// dirhashes, check the .info's claim, and insert the bytes into the cache.
 /// `Ok(None)` means "outside the closure" — the main module (no artifacts)
 /// or a build-GRAPH-only module whose zip sum the tidied go.sum omits.
@@ -761,11 +761,11 @@ fn verified_module(
     )) {
         return Err(err(format!(
             "{}@{}: go.mod sum is not in the project's go.sum \
-             ledger; refusing (run `blanket run go mod tidy`)",
+             ledger; refusing (run `tog run go mod tidy`)",
             entry.path, entry.version
         )));
     }
-    // Blanket-owned verification: recompute both dirhashes.
+    // Tog-owned verification: recompute both dirhashes.
     let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
     if got_h1 != *sum {
         return Err(err(format!(
@@ -812,8 +812,8 @@ fn verified_module(
 
 /// Plan the module closure. Network-permitted delegation to the store Go in
 /// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
-/// by blanket-owned verification of every artifact. Cached in
-/// .blanket/go-plan.json keyed by go.mod+go.sum content.
+/// by tog-owned verification of every artifact. Cached in
+/// .tog/go-plan.json keyed by go.mod+go.sum content.
 pub fn plan_go(
     store: &Store,
     platform: Platform,
@@ -829,7 +829,7 @@ pub fn plan_go(
 
     let src_digest = source_digest(project_dir)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
-    let cache_path = project_dir.join(".blanket/go-plan.json");
+    let cache_path = project_dir.join(".tog/go-plan.json");
     if let Some(plan) = cached_plan(&cache_path, &input_hash)? {
         return Ok(plan);
     }
@@ -871,10 +871,10 @@ pub fn plan_go(
     let now_sum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
     if now_mod != gomod || now_sum != gosum {
         return Err(err(
-            "go.mod/go.sum changed while planning; re-run blanket sync",
+            "go.mod/go.sum changed while planning; re-run tog sync",
         ));
     }
-    fs::create_dir_all(project_dir.join(".blanket"))?;
+    fs::create_dir_all(project_dir.join(".tog"))?;
     fs::write(
         &cache_path,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -887,7 +887,7 @@ pub fn plan_go(
 
 /// Digest of the project's .go sources (the tidy gate's third input).
 /// Sorted (relpath, sha256) pairs; names starting with `.` or `_` (so
-/// `.blanket` too) are skipped.
+/// `.tog` too) are skipped.
 fn source_digest(project_dir: &Path) -> io::Result<String> {
     let mut files: Vec<(String, String)> = Vec::new();
     fn walk(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
@@ -954,7 +954,7 @@ pub fn escape_go_path(s: &str) -> io::Result<String> {
 }
 
 /// Stage the cache/download skeleton for a plan (zips, .mod, .info,
-/// blanket-verified .ziphash) from the verified artifact cache.
+/// tog-verified .ziphash) from the verified artifact cache.
 pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> io::Result<()> {
     validate_plan(plan)?;
     for m in &plan.modules {
@@ -1050,7 +1050,7 @@ pub fn realize_modcache(
     // its full zip validation while materializing <module>@<version>/ dirs.
     if !plan.modules.is_empty() {
         let scratch = store.stage()?;
-        let mut gomod = format!("module blanket.invalid/extract\n\ngo {}\n\nrequire (\n", {
+        let mut gomod = format!("module tog.invalid/extract\n\ngo {}\n\nrequire (\n", {
             // go directive: major.minor only
             let mut it = plan.go_version.split('.');
             format!("{}.{}", it.next().unwrap_or("1"), it.next().unwrap_or("0"))
@@ -1100,7 +1100,7 @@ pub fn realize_modcache(
 }
 
 /// Project provenance (closure envelope). Go needs no wrapper or config
-/// projection: enforcement is process env, set by blanket run/build.
+/// projection: enforcement is process env, set by tog run/build.
 pub fn project_go_env(
     project_dir: &Path,
     go_obj: &Path,
@@ -1112,7 +1112,7 @@ pub fn project_go_env(
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&go_obj)
-        .ok_or_else(|| err("Go object is not in a Blanket store"))?;
+        .ok_or_else(|| err("Go object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
@@ -1141,7 +1141,7 @@ pub fn project_go_env(
 }
 
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
-/// staged in scratch and moved into the project by blanket afterwards.
+/// staged in scratch and moved into the project by tog afterwards.
 pub fn build_sandboxed(
     platform: Platform,
     project_dir: &Path,
@@ -1169,7 +1169,7 @@ pub fn build_sandboxed(
             .any(|f| norm == *f || norm.starts_with(&format!("{f}=")))
         {
             return Err(err(format!(
-                "{arg}: this flag is managed by blanket (module mode, output \
+                "{arg}: this flag is managed by tog (module mode, output \
                  staging, and tool execution are enforced)"
             )));
         }
@@ -1236,7 +1236,7 @@ pub fn build_sandboxed(
             let dest = project_dir.join(entry.file_name());
             fs::rename(entry.path(), &dest)
                 .or_else(|_| fs::copy(entry.path(), &dest).map(|_| ()))?;
-            eprintln!("blanket: built {}", dest.display());
+            eprintln!("tog: built {}", dest.display());
         }
         Ok(())
     });
@@ -1310,7 +1310,7 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "blanket-go-test-{}-{}",
+                "tog-go-test-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1565,7 +1565,7 @@ mod tests {
     #[test]
     fn go_archive_layout_strips_only_the_go_root() {
         let temp = std::env::temp_dir().join(format!(
-            "blanket-go-layout-{}-{}",
+            "tog-go-layout-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1674,7 +1674,7 @@ mod tests {
             modules: vec![base.clone()],
         };
         assert!(validate_plan(&ok_plan).is_ok());
-        // Path-traversal "sha256" from a tampered .blanket/go-plan.json.
+        // Path-traversal "sha256" from a tampered .tog/go-plan.json.
         let mut evil = base.clone();
         evil.zip_sha256 = "../../objects/x".into();
         assert!(validate_plan(&GoPlan {
@@ -1715,7 +1715,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-            assert!(e.contains("managed by blanket"), "{bad}: {e}");
+            assert!(e.contains("managed by tog"), "{bad}: {e}");
         }
     }
 
@@ -1728,7 +1728,7 @@ mod tests {
     #[test]
     fn modcache_skeleton_layout() {
         let temp = std::env::temp_dir().join(format!(
-            "blanket-go-skel-{}-{}",
+            "tog-go-skel-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1739,9 +1739,9 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("BLANKET_STORE", temp.join("store"));
+        std::env::set_var("TOG_STORE", temp.join("store"));
         let store = Store::open().unwrap();
-        std::env::remove_var("BLANKET_STORE");
+        std::env::remove_var("TOG_STORE");
         // Real fixture artifacts through the verified cache.
         let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
         let (zip_hash, _) = cache_insert(&store, &fix.join("quote-v1.5.2.zip")).unwrap();
@@ -1819,9 +1819,9 @@ mod tests {
     }
 
     fn write_plan_cache(project: &Path, input_hash: &str, plan: &GoPlan) {
-        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
         fs::write(
-            project.join(".blanket/go-plan.json"),
+            project.join(".tog/go-plan.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "input_hash": input_hash,
                 "plan": plan,

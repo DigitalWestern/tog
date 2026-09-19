@@ -1,22 +1,22 @@
 //! Acceptance: a build that attempts undeclared network access MUST fail.
 //!
 //! Heavy (realizes CPython + build toolchain on first run), so #[ignore]d;
-//! tests/acceptance.sh runs it with a shared BLANKET_STORE:
+//! tests/acceptance.sh runs it with a shared TOG_STORE:
 //!     cargo test --test sandbox_deny -- --ignored
 
-use blanket::kernel::platform::Platform;
-use blanket::kernel::sandbox::{run_build_spec, BuildSpec};
-use blanket::kernel::store::Store;
-use blanket::kernel::types::*;
-use blanket::tailors::python::build;
+use tog::kernel::platform::Platform;
+use tog::kernel::sandbox::{run_build_spec, BuildSpec};
+use tog::kernel::store::Store;
+use tog::kernel::types::*;
+use tog::tailors::python::build;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// `BLANKET_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
+/// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
 /// skip into a panic so CI cannot report a skipped check as passed.
 fn required_sandbox_tests() -> bool {
-    matches!(std::env::var_os("BLANKET_SANDBOX_TESTS"), Some(value) if !value.is_empty())
+    matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
 }
 
 fn skip_or_panic(test_name: &str, reason: impl std::fmt::Display) {
@@ -127,7 +127,7 @@ fn bwrap_contract() {
     }
 
     let root =
-        std::env::temp_dir().join(format!("blanket-sandbox-contract-{}", std::process::id()));
+        std::env::temp_dir().join(format!("tog-sandbox-contract-{}", std::process::id()));
     std::fs::create_dir(&root).expect("create contract temp directory");
     let scratch = root.join("scratch");
     let writable = root.join("writable");

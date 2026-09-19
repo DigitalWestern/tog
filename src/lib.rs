@@ -1,4 +1,4 @@
-//! blanket: a universal package-manager kernel.
+//! tog: a universal package-manager kernel.
 //!
 //! Layers point one way, `commands → tailors → comforter → kernel`:
 //! `kernel/` is the ecosystem-agnostic core, `tailors/` holds one adapter

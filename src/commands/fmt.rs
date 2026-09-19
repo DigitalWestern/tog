@@ -1,4 +1,4 @@
-//! `blanket fmt`: the pinned formatter of the one ecosystem that has one
+//! `tog fmt`: the pinned formatter of the one ecosystem that has one
 //! (Rust today), or a delegated package.json `fmt` script. The formatter
 //! itself is `Tailor::fmt`; this file only decides which of the two runs.
 
@@ -22,12 +22,12 @@ pub fn run(
     let cwd = project_dir();
     policy::init(&cwd, false)?;
 
-    // `--eco` is blanket's own ecosystem selector, not something a script can
+    // `--eco` is tog's own ecosystem selector, not something a script can
     // read: when it is given explicitly it dispatches to that ecosystem and
     // the package.json script is skipped, so `--eco rust` is a real escape
     // hatch in a polyglot root whose package.json also has a `fmt` script.
     // Without it, a script named fmt wins over the named command, matching
-    // `blanket run fmt`. Preserve the command's user arguments for the script;
+    // `tog run fmt`. Preserve the command's user arguments for the script;
     // `--eco` is never appended to a delegated command line.
     let formatter: &dyn Tailor = match ecosystem {
         Some(ecosystem) => match tailors::registry()
@@ -59,10 +59,10 @@ pub fn run(
                 // `run` only executes package scripts in a projected
                 // environment. Preserve that early, store-free refusal for a
                 // package that has a script but has never been synced.
-                if !script_root.join(".blanket/closures").is_dir() {
+                if !script_root.join(".tog/closures").is_dir() {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        "no environment projected here for command 'fmt'; run `blanket sync` first",
+                        "no environment projected here for command 'fmt'; run `tog sync` first",
                     ));
                 }
                 let mut command = vec!["fmt".to_string()];
@@ -99,7 +99,7 @@ pub fn run(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "multiple ecosystems found ({}); specify `blanket fmt --eco rust`",
+                "multiple ecosystems found ({}); specify `tog fmt --eco rust`",
                 detected.join(", ")
             ),
         ));
@@ -114,7 +114,7 @@ pub fn run(
     let status = formatter.fmt(&ctx, &cwd, check, args, &mut attribution)?;
     attribution.finish(true)?;
     if crate::comforter::signing_key().is_none() {
-        ui::note("fmt: rustfmt record unsigned; blanket audit reports it outdated (set BLANKET_SIGNING_KEY to sign)");
+        ui::note("fmt: rustfmt record unsigned; tog audit reports it outdated (set TOG_SIGNING_KEY to sign)");
     }
     Ok(status)
 }

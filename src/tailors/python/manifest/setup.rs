@@ -239,7 +239,7 @@ pub(super) fn collect_setup_files(path: &Path, files: &mut BTreeSet<PathBuf>) ->
         let name = entry.file_name().to_string_lossy().into_owned();
         if matches!(
             name.as_str(),
-            ".git" | ".blanket" | "__pycache__" | ".venv" | "node_modules"
+            ".git" | ".tog" | "__pycache__" | ".venv" | "node_modules"
         ) || name.ends_with(".egg-info")
             || name == "requirements.lock.txt"
         {

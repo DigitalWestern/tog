@@ -1,22 +1,22 @@
 //! Manifest discovery (python tailor): which files a project has, which
-//! manifest shape wins, and the `[tool.blanket]` configuration that steers it.
+//! manifest shape wins, and the `[tool.tog]` configuration that steers it.
 
 use super::*;
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct BlanketPythonConfig {
+pub(super) struct TogPythonConfig {
     pub(super) requirements: Option<PathBuf>,
     pub(super) extras: BTreeSet<String>,
 }
 
-pub(super) fn config(dir: &Path) -> io::Result<BlanketPythonConfig> {
-    let path = dir.join("blanket.toml");
+pub(super) fn config(dir: &Path) -> io::Result<TogPythonConfig> {
+    let path = dir.join("tog.toml");
     if !path.is_file() {
-        return Ok(BlanketPythonConfig::default());
+        return Ok(TogPythonConfig::default());
     }
     let value = parse_toml(&path, &read_text(&path)?)?;
     let Some(python) = value.get("python").and_then(toml::Value::as_table) else {
-        return Ok(BlanketPythonConfig::default());
+        return Ok(TogPythonConfig::default());
     };
     let requirements = python
         .get("requirements")
@@ -30,7 +30,7 @@ pub(super) fn config(dir: &Path) -> io::Result<BlanketPythonConfig> {
         .filter_map(toml::Value::as_str)
         .map(str::to_ascii_lowercase)
         .collect();
-    Ok(BlanketPythonConfig {
+    Ok(TogPythonConfig {
         requirements,
         extras,
     })
@@ -177,7 +177,7 @@ pub fn discover(platform: Platform, dir: &Path) -> io::Result<Manifest> {
 
 pub(super) fn dynamic_dependencies_manifest(
     dir: &Path,
-    cfg: &BlanketPythonConfig,
+    cfg: &TogPythonConfig,
 ) -> io::Result<Manifest> {
     match setup_or_requirements_manifest(dir, cfg) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Err(unreadable(
@@ -207,7 +207,7 @@ pub fn dynamic_requirements_fallback(dir: &Path) -> io::Result<Option<Manifest>>
 
 pub(super) fn setup_or_requirements_manifest(
     dir: &Path,
-    cfg: &BlanketPythonConfig,
+    cfg: &TogPythonConfig,
 ) -> io::Result<Manifest> {
     let setup_cfg_path = dir.join("setup.cfg");
     let setup_py_path = dir.join("setup.py");
@@ -290,7 +290,7 @@ pub(super) fn project_manifest(
     dir: &Path,
     value: &toml::Value,
     source: &str,
-    cfg: &BlanketPythonConfig,
+    cfg: &TogPythonConfig,
 ) -> io::Result<Manifest> {
     let mut requirements = Vec::new();
     let project = value

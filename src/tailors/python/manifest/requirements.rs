@@ -66,7 +66,7 @@ pub(super) fn requirements_manifest(_dir: &Path, path: &Path, input: &str) -> io
 
 pub(super) fn requirements_directory_candidate(
     dir: &Path,
-    cfg: &BlanketPythonConfig,
+    cfg: &TogPythonConfig,
 ) -> io::Result<Option<PathBuf>> {
     let requirements = dir.join("requirements");
     if !requirements.is_dir() {
@@ -83,7 +83,7 @@ pub(super) fn requirements_directory_candidate(
         }
         return Err(unreadable(
             &path,
-            "blanket.toml [python].requirements points to a missing file",
+            "tog.toml [python].requirements points to a missing file",
         ));
     }
     for hardware in ["cpu.txt", "cuda.txt", "rocm.txt", "xpu.txt"] {

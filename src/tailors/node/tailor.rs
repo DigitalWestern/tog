@@ -29,8 +29,8 @@ const NODE_INPUTS: &[&str] = &[
 
 pub struct Node;
 
-/// Is `dir/node_modules` a blanket projection, and which `node_modules`
-/// between `cwd` and `dir` should lead PATH? `blanket run` works from
+/// Is `dir/node_modules` a tog projection, and which `node_modules`
+/// between `cwd` and `dir` should lead PATH? `tog run` works from
 /// workspace subdirectories like npm run does: the nearest projected
 /// `node_modules` inside the same forest wins, falling back to the root's.
 pub fn projected_node_modules(dir: &Path, cwd: &Path) -> (bool, PathBuf) {
@@ -38,7 +38,7 @@ pub fn projected_node_modules(dir: &Path, cwd: &Path) -> (bool, PathBuf) {
     let node_projected = std::fs::symlink_metadata(&nm)
         .map(|md| md.file_type().is_symlink())
         .unwrap_or(false)
-        && std::fs::symlink_metadata(dir.join(".blanket/closures/node.json")).is_ok();
+        && std::fs::symlink_metadata(dir.join(".tog/closures/node.json")).is_ok();
     let nearest_nm = if node_projected {
         let forest_root = nm
             .canonicalize()
@@ -117,15 +117,15 @@ impl Tailor for Node {
         let Some(plan) = inputs::load_npm_plan(platform, dir)? else {
             return Ok(false);
         };
-        let mut config = node::BlanketConfig::default();
+        let mut config = node::TogConfig::default();
         if plan.lock_source == "package-lock.json" {
             let lock = std::fs::read_to_string(dir.join("package-lock.json"))?;
             if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
                 node::check_lock_freshness(&pkg, &lock)?;
-                config = node::parse_blanket_config(&pkg)?;
+                config = node::parse_tog_config(&pkg)?;
             }
         } else if let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) {
-            config = node::parse_blanket_config(&pkg)?;
+            config = node::parse_tog_config(&pkg)?;
         }
         let env = node::realize_node_env(store, platform, &plan, &config.artifacts)?;
         let inputs = comforter::input_records(
@@ -249,7 +249,7 @@ impl Tailor for Node {
             // recorded as a property rather than a malformed hash entry.
             push_property(
                 &mut c,
-                "blanket:integrity",
+                "tog:integrity",
                 &required(eco, &p, "integrity")?,
             );
             out.push(c);

@@ -1,15 +1,15 @@
 [package]
-name = "blanket"
+name = "tog"
 version = "0.1.0"
 edition = "2021"
 description = "One command for every package manager: pinned toolchains, locked graphs, an immutable store"
-repository = "https://github.com/DigitalWestern/blanket"
-homepage = "https://github.com/DigitalWestern/blanket"
+repository = "https://github.com/DigitalWestern/tog"
+homepage = "https://github.com/DigitalWestern/tog"
 readme = "README.md"
 keywords = ["package-manager", "toolchain", "lockfile", "reproducible", "store"]
 categories = ["command-line-utilities", "development-tools"]
-# Not published to crates.io: the `blanket` name there belongs to an unrelated
-# proc-macro crate, and this repository carries no license file yet. Pick a
+# Not published to crates.io: the `tog` name there belongs to an unrelated
+# process-multiplexer crate, and this repository carries no license file yet. Pick a
 # crate name and a license, then remove this line. `cargo install --git` and
 # `cargo install --path .` work regardless.
 publish = false

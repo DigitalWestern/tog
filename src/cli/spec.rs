@@ -5,9 +5,9 @@ use super::{Group, Spec, VERSION};
 const HELP_OPTION: (&str, &str) = ("-h, --help", "print this help");
 const JSON_OPTION: (&str, &str) = ("--json", "machine-readable output on stdout");
 
-/// What `blanket ls` accepts as a filter word. `ls` lists closures, not
+/// What `tog ls` accepts as a filter word. `ls` lists closures, not
 /// ecosystems: besides the seven ecosystems it prints a row for the
-/// toolchain-only `rustfmt` closure `blanket fmt` writes, and every name
+/// toolchain-only `rustfmt` closure `tog fmt` writes, and every name
 /// `ls` can print must be a name it accepts. This is the `ls` vocabulary
 /// only; it never selects an ecosystem for sync, add, or build.
 pub const LS_WORDS: &[&str] = &[
@@ -22,20 +22,20 @@ pub const COMMANDS: &[Spec] = &[
         name: "sync",
         group: Group::Everyday,
         summary: "realize and project the environment(s) from the project's inputs",
-        usage: "blanket sync [--fresh] [--strict]        (alias: install, i)",
+        usage: "tog sync [--fresh] [--strict]        (alias: install, i)",
         description: "\
 Discovers every ecosystem present in the current directory (see PROJECT
-INPUTS in 'blanket --help'), realizes each locked plan into the immutable
-store, and projects it into the project (.venv, node_modules, .blanket/...).
-A bare 'blanket' inside a project does the same. A found manifest with no
+INPUTS in 'tog --help'), realizes each locked plan into the immutable
+store, and projects it into the project (.venv, node_modules, .tog/...).
+A bare 'tog' inside a project does the same. A found manifest with no
 dependencies syncs an interpreter-only environment.
 Policy exceptions (unattested inputs, failed install scripts, ...) are
-recorded in .blanket/closures/*.json and summarized at the end; --strict, a
-BLANKET_STRICT=1 environment, or a .blanket/policy.toml deny list refuses
+recorded in .tog/closures/*.json and summarized at the end; --strict, a
+TOG_STRICT=1 environment, or a .tog/policy.toml deny list refuses
 them instead.",
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
-            ("--strict", "refuse every policy exception (same as BLANKET_STRICT=1)"),
+            ("--strict", "refuse every policy exception (same as TOG_STRICT=1)"),
             HELP_OPTION,
         ],
         words: &[],
@@ -44,14 +44,14 @@ them instead.",
         name: "fmt",
         group: Group::Everyday,
         summary: "format the Rust project with the pinned rustfmt",
-        usage: "blanket fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
+        usage: "tog fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
         description: "\
 Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
 discovered with the store Cargo tool and Cargo metadata is read with
 --no-deps, so a project that has never been synced needs no Cargo.lock,
 dependency resolution, or vendor object. --check returns rustfmt's status.
 A package.json script named fmt takes precedence and is run as
-'blanket run fmt'. In a polyglot directory use --eco rust: an explicit --eco
+'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
 Other ecosystems are not implemented yet.",
         options: &[
@@ -65,12 +65,12 @@ Other ecosystems are not implemented yet.",
         name: "add",
         group: Group::Everyday,
         summary: "add a dependency, re-lock, sync",
-        usage: "blanket add <package>... [--dev] [--no-sync]",
+        usage: "tog add <package>... [--dev] [--no-sync]",
         description: "\
 Adds each package to the project's manifest with the ecosystem's own pinned
 tool (uv, the store npm, pinned pnpm, cargo, go, bundler), re-locks, and
 syncs. Where no pinned tool can make the edit (Poetry, PDM, Yarn classic,
-setup.py, Elixir, .NET) blanket refuses and prints the exact line and file
+setup.py, Elixir, .NET) tog refuses and prints the exact line and file
 instead.
 
 Which ecosystem: an explicit prefix (py:requests, npm:react, cargo:serde,
@@ -78,12 +78,12 @@ go:github.com/x/y, gem:rails, hex:jason, nuget:Foo.Bar) or the name's shape
 (@scope/name, github.com/..., Foo.Bar) decides it; otherwise the nearest
 manifest walking up from here; if that directory holds several, the
 registries are asked and a name known to exactly one wins; if several know
-it you are asked at the terminal. Blanket never guesses from the bare name.
+it you are asked at the terminal. Tog never guesses from the bare name.
 Constraints pass through to the tool: 'requests>=2', 'react@18',
 'serde@1', 'rails@~> 7.1'.",
         options: &[
             ("--dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
-            ("--no-sync", "stop after the manifest and lock edit; review, then run 'blanket'"),
+            ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
         words: &[],
@@ -92,13 +92,13 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
         name: "remove",
         group: Group::Everyday,
         summary: "remove a dependency, re-lock, sync",
-        usage: "blanket remove <package>... [--no-sync]",
+        usage: "tog remove <package>... [--no-sync]",
         description: "\
 The inverse of add, through the same pinned tools with the same ecosystem
-choice. For a plain requirements file blanket deletes the line itself.",
+choice. For a plain requirements file tog deletes the line itself.",
         options: &[
             ("--dev", "remove from development dependencies (uv --dev, cargo --dev)"),
-            ("--no-sync", "stop after the manifest and lock edit; review, then run 'blanket'"),
+            ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
         words: &[],
@@ -107,7 +107,7 @@ choice. For a plain requirements file blanket deletes the line itself.",
         name: "update",
         group: Group::Everyday,
         summary: "update dependencies within the manifest's constraints, sync",
-        usage: "blanket update [<package>...] [--no-sync]",
+        usage: "tog update [<package>...] [--no-sync]",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
@@ -115,7 +115,7 @@ bundle update, mix deps.update, and pnpm update --lockfile-only. Poetry, PDM,
 Yarn classic, and .NET projects are told which command to run with their own
 tool.",
         options: &[
-            ("--no-sync", "stop after the lock edit; review, then run 'blanket'"),
+            ("--no-sync", "stop after the lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
         words: &[],
@@ -124,14 +124,14 @@ tool.",
         name: "run",
         group: Group::Everyday,
         summary: "run a command or package.json script inside the projected env(s)",
-        usage: "blanket run [--] <command> [<args>...]",
+        usage: "tog run [--] <command> [<args>...]",
         description: "\
 Executes <command> with PATH and the ecosystem variables of the nearest
-projected root (the closest ancestor with .blanket/closures/). When the
+projected root (the closest ancestor with .tog/closures/). When the
 project has a package.json and <command> names one of its scripts, the
 script runs (pre/name/post, npm environment, exit code passed through) and
-wins over a same-named executable on PATH; 'blanket <script>' is the short
-form when the script name is not a blanket command. Everything after
+wins over a same-named executable on PATH; 'tog <script>' is the short
+form when the script name is not a tog command. Everything after
 <command> is passed through unchanged.",
         options: &[HELP_OPTION],
         words: &[],
@@ -140,7 +140,7 @@ form when the script name is not a blanket command. Everything after
         name: "x",
         group: Group::Everyday,
         summary: "run a tool without adding it to the project (like npx / uvx)",
-        usage: "blanket x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]\n  blanket x --clean [--py | --npm] [--from <package>] [<tool>[@<version>]]",
+        usage: "tog x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]\n  tog x --clean [--py | --npm] [--from <package>] [<tool>[@<version>]]",
         description: "\
 Resolves the package with the store uv or npm, realizes it as an ordinary
 store environment (a store hit from the second run on), and executes the
@@ -148,10 +148,10 @@ tool with every argument passed through. Which registry: 'py:' or 'npm:'
 on the tool, --py / --npm, or the current project's ecosystem (Python
 first, then Node); outside a project the prefix is required. --from names
 the package when the executable is called something else
-('blanket x --from httpie http'). Environments live under ~/.blanket/x/
+('tog x --from httpie http'). Environments live under ~/.tog/x/
 and are gc roots like any project. `--clean` removes every cached x
 environment, or only the selected tool's environments; store objects stay
-until the next `blanket gc`. A running tool is left in place and reported as
+until the next `tog gc`. A running tool is left in place and reported as
 in use; retry after it exits.",
         options: &[
             ("--clean", "remove cached x environments instead of running a tool"),
@@ -166,14 +166,14 @@ in use; retry after it exits.",
         name: "build",
         group: Group::Everyday,
         summary: "sandboxed, network-denied build (cargo | go | elixir | dotnet)",
-        usage: "blanket build [<ecosystem>] [--] [<tool args>...]",
+        usage: "tog build [<ecosystem>] [--] [<tool args>...]",
         description: "\
 Runs the ecosystem's build tool inside the network-denied sandbox with the
 pinned toolchain and the realized dependency objects. The ecosystem is
 inferred when exactly one build-capable project (Cargo.toml, go.mod,
 mix.exs, *.csproj) is found from here upward; name it when several are.
 Every argument after the ecosystem is handed to the tool unchanged, so
-'blanket build --release' works; use '--' if the first tool argument is
+'tog build --release' works; use '--' if the first tool argument is
 '-h' or '--help'.",
         options: &[HELP_OPTION],
         words: BUILD_WORDS,
@@ -182,7 +182,7 @@ Every argument after the ecosystem is handed to the tool unchanged, so
         name: "status",
         group: Group::Inspect,
         summary: "is the projection current with the manifest and the lock?",
-        usage: "blanket status [--json]",
+        usage: "tog status [--json]",
         description: "\
 For every ecosystem found here: 'synced' when the last sync's inputs are
 byte-identical to the files on disk and the projection is in place;
@@ -197,29 +197,29 @@ lock' gate.",
         name: "audit",
         group: Group::Inspect,
         summary: "would the synced closures pass a policy? (CI admission gate)",
-        usage: "blanket audit [--policy <file>] [--json]",
+        usage: "tog audit [--policy <file>] [--json]",
         description: "\
-Reads the closure records every sync committed to .blanket/closures/*.json,
+Reads the closure records every sync committed to .tog/closures/*.json,
 verifies each record's signature against the [signing] trusted keys in the
-machine policy (BLANKET_POLICY or ~/.blanket/policy.toml; a project
-.blanket/policy.toml or --policy <file> can only drop keys, never add one),
+machine policy (TOG_POLICY or ~/.tog/policy.toml; a project
+.tog/policy.toml or --policy <file> can only drop keys, never add one),
 and judges the exceptions it records against the policy chain merged with
 --policy <file>. Merging only tightens: the file can add denials but never
 loosen what the machine or project policy says. Per closure, the first that
 applies: bad-signature (tampered or malformed; find out who changed it),
 untrusted (signed by a key the trusted set does not contain), outdated
 (unsigned, or predates input, platform, or exception recording; run
-'blanket sync' once under a trusted key, then commit), stale (its inputs
-changed since the sync, the same check 'blanket status' makes), denied
+'tog sync' once under a trusted key, then commit), stale (its inputs
+changed since the sync, the same check 'tog status' makes), denied
 (each denied exception's kind, subject, and detail, plus a count of
 permitted ones by kind), unknown (a kind this binary cannot judge), or
 clean. A record that is not trusted is not evaluated further. A detected
-ecosystem with no closure is missing. The rustfmt closure 'blanket fmt'
+ecosystem with no closure is missing. The rustfmt closure 'tog fmt'
 writes is stale when this binary would record that run differently now;
-rerun 'blanket fmt'. Only clean passes. Offline, read-only, no store
+rerun 'tog fmt'. Only clean passes. Offline, read-only, no store
 access, no sandbox needed. Exit status 0 when every closure is clean and
 none is missing, 1 otherwise, 2 when no trusted key is configured.
-'blanket keygen' creates a signing key; set BLANKET_SIGNING_KEY where sync
+'tog keygen' creates a signing key; set TOG_SIGNING_KEY where sync
 runs. A company deny list to start from ships as docs/human/policy-company.toml.",
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
@@ -232,13 +232,13 @@ runs. A company deny list to start from ships as docs/human/policy-company.toml.
         name: "ls",
         group: Group::Inspect,
         summary: "list what is installed, per ecosystem",
-        usage: "blanket ls [<ecosystem>] [--json]",
+        usage: "tog ls [<ecosystem>] [--json]",
         description: "\
 Name and version of every package in each synced closure, with the
 toolchain each runs on; -v adds the artifact and store object. Read from
-.blanket/closures/*.json, no store access. Ecosystems: python, node,
+.tog/closures/*.json, no store access. Ecosystems: python, node,
 cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
-'blanket fmt' writes.",
+'tog fmt' writes.",
         options: &[JSON_OPTION, HELP_OPTION],
         words: LS_WORDS,
     },
@@ -246,11 +246,11 @@ cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
         name: "plan",
         group: Group::Inspect,
         summary: "print the locked plan(s) as JSON",
-        usage: "blanket plan",
+        usage: "tog plan",
         description: "\
-Prints one JSON document per ecosystem found here, exactly what 'blanket
+Prints one JSON document per ecosystem found here, exactly what 'tog
 sync' would realize. Planning may resolve missing lockfiles with the store's
-own uv/npm/cargo and cache the result under .blanket/.",
+own uv/npm/cargo and cache the result under .tog/.",
         options: &[HELP_OPTION],
         words: &[],
     },
@@ -258,7 +258,7 @@ own uv/npm/cargo and cache the result under .blanket/.",
         name: "sbom",
         group: Group::Inspect,
         summary: "CycloneDX 1.5 SBOM of the synced closures",
-        usage: "blanket sbom [--output <file>]",
+        usage: "tog sbom [--output <file>]",
         description: "\
 Emits a CycloneDX 1.5 document covering every ecosystem closure recorded by
 the last sync: pinned hashes, purls, and toolchain store ids. Writes to
@@ -273,7 +273,7 @@ stdout unless --output is given.",
         name: "doctor",
         group: Group::Inspect,
         summary: "check host prerequisites, the sandbox, and the store",
-        usage: "blanket doctor [--json]",
+        usage: "tog doctor [--json]",
         description: "\
 The first-five-minutes command. Checks the platform, the store (path,
 writable, free space), the build sandbox (bubblewrap and user namespaces on
@@ -287,7 +287,7 @@ line is ok, warn, or fail with the fix; exit status 1 on any fail.",
         name: "gc",
         group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
-        usage: "blanket gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--migrate-metadata] [--register <dir>...] [--forget <key>...]",
+        usage: "tog gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--migrate-metadata] [--register <dir>...] [--forget <key>...]",
         description: "\
 Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
@@ -298,7 +298,7 @@ and backups. A record that says for itself what it needs keeps protecting
 it even when the project directory is gone; an older pathname-only record
 that has become unavailable stops the sweep instead of losing its record,
 so make it available again or forget it with --forget. Cleanup is skipped
-while another Blanket job is using this store, and any object whose
+while another Tog job is using this store, and any object whose
 recorded evidence cannot be certified stops the sweep rather than being
 guessed at. Usable on a copied store from any host.",
         options: &[
@@ -334,13 +334,13 @@ guessed at. Usable on a copied store from any host.",
         name: "keygen",
         group: Group::Maintain,
         summary: "create a closure-signing key and print its public key",
-        usage: "blanket keygen <path>",
+        usage: "tog keygen <path>",
         description: "\
 Writes a new Ed25519 signing key to <path> (created exclusively, mode 0600;
 an existing file or symlink is refused, never overwritten) and prints the
 public key on stdout as the [signing] policy table to paste into the
-machine policy. Set BLANKET_SIGNING_KEY=<path> where 'blanket sync' and
-'blanket fmt' run so every closure they write is signed; 'blanket audit'
+machine policy. Set TOG_SIGNING_KEY=<path> where 'tog sync' and
+'tog fmt' run so every closure they write is signed; 'tog audit'
 accepts only records signed by a key the machine policy trusts. Keep the
 key outside the checkout, the store, and any sandbox read root; a job that
 runs untrusted project code must not hold one.",
@@ -351,9 +351,9 @@ runs untrusted project code must not hold one.",
         name: "store",
         group: Group::Maintain,
         summary: "'store path', 'store roots'",
-        usage: "blanket store <path | roots>",
+        usage: "tog store <path | roots>",
         description: "\
-  path    print the store root (~/.blanket/store unless BLANKET_STORE is set)
+  path    print the store root (~/.tog/store unless TOG_STORE is set)
   roots   list every registered project root as '<key>  <path>'",
         options: &[HELP_OPTION],
         words: &["path", "roots"],
@@ -362,14 +362,14 @@ runs untrusted project code must not hold one.",
         name: "completions",
         group: Group::Maintain,
         summary: "print a shell completion script (bash | zsh | fish)",
-        usage: "blanket completions <bash | zsh | fish>",
+        usage: "tog completions <bash | zsh | fish>",
         description: "\
 Generated from the same command table as this help, so it cannot drift.
 Install:
-  bash   blanket completions bash > ~/.local/share/bash-completion/completions/blanket
-  zsh    blanket completions zsh  > \"${fpath[1]}/_blanket\"   (then: compinit)
-  fish   blanket completions fish > ~/.config/fish/completions/blanket.fish
-Package.json script names complete after 'blanket run' and as the first
+  bash   tog completions bash > ~/.local/share/bash-completion/completions/tog
+  zsh    tog completions zsh  > \"${fpath[1]}/_tog\"   (then: compinit)
+  fish   tog completions fish > ~/.config/fish/completions/tog.fish
+Package.json script names complete after 'tog run' and as the first
 word when a package.json is in the current directory.",
         options: &[HELP_OPTION],
         words: SHELL_WORDS,
@@ -399,10 +399,10 @@ PROJECT INPUTS (any combination; each found ecosystem is synced):
 
 const ENVIRONMENT: &str = "\
 ENVIRONMENT:
-  BLANKET_STORE           store root (default ~/.blanket/store)
-  BLANKET_STRICT=1        refuse every policy exception, like --strict
-  BLANKET_POLICY          policy file used instead of ~/.blanket/policy.toml
-  BLANKET_SIGNING_KEY     key file; every command that writes a closure signs it
+  TOG_STORE           store root (default ~/.tog/store)
+  TOG_STRICT=1        refuse every policy exception, like --strict
+  TOG_POLICY          policy file used instead of ~/.tog/policy.toml
+  TOG_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR                plain output, like --no-color
 ";
 
@@ -422,22 +422,22 @@ pub fn canonical_name(name: &str) -> &str {
 
 const GLOBAL_OPTIONS: &str = "\
 OPTIONS:
-  -C, --directory <dir>  run as if blanket had been started in <dir>
+  -C, --directory <dir>  run as if tog had been started in <dir>
   -q, --quiet            no narration: only errors and results on stdout
   -v, --verbose          show every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
-  -h, --help             print help ('blanket help <command>' for one command)
+  -h, --help             print help ('tog help <command>' for one command)
   -V, --version          print the version
 ";
 
 /// Top-level help: the command list by group, global options, inputs.
 pub fn usage() -> String {
     let mut text = format!(
-        "blanket {VERSION} — one command for every package manager\n\n\
+        "tog {VERSION} — one command for every package manager\n\n\
          USAGE:\n  \
-         blanket [<options>] <command> [<args>...]\n  \
-         blanket                      in a project: the same as 'blanket sync'\n  \
-         blanket <script> [<args>...] run a package.json script (like 'npm run')\n"
+         tog [<options>] <command> [<args>...]\n  \
+         tog                      in a project: the same as 'tog sync'\n  \
+         tog <script> [<args>...] run a package.json script (like 'npm run')\n"
     );
     let width = COMMANDS
         .iter()
@@ -477,7 +477,7 @@ pub fn usage() -> String {
 /// Help for one command.
 pub fn help(spec: &Spec) -> String {
     let mut text = format!(
-        "blanket {} — {}\n\nUSAGE:\n  {}\n\nOPTIONS:\n",
+        "tog {} — {}\n\nUSAGE:\n  {}\n\nOPTIONS:\n",
         spec.name, spec.summary, spec.usage
     );
     let width = spec
@@ -518,15 +518,15 @@ mod tests {
                 spec.name
             );
             let help = help(spec);
-            assert!(help.starts_with(&format!("blanket {} — ", spec.name)));
+            assert!(help.starts_with(&format!("tog {} — ", spec.name)));
             assert!(help.contains(spec.usage));
             for (flag, description) in spec.options {
                 assert!(help.contains(flag) && help.contains(description), "{flag}");
             }
         }
-        assert!(text.contains("BLANKET_STORE"));
+        assert!(text.contains("TOG_STORE"));
         assert!(text.contains("requirements.txt"));
-        assert!(text.contains("blanket <script> [<args>...]"));
+        assert!(text.contains("tog <script> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
     }
 }

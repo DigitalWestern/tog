@@ -39,7 +39,7 @@ pub const LOCK_DISAGREEMENT: &str = "lock_disagreement";
 pub const UNATTESTED_CARGO_LOCK: &str = "unattested_cargo_lock";
 /// An install-time download was skipped; the artifact is not in the closure.
 pub const ARTIFACT_NOT_PROVISIONED: &str = "artifact_not_provisioned";
-/// blanket downloaded and verified an install-time artifact itself; the
+/// tog downloaded and verified an install-time artifact itself; the
 /// checksum source is upstream's own manifest (trust-on-first-use).
 pub const ARTIFACT_PROVISIONED: &str = "artifact_provisioned";
 /// A package that ships prebuilt binaries was compiled from source instead.
@@ -80,13 +80,13 @@ pub struct Policy {
     /// declared; in a merged chain it is the effective trusted set, `None`
     /// while no machine-scope policy has introduced one. Absent and empty
     /// are different states: absent means "not configured" (an operator
-    /// mistake for `blanket audit`), empty means "trust nobody".
+    /// mistake for `tog audit`), empty means "trust nobody".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<Signing>,
 }
 
 /// The `[signing]` policy table: the public keys whose closure signatures
-/// `blanket audit` accepts. Every other command parses it and ignores it.
+/// `tog audit` accepts. Every other command parses it and ignores it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Signing {
@@ -208,7 +208,7 @@ pub fn union(policy: &mut Policy, other: &Policy) {
 /// with it, so a working tree can drop keys but never vouch for its own.
 /// A scope with no `[signing]` table leaves the set unchanged, and a
 /// project or flag list seen before any machine declaration cannot
-/// initialize it: trust stays unconfigured. Used by `blanket audit
+/// initialize it: trust stays unconfigured. Used by `tog audit
 /// --policy` too, so the file handed to the gate can never loosen the
 /// machine or project policy.
 pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
@@ -230,18 +230,18 @@ pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
 
 /// Where one contributing policy came from. The serialized names
 /// (`machine`, `project`, `flag`, `env`) are the stable strings
-/// `blanket audit --json` reports under `policy.sources`.
+/// `tog audit --json` reports under `policy.sources`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceOrigin {
-    /// `BLANKET_POLICY`, or `$HOME/.blanket/policy.toml` when it is unset.
+    /// `TOG_POLICY`, or `$HOME/.tog/policy.toml` when it is unset.
     Machine,
-    /// An ancestor directory's `.blanket/policy.toml`.
+    /// An ancestor directory's `.tog/policy.toml`.
     Project,
-    /// A file named by `blanket audit --policy`. Other commands may also use
+    /// A file named by `tog audit --policy`. Other commands may also use
     /// this origin for their `--strict` flag; audit uses it only for the file.
     Flag,
-    /// `BLANKET_STRICT=1`. Not a file: `path` is absent.
+    /// `TOG_STRICT=1`. Not a file: `path` is absent.
     Env,
 }
 
@@ -284,7 +284,7 @@ pub struct PolicySource {
 
 impl PolicySource {
     /// The entry for a policy read from `path`, including one merged in
-    /// from outside the chain (`blanket audit --policy`).
+    /// from outside the chain (`tog audit --policy`).
     pub fn from_file(origin: SourceOrigin, path: &Path, policy: &Policy) -> Self {
         Self {
             origin,
@@ -315,7 +315,7 @@ pub fn load_with_sources(
 ) -> io::Result<(Policy, Vec<PolicySource>)> {
     let mut policy = Policy::default();
     let mut sources = Vec::new();
-    let machine_path = if let Some(path) = std::env::var_os("BLANKET_POLICY") {
+    let machine_path = if let Some(path) = std::env::var_os("TOG_POLICY") {
         let path = PathBuf::from(path);
         merge_file(
             &mut policy,
@@ -326,7 +326,7 @@ pub fn load_with_sources(
         )?;
         path_identity(&path)
     } else if let Some(home) = std::env::var_os("HOME") {
-        let path = PathBuf::from(home).join(".blanket/policy.toml");
+        let path = PathBuf::from(home).join(".tog/policy.toml");
         let loaded = merge_file(
             &mut policy,
             &mut sources,
@@ -340,9 +340,9 @@ pub fn load_with_sources(
     };
     // Every ancestor's project policy applies (union only tightens), so a
     // workspace-root policy governs builds started in a member directory
-    // without blanket having to know each ecosystem's rooting rule.
+    // without tog having to know each ecosystem's rooting rule.
     for dir in project_dir.ancestors() {
-        let path = dir.join(".blanket/policy.toml");
+        let path = dir.join(".tog/policy.toml");
         if machine_path
             .as_ref()
             .is_some_and(|machine| path_identity(&path).as_ref() == Some(machine))
@@ -357,7 +357,7 @@ pub fn load_with_sources(
             SourceOrigin::Project,
         )?;
     }
-    let env_strict = std::env::var("BLANKET_STRICT").as_deref() == Ok("1");
+    let env_strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
     policy.strict |= cli_strict || env_strict;
     if cli_strict {
         sources.push(PolicySource {
@@ -417,11 +417,11 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "policy denies {kind}: {subject}: {detail} (see .blanket/policy.toml / BLANKET_STRICT)"
+                    "policy denies {kind}: {subject}: {detail} (see .tog/policy.toml / TOG_STRICT)"
                 ),
             ));
         }
-        eprintln!("blanket: exception {kind}: {subject}: {detail}");
+        eprintln!("tog: exception {kind}: {subject}: {detail}");
         frame.exceptions.push(Exception {
             kind: kind.into(),
             subject: subject.into(),
@@ -744,13 +744,13 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "cached object {id} carries exception(s): {}; blanket sync --fresh will not help; rebuild the object under a permissive policy or fix the cause",
+            "cached object {id} carries exception(s): {}; tog sync --fresh will not help; rebuild the object under a permissive policy or fix the cause",
             denied_kinds.join(", ")
         ),
     ))
 }
 
-/// Tests that read or set `HOME` / `BLANKET_POLICY` hold this lock: the
+/// Tests that read or set `HOME` / `TOG_POLICY` hold this lock: the
 /// environment is process-global, so a test that mutates it would otherwise
 /// redirect a concurrent `load` (the same hazard as `store::STORE_ENV_LOCK`).
 /// "Read" includes reading them indirectly: `audit` through `policy::load`,
@@ -1021,7 +1021,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn load_with_sources_attributes_each_deny_to_the_file_that_asked_for_it() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-sources-{}-{}",
+            "tog-policy-sources-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1031,27 +1031,27 @@ deny = ["git-dependency"]"#,
         let home = root.join("home");
         let parent = root.join("workspace");
         let project = parent.join("member");
-        fs::create_dir_all(home.join(".blanket")).unwrap();
-        fs::create_dir_all(parent.join(".blanket")).unwrap();
-        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::create_dir_all(home.join(".tog")).unwrap();
+        fs::create_dir_all(parent.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
         fs::write(
-            home.join(".blanket/policy.toml"),
+            home.join(".tog/policy.toml"),
             "deny = [\"git-dependency\"]\n",
         )
         .unwrap();
         fs::write(
-            project.join(".blanket/policy.toml"),
+            project.join(".tog/policy.toml"),
             "strict = true\ndeny = [\"file-collision\"]\n",
         )
         .unwrap();
         fs::write(
-            parent.join(".blanket/policy.toml"),
+            parent.join(".tog/policy.toml"),
             "deny = [\"weak-integrity\"]\n",
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
         let (merged, sources) = load_with_sources(&project, false).unwrap();
         let from_load = load(&project, false).unwrap();
         // Ancestors above the temp root belong to the machine running the
@@ -1062,19 +1062,19 @@ deny = ["git-dependency"]"#,
         let expected = [
             (
                 SourceOrigin::Machine,
-                home.join(".blanket/policy.toml"),
+                home.join(".tog/policy.toml"),
                 false,
                 GIT_DEPENDENCY,
             ),
             (
                 SourceOrigin::Project,
-                project.join(".blanket/policy.toml"),
+                project.join(".tog/policy.toml"),
                 true,
                 FILE_COLLISION,
             ),
             (
                 SourceOrigin::Project,
-                parent.join(".blanket/policy.toml"),
+                parent.join(".tog/policy.toml"),
                 false,
                 WEAK_INTEGRITY,
             ),
@@ -1100,7 +1100,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn strict_without_a_file_is_recorded_as_the_flag_source() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-strict-{}-{}",
+            "tog-policy-strict-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1110,8 +1110,8 @@ deny = ["git-dependency"]"#,
         fs::create_dir_all(&root).unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
-        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
         let (policy, sources) = load_with_sources(&root, true).unwrap();
         assert!(policy.strict);
         let flags: Vec<&PolicySource> = sources
@@ -1130,7 +1130,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn load_with_sources_does_not_duplicate_a_machine_policy_under_home() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-home-{}-{}",
+            "tog-policy-home-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1139,15 +1139,15 @@ deny = ["git-dependency"]"#,
         ));
         let home = root.join("home");
         let project = home.join("project");
-        let machine = home.join(".blanket/policy.toml");
-        fs::create_dir_all(home.join(".blanket")).unwrap();
+        let machine = home.join(".tog/policy.toml");
+        fs::create_dir_all(home.join(".tog")).unwrap();
         fs::create_dir_all(&project).unwrap();
         fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
 
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
-        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
 
         let (merged, sources) = load_with_sources(&project, false).unwrap();
         assert!(merged.deny.contains(GIT_DEPENDENCY));
@@ -1156,7 +1156,7 @@ deny = ["git-dependency"]"#,
         assert_eq!(ours[0].origin, SourceOrigin::Machine);
         assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
 
-        let project_policy = project.join(".blanket/policy.toml");
+        let project_policy = project.join(".tog/policy.toml");
         fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
         fs::write(&project_policy, "deny = [\"weak-integrity\"]\n").unwrap();
         let (merged, sources) = load_with_sources(&project, false).unwrap();
@@ -1177,7 +1177,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn load_with_sources_does_not_duplicate_a_hard_linked_machine_policy() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-hard-link-{}-{}",
+            "tog-policy-hard-link-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1186,17 +1186,17 @@ deny = ["git-dependency"]"#,
         ));
         let home = root.join("home");
         let project = root.join("project");
-        let machine = home.join(".blanket/policy.toml");
-        let project_policy = project.join(".blanket/policy.toml");
-        fs::create_dir_all(home.join(".blanket")).unwrap();
+        let machine = home.join(".tog/policy.toml");
+        let project_policy = project.join(".tog/policy.toml");
+        fs::create_dir_all(home.join(".tog")).unwrap();
         fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
         fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
         fs::hard_link(&machine, &project_policy).unwrap();
 
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
-        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
 
         let (merged, sources) = load_with_sources(&project, false).unwrap();
 
@@ -1211,7 +1211,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn strict_environment_and_flag_are_recorded_as_separate_sources() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-strict-env-{}-{}",
+            "tog-policy-strict-env-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1221,8 +1221,8 @@ deny = ["git-dependency"]"#,
         fs::create_dir_all(&root).unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
-        let _strict = EnvVarGuard::set("BLANKET_STRICT", "1");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _strict = EnvVarGuard::set("TOG_STRICT", "1");
 
         let (policy, env_sources) = load_with_sources(&root, false).unwrap();
         assert!(policy.strict);
@@ -1258,7 +1258,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn loads_user_and_project_policy_union_from_files() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-test-{}-{}",
+            "tog-policy-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1267,21 +1267,21 @@ deny = ["git-dependency"]"#,
         ));
         let home = root.join("home");
         let project = root.join("project");
-        fs::create_dir_all(home.join(".blanket")).unwrap();
-        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::create_dir_all(home.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
         fs::write(
-            home.join(".blanket/policy.toml"),
+            home.join(".tog/policy.toml"),
             "deny = [\"git-dependency\"]\n",
         )
         .unwrap();
         fs::write(
-            project.join(".blanket/policy.toml"),
+            project.join(".tog/policy.toml"),
             "strict = true\ndeny = [\"file-collision\"]\n",
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
         let loaded = load(&project, false).unwrap();
         // Ancestor rule: a workspace member inherits the root's policy.
         let member = project.join("crates/member");
@@ -1464,7 +1464,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn load_with_sources_records_each_scopes_trusted_list() {
         let root = std::env::temp_dir().join(format!(
-            "blanket-policy-signing-{}-{}",
+            "tog-policy-signing-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1473,22 +1473,22 @@ deny = ["git-dependency"]"#,
         ));
         let home = root.join("home");
         let project = root.join("project");
-        fs::create_dir_all(home.join(".blanket")).unwrap();
-        fs::create_dir_all(project.join(".blanket")).unwrap();
+        fs::create_dir_all(home.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".tog")).unwrap();
         let toml_list = |bytes: &[u8]| {
             let entries: Vec<String> = bytes.iter().map(|b| format!("\"{}\"", key(*b))).collect();
             format!("[signing]\ntrusted = [{}]\n", entries.join(", "))
         };
-        fs::write(home.join(".blanket/policy.toml"), toml_list(&[1, 2])).unwrap();
+        fs::write(home.join(".tog/policy.toml"), toml_list(&[1, 2])).unwrap();
         fs::write(
-            project.join(".blanket/policy.toml"),
+            project.join(".tog/policy.toml"),
             format!("deny = [\"git-dependency\"]\n{}", toml_list(&[2, 3])),
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("BLANKET_POLICY");
-        let _strict = EnvVarGuard::remove("BLANKET_STRICT");
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
         let (policy, sources) = load_with_sources(&project, true).unwrap();
         assert_eq!(policy.signing.as_ref().unwrap().trusted, keys(&[2]));
         assert!(policy.deny.contains(GIT_DEPENDENCY));
@@ -1506,7 +1506,7 @@ deny = ["git-dependency"]"#,
         assert_eq!(flag.trusted, None);
         // Without a machine declaration the project list is recorded but
         // trust stays unconfigured.
-        fs::write(home.join(".blanket/policy.toml"), "deny = []\n").unwrap();
+        fs::write(home.join(".tog/policy.toml"), "deny = []\n").unwrap();
         let (policy, sources) = load_with_sources(&project, false).unwrap();
         assert_eq!(policy.signing, None);
         let fixture = fixture_sources(&sources, &root);
@@ -1514,7 +1514,7 @@ deny = ["git-dependency"]"#,
         assert_eq!(fixture[1].trusted, Some(keys(&[2, 3])));
         // An explicitly empty machine list is recorded as `Some([])`.
         fs::write(
-            home.join(".blanket/policy.toml"),
+            home.join(".tog/policy.toml"),
             "[signing]\ntrusted = []\n",
         )
         .unwrap();

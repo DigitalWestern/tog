@@ -1,4 +1,4 @@
-//! The command surface: one grammar for every `blanket` invocation.
+//! The command surface: one grammar for every `tog` invocation.
 //!
 //! This module is pure — it never touches the store, the filesystem, or the
 //! host platform — so every shape of argv is unit-testable and `main` is a
@@ -6,14 +6,14 @@
 //!
 //! - every option is validated: an unknown flag or stray positional is a
 //!   usage error (exit 2) with a "did you mean" suggestion when one is close;
-//! - `blanket help [<command>]`, `--help`/`-h`, `--version`/`-V` work at the
+//! - `tog help [<command>]`, `--help`/`-h`, `--version`/`-V` work at the
 //!   top level and `-h`/`--help` inside every command, first argument only
 //!   where the rest is passed through (`fmt`, `run`, `build`);
 //! - `run` and `build` pass their arguments through to the program untouched
-//!   (only a leading `-h`/`--help` is blanket's; `--` forces pass-through);
+//!   (only a leading `-h`/`--help` is tog's; `--` forces pass-through);
 //! - `-C <dir>` runs the command as if started in `<dir>`; `-q`, `-v` and
 //!   `--no-color` set the output conventions (see `ui`);
-//! - a bare `blanket` and an unknown first word are *not* decided here: the
+//! - a bare `tog` and an unknown first word are *not* decided here: the
 //!   dispatcher turns them into `sync` inside a project and into a
 //!   package.json script run when one matches.
 //!
@@ -160,7 +160,7 @@ pub enum Parsed {
     Run(Invocation),
     /// Print to stdout and exit 0 (help, version).
     Print(String),
-    /// `blanket` with no command: `sync` inside a project, usage outside.
+    /// `tog` with no command: `sync` inside a project, usage outside.
     Implicit(Options),
     /// A first word that is not a command: a package.json script if one
     /// matches, otherwise the usage error in `message`.
@@ -195,10 +195,10 @@ impl UsageError {
 
 pub fn render_usage_error(message: &str, command: Option<&str>) -> String {
     let hint = match command {
-        Some(name) => format!("Run 'blanket help {name}' for usage."),
-        None => "Run 'blanket --help' for usage.".to_string(),
+        Some(name) => format!("Run 'tog help {name}' for usage."),
+        None => "Run 'tog --help' for usage.".to_string(),
     };
-    format!("blanket: error: {message}\n{hint}\n")
+    format!("tog: error: {message}\n{hint}\n")
 }
 
 impl std::fmt::Display for UsageError {

@@ -172,7 +172,7 @@ struct SavedSignal {
     installed: bool,
 }
 
-/// One serialized process-local signal session. A separate Blanket process
+/// One serialized process-local signal session. A separate Tog process
 /// has its own session, so this only serializes concurrent sessions within
 /// one process.
 struct Session {
@@ -866,7 +866,7 @@ mod tests {
 
     fn test_store(label: &str) -> (Store, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "blanket-supervise-{label}-{}-{}",
+            "tog-supervise-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

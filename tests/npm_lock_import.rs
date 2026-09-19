@@ -22,7 +22,7 @@ fn run(binary: &Path, project: &Path, store: &Path, args: &[&str], tmp: &Path) -
 fn run_from(binary: &Path, current_dir: &Path, store: &Path, args: &[&str], tmp: &Path) -> Output {
     Command::new(binary)
         .current_dir(current_dir)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .env("TMPDIR", tmp)
         .args(args)
         .output()
@@ -48,7 +48,7 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
         .join("scratch/tmp");
     fs::create_dir_all(&scratch).unwrap();
     let store = scratch.join("nx7-store");
-    let binary = Path::new(env!("CARGO_BIN_EXE_blanket"));
+    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
 
     for fixture in ["proj-pnpm", "proj-pnpm-ws", "proj-yarn1"] {
         let project = scratch.join(format!("nx7-{fixture}"));
@@ -59,7 +59,7 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
 
         let synced = run(binary, &project, &store, &["sync"], &scratch);
         assert_ok(&synced, &format!("sync {fixture}"));
-        let closure = fs::read_to_string(project.join(".blanket/closures/node.json")).unwrap();
+        let closure = fs::read_to_string(project.join(".tog/closures/node.json")).unwrap();
         let expected_source = if fixture == "proj-yarn1" {
             "yarn.lock"
         } else {

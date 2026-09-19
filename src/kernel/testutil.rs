@@ -8,7 +8,7 @@ pub struct TempDir(pub(crate) PathBuf);
 impl TempDir {
     pub fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-test-{}-{}",
+            "tog-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

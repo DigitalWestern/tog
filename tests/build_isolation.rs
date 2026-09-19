@@ -1,13 +1,13 @@
 //! Ignored build-isolation coverage against real PyPI sdists.
 //!
 //! These tests are intentionally slow and networked. Run on Linux with:
-//! BLANKET_STORE=$HOME/scratch/tmp/nx11-store TMPDIR=$HOME/scratch/tmp
-//! BLANKET_SANDBOX_TESTS=required cargo test --test build_isolation -- --ignored
+//! TOG_STORE=$HOME/scratch/tmp/nx11-store TMPDIR=$HOME/scratch/tmp
+//! TOG_SANDBOX_TESTS=required cargo test --test build_isolation -- --ignored
 
-use blanket::kernel::platform::Platform;
-use blanket::kernel::store::Store;
-use blanket::kernel::types::{ArtifactKind, LockedPackage, Plan};
-use blanket::tailors::python::build;
+use tog::kernel::platform::Platform;
+use tog::kernel::store::Store;
+use tog::kernel::types::{ArtifactKind, LockedPackage, Plan};
+use tog::tailors::python::build;
 use std::process::Command;
 
 fn package(name: &str, version: &str, filename: &str, url: &str, sha256: &str) -> LockedPackage {
@@ -39,11 +39,11 @@ fn runtime_numpy() -> Plan {
 }
 
 fn test_store() -> Option<Store> {
-    if std::env::var_os("BLANKET_STORE").is_none() {
-        if std::env::var_os("BLANKET_SANDBOX_TESTS").is_some() {
-            panic!("build_isolation requires BLANKET_STORE to avoid using a real store");
+    if std::env::var_os("TOG_STORE").is_none() {
+        if std::env::var_os("TOG_SANDBOX_TESTS").is_some() {
+            panic!("build_isolation requires TOG_STORE to avoid using a real store");
         }
-        eprintln!("skip build_isolation: set BLANKET_STORE to a throwaway store");
+        eprintln!("skip build_isolation: set TOG_STORE to a throwaway store");
         return None;
     }
     Some(Store::open().expect("store"))
@@ -76,7 +76,7 @@ fn python_import(wheel: &std::path::Path, code: &str) {
 fn pure_python_flit_sdist_uses_isolated_build_env() {
     let Some(store) = test_store() else { return };
     let _attribution_guard = attribution_guard();
-    let attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
+    let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
         "tomli-w",
         "1.2.0",
@@ -99,7 +99,7 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
 fn insightface_sdist_builds_with_runtime_numpy_constraint() {
     let Some(store) = test_store() else { return };
     let _attribution_guard = attribution_guard();
-    let attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
+    let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
         "insightface",
         "0.7.3",
@@ -131,7 +131,7 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
 fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
     let Some(store) = test_store() else { return };
     let _attribution_guard = attribution_guard();
-    let mut attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
+    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let tokenizers = package(
         "tokenizers",
         "0.13.3",
@@ -152,7 +152,7 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
             // real fastuuid sdist, which exercises the same Rust build path.
             eprintln!("TODO tokenizers on CPython 3.11: {error}");
             attribution.discard();
-            attribution = blanket::kernel::policy::Attribution::open("python").unwrap();
+            attribution = tog::kernel::policy::Attribution::open("python").unwrap();
             let fallback = package(
                 "fastuuid",
                 "0.14.0",

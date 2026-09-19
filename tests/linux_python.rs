@@ -1,9 +1,9 @@
 //! Linux Python round-trip test. Heavy: downloads CPython, uv, and the
 //! manylinux wheels into a throwaway store, so it is ignored.
 
-use blanket::kernel::platform::Platform;
-use blanket::kernel::store::Store;
-use blanket::tailors::python;
+use tog::kernel::platform::Platform;
+use tog::kernel::store::Store;
+use tog::tailors::python;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -12,7 +12,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "blanket-linux-python-{}-{}",
+            "tog-linux-python-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -44,10 +44,10 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-fn blanket(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
+fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
-        .env("BLANKET_STORE", store)
+        .env("TOG_STORE", store)
         .args(args)
         .output()
         .unwrap()
@@ -81,12 +81,12 @@ fn linux_python_sync_run_and_uv_round_trip() {
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-a"),
         &project,
     );
-    let store_path = std::env::var_os("BLANKET_STORE")
+    let store_path = std::env::var_os("TOG_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| temp.0.join("store"));
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(blanket(&binary, &project, &store_path, &["sync"]), "sync");
+    assert_ok(tog(&binary, &project, &store_path, &["sync"]), "sync");
 
     let imports = Command::new(project.join(".venv/bin/python"))
         .args([
@@ -99,7 +99,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
     assert_eq!(imports.trim(), "3.0.2 1.17.0");
 
     let run = assert_ok(
-        blanket(
+        tog(
             &binary,
             &project,
             &store_path,
@@ -110,7 +110,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
                 "import sys, sysconfig; print(sys.version.split()[0]); print(sysconfig.get_platform())",
             ],
         ),
-        "blanket run python",
+        "tog run python",
     );
     let mut lines = run.lines();
     assert_eq!(lines.next(), Some("3.12.14"));
@@ -132,10 +132,10 @@ fn linux_python_sync_run_and_uv_round_trip() {
     let uv_version = assert_ok(uv_version, "uv --version");
     assert!(uv_version.contains("0.12.7"), "{uv_version}");
 
-    let plan_path = project.join(".blanket/plan.json");
+    let plan_path = project.join(".tog/plan.json");
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
     assert_ok(
-        blanket(&binary, &project, &store_path, &["sync"]),
+        tog(&binary, &project, &store_path, &["sync"]),
         "warm sync",
     );
     assert_eq!(

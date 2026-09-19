@@ -18,8 +18,8 @@ use std::time::{Duration, SystemTime};
 /// different id, and a legacy (schemaless) record of an unknown kind can
 /// never be certified, so the fixture publishes a complete `object-meta/2`
 /// record the way `tests/cli.rs::publish_certified_object` does.
-fn protected_identity() -> blanket::kernel::types::Identity {
-    blanket::kernel::types::Identity {
+fn protected_identity() -> tog::kernel::types::Identity {
+    tog::kernel::types::Identity {
         kind: "test".into(),
         name: "protected".into(),
         version: "1".into(),
@@ -35,7 +35,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = blanket::kernel::store::remove_tree(&self.base);
+        let _ = tog::kernel::store::remove_tree(&self.base);
     }
 }
 
@@ -46,7 +46,7 @@ impl Fixture {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
             .join(format!(
-                "blanket-gc-roots-{label}-{}-{}",
+                "tog-gc-roots-{label}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -54,7 +54,7 @@ impl Fixture {
                     .as_nanos()
             ));
         fs::create_dir_all(&base).unwrap();
-        // blanket records object paths under the store's canonicalized root
+        // tog records object paths under the store's canonicalized root
         // and compares them exactly; on macOS the temp dir sits under /var,
         // a symlink to /private/var.
         let base = base.canonicalize().unwrap();
@@ -107,7 +107,7 @@ impl Fixture {
     }
 
     fn make_project(&self, project: &Path, live: bool) {
-        let closures = project.join(".blanket/closures");
+        let closures = project.join(".tog/closures");
         fs::create_dir_all(&closures).unwrap();
         if live {
             fs::write(
@@ -125,7 +125,7 @@ impl Fixture {
 
     /// Write a registry record by hand, exactly as `register_root` would.
     fn record(&self, project: &Path) -> String {
-        let key = blanket::kernel::store::Store::root_key(project).unwrap();
+        let key = tog::kernel::store::Store::root_key(project).unwrap();
         self.record_as(&key, format!("{}\n", project.display()).as_bytes());
         key
     }
@@ -165,9 +165,9 @@ impl Fixture {
     }
 
     fn run_in<S: AsRef<OsStr>, P: AsRef<Path>>(&self, cwd: P, args: &[S]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_blanket"))
+        Command::new(env!("CARGO_BIN_EXE_tog"))
             .current_dir(cwd)
-            .env("BLANKET_STORE", &self.store)
+            .env("TOG_STORE", &self.store)
             .env("HOME", &self.base)
             .env("NO_COLOR", "1")
             .args(args)
@@ -377,7 +377,7 @@ fn a_pathname_that_is_not_utf8_is_refused() {
     }
     fixture.make_project(&raw_project, true);
     let lossy_twin = fixture.project("project-\u{fffd}", false);
-    let twin_key = blanket::kernel::store::Store::root_key(&lossy_twin).unwrap();
+    let twin_key = tog::kernel::store::Store::root_key(&lossy_twin).unwrap();
 
     // argv stays UTF-8; the child canonicalizes `.` into the raw pathname.
     let register = fixture.run_in(&raw_project, &["gc", "--register", ".", "--keep-days=0"]);
@@ -405,7 +405,7 @@ fn a_pathname_that_is_not_utf8_is_refused() {
 /// one is written. A root that resolves to a directory with none is a
 /// pathname that no longer names the project that was registered, which is
 /// how the review's unmounted mount point deleted a live object: the backing
-/// directory underneath carried an empty `.blanket/closures` of its own.
+/// directory underneath carried an empty `.tog/closures` of its own.
 #[test]
 fn a_root_that_resolves_to_no_closures_blocks_the_sweep() {
     let fixture = Fixture::new("no-closures");
@@ -419,7 +419,7 @@ fn a_root_that_resolves_to_no_closures_blocks_the_sweep() {
         "control sweep deleted the object"
     );
 
-    fs::remove_file(project.join(".blanket/closures/python.json")).unwrap();
+    fs::remove_file(project.join(".tog/closures/python.json")).unwrap();
     for args in [
         vec!["gc", "--project", "--keep-days=0"],
         vec!["gc", "--dry-run", "--keep-days=0"],
@@ -460,7 +460,7 @@ fn dry_run_never_writes_a_record() {
     let key = fixture.record(&old);
     fs::remove_dir_all(&old).unwrap();
     let new = fixture.project("new", true);
-    let new_key = blanket::kernel::store::Store::root_key(&new).unwrap();
+    let new_key = tog::kernel::store::Store::root_key(&new).unwrap();
 
     let before = fixture.record_names();
     let combined = fixture.run(&[
