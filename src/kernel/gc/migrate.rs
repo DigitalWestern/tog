@@ -232,7 +232,7 @@ pub(super) fn upgraded_record(
 
 /// Every `algo:hex` the cache actually holds. The containment guard needs to
 /// tell a digest that names a retained file from one that names nothing: the
-/// pre-D reader scanned identity inputs for any 64-hex token, and plenty of
+/// old reader scanned identity inputs for any 64-hex token, and plenty of
 /// those tokens — inner Hex checksums, manifest digests, content hashes —
 /// were never cache addresses and so retained nothing at all.
 pub(super) fn present_cache_entries(store: &Store) -> io::Result<BTreeSet<String>> {
@@ -285,8 +285,8 @@ pub(super) fn effective_deps<'a>(
     ))
 }
 
-/// Does the proposed certification retain at least everything the pre-D
-/// reader retained for this record?
+/// Does the proposed certification retain at least everything the
+/// pre-object-meta/2 reader retained for this record?
 ///
 /// The old sweep protected two things it found by scanning identity inputs:
 /// any embedded object id, and any 64-hex token, which it treated as a
@@ -358,8 +358,8 @@ pub(super) fn certification_covers_legacy_retention(
 }
 
 /// Object ids embedded anywhere in a legacy identity's inputs. This is the
-/// pre-D `store::object_refs` scan, kept only to define what the old reader
-/// retained; it is never used as evidence of completeness.
+/// `store::object_refs` scan the legacy writer used, kept only to define what
+/// the old reader retained; it is never used as evidence of completeness.
 pub(super) fn collect_object_ids_from_value(value: &serde_json::Value, ids: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::String(text) => {
@@ -381,9 +381,9 @@ pub(super) fn collect_object_ids_from_value(value: &serde_json::Value, ids: &mut
     }
 }
 
-/// The pre-D `gc::cache_hashes_from_value` heuristic: every 64-hex token in
-/// the identity inputs, which the old sweep treated as a sha256 cache
-/// address. Kept for the same reason as the scan above.
+/// The old sweep's cache heuristic: every 64-hex token in the identity
+/// inputs, which it treated as a sha256 cache address. Kept for the same
+/// reason as the scan above.
 pub(super) fn legacy_cache_hashes(value: &serde_json::Value) -> BTreeSet<String> {
     let mut hashes = BTreeSet::new();
     fn walk(value: &serde_json::Value, hashes: &mut BTreeSet<String>) {

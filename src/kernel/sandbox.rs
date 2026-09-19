@@ -4,13 +4,12 @@
 //! Deny-by-default profile: no network, reads limited to declared inputs
 //! (store + system runtime), writes limited to the build's private
 //! directories. This is a hermeticity mechanism, not containment for
-//! hostile code (Sol's framing) — it makes "undeclared network access
-//! fails" true, which is what the kernel needs.
+//! hostile code — it makes "undeclared network access fails" true, which is
+//! what the kernel needs.
 //!
 //! Unix sockets in writable roots, the working directory, and scratch are
 //! rejected before mounting. Immutable read roots are intentionally not
-//! scanned: sockets there remain an accepted cooperative-hermeticity gap,
-//! and should also be documented in LIMITATIONS.md.
+//! scanned: sockets there remain an accepted cooperative-hermeticity gap.
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
@@ -28,9 +27,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// A sandboxed build, ecosystem-agnostic (Sol review 4): tailors construct
-/// the spec — argv, environment, read/write roots, scratch — and the kernel
-/// executes it. Keeps sandbox policy in one place as tailors multiply.
+/// A sandboxed build, ecosystem-agnostic: tailors construct the spec — argv,
+/// environment, read/write roots, scratch — and the kernel executes it. Keeps
+/// sandbox policy in one place as tailors multiply.
 pub struct BuildSpec {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
@@ -45,9 +44,6 @@ pub struct BuildSpec {
     pub path: String,
 }
 
-/// Authoritative environment projection (Sol review 5, kernel primitive):
-/// strip every variable matching `remove_prefixes` or listed in `remove`,
-/// then apply the forced `set`. Python/cargo/go/ruby all need this shape.
 /// Strip every inherited variable whose name starts with one of
 /// `remove_prefixes` (compared ASCII case-insensitively: npm and pnpm collect
 /// their settings with `/^npm_config_/i`, so `Npm_Config_registry` is as live
@@ -777,6 +773,8 @@ fn inherited_fds() -> io::Result<Vec<RawFd>> {
 
 #[cfg(target_os = "linux")]
 fn mark_inherited_fds_cloexec(fds: &[RawFd]) -> io::Result<()> {
+    // SAFETY: close_range takes three integer arguments; an unsupported
+    // kernel reports ENOSYS/EINVAL through errno, which is handled below.
     let close_range_result =
         unsafe { syscall(SYS_CLOSE_RANGE, 3_u32, u32::MAX, CLOSE_RANGE_CLOEXEC) };
     if close_range_result == 0 {
@@ -797,6 +795,8 @@ fn mark_inherited_fds_cloexec(fds: &[RawFd]) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn mark_fds_cloexec_with_fcntl(fds: &[RawFd]) -> io::Result<()> {
     for &fd in fds {
+        // SAFETY: fcntl takes an integer descriptor; a stale one fails with
+        // EBADF rather than touching another process's state.
         let result = unsafe { fcntl(fd, F_SETFD, FD_CLOEXEC) };
         if result == -1 {
             let error = io::Error::last_os_error();
@@ -818,6 +818,9 @@ fn bwrap_command(path: &Path) -> io::Result<Command> {
         // The fallback list is collected before fork because pre_exec must
         // not allocate while the child is between fork and exec.
         let fds = inherited_fds()?;
+        // SAFETY: the post-fork closure only calls close_range/fcntl on the
+        // descriptor numbers collected above, which are async-signal-safe and
+        // allocate nothing.
         unsafe {
             command.pre_exec(move || mark_inherited_fds_cloexec(&fds));
         }
@@ -1254,7 +1257,10 @@ mod tests {
         let (socket, _peer) = UnixStream::pair().unwrap();
         let directory_fd = directory.as_raw_fd();
         let socket_fd = socket.as_raw_fd();
+        // SAFETY: both descriptors are owned by the live `directory` and
+        // `socket` values above.
         assert_eq!(unsafe { fcntl(directory_fd, F_SETFD, 0) }, 0);
+        // SAFETY: as above.
         assert_eq!(unsafe { fcntl(socket_fd, F_SETFD, 0) }, 0);
 
         let result = run(
@@ -1528,13 +1534,16 @@ mod tests {
         let root = temp_dir("cloexec-fallback");
         let file = File::open(&root).unwrap();
         let fd = file.as_raw_fd();
+        // SAFETY: fd is owned by the live `file` value above.
         assert_eq!(unsafe { fcntl(fd, F_SETFD, 0) }, 0);
+        // SAFETY: as above.
         assert_eq!(unsafe { fcntl(fd, F_GETFD) } & FD_CLOEXEC, 0);
         let closed_fd = {
             let extra = File::open(&root).unwrap();
             extra.as_raw_fd()
         };
         mark_fds_cloexec_with_fcntl(&[fd, closed_fd]).expect("EBADF for a closed fd is tolerated");
+        // SAFETY: fd is owned by the live `file` value above.
         assert_eq!(unsafe { fcntl(fd, F_GETFD) } & FD_CLOEXEC, FD_CLOEXEC);
         drop(file);
         fs::remove_dir_all(root).unwrap();

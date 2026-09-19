@@ -410,12 +410,12 @@ mod tests {
         SigningKey::from_seed(&[7u8; 32]).unwrap()
     }
 
-    /// The public key of the all-sevens seed, as ring derives it. Pins the
-    /// derivation so a `ring` upgrade cannot silently move every key.
     /// The signature the all-sevens seed produces over
     /// `{"body":{"n":1},"schema":"closure/1"}`: pins key derivation and the
     /// canonical bytes together, so a change to either moves it.
     const FIXED_SIGNATURE: &str = "ec462ca39c39f1a303c2d766857487ba5b5768184685881bd6365d5c96e92a2b9f52d93ae97a92b4c925cf934508f945482f7e4aa46711fbec0d82bd8d48b802";
+    /// The public key of the all-sevens seed, as ring derives it. Pins the
+    /// derivation so a `ring` upgrade cannot silently move every key.
     const FIXED_SEED_PUBLIC_KEY: &str =
         "ed25519:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 

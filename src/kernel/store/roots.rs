@@ -74,6 +74,7 @@ impl Store {
             .open(&path)?;
         // The descriptor is the object whose permissions were inspected;
         // applying chmod by pathname could target a replacement lock name.
+        // SAFETY: `file` is the descriptor just opened and is owned here.
         if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -99,10 +100,10 @@ impl Store {
     ) -> io::Result<RootEntry> {
         self.require_activity(activity, "legacy root registration")?;
         let project_dir = project_dir.canonicalize()?;
-        // The record must hold the project's pathname exactly (A-R3): a
-        // trailing space or a non-UTF-8 byte would register one project
-        // under another project's identity. Refuse instead of recording a
-        // lossy spelling.
+        // The record must hold the project's pathname exactly: a trailing
+        // space or a non-UTF-8 byte would register one project under
+        // another project's identity. Refuse instead of recording a lossy
+        // spelling.
         let pathname = record_pathname(&project_dir)?.to_string();
         let key = root_key(&project_dir);
         let _project = self.project_lock(&project_dir)?;
@@ -389,9 +390,9 @@ impl Store {
         Ok(entries)
     }
 
-    /// Diagnostic enumeration for `store roots`.  Unlike `roots()`, a bad
-    /// record is represented as a diagnostic instead of being silently
-    /// omitted; this command is intentionally not a sweep authority.
+    /// Diagnostic enumeration for `store roots`.  Unlike `roots()`, an entry
+    /// whose name is not a root key is reported as a diagnostic instead of
+    /// being skipped; this command is intentionally not a sweep authority.
     pub fn root_diagnostics(&self) -> io::Result<Vec<RootDiagnostic>> {
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
@@ -483,9 +484,9 @@ impl Store {
             // A key whose record cannot be read (symlink, directory, empty,
             // padded, unknown schema) is reported on the entry as unusable
             // rather than failing the read here, so the sweep's refusal
-            // (gc::unusable_root) names the key and `--forget` uniformly
-            // (A-R2). The sweep still fails closed: collect_roots refuses on
-            // the first unusable entry before anything is deleted.
+            // (gc::unusable_root) names the key and `--forget` uniformly.
+            // The sweep still fails closed: collect_roots refuses on the
+            // first unusable entry before anything is deleted.
             let path = roots.join(&name);
             entries.push(self.read_root_entry_tolerant_at(roots_dir.as_raw_fd(), key, path));
         }
@@ -522,11 +523,12 @@ impl Store {
         Ok(())
     }
 
+    /// Whether this store's root registry has ever been written. A store
     /// created before the registry feature may have objects but no roots
-    /// directory, so Store::open creating that directory is not sufficient.
-    /// Valid root entries are accepted as initialized for compatibility with
-    /// stores written by the first registry implementation, before the marker
-    /// was added.
+    /// directory, so `Store::open` creating that directory is not sufficient.
+    /// Any entry already in `roots/` counts as initialized, so stores written
+    /// by the first registry implementation — before the marker existed — are
+    /// accepted too.
     pub(crate) fn registry_initialized(&self) -> io::Result<bool> {
         let roots = self.root.join("roots");
         ensure_directory_tree(&self.root, Path::new("roots"))?;
@@ -587,8 +589,8 @@ impl Store {
             // A directory sitting at a key is not a record, but it still
             // occupies that key and still stops every sweep. Forgetting the
             // key has to clear it too, or the escape hatch fails at the
-            // worst case (A-R6). The (dev, ino) recheck above is the guard:
-            // what is removed is the entry the caller decoded.
+            // worst case. The (dev, ino) recheck above is the guard: what is
+            // removed is the entry the caller decoded.
             let path = roots_path.join(&entry.key);
             fs::remove_dir_all(&path).map_err(|error| {
                 io::Error::new(
@@ -620,9 +622,9 @@ impl Store {
     /// A record that cannot be trusted is reported on the entry instead of
     /// failing the lookup: `--forget` is the escape hatch every refusal
     /// points at, so it has to work when the registry is at its worst,
-    /// including on the corrupt record itself (A-R6). The key is matched by
-    /// exact directory-entry name, so a case-insensitive filesystem cannot
-    /// answer with a neighbouring spelling's record (A-R1).
+    /// including on the corrupt record itself. The key is matched by exact
+    /// directory-entry name, so a case-insensitive filesystem cannot answer
+    /// with a neighbouring spelling's record.
     pub fn lookup_root(&self, key: &str) -> io::Result<RootEntry> {
         Self::validate_root_key(key)?;
         let roots = self.root.join("roots");
@@ -657,8 +659,8 @@ impl Store {
         if !is_regular_file(&metadata) {
             // A directory or other non-record sitting at the key still
             // occupies it and still stops every sweep, so it must be
-            // forgettable too (A-R6): report it instead of failing, and let
-            // the removal clear it.
+            // forgettable too: report it instead of failing, and let the
+            // removal clear it.
             return Ok(RootEntry {
                 key: key.into(),
                 path: PathBuf::new(),
@@ -679,7 +681,7 @@ impl Store {
             // Any read failure (corrupt, unreadable, not a regular file)
             // still yields an entry: `--forget` is the escape hatch every
             // refusal points at, so a damaged record must stay forgettable
-            // by its own key (A-R6).
+            // by its own key.
             Err(error) => Ok(RootEntry {
                 key: key.into(),
                 path: PathBuf::new(),
@@ -729,8 +731,8 @@ impl Store {
     /// combinations before either side mutates the registry.
     pub fn root_key(project_dir: &Path) -> io::Result<String> {
         let project_dir = project_dir.canonicalize()?;
-        // Refuse up front what a record cannot hold back exactly (A-R3), so
-        // the register/forget preflight never derives a key for a project
+        // Refuse up front what a record cannot hold back exactly, so the
+        // register/forget preflight never derives a key for a project
         // registration would reject. (The private `root_key` stays pure:
         // `root/2` records can hold such paths losslessly.)
         record_pathname(&project_dir)?;
@@ -743,9 +745,9 @@ impl Store {
     /// discovering it after an environment has been realized and projected.
     pub fn check_registrable(project_dir: &Path) -> io::Result<()> {
         // A `root/2` record can hold a non-UTF-8 pathname losslessly, but
-        // the project-facing refusal (A-R3) is conservative on purpose: a
-        // project whose path cannot be recorded exactly is refused before
-        // sync or closure publication writes into it. The root/2 roundtrip
+        // the project-facing refusal is conservative on purpose: a project
+        // whose path cannot be recorded exactly is refused before sync or
+        // closure publication writes into it. The root/2 roundtrip
         // capability stays available for direct record registration.
         let project_dir = project_dir.canonicalize()?;
         record_pathname(&project_dir).map(|_| ())
@@ -754,8 +756,8 @@ impl Store {
     /// Read one root record without failing. A record that cannot be
     /// trusted is reported on the entry (`unusable`), never skipped and
     /// never allowed to name a project: the record still exists, so some
-    /// project may still be counting on it (A-R2). Only registry-wide I/O
-    /// errors are fatal.
+    /// project may still be counting on it. Only registry-wide I/O errors
+    /// are fatal.
     pub(super) fn read_root_entry_tolerant_at(
         &self,
         roots_fd: RawFd,
@@ -989,8 +991,8 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
     }
     // A legacy record is one pathname read back exactly as registered: a
     // padded or multi-line spelling names a different project than the one
-    // that was registered (A-R3), so it is refused rather than trimmed into
-    // shape — a trimmed record is protection that silently moves.
+    // that was registered, so it is refused rather than trimmed into shape
+    // — a trimmed record is protection that silently moves.
     let raw = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     if raw != trimmed || raw.contains(&b'\n') {
         return Err(io::Error::new(
@@ -1517,7 +1519,7 @@ pub(super) fn root_key(project_dir: &Path) -> String {
 /// trailing space or a byte that is not UTF-8 registers one project under
 /// another project's identity, and GC then keeps the wrong project's objects
 /// and sweeps the live ones. Refuse the registration instead of recording a
-/// pathname that names a different directory when it is read back (A-R3).
+/// pathname that names a different directory when it is read back.
 pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
     let text = project_dir.to_str().ok_or_else(|| {
         io::Error::new(

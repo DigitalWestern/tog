@@ -60,7 +60,7 @@ pub struct Record {
     pub dependencies: BTreeSet<String>,
     pub cache: BTreeSet<Digest>,
     /// The legacy record carried a `refs` array. This is *not* completeness
-    /// evidence; it is the pre-D retention boundary that `--collect-legacy`
+    /// evidence; it is the legacy retention boundary that `--collect-legacy`
     /// keys on, and migration must preserve it.
     pub had_legacy_refs: bool,
     /// The whole record, so migration can rewrite it without inventing or
@@ -381,7 +381,7 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
             "object {id} has unknown evidence marker {evidence}"
         )));
     };
-    // Migration preserves the pre-D retention boundary explicitly: a record
+    // Migration preserves the legacy retention boundary explicitly: a record
     // that never carried `refs` keeps its legacy retention after upgrade,
     // because proving an object's outgoing dependencies says nothing about
     // whether some pre-registry project still needs the object itself.
@@ -2748,7 +2748,7 @@ mod tests {
 
             // The pkg: value names electron, and the producer's provisioning
             // decision says electron always carries a provisioned: key, so
-            // no schema change is needed to catch this drift (Sol r5 #1).
+            // no schema change is needed to catch this drift.
             let reason = check_identity_grammar(&dropped).unwrap_err();
             assert!(
                 reason.contains("Node pkg/provisioned relation"),
@@ -2925,7 +2925,7 @@ mod tests {
             // requires is either still required of the live producer or
             // explicitly legacy-only. Parking it in live_optional would let
             // the producer drop it while the omission loop above never tries
-            // removing it (Sol r5 #2).
+            // removing it.
             for key in row.grammar.required {
                 assert!(
                     row.live_required.contains(key) || row.legacy_only.contains(key),
