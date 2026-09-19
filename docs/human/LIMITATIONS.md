@@ -118,10 +118,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   atomic writes**: a symlinked `.blanket` could redirect a cache write outside the project.
 - **Only the Go toolchain tarball goes through the pre-materialization extractor**; CPython,
   Node, Rust, Ruby, .NET, Elixir/OTP and native-library tarballs still rely on the platform
-  tar's own defences. The `-tv` listing is parsed by column position; a column-free `tar -t`
-  cross-check fails closed on unmodelled layouts. Reading tar headers directly is the intended
-  replacement; bsdtar columns are verified against libarchive 3.8.7 on Linux, and the Mac gate
-  confirms them there.
+  tar's own defences. The listing is read from the archive's own headers (ustar names and the
+  POSIX prefix field, PAX `path`/`linkpath`/`size`, GNU long names) and cross-checked against
+  `tar -t`; unmodelled layouts — sparse members, a global header that renames, unknown type
+  letters, bad checksums — refuse the whole archive.
 
 ## Python
 

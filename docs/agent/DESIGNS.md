@@ -701,7 +701,7 @@ is off, and the lock is neither written nor required.
 
 0. **Exact selection fixes (landed as two PRs)** — #21 `wp2/python-exact-selection` (`src/pyselect.rs`, `src/python.rs`) and #22 `wp2/go-selected-version` (`src/golang.rs`), each with its own unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
 1. **Shipped-table adapter and source selection (landed)** — pin modules, `src/platform.rs`, typed source-policy interface with configurable endpoint defaults, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
-2. **Secure archive extractor (landed; follow-up before a second consumer)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar. Ordered follow-up **2b** replaces column-parsed tar listings with direct header validation before any second consumer adopts the module.
+2. **Secure archive extractor (landed)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar.
 3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It extends the descriptor-relative primitives currently in `src/store.rs`/`src/project.rs` (which may be extracted as `src/fsroot.rs`) for lock/input-specific rules (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `blanket-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
 4. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
 5. **Activation and update** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: update, two-store replay including the dropped-`release` upgrade replay, no-pin creation, stale/frozen refusal (with `frozen_validation_failure_precedes_all_writes` and the Gemfile-marker regression), added-higher-precedence-source staleness, unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff.
@@ -788,13 +788,6 @@ so this file does not drift from it:
   `src/ruby.rs:57`; `dotnet::SDK_VERSION`, `src/dotnet.rs:27`, enforced at
   `src/dotnet.rs:132` and `src/dotnet.rs:338`).
 
-**PR 2b — archive-header follow-up, before a second consumer.** Replace the
-`tar -tv` column parser with direct tar-header validation, including supported
-extended headers and all existing traversal/link/special-file refusals.
-Preserve the existing Go consumer and outside-sentinel tests; verify GNU tar
-and macOS extraction behavior. No other toolchain adopts the extractor until
-this PR passes review. It is a scheduled prerequisite, not an unranked nit.
-
 **PR 3 — lock core, dormant.**
 - *Files:* new `src/toolchain_input.rs` (per-ecosystem declarative readers),
   extend the descriptor-relative helper extracted by GC C as `src/fsroot.rs` (root helper: `openat`/`O_NOFOLLOW`
@@ -879,7 +872,7 @@ Needs WP2.
 **Objective.** One binary discovers a newly published upstream release without
 a code change.
 
-**Prerequisites.** WP2 PRs 1, 2b, 3, 4, 5. Default versions do not move until WP2
+**Prerequisites.** WP2 PRs 1, 3, 4, 5. Default versions do not move until WP2
 has merged.
 
 **Scope.**
