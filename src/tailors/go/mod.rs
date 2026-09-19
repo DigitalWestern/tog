@@ -870,9 +870,7 @@ pub fn plan_go(
     let now_mod = fs::read_to_string(project_dir.join("go.mod")).unwrap_or_default();
     let now_sum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
     if now_mod != gomod || now_sum != gosum {
-        return Err(err(
-            "go.mod/go.sum changed while planning; re-run tog sync",
-        ));
+        return Err(err("go.mod/go.sum changed while planning; re-run tog sync"));
     }
     fs::create_dir_all(project_dir.join(".tog"))?;
     fs::write(

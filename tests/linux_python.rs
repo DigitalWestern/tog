@@ -1,11 +1,11 @@
 //! Linux Python round-trip test. Heavy: downloads CPython, uv, and the
 //! manylinux wheels into a throwaway store, so it is ignored.
 
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 use tog::tailors::python;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 struct TempDir(PathBuf);
 
@@ -134,10 +134,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
 
     let plan_path = project.join(".tog/plan.json");
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
-    assert_ok(
-        tog(&binary, &project, &store_path, &["sync"]),
-        "warm sync",
-    );
+    assert_ok(tog(&binary, &project, &store_path, &["sync"]), "warm sync");
     assert_eq!(
         std::fs::metadata(&plan_path).unwrap().modified().unwrap(),
         plan_mtime,

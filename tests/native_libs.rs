@@ -2,12 +2,12 @@
 //! `TOG_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp
 //! TOG_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
 
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use tog::kernel::platform::Platform;
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
 use tog::tailors::python::nativelibs::{compose_env, ensure_native_libs, size_bytes};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 struct TempDir(PathBuf);
 

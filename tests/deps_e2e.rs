@@ -345,8 +345,7 @@ fn pnpm_add_update_remove_roundtrip() {
         .iter()
         .find(|package| package["path"] == "node_modules/pnpm")
         .unwrap();
-    let digest =
-        tog::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
+    let digest = tog::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
     let tarball =
         std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
     let corepack_sha224 = hex::encode(Sha224::digest(&tarball));
@@ -554,11 +553,7 @@ fn mixed_cargo_pnpm_edit_keeps_toolchain_exception_with_cargo() {
     );
 
     let mut x_closures = Vec::new();
-    find_files(
-        &temp.0.join("home/.tog/x"),
-        "node.json",
-        &mut x_closures,
-    );
+    find_files(&temp.0.join("home/.tog/x"), "node.json", &mut x_closures);
     assert_eq!(x_closures.len(), 1, "Node x closures: {x_closures:?}");
     let x_exceptions = closure_exceptions(&x_closures[0]);
     assert!(

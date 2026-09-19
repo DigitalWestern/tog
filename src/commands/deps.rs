@@ -2217,10 +2217,8 @@ mod tests {
 
     #[test]
     fn missing_pnpm_package_manager_names_lock_format_without_floating_suggestion() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-node-package-manager-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tog-node-package-manager-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("package.json"), "{}\n").unwrap();
@@ -2390,8 +2388,7 @@ mod tests {
     /// this path, are what keep that harmless.
     #[test]
     fn pnpm_scratch_paths_resolve_where_pnpm_joins_them() {
-        let root =
-            std::env::temp_dir().join(format!("tog-pnpm-scratch-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tog-pnpm-scratch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let stage = root.join("store/tmp/stage-1");
         let lock_root = root.join("proj");
@@ -2472,8 +2469,7 @@ mod tests {
 
     #[test]
     fn a_backslash_in_a_directory_name_takes_pnpms_own_slash_importer_key() {
-        let root =
-            std::env::temp_dir().join(format!("tog-pnpm-backslash-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tog-pnpm-backslash-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages").join("a\\b")).unwrap();
         fs::write(
@@ -2495,8 +2491,7 @@ mod tests {
 
     #[test]
     fn a_project_the_workspace_lock_does_not_list_refuses_instead_of_selecting_npm() {
-        let root =
-            std::env::temp_dir().join(format!("tog-pnpm-unlisted-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tog-pnpm-unlisted-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages/listed")).unwrap();
         fs::create_dir_all(root.join("packages/added-since-install")).unwrap();
@@ -2567,10 +2562,8 @@ mod tests {
 
     #[test]
     fn node_lock_selection_prefers_own_lock_and_reads_workspace_membership_from_the_lock() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-node-lock-selection-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tog-node-lock-selection-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("packages/lib")).unwrap();
         fs::create_dir_all(root.join("packages/private")).unwrap();
@@ -2632,10 +2625,8 @@ mod tests {
 
     #[test]
     fn ancestor_non_pnpm_locks_and_no_lock_projects_are_boundaries() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-node-lock-boundaries-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tog-node-lock-boundaries-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let nested = root.join("tools/nested");
         fs::create_dir_all(&nested).unwrap();
@@ -2659,10 +2650,8 @@ mod tests {
 
     #[test]
     fn unmatched_pnpm_workspace_is_a_boundary_to_an_outer_workspace() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-nested-pnpm-boundary-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tog-nested-pnpm-boundary-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let inner = root.join("inner");
         let member = inner.join("member");
@@ -2713,10 +2702,8 @@ mod tests {
 
     #[test]
     fn yarn_berry_uses_conversion_refusal_without_delegation() {
-        let root = std::env::temp_dir().join(format!(
-            "tog-yarn-berry-detection-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tog-yarn-berry-detection-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(
@@ -2858,8 +2845,7 @@ mod tests {
 
     #[test]
     fn requirement_edits_are_logical_lossless_and_ambiguous_edits_fail() {
-        let temp =
-            std::env::temp_dir().join(format!("tog-deps-logical-{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("tog-deps-logical-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
         let file = temp.join("requirements.txt");

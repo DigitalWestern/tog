@@ -3,11 +3,6 @@
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
 
-use tog::kernel::platform::Platform;
-#[cfg(debug_assertions)]
-use tog::kernel::store::ObjectDeps;
-use tog::kernel::store::Store;
-use tog::kernel::types::*;
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
 #[cfg(debug_assertions)]
@@ -17,6 +12,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 #[cfg(debug_assertions)]
 use std::path::PathBuf;
 use std::process::Command;
+use tog::kernel::platform::Platform;
+#[cfg(debug_assertions)]
+use tog::kernel::store::ObjectDeps;
+use tog::kernel::store::Store;
+use tog::kernel::types::*;
 
 #[cfg(debug_assertions)]
 struct TempStore(PathBuf);

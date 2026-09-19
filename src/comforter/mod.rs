@@ -366,10 +366,7 @@ fn write_closure_inner(
     mkdir_at(tog_fd.as_raw_fd(), "closures", &closures_dir)?;
     let closures_fd = open_directory_at(tog_fd.as_raw_fd(), "closures", &closures_dir)?;
 
-    for (path, label) in [
-        (&tog_dir, ".tog"),
-        (&closures_dir, ".tog/closures"),
-    ] {
+    for (path, label) in [(&tog_dir, ".tog"), (&closures_dir, ".tog/closures")] {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             return Err(io::Error::other(format!(
@@ -1695,10 +1692,9 @@ mod closure_platform_tests {
         .unwrap();
         attribution.finish(true).unwrap();
 
-        let closure: serde_json::Value = serde_json::from_slice(
-            &fs::read(project.join(".tog/closures/python.json")).unwrap(),
-        )
-        .unwrap();
+        let closure: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
+                .unwrap();
         assert_eq!(closure["ecosystem"], "python");
         assert_eq!(
             closure["body"]["store_object"].as_str(),
@@ -1741,10 +1737,9 @@ mod closure_platform_tests {
         set_signing_key_for_test(None);
         written.unwrap();
         attribution.finish(true).unwrap();
-        let closure: serde_json::Value = serde_json::from_slice(
-            &fs::read(project.join(".tog/closures/python.json")).unwrap(),
-        )
-        .unwrap();
+        let closure: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
+                .unwrap();
         // The signature covers the envelope as written, exceptions included.
         assert_eq!(
             crate::kernel::signing::verify(&closure),
@@ -1773,10 +1768,9 @@ mod closure_platform_tests {
         )
         .unwrap();
         attribution.finish(true).unwrap();
-        let closure: serde_json::Value = serde_json::from_slice(
-            &fs::read(project.join(".tog/closures/python.json")).unwrap(),
-        )
-        .unwrap();
+        let closure: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
+                .unwrap();
         assert_eq!(
             crate::kernel::signing::verify(&closure),
             crate::kernel::signing::Verification::Unsigned

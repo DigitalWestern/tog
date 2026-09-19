@@ -57,18 +57,9 @@ fn tog_at(bin: &Path, cwd: &Path, store: &Path, args: &[&str]) -> Output {
     tog_env(bin, cwd, store, args, &[])
 }
 
-fn tog_env(
-    bin: &Path,
-    cwd: &Path,
-    store: &Path,
-    args: &[&str],
-    env: &[(&str, &Path)],
-) -> Output {
+fn tog_env(bin: &Path, cwd: &Path, store: &Path, args: &[&str], env: &[(&str, &Path)]) -> Output {
     let mut command = Command::new(bin);
-    command
-        .current_dir(cwd)
-        .env("TOG_STORE", store)
-        .args(args);
+    command.current_dir(cwd).env("TOG_STORE", store).args(args);
     for (name, value) in env {
         command.env(name, value);
     }

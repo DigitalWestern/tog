@@ -4,14 +4,14 @@
 //! tests/acceptance.sh runs it with a shared TOG_STORE:
 //!     cargo test --test sandbox_deny -- --ignored
 
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use tog::kernel::platform::Platform;
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
 use tog::tailors::python::build;
-use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
 /// skip into a panic so CI cannot report a skipped check as passed.
@@ -126,8 +126,7 @@ fn bwrap_contract() {
         return;
     }
 
-    let root =
-        std::env::temp_dir().join(format!("tog-sandbox-contract-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("tog-sandbox-contract-{}", std::process::id()));
     std::fs::create_dir(&root).expect("create contract temp directory");
     let scratch = root.join("scratch");
     let writable = root.join("writable");

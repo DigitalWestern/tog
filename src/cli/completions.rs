@@ -169,9 +169,7 @@ fn fish_completions() -> String {
     out.push_str(
         "complete -c tog -n '__fish_use_subcommand' -a help -d 'show help for a command'\n",
     );
-    out.push_str(
-        "complete -c tog -n '__fish_use_subcommand' -a version -d 'print the version'\n",
-    );
+    out.push_str("complete -c tog -n '__fish_use_subcommand' -a version -d 'print the version'\n");
     out.push_str("complete -c tog -n '__fish_use_subcommand' -a '(__tog_scripts)' -d 'package.json script'\n");
     for spec in COMMANDS {
         let seen = if spec.name == "sync" {

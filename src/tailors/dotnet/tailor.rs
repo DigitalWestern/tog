@@ -111,8 +111,7 @@ impl Tailor for Dotnet {
             let sdk = comforter::closure_object(&ctx.store, &closure, "sdk_object", "dotnet")?;
             let packages = comforter::closure_object(&ctx.store, &closure, "packages_object", "")?;
             prefix.push(sdk.to_string_lossy().into_owned());
-            let scratch =
-                std::env::temp_dir().join(format!("tog-dn-run-{}", std::process::id()));
+            let scratch = std::env::temp_dir().join(format!("tog-dn-run-{}", std::process::id()));
             std::fs::create_dir_all(&scratch)?;
             let (prefixes, remove, set) = dotnet::run_env(&sdk, &packages, &scratch);
             sandbox::force_env(command, &prefixes, &remove, &set);

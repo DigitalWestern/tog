@@ -1,10 +1,10 @@
 //! The `tog` binary: parse argv, set up output, resolve the implicit
 //! forms, and hand the command to `commands::dispatch`.
 
+use std::process::exit;
 use tog::cli;
 use tog::commands;
 use tog::kernel::ui;
-use std::process::exit;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

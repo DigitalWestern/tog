@@ -1751,8 +1751,7 @@ pub fn build_sandboxed(
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let pin = otp_pin(platform).expect("pinned BEAM toolchain for test platform");
-    let beam =
-        beam_identity(pin, Path::new("/fixture/tog-store")).expect("offline BEAM identity");
+    let beam = beam_identity(pin, Path::new("/fixture/tog-store")).expect("offline BEAM identity");
     let empty_plan = ElixirPlan {
         otp_version: OTP_VERSION.into(),
         elixir_version: ELIXIR_VERSION.into(),

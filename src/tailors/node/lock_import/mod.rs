@@ -697,10 +697,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "tog-lock-import-{}-{nonce}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("tog-lock-import-{}-{nonce}", std::process::id()));
         let _ = fs::create_dir_all(path.join("packages/lib"));
         path
     }

@@ -1219,10 +1219,7 @@ fn apply_artifact_policy(
         Err(error) => {
             // A provisioning failure is not fatal: the install script still
             // runs and fails loudly on its own if it needs the artifact.
-            eprintln!(
-                "tog: {}: could not provision its artifact: {error}",
-                p.name
-            );
+            eprintln!("tog: {}: could not provision its artifact: {error}", p.name);
             crate::kernel::policy::record(
                 crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
                 &format!("{}@{}", p.name, p.version),

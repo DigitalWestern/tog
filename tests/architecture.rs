@@ -397,8 +397,8 @@ fn blank_literals(text: &str) -> String {
 fn store_env_writes_hold_the_lock() {
     let mut violations = Vec::new();
     for (relative, text) in all_sources() {
-        let writes = text.contains("set_var(\"TOG_STORE\"")
-            || text.contains("remove_var(\"TOG_STORE\"");
+        let writes =
+            text.contains("set_var(\"TOG_STORE\"") || text.contains("remove_var(\"TOG_STORE\"");
         if writes && !text.contains("STORE_ENV_LOCK") {
             violations.push(relative);
         }

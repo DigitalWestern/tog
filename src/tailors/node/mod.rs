@@ -625,18 +625,14 @@ pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
             let sha256 = item["sha256"].as_str().unwrap_or_default();
             let path = item["path"].as_str().unwrap_or_default();
             if !url.starts_with("https://") {
-                return Err(err(format!(
-                    "tog.artifacts: url must be https ({url:?})"
-                )));
+                return Err(err(format!("tog.artifacts: url must be https ({url:?})")));
             }
             if sha256.len() != 64
                 || !sha256
                     .chars()
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
             {
-                return Err(err(
-                    "tog.artifacts: sha256 must be 64 lowercase hex chars",
-                ));
+                return Err(err("tog.artifacts: sha256 must be 64 lowercase hex chars"));
             }
             let path_ok = !path.is_empty()
                 && !path.starts_with('/')
@@ -1138,10 +1134,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "tog-npm-lifecycle-{}-{nonce}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tog-npm-lifecycle-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(root.join(subdir)).unwrap();
@@ -1212,8 +1206,7 @@ mod tests {
 
     #[test]
     fn darwin_warm_sync_does_not_fetch_package_tarballs() {
-        let root =
-            std::env::temp_dir().join(format!("tog-npm-darwin-warm-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tog-npm-darwin-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
@@ -1284,8 +1277,7 @@ mod tests {
 
     #[test]
     fn linux_warm_sync_uses_persisted_archive_classification() {
-        let root =
-            std::env::temp_dir().join(format!("tog-npm-linux-warm-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tog-npm-linux-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
             std::fs::create_dir_all(root.join(subdir)).unwrap();
@@ -2139,8 +2131,7 @@ mod tests {
         let empty = parse_tog_config(r#"{"name":"x"}"#).unwrap();
         assert!(empty.mutable_packages.is_empty() && empty.artifacts.is_empty());
         let ok =
-            parse_tog_config(r#"{"tog":{"mutablePackages":["b","@prisma/engines","b"]}}"#)
-                .unwrap();
+            parse_tog_config(r#"{"tog":{"mutablePackages":["b","@prisma/engines","b"]}}"#).unwrap();
         assert_eq!(
             ok.mutable_packages,
             vec!["@prisma/engines".to_string(), "b".to_string()]
