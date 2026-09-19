@@ -5,12 +5,41 @@
 //! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
 //! may wire the whole crate together. Size budgets (layering rule 5) are
 //! reported, not enforced, so drift is visible in `cargo test` output.
+//!
+//! Three housekeeping rules are enforced the same way: a test that sets
+//! `BLANKET_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
+//! than cite plan documents or review rounds, and `docs/agent/` holds only
+//! its two files.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Every `.rs` file under `src/` and `tests/`, as (repo-relative path, text).
+fn all_sources() -> Vec<(String, String)> {
+    let root = repo();
+    let mut files = Vec::new();
+    rust_files(&root.join("src"), &mut files);
+    rust_files(&root.join("tests"), &mut files);
+    files
+        .into_iter()
+        .map(|file| {
+            let relative = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = fs::read_to_string(&file).unwrap();
+            (relative, text)
+        })
+        .collect()
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -359,4 +388,109 @@ fn blank_literals(text: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// `BLANKET_STORE` is process-global. A test that sets or clears it without
+/// holding `store::STORE_ENV_LOCK` redirects a concurrent test to the real
+/// store, so any file that touches the variable must name the lock.
+#[test]
+fn store_env_writes_hold_the_lock() {
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        let writes = text.contains("set_var(\"BLANKET_STORE\"")
+            || text.contains("remove_var(\"BLANKET_STORE\"");
+        if writes && !text.contains("STORE_ENV_LOCK") {
+            violations.push(relative);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "files that write BLANKET_STORE without STORE_ENV_LOCK:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Plan documents and review rounds get deleted; a comment that cites one
+/// goes stale with it. Comments describe the code they sit on instead.
+#[test]
+fn comments_do_not_cite_plans() {
+    const CITATIONS: &[&str] = &[
+        "DESIGNS.md",
+        "FOLLOW-UPS.md",
+        "NEXT.md",
+        "REFACTOR.md",
+        "REVIEW.md",
+        "Sol review",
+        "per Sol",
+    ];
+    // A word followed directly by a digit: a plan item number or review round.
+    const NUMBERED: &[&str] = &["item ", "WP", "A-R", "Sol r"];
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        for (index, line) in text.lines().enumerate() {
+            let Some(comment) = comment_text(line) else {
+                continue;
+            };
+            let cited = CITATIONS.iter().any(|c| comment.contains(c))
+                || NUMBERED.iter().any(|word| {
+                    comment.match_indices(word).any(|(at, _)| {
+                        let before_ok = at == 0
+                            || !comment[..at]
+                                .chars()
+                                .next_back()
+                                .is_some_and(|c| c.is_alphanumeric());
+                        let after = comment[at + word.len()..].chars().next();
+                        before_ok && after.is_some_and(|c| c.is_ascii_digit())
+                    })
+                });
+            if cited {
+                violations.push(format!("{relative}:{}: {}", index + 1, comment.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "comments citing plan documents or review rounds:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The comment on a line: everything from a `//` that sits outside a string
+/// or char literal. Good enough for a lint; a line the scanner misreads is a
+/// missed comment, not a false report, unless a literal on the same line
+/// contains one of the cited names.
+fn comment_text(line: &str) -> Option<&str> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let (at, c) = chars[i];
+        if in_string {
+            if c == '\\' {
+                i += 1;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '\'' && chars.get(i + 2).is_some_and(|&(_, q)| q == '\'') {
+            i += 2;
+        } else if c == '"' {
+            in_string = true;
+        } else if c == '/' && chars.get(i + 1).is_some_and(|&(_, n)| n == '/') {
+            return Some(&line[at..]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `docs/agent/` is two files. Ledgers, review reports, and evidence dumps
+/// go in pull request descriptions; history is git.
+#[test]
+fn agent_docs_are_two_files() {
+    let mut names: Vec<String> = fs::read_dir(repo().join("docs/agent"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["DESIGNS.md", "HITRATE.md"]);
 }

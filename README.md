@@ -17,6 +17,7 @@ back atomically.
 | [docs/human/LIMITATIONS.md](docs/human/LIMITATIONS.md) | what it honestly cannot do |
 | [FOLLOW-UPS.md](FOLLOW-UPS.md) | the to-do list and open decisions |
 | [docs/agent/DESIGNS.md](docs/agent/DESIGNS.md) | designed but unbuilt work (for agents) |
+| [docs/human/ADDING-A-TAILOR.md](docs/human/ADDING-A-TAILOR.md) | adding an ecosystem |
 
 ## Host prerequisites
 
@@ -101,9 +102,18 @@ blanket.
 ## Test
 
 ```sh
-cargo test               # unit tests (no network)
-bash tests/acceptance.sh # end-to-end (network, real PyPI, throwaway store)
+cargo test                                # unit and offline tests; CI runs this and cargo fmt --check
+cargo test -- --ignored --test-threads=1  # heavy: network, real registries, one store per run under TMPDIR
+bash tests/acceptance.sh                  # the full end-to-end checklist
 ```
+
+On Linux the sandbox is bubblewrap (`dnf install bubblewrap`); set
+`BLANKET_SANDBOX_TESTS=required` to fail instead of skip when it is missing,
+and point `TMPDIR` at a real disk, because a small tmpfs fills. A test that
+sets `BLANKET_STORE` uses a temp dir and holds `store::STORE_ENV_LOCK`; a
+test that realizes through a child holds `supervise::SUPERVISION_TEST_LOCK`.
+`tests/architecture.rs` enforces the layering rules, the store lock, and
+that comments describe code rather than cite plans.
 
 ## Working across machines
 

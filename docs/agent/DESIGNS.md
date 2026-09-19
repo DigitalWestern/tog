@@ -3,7 +3,9 @@
 The one agent-facing design file. Everything here is **future work**: nothing
 in it describes shipped behavior (for that, read `docs/human/ARCHITECTURE.md`).
 Open decisions and the ordered to-do list live in `FOLLOW-UPS.md`; this file
-holds the detail a session needs to pick an item up cold.
+holds the detail a session needs to pick an item up cold. When an item
+ships, its description moves into `docs/human/` and its `FOLLOW-UPS.md`
+entry is deleted.
 
 Assembled 2026-09-16 from the archived implementation plan and the long-form
 architecture document, both deleted in the documentation cleanup (recover

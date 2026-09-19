@@ -25,6 +25,8 @@ Stolen from Nix, minus the interface.
   is a hash of its `Identity`: kind, name, version, and every input that
   determines the output (artifact sha256s, dependency object ids). Objects
   are committed atomically (staged dir + rename) and made read-only.
+  Changing what goes into an object means adding an identity input; an
+  existing object's meaning is never reinterpreted in place.
 - **Artifact cache** (`cache/sha256/<hash>`): every downloaded file, stored
   by verified content hash. Never refetched; enables offline reconstruction.
 - **Comforters (environments are store objects too)**: a `python-env` object

@@ -1,0 +1,24 @@
+# Every push to main and every pull request: formatting, build, and the
+# offline test suite. The heavy network tests (`--ignored`) stay manual;
+# see README.md "Test".
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Linux sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo build --locked
+      - run: cargo test --locked
