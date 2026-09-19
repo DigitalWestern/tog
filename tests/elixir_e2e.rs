@@ -139,8 +139,8 @@ fn elixir_sync_sandboxed_build_and_run() {
     std::fs::create_dir_all(&home).unwrap();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
-    // 1. Realize the composite BEAM object; everything below uses only its
-    //    committed path (read from the closure blanket wrote).
+    // Realize the composite BEAM object; everything below uses only its
+    // committed path (read from the closure blanket wrote).
     assert_ok(blanket(&binary, &project, &store, &["sync"]), "sync");
     let closure = closure_body(&project);
     let beam = PathBuf::from(closure["beam_object"]["path"].as_str().unwrap());
@@ -153,7 +153,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     );
     let otp = beam.join("otp");
     assert!(otp.join("bin/erl").is_file());
-    // Staging is gone: nothing left under <store>/tmp but the lock file.
+    // Staging is cleaned up: no `stage-` directories left under <store>/tmp.
     let leftovers: Vec<_> = std::fs::read_dir(store_canon.join("tmp"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -161,7 +161,7 @@ fn elixir_sync_sandboxed_build_and_run() {
         .collect();
     assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
 
-    // 2./3./4./5. OTP-side probes from the committed object.
+    // OTP-side probes from the committed object.
     let otp_version = std::fs::read_to_string(otp.join("releases/29/OTP_VERSION")).unwrap();
     assert_eq!(otp_version.trim(), "29.0.5");
     let expected_hash = hex::encode(Sha256::digest(b"blanket"));
@@ -223,10 +223,10 @@ fn elixir_sync_sandboxed_build_and_run() {
     assert!(ex.contains(&format!("sha256={expected_hash}\n")), "{ex}");
     assert!(ex.contains("ssl=[:"), "{ex}");
 
-    // 7./8. Sandboxed compile of the locked closure (telemetry via the
-    //    pinned rebar3, jason via mix), network denied; then the app probe
-    //    WITHOUT compiling, so a failed sandboxed build cannot be repaired
-    //    by this unsandboxed run.
+    // Sandboxed compile of the locked closure (telemetry via the pinned
+    // rebar3, jason via mix), network denied; then the app probe WITHOUT
+    // compiling, so a failed sandboxed build cannot be repaired by this
+    // unsandboxed run.
     assert_ok(blanket(&binary, &project, &store, &["build"]), "build");
     let build_dir = project.join(format!("_build/blanket-{fingerprint}"));
     assert!(
@@ -248,9 +248,9 @@ fn elixir_sync_sandboxed_build_and_run() {
     let out = assert_ok(blanket(&binary, &project, &store, &probe), "run");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
 
-    // 9. Drop the qualified build output and refresh the projection (removes
-    //    compiled residue in dep source trees), rebuild from the same realized
-    //    objects, rerun.
+    // Drop the qualified build output and refresh the projection (removes
+    // compiled residue in dep source trees), rebuild from the same realized
+    // objects, rerun.
     remove_tree(&build_dir);
     assert!(!build_dir.exists());
     assert_ok(
@@ -275,7 +275,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     );
     assert!(vsn.contains("1.20.4"), "{vsn}");
 
-    // 10. Fingerprint/build dir are platform-specific; the object is immutable.
+    // Fingerprint/build dir are platform-specific; the object is immutable.
     if cfg!(target_os = "linux") {
         assert_ne!(fingerprint, DARWIN_FINGERPRINT);
         assert_ne!(

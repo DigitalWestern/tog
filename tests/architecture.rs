@@ -88,8 +88,7 @@ fn layer(relative: &Path) -> String {
 /// list is a shared-layer review (layering rule 2).
 const ALLOWED: &[(&str, &str, &str)] = &[
     // Python sdists with Rust extensions build with the cargo tailor's
-    // pinned toolchain. A kernel-level toolchain provider would remove this
-    // (FOLLOW-UPS.md).
+    // pinned toolchain. A kernel-level toolchain provider would remove this.
     (
         "tailors/python/build.rs",
         "tailors::cargo",
@@ -98,7 +97,7 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     // npm install scripts (node-gyp) run under a pinned CPython and the
     // Python tailor's artifact and native-lib provisioning. Those two
     // modules are ecosystem-neutral in practice and belong in a shared
-    // toolchain provider (FOLLOW-UPS.md).
+    // toolchain provider.
     (
         "tailors/node/realize.rs",
         "tailors::python",
@@ -178,7 +177,8 @@ fn layers_point_one_way() {
 }
 
 /// Size budgets are advisory: this test prints the files and functions
-/// over budget so `cargo test -- --nocapture architecture` shows the drift.
+/// over budget so `cargo test --test architecture -- --nocapture` shows the
+/// drift.
 #[test]
 fn size_budgets_are_reported() {
     let root = src();

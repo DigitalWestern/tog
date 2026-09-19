@@ -147,10 +147,9 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
     ) {
         Ok(wheel) => wheel,
         Err(error) => {
-            // The current pinned Rust rejects tokenizers 0.13.3's legacy
-            // invalid_reference_casting code. Item 8 has no 3.11 pin on this
-            // branch, so keep the tokenizers specimen as a TODO and prove the
-            // same Rust path with the smaller real fastuuid sdist.
+            // The pinned Rust rejects tokenizers 0.13.3's legacy
+            // invalid_reference_casting code, so fall back to the smaller
+            // real fastuuid sdist, which exercises the same Rust build path.
             eprintln!("TODO tokenizers on CPython 3.11: {error}");
             attribution.discard();
             attribution = blanket::kernel::policy::Attribution::open("python").unwrap();

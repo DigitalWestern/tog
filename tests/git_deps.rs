@@ -112,8 +112,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     // The repository's own .git must never reach the environment.
     assert!(!env.join("node_modules/git-dep/.git").exists());
 
-    // The commit is the identity: the same plan hits the cache, and a
-    // different commit is a different environment.
+    // The commit is the identity: the same plan hits the cache.
     let again = node::realize_node_env(&store, platform, &plan, &[]).expect("second realize");
     assert_eq!(env, again);
 
