@@ -95,8 +95,11 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 }
 
 /// A pre-lock Ruby closure records the interpreter under `plan.ruby_version`.
-pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(body, &[("ruby", "/plan/ruby_version")])
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(platform, body, &[("ruby", "/plan/ruby_version")])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

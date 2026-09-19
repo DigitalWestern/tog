@@ -189,7 +189,7 @@ with the provider, build, append-only recipe id, URL and algorithm-qualified
 digest (`sha256:…` or `sha512:…`, exactly the digest the pin already
 verifies; .NET, Hex and rebar3 keep their sha512). The rows carry the same
 bytes realization fetches; they mint no new object identity. The kernel
-never names an ecosystem: it validates the bundles it is handed (unique
+names no tailor: it validates the bundles it is handed (unique
 release keys and bundle ids, resolvable embedding chains, one row per
 platform and component) and selects from the releases complete on every
 supported platform, so an asymmetric catalog chooses the same bundle from
@@ -199,7 +199,8 @@ provider/build/recipe tuple, the artifact tuple and the bundle id; exact
 requests filter by primary version and ranges take the first satisfying
 candidate. `SourcePolicy` is the typed endpoint policy retrieval will check
 (shipped `https://` defaults per publisher, credential references only,
-never a secret, and not part of lock validity). `seed` chooses a bundle
+never a secret, and not part of lock validity; the defaults are data the
+kernel owns, so a new tailor's publisher is added there). `seed` chooses a bundle
 from a pre-lock closure's recorded platform and exact versions and refuses,
 naming `blanket update --toolchain`, when either is missing, when the
 version is not in the catalog, or when the bundle is incomplete on the

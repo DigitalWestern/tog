@@ -124,8 +124,13 @@ impl Tailor for Dotnet {
         dotnet::toolchain_catalog()
     }
 
-    fn legacy_toolchain_evidence(&self, _ecosystem: &str, body: &Value) -> LegacyEvidence {
-        dotnet::legacy_toolchain_evidence(body)
+    fn legacy_toolchain_evidence(
+        &self,
+        _ecosystem: &str,
+        platform: Option<Platform>,
+        body: &Value,
+    ) -> LegacyEvidence {
+        dotnet::legacy_toolchain_evidence(platform, body)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

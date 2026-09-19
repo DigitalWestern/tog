@@ -21,6 +21,10 @@ Rules the tailor must keep:
   fails the build otherwise.
 - Every method takes the project directory explicitly; a tailor never reads
   the current directory.
+- Every artifact row `toolchain_catalog` emits must be served from an
+  endpoint `SourcePolicy::shipped()` (`src/kernel/toolchain/source.rs`)
+  lists under the row's `provider`; the registry test in `src/tailors/mod.rs`
+  fails otherwise. Add the publisher's `https://` prefix there.
 - Store objects are input-addressed: what goes into `Identity.inputs`
   defines the object id. A new input means a new schema value
   (`"<kind>/2"`), a new `objects.rs` row, and the old row kept for the

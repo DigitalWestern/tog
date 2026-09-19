@@ -15,10 +15,48 @@ use std::fmt;
 use std::io;
 
 /// A dotted numeric version (`3.12.14`, `24.20.0`, `9.0.317`): the only
-/// shape a primary component may have. Compared component-wise, so `3.10`
-/// sorts above `3.9` and `1.2` below `1.2.0`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// shape a primary component may have. Compared component-wise with PEP
+/// 440's zero padding, so `3.10` sorts above `3.9` and `1.2` equals
+/// `1.2.0`; the spelling is kept for display.
+#[derive(Clone, Debug)]
 pub struct Version(Vec<u64>);
+
+impl Version {
+    /// The parts with trailing zeros dropped: what comparison sees.
+    fn trimmed(&self) -> &[u64] {
+        let mut end = self.0.len();
+        while end > 1 && self.0[end - 1] == 0 {
+            end -= 1;
+        }
+        &self.0[..end]
+    }
+}
+
+impl PartialEq for Version {
+    fn eq(&self, other: &Version) -> bool {
+        self.trimmed() == other.trimmed()
+    }
+}
+
+impl Eq for Version {}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Version) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Version) -> Ordering {
+        self.trimmed().cmp(other.trimmed())
+    }
+}
+
+impl std::hash::Hash for Version {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.trimmed().hash(state)
+    }
+}
 
 impl Version {
     pub fn parse(text: &str) -> io::Result<Version> {
@@ -70,11 +108,21 @@ pub enum Op {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Specifier {
-    pub op: Op,
-    pub version: Version,
+    op: Op,
+    version: Version,
 }
 
 impl Specifier {
+    /// `~=` needs at least two components (PEP 440); the others take any.
+    pub fn new(op: Op, version: Version) -> io::Result<Specifier> {
+        if op == Op::Compatible && version.0.len() < 2 {
+            return Err(invalid(format!(
+                "~={version} needs at least two version components"
+            )));
+        }
+        Ok(Specifier { op, version })
+    }
+
     pub fn matches(&self, candidate: &Version) -> bool {
         match self.op {
             Op::Ge => candidate >= &self.version,
@@ -84,9 +132,6 @@ impl Specifier {
             Op::Compatible => {
                 let mut prefix = self.version.clone();
                 prefix.0.pop();
-                if prefix.0.is_empty() {
-                    return candidate >= &self.version;
-                }
                 candidate >= &self.version && candidate.starts_with(&prefix)
             }
         }
@@ -321,7 +366,9 @@ mod tests {
     #[test]
     fn versions_parse_and_compare_numerically() {
         assert!(v("3.10.0") > v("3.9.99"));
-        assert!(v("1.2") < v("1.2.0"));
+        assert_eq!(v("1.2"), v("1.2.0"));
+        assert!(v("1.2") < v("1.2.1"));
+        assert!(v("3.12.0") > v("3.11.99"));
         assert!(v("24.20.0").starts_with(&v("24.20")));
         assert!(!v("3.120.0").starts_with(&v("3.12")));
         assert_eq!(v("9.0.317").to_string(), "9.0.317");
@@ -344,7 +391,9 @@ mod tests {
         assert!(!spec(Op::Compatible, "3.11.2").matches(&v("3.12.0")));
         assert!(spec(Op::Compatible, "3.11").matches(&v("3.14.0")));
         assert!(!spec(Op::Compatible, "3.11").matches(&v("4.0.0")));
-        assert!(spec(Op::Compatible, "3").matches(&v("9.0.0")));
+        assert!(Specifier::new(Op::Compatible, v("3")).is_err());
+        assert!(spec(Op::Eq, "3.12").matches(&v("3.12.0")));
+        assert!(!spec(Op::Eq, "3.12").matches(&v("3.12.1")));
         let range = VersionRequest::Specifiers(vec![spec(Op::Ge, "3.11"), spec(Op::Lt, "3.13")]);
         assert!(range.matches(&v("3.12.14")));
         assert!(!range.matches(&v("3.13.0")));
@@ -365,11 +414,12 @@ mod tests {
         let catalog = catalog(vec![a, b, c]);
         let selected = catalog.select(&Request::newest()).unwrap();
         assert_eq!(selected.release, "c");
-        let from_each_platform: Vec<String> = Platform::ALL
-            .iter()
-            .map(|_| catalog.select(&Request::newest()).unwrap().bundle_id())
-            .collect();
-        assert_eq!(from_each_platform[0], from_each_platform[1]);
+        // The selector takes no platform, so this literal is what either
+        // host mints; a host input creeping back in would change it.
+        assert_eq!(
+            selected.bundle_id(),
+            "sha256:acdec1e47e3a5504c55c7972baed5fb822da193aa1b1aaa038c41eb08e821caa"
+        );
         assert_eq!(
             catalog
                 .ordered()

@@ -160,8 +160,13 @@ impl Tailor for Cargo {
         cargo::toolchain_catalog()
     }
 
-    fn legacy_toolchain_evidence(&self, ecosystem: &str, body: &Value) -> LegacyEvidence {
-        cargo::legacy_toolchain_evidence(ecosystem, body)
+    fn legacy_toolchain_evidence(
+        &self,
+        ecosystem: &str,
+        platform: Option<Platform>,
+        body: &Value,
+    ) -> LegacyEvidence {
+        cargo::legacy_toolchain_evidence(ecosystem, platform, body)
     }
 
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing {

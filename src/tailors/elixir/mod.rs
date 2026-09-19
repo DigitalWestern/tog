@@ -147,8 +147,12 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 
 /// A pre-lock Elixir closure records both halves of the BEAM pair under
 /// `plan.otp_version` and `plan.elixir_version`.
-pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
     crate::comforter::legacy_toolchain_evidence(
+        platform,
         body,
         &[
             ("otp", "/plan/otp_version"),

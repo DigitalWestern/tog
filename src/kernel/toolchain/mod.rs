@@ -302,6 +302,15 @@ impl Catalog {
             bundle
                 .validate()
                 .map_err(|error| invalid(format!("{ecosystem} catalog: {error}")))?;
+            // One ecosystem, one primary component list: a request names
+            // components by that list, and the order compares by it.
+            let first = &bundles[0];
+            if bundle.primary != first.primary {
+                return Err(invalid(format!(
+                    "{ecosystem} catalog: release {} has primary {:?}, release {} has {:?}",
+                    first.release, first.primary, bundle.release, bundle.primary
+                )));
+            }
             if !releases.insert(bundle.release.as_str()) {
                 return Err(invalid(format!(
                     "{ecosystem} catalog: duplicate release key {}",
@@ -479,6 +488,24 @@ mod tests {
         let error = Catalog::new("node", vec![bad_primary]).unwrap_err();
         assert!(
             error.to_string().contains("primary component ghost"),
+            "{error}"
+        );
+
+        let mut other_primary = bundle("r2", "node", "1.0.0", Platform::ALL);
+        other_primary
+            .components
+            .push(Component::new("npm", "11.0.0"));
+        other_primary
+            .artifacts
+            .extend(Platform::ALL.iter().map(|p| row(*p, "npm", 'c')));
+        other_primary.primary = vec!["npm".into()];
+        let error = Catalog::new(
+            "node",
+            vec![bundle("r1", "node", "1.0.0", Platform::ALL), other_primary],
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("release r2 has [\"npm\"]"),
             "{error}"
         );
 

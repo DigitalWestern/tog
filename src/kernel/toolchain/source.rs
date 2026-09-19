@@ -63,7 +63,11 @@ impl Endpoint {
 
     /// Does `url` fall under this endpoint? The origin must match exactly
     /// (no suffix matching) and the path must extend the base's path at a
-    /// segment boundary.
+    /// segment boundary. A path that a server or client could normalize to
+    /// somewhere else (`.`/`..` segments, backslashes, or a percent-escape
+    /// that decodes to `/`, `\`, `.` or `%`) is never covered, so a prefix
+    /// cannot be escaped by spelling. Inert escapes such as the `%2B` in a
+    /// python-build-standalone file name are fine.
     pub fn covers(&self, url: &str) -> bool {
         let Some(rest) = url.strip_prefix("https://") else {
             return false;
@@ -75,12 +79,47 @@ impl Endpoint {
             return false;
         }
         let path = path.split(['?', '#']).next().unwrap_or("");
+        if path.contains('\\')
+            || !escapes_are_inert(path)
+            || path
+                .split('/')
+                .any(|segment| segment == "." || segment == "..")
+        {
+            return false;
+        }
         let base_path = base_path.trim_end_matches('/');
         if base_path.is_empty() {
             return true;
         }
         path == base_path || path.starts_with(&format!("{base_path}/"))
     }
+}
+
+/// Every `%XX` in `path` is well formed and decodes to a byte that cannot
+/// change which directory the path names once a server decodes it.
+fn escapes_are_inert(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let Some(hex) = bytes.get(i + 1..i + 3) else {
+                return false;
+            };
+            let Ok(text) = std::str::from_utf8(hex) else {
+                return false;
+            };
+            let Ok(decoded) = u8::from_str_radix(text, 16) else {
+                return false;
+            };
+            if matches!(decoded, b'/' | b'\\' | b'.' | b'%') {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    true
 }
 
 fn split_host(rest: &str) -> (&str, &str) {
@@ -254,6 +293,24 @@ mod tests {
             !endpoint.covers("https://evil.example/github.com/astral-sh/uv/releases/download/x")
         );
         assert!(!endpoint.covers("http://github.com/astral-sh/uv/releases/download/x"));
+        // Spellings a server would normalize out of the prefix.
+        for escape in [
+            "https://github.com/astral-sh/uv/releases/download/../../../other/x/releases/download/y",
+            "https://github.com/astral-sh/uv/releases/download/./x",
+            "https://github.com/astral-sh/uv/releases/download/%2e%2e/x",
+            "https://github.com/astral-sh/uv/releases/download/..\\x",
+            "https://github.com/astral-sh/uv/releases/download/a%2fb",
+            "https://github.com/astral-sh/uv/releases/download/a%5Cb",
+            "https://github.com/astral-sh/uv/releases/download/a%2",
+            "https://github.com/astral-sh/uv/releases/download/a%zz",
+            "https://github.com/astral-sh/uv/releases/download/a%25",
+        ] {
+            assert!(!endpoint.covers(escape), "{escape}");
+        }
+        // An escape that decodes to an ordinary character is inert.
+        assert!(endpoint.covers(
+            "https://github.com/astral-sh/uv/releases/download/cpython-3.12.14%2B20260825.tar.gz"
+        ));
         let origin = Endpoint::new("https://nodejs.org").unwrap();
         assert!(origin.covers("https://nodejs.org/dist/v24.20.0/node.tar.gz"));
         assert!(!origin.covers("https://nodejs.org:8443/dist/x"));

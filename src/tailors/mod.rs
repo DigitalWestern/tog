@@ -192,9 +192,15 @@ pub trait Tailor: Sync {
     fn toolchain_catalog(&self) -> io::Result<Catalog>;
 
     /// What a closure of this ecosystem written before the toolchain lock
-    /// proves about its toolchain: the envelope platform and the exact
-    /// versions it records (`kernel::toolchain::seed`).
-    fn legacy_toolchain_evidence(&self, ecosystem: &str, body: &Value) -> LegacyEvidence;
+    /// proves about its toolchain (`kernel::toolchain::seed`): `platform`
+    /// is the closure envelope's platform, `body` the closure body
+    /// `read_closure` returns, from which the exact recorded versions come.
+    fn legacy_toolchain_evidence(
+        &self,
+        ecosystem: &str,
+        platform: Option<Platform>,
+        body: &Value,
+    ) -> LegacyEvidence;
 
     /// The `--eco` word `blanket fmt` accepts for this ecosystem, when it
     /// has a pinned formatter.
@@ -416,15 +422,12 @@ mod tests {
         );
     }
 
-    /// A pre-lock closure body per ecosystem, recording the versions of the
-    /// newest shipped release on `platform`.
-    fn legacy_body(
-        id: &str,
-        bundle: &crate::kernel::toolchain::Bundle,
-        platform: Option<Platform>,
-    ) -> Value {
+    /// A pre-lock closure body per ecosystem, shaped as the writers shape
+    /// it (the platform lives in the envelope, never in the body), recording
+    /// the versions of `bundle`.
+    fn legacy_body(id: &str, bundle: &crate::kernel::toolchain::Bundle) -> Value {
         let version = |component: &str| bundle.component(component).unwrap().version.clone();
-        let mut body = match id {
+        match id {
             "python" => json!({"python": {"version": version("cpython")}, "plan": {}}),
             "node" => json!({"node_version": version("node")}),
             "cargo" => json!({"plan": {"rust_version": version("rustc")}}),
@@ -435,11 +438,7 @@ mod tests {
             }
             "dotnet" => json!({"plan": {"sdk_version": version("dotnet-sdk")}}),
             other => panic!("no legacy body for {other}"),
-        };
-        if let Some(platform) = platform {
-            body["platform"] = Value::String(platform.triple().into());
         }
-        body
     }
 
     #[test]
@@ -447,21 +446,19 @@ mod tests {
         for tailor in registry() {
             let catalog = tailor.toolchain_catalog().unwrap();
             let newest = catalog.select(&Request::newest()).unwrap();
+            let body = legacy_body(tailor.id(), newest);
+            assert!(body.get("platform").is_none());
             for platform in Platform::ALL {
-                let body = legacy_body(tailor.id(), newest, Some(*platform));
-                let evidence = tailor.legacy_toolchain_evidence(tailor.id(), &body);
+                let evidence =
+                    tailor.legacy_toolchain_evidence(tailor.id(), Some(*platform), &body);
                 assert_eq!(evidence.platform, Some(*platform));
                 let seeded = seed(&catalog, &evidence)
                     .unwrap_or_else(|error| panic!("{}: {error}", tailor.id()));
                 assert_eq!(seeded.release, newest.release, "{}", tailor.id());
             }
             // No envelope platform: refuse, naming the update verb.
-            let body = legacy_body(tailor.id(), newest, None);
-            let error = seed(
-                &catalog,
-                &tailor.legacy_toolchain_evidence(tailor.id(), &body),
-            )
-            .unwrap_err();
+            let evidence = tailor.legacy_toolchain_evidence(tailor.id(), None, &body);
+            let error = seed(&catalog, &evidence).unwrap_err();
             assert!(
                 error.to_string().contains("records no platform"),
                 "{}: {error}",
@@ -473,12 +470,9 @@ mod tests {
                 tailor.id()
             );
             // No recorded version: refuse rather than use the shipped default.
-            let bare = json!({"platform": LINUX.triple(), "plan": {}});
-            let error = seed(
-                &catalog,
-                &tailor.legacy_toolchain_evidence(tailor.id(), &bare),
-            )
-            .unwrap_err();
+            let bare = json!({"plan": {}});
+            let evidence = tailor.legacy_toolchain_evidence(tailor.id(), Some(LINUX), &bare);
+            let error = seed(&catalog, &evidence).unwrap_err();
             assert!(
                 error.to_string().contains("records no"),
                 "{}: {error}",
@@ -488,19 +482,27 @@ mod tests {
         // Python's older closures record the version on the plan instead.
         let python = by_id("python").unwrap();
         let catalog = python.toolchain_catalog().unwrap();
-        let old = json!({"platform": DARWIN.triple(), "plan": {"python_version": "3.11.16"}});
-        let seeded = seed(&catalog, &python.legacy_toolchain_evidence("python", &old)).unwrap();
+        let old = json!({"plan": {"python_version": "3.11.16"}});
+        let seeded = seed(
+            &catalog,
+            &python.legacy_toolchain_evidence("python", Some(DARWIN), &old),
+        )
+        .unwrap();
         assert_eq!(seeded.component("cpython").unwrap().version, "3.11.16");
         // A rustfmt closure records the version at the top level.
         let cargo = by_id("cargo").unwrap();
         let catalog = cargo.toolchain_catalog().unwrap();
-        let fmt = json!({"platform": LINUX.triple(), "rust_version": "1.96.1"});
-        assert!(seed(&catalog, &cargo.legacy_toolchain_evidence("rustfmt", &fmt)).is_ok());
+        let fmt = json!({"rust_version": "1.96.1"});
+        assert!(seed(
+            &catalog,
+            &cargo.legacy_toolchain_evidence("rustfmt", Some(LINUX), &fmt)
+        )
+        .is_ok());
         // A version the catalog never shipped is unrecoverable.
-        let stranger = json!({"platform": LINUX.triple(), "plan": {"rust_version": "1.0.0"}});
+        let stranger = json!({"plan": {"rust_version": "1.0.0"}});
         let error = seed(
             &catalog,
-            &cargo.legacy_toolchain_evidence("cargo", &stranger),
+            &cargo.legacy_toolchain_evidence("cargo", Some(LINUX), &stranger),
         )
         .unwrap_err();
         assert!(

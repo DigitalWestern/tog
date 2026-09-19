@@ -74,9 +74,13 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
 
 /// The shipped Go catalog: one release bundle per pinned Go version.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let mut versions: Vec<&str> = GO_PIN_ROWS.iter().map(|pin| pin.version).collect();
-    versions.sort_unstable();
-    versions.dedup();
+    // Catalog order is pin-table order: the newest-appended row wins a tie.
+    let mut versions: Vec<&str> = Vec::new();
+    for version in GO_PIN_ROWS.iter().map(|pin| pin.version) {
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
     let mut bundles = Vec::new();
     for version in versions {
         let artifacts = GO_PIN_ROWS
@@ -106,8 +110,11 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 }
 
 /// A pre-lock Go closure records the toolchain under `plan.go_version`.
-pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(body, &[("go", "/plan/go_version")])
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(platform, body, &[("go", "/plan/go_version")])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

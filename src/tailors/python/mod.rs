@@ -259,9 +259,13 @@ const CPYTHON_BUILD: &str = "20260825";
 /// resolver too. Rows carry the pin's URL and digest unchanged; the recipe
 /// ids name the layouts the existing identities already commit to.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let mut versions: Vec<&str> = PYTHONS.iter().map(|pin| pin.version).collect();
-    versions.sort_unstable();
-    versions.dedup();
+    // Catalog order is pin-table order: the newest-appended row wins a tie.
+    let mut versions: Vec<&str> = Vec::new();
+    for version in PYTHONS.iter().map(|pin| pin.version) {
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
     let mut bundles = Vec::new();
     for version in versions {
         let mut artifacts = Vec::new();
@@ -303,8 +307,12 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 
 /// A pre-lock Python closure records the selected CPython version under
 /// `python.version` (older closures: `plan.python_version`).
-pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
     crate::comforter::legacy_toolchain_evidence(
+        platform,
         body,
         &[
             ("cpython", "/python/version"),

@@ -167,7 +167,10 @@ bytes, which is what lets publication compare bytes rather than parse trees.
 
 This Node bundle uses shipped pins: npm is embedded in the Node artifact and
 node-gyp inside that bundled npm, so the Node artifact's two platform rows are
-the whole independently-fetched set. Its `.node-version` holds `24.20.0\n`,
+the whole independently-fetched set. (The shipped catalog today lists only
+the `node` component: the pin table records no verified npm or node-gyp
+version, and the catalog invents none. The embedded rows appear once those
+versions are verified at pin time.) Its `.node-version` holds `24.20.0\n`,
 whose sha256 is that input row's digest, and its `package.json` carries no
 `engines.node`, which the second row records rather than omits:
 

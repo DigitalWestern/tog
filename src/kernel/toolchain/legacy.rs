@@ -60,9 +60,12 @@ pub fn seed<'a>(catalog: &'a Catalog, evidence: &LegacyEvidence) -> io::Result<&
         return Err(refuse(catalog, "the closure records no platform".into()));
     };
     let Some(first) = catalog.bundles().first() else {
-        return Err(refuse(catalog, "the catalog is empty".into()));
+        return Err(invalid(format!(
+            "{} catalog is empty: nothing to seed a toolchain lock from",
+            catalog.ecosystem()
+        )));
     };
-    // Every bundle of one catalog shares the primary component list.
+    // `Catalog::new` checked that every bundle shares this primary list.
     let mut wanted = Vec::new();
     for name in &first.primary {
         let text = evidence
@@ -81,16 +84,6 @@ pub fn seed<'a>(catalog: &'a Catalog, evidence: &LegacyEvidence) -> io::Result<&
 
     let mut candidates = Vec::new();
     for bundle in catalog.bundles() {
-        if bundle.primary != first.primary {
-            return Err(invalid(format!(
-                "{} catalog: release {} has primary {:?}, release {} has {:?}",
-                catalog.ecosystem(),
-                first.release,
-                first.primary,
-                bundle.release,
-                bundle.primary
-            )));
-        }
         let versions = bundle.primary_versions()?;
         if versions
             .iter()

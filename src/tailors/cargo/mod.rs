@@ -94,9 +94,13 @@ fn rust_components(platform: Platform) -> io::Result<Vec<&'static RustComponent>
 /// with rustc, rust-std and cargo under the toolchain recipe and rustfmt (the
 /// `blanket fmt` component of the same version) under its own.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let mut versions: Vec<&str> = RUST_COMPONENTS.iter().map(|c| c.version).collect();
-    versions.sort_unstable();
-    versions.dedup();
+    // Catalog order is pin-table order: the newest-appended row wins a tie.
+    let mut versions: Vec<&str> = Vec::new();
+    for version in RUST_COMPONENTS.iter().map(|c| c.version) {
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
     let mut bundles = Vec::new();
     for version in versions {
         let mut components = Vec::new();
@@ -145,13 +149,17 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 
 /// A pre-lock cargo closure records the toolchain under `plan.rust_version`;
 /// a rustfmt closure records it at the top level.
-pub fn legacy_toolchain_evidence(ecosystem: &str, body: &serde_json::Value) -> LegacyEvidence {
+pub fn legacy_toolchain_evidence(
+    ecosystem: &str,
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
     let pointer = if ecosystem == "rustfmt" {
         "/rust_version"
     } else {
         "/plan/rust_version"
     };
-    crate::comforter::legacy_toolchain_evidence(body, &[("rustc", pointer)])
+    crate::comforter::legacy_toolchain_evidence(platform, body, &[("rustc", pointer)])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

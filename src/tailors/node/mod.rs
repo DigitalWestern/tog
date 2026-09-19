@@ -161,9 +161,13 @@ pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
 /// npm and node-gyp ship inside the Node artifact; the pin table records no
 /// version for them, so they are not listed as components here.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let mut versions: Vec<&str> = NODE_PINS.iter().map(|pin| pin.version).collect();
-    versions.sort_unstable();
-    versions.dedup();
+    // Catalog order is pin-table order: the newest-appended row wins a tie.
+    let mut versions: Vec<&str> = Vec::new();
+    for version in NODE_PINS.iter().map(|pin| pin.version) {
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
     let mut bundles = Vec::new();
     for version in versions {
         let artifacts = NODE_PINS
@@ -193,8 +197,11 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 }
 
 /// A pre-lock Node closure records its runtime under `node_version`.
-pub fn legacy_toolchain_evidence(body: &serde_json::Value) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(body, &[("node", "/node_version")])
+pub fn legacy_toolchain_evidence(
+    platform: Option<Platform>,
+    body: &serde_json::Value,
+) -> LegacyEvidence {
+    crate::comforter::legacy_toolchain_evidence(platform, body, &[("node", "/node_version")])
 }
 
 pub fn preflight(platform: Platform) -> io::Result<()> {
