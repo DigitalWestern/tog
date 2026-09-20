@@ -260,6 +260,33 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
     crate::tailors::python::artifacts::provisioned_version(name, version)
 }
 
+/// The two spellings of the `node-env/4` native decision. The producer
+/// writes one of them on every commit, so a dropped `native_libs` key is a
+/// contract violation rather than a different legitimate environment.
+pub(crate) const NATIVE_LIBS_MOUNTED: &str = "native-libs";
+pub(crate) const NATIVE_NONE: &str = "none";
+
+/// The `node-env/4` digest over the package set and the declared artifacts:
+/// every `pkg:` and `artifact:` input in identity order, key and value
+/// NUL-terminated so no pair can be re-spelled as another. It is written
+/// unconditionally — the empty lockfile gets the digest of nothing — which
+/// is what makes a dropped `pkg:` or `artifact:` key visible. The identity
+/// contract in `objects.rs` recomputes it from this same function.
+pub(crate) fn plan_digest(inputs: &BTreeMap<String, String>) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for (key, value) in inputs
+        .iter()
+        .filter(|(key, _)| key.starts_with("pkg:") || key.starts_with("artifact:"))
+    {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
 pub(super) fn node_env_identity(
     store: &Store,
     platform: Platform,
@@ -270,10 +297,11 @@ pub(super) fn node_env_identity(
 ) -> io::Result<Identity> {
     let mut inputs = BTreeMap::new();
     // /3: install scripts run sandboxed; name@version joined the per-pkg
-    // identity (they reach scripts as npm_package_* env). Remaining known
-    // impurity, documented: host Xcode/SDK version is not fingerprinted
-    // (same standing as python sdist builds).
-    inputs.insert("schema".to_string(), "node-env/3".to_string());
+    // identity (they reach scripts as npm_package_* env). /4: a plan digest
+    // over the packages and declared artifacts plus an explicit native
+    // decision. Remaining known impurity, documented: host Xcode/SDK version
+    // is not fingerprinted (same standing as python sdist builds).
+    inputs.insert("schema".to_string(), "node-env/4".to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -343,6 +371,19 @@ pub(super) fn node_env_identity(
             return Err(err(format!("duplicate artifact path: {}", a.path)));
         }
     }
+    // The two unconditional inputs `node-env/4` adds. Under /3 a
+    // multi-package plan that lost one `pkg:` key still had another, and a
+    // lost `artifact:` or Linux `native_libs` key passed, because every check
+    // keyed on the presence of the key it checked.
+    inputs.insert("plan_digest".to_string(), plan_digest(&inputs));
+    inputs.insert(
+        "native".to_string(),
+        match native_libs_id {
+            Some(_) => NATIVE_LIBS_MOUNTED,
+            None => NATIVE_NONE,
+        }
+        .to_string(),
+    );
     if let Some(native_libs_id) = native_libs_id {
         inputs.insert("native_libs".into(), native_libs_id.into());
     }

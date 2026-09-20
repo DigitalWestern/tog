@@ -13,6 +13,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "go",
         schema: Some("go-toolchain/1"),
+        superseded_by: None,
         live_required: &["schema", "artifact_sha256", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -27,6 +28,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "go-modcache",
         schema: Some("go-modcache/1"),
+        superseded_by: None,
         live_required: &["schema", "extractor"],
         live_optional: &["mod:", "modfile:", "info:"],
         legacy_only: &[],

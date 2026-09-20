@@ -114,7 +114,7 @@ sdist). CPython comes from astral-sh/python-build-standalone with sha256s
 pinned in `python/mod.rs`; interpreter selection happens before locking
 (`.python-version` wins, then `requires-python`). Wheels install into the
 env object; sdists build in a network-denied sandbox (legacy setuptools
-records keep `sdist-build/2`, PEP 517 uses `sdist-build/3` with an immutable
+records keep `sdist-build/2`, PEP 517 uses `sdist-build/4` with an immutable
 build environment). Environments are immutable: no activate scripts, pip
 cannot mutate them.
 
@@ -131,7 +131,8 @@ comforter is everything cargo needs to build fully offline: a pinned
 toolchain object (rustc + cargo + rust-std, TOFU-pinned sha256s) plus a
 `cargo-vendor` object of every registry crate, hash-verified, with tog
 generated `.cargo-checksum.json`. Vendor identity is the sorted crate
-checksums only, so locks with the same crate set share one object.
+checksums plus their count (`cargo-vendor/2`), so locks with the same crate
+set share one object.
 Enforcement is a cargo wrapper under `.tog/cargo-home/bin/` that execs
 the store cargo with `--frozen`; user-supplied `--config` is rejected and
 `RUSTC` is forced. `tog build` sandboxes the compile with a disposable
@@ -327,26 +328,6 @@ also fails closed at sweep time. Public tailor realization entry points call
 through `commands::dispatch`; direct kernel callers install it explicitly.
 Release builds skip the check; it catches developer error, it is not a store
 invariant.
-Under `cargo-vendor/1`, a one-crate plan whose producer dropped its `crate:` key
-is indistinguishable from the legitimate empty plan; removing that ambiguity
-requires a new schema value (`cargo-vendor/2`) with a separate count input,
-which is a deliberate future identity change, not something this guard can do.
-The same pinned boundary applies to `python-env/2`, where a dropped sole wheel
-`pkg:` key becomes the legitimate empty environment and a dropped `native_libs`
-key on an inspected native sdist passes; to `node-env/3`, where a dropped
-package from a multi-package plan or an optional `artifact:` or Linux
-`native_libs` key passes; and to `sdist-build/3`, where dropping both halves
-of either the `rust`/`vendor` or `native_libs`/`native_linker` pair passes.
-(A dropped `provisioned:` key is caught today: the `pkg:` value names the
-package, and the contract asks the producer's own provisioning decision
-whether that package must carry one.) Their successors would be
-`python-env/3` with a plan digest over the package set plus an explicit
-native decision, `node-env/4` with a plan digest over the package set and
-declared artifacts plus an explicit native decision, and `sdist-build/4` with
-explicit build-mode and native-mode fields; a bare count or flag would not
-close every gap in its row. Each new schema would reissue every object id of
-its kind, so choosing to introduce one is an owner decision tracked in
-FOLLOW-UPS.md.
 
 Status, 2026-09-10: implemented and independently reviewed on Linux; the
 macOS gate has not run since this work landed. The boundary:
@@ -354,6 +335,33 @@ it covers cooperating tog processes on a local filesystem with working
 advisory locks and atomic rename; not old binaries, not programs launched
 directly from store paths, not malicious same-user changes, not network
 filesystems where `flock` is advisory in name only.
+
+### Identity schemas of the environment and build kinds
+
+Four rows had drifts their contracts could not see, because every check was
+conditional on the presence of the key it checked. All four shipped their
+successor together, accepting one store-wide rebuild of those kinds:
+
+| kind | successor | what the bump adds | the drift it closes |
+|---|---|---|---|
+| `cargo-vendor` | `cargo-vendor/2` | `crates`, the exact number of `crate:` keys | `version` is `max(1, count)`, so a one-crate plan that lost its only `crate:` key hashed to the empty plan |
+| `python-env` | `python-env/3` | `package_digest` over every `pkg:` entry, and a `native` decision | a one-wheel plan that lost its only `pkg:` key became the empty environment; a native sdist could lose `native_libs` |
+| `node-env` | `node-env/4` | `plan_digest` over every `pkg:` and `artifact:` entry, and a `native` decision | a multi-package plan could lose one package, or a declared `artifact:` or Linux `native_libs` key |
+| `sdist-build` | `sdist-build/4` | `build_mode` and `native_mode` | dropping *both* halves of `rust`/`vendor` or `native_libs`/`native_linker` left the valid shape that never had one |
+
+Each added input is written unconditionally, including in the empty case, and
+the contract recomputes it from the producer's own function. A dropped `pkg:`
+key no longer collides with a legitimate identity, it fails the commit.
+(A dropped `provisioned:` key was always caught: the `pkg:` value names the
+package, and the contract asks the producer's own provisioning decision
+whether that package must carry one.)
+
+A new schema reissues every object id of its kind. Nothing caches the old id:
+a re-sync computes the successor identity, misses the store, and realizes
+fresh, and the orphaned old-schema objects are swept as ordinary garbage
+when nothing roots them. Their rows stay registered, marked `superseded_by`,
+so a pre-`object-meta/2` record of the old layout still migrates rather than
+blocking the sweep; publishing a superseded schema is refused at commit.
 
 ## Store concurrency
 

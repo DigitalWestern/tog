@@ -14,6 +14,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "nodejs",
         schema: None,
+        superseded_by: None,
         live_required: &["artifact_sha256", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -28,6 +29,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "node-env",
         schema: Some("node-env/3"),
+        superseded_by: Some("node-env/4"),
         live_required: &["schema", "store_root", "nodejs", "workspaces"],
         live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
         legacy_only: &[],
@@ -39,16 +41,38 @@ pub static KINDS: &[KindAdapter] = &[
         },
         adapt: node_env_v3,
     },
+    KindAdapter {
+        kind: "node-env",
+        schema: Some("node-env/4"),
+        superseded_by: None,
+        live_required: &[
+            "schema",
+            "store_root",
+            "nodejs",
+            "workspaces",
+            "plan_digest",
+            "native",
+        ],
+        live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
+        legacy_only: &[],
+        live_contract: Some(node_env_v4_contract),
+        grammar: Grammar {
+            required: &["schema", "nodejs", "plan_digest", "native"],
+            optional: &["store_root", "layout", "workspaces", "native_libs"],
+            groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
+        },
+        adapt: node_env_v4,
+    },
 ];
 
-/// `node-env/3` cannot detect three identity drifts. Dropping one package
-/// from a multi-package plan leaves another `pkg:` key, so the presence
-/// checks pass. Dropping an `artifact:` or Linux `native_libs` key also
-/// passes because those checks are conditional on the key being present.
-/// `node-env/4` would need a plan digest over the package set, the declared
-/// artifacts, and the native decision. A dropped `provisioned:` key IS
-/// detected: the `pkg:` value names the package, and the producer's own
-/// provisioning decision says which packages must carry one.
+/// `node-env/3` could not detect three identity drifts. Dropping one package
+/// from a multi-package plan left another `pkg:` key, so the presence checks
+/// passed. Dropping an `artifact:` or Linux `native_libs` key also passed,
+/// because those checks were conditional on the key being present.
+/// `node-env/4` closes all three; this row survives only for records already
+/// in the store. A dropped `provisioned:` key was always detected: the
+/// `pkg:` value names the package, and the producer's own provisioning
+/// decision says which packages must carry one.
 fn node_env_contract(identity: &Identity) -> Result<(), String> {
     let inputs = &identity.inputs;
     // A lockfile with no installable packages is legitimate. In that shape
@@ -105,6 +129,44 @@ fn node_env_contract(identity: &Identity) -> Result<(), String> {
     Ok(())
 }
 
+/// `node-env/4` adds two unconditional inputs to the `/3` shape: a
+/// `plan_digest` over every `pkg:` and `artifact:` entry, and a `native`
+/// decision the producer spells out whether or not it mounts the library
+/// set. A dropped package or declared artifact now leaves a digest no plan
+/// produces, and a dropped `native_libs` key leaves `native` claiming a
+/// mount that is not there. Both are recomputed here from the producer's own
+/// functions.
+fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
+    // The `/3` relations run first: when one of them can name the exact
+    // pairing that broke, that is a better diagnostic than "the digest moved".
+    node_env_contract(identity)?;
+    let inputs = &identity.inputs;
+    let declared = inputs
+        .get("plan_digest")
+        .ok_or_else(|| "Node plan digest: no plan_digest input".to_string())?;
+    let recomputed = super::realize::plan_digest(inputs);
+    if *declared != recomputed {
+        return Err(format!(
+            "Node plan digest: plan_digest {declared} does not match the {recomputed} this \
+             package and artifact set hashes to"
+        ));
+    }
+    let native = inputs
+        .get("native")
+        .ok_or_else(|| "Node native decision: no native input".to_string())?;
+    let expected = match inputs.contains_key("native_libs") {
+        true => super::realize::NATIVE_LIBS_MOUNTED,
+        false => super::realize::NATIVE_NONE,
+    };
+    if native != expected {
+        return Err(format!(
+            "Node native decision: native {native:?} does not match the {expected:?} this \
+             identity's native_libs input implies"
+        ));
+    }
+    Ok(())
+}
+
 /// The `<name>@<version>` field of a `pkg:` value. The producer writes
 /// `<algo>:<hex>:<name>@<version>:patch[..]:bin[..]` for a registry package
 /// and `git:<object id>:<name>@<version>:...` for a git package; the name may
@@ -119,6 +181,44 @@ fn package_name_and_version(value: &str) -> Option<(&str, &str)> {
 /// (in the algorithm npm published, which may be sha1, sha256 or sha512); a
 /// git package contributes its realized `git-source` object.
 fn node_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    node_env_inner(
+        record,
+        index,
+        &[
+            "schema",
+            "store_root",
+            "nodejs",
+            "layout",
+            "workspaces",
+            "native_libs",
+        ],
+    )
+}
+
+/// `node-env/4`: the same byte sources. `plan_digest` and `native` are drift
+/// guards over entries already named here, so neither adds a dependency.
+fn node_env_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    node_env_inner(
+        record,
+        index,
+        &[
+            "schema",
+            "store_root",
+            "nodejs",
+            "layout",
+            "workspaces",
+            "native_libs",
+            "plan_digest",
+            "native",
+        ],
+    )
+}
+
+fn node_env_inner(
+    record: &Record,
+    index: &MetaIndex,
+    scalars: &[&str],
+) -> Result<ObjectDeps, String> {
     let mut deps = ObjectDeps::new();
     add_object(&mut deps, input(record, "nodejs")?, index, "nodejs")?;
     if let Some(native_libs) = record.identity.inputs.get("native_libs") {
@@ -158,10 +258,7 @@ fn node_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
             )?;
         } else if let Some(path) = key.strip_prefix("artifact:") {
             add_digest(&mut deps, Algo::Sha256, value, &format!("artifact {path}"))?;
-        } else if !matches!(
-            key.as_str(),
-            "schema" | "store_root" | "nodejs" | "layout" | "workspaces" | "native_libs"
-        ) {
+        } else if !scalars.contains(&key.as_str()) {
             return Err(format!("unexpected identity input {key}"));
         }
     }

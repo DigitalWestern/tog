@@ -1047,7 +1047,7 @@ fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> 
     crates.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
 
     let mut seen = BTreeSet::new();
-    let mut inputs = BTreeMap::from([(String::from("schema"), String::from("cargo-vendor/1"))]);
+    let mut inputs = BTreeMap::from([(String::from("schema"), String::from("cargo-vendor/2"))]);
     for krate in &mut crates {
         validate_crate_component("name", &krate.name)?;
         validate_crate_component("version", &krate.version)?;
@@ -1068,6 +1068,10 @@ fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> 
         }
         inputs.insert(format!("crate:{}@{}", krate.name, krate.version), checksum);
     }
+    // The explicit crate count `cargo-vendor/2` exists for: `version` is
+    // max(1, count), so under /1 a one-crate plan that lost its only `crate:`
+    // key hashed to the empty plan's object id.
+    inputs.insert(String::from("crates"), crates.len().to_string());
     let identity = Identity {
         kind: "cargo-vendor".into(),
         name: "vendor".into(),
@@ -2402,6 +2406,57 @@ mod git_source_tests {
         let tag_text = tog_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
         assert!(tag_text.contains("tag = \"v1\""), "{tag_text}");
         assert!(text.trim_end().ends_with("offline = true"), "{text}");
+    }
+
+    /// `cargo-vendor/2` golden, from fixed inputs. A vendor identity has no
+    /// platform input, so there is one value for every host. The `/1`
+    /// spelling of the same plan is a different object id, so the bump
+    /// reissues every vendor tree; and the drift `/1` could not see — a
+    /// one-crate plan losing its only `crate:` key — is now a contract
+    /// error instead of the empty plan's identity.
+    #[test]
+    fn vendor_identity_golden_and_dropped_sole_crate() {
+        crate::tailors::install_kinds();
+        let plan = |crates: Vec<CargoCrate>| CargoPlan {
+            rust_version: RUST_VERSION.into(),
+            crates,
+            members: Vec::new(),
+        };
+        let serde = CargoCrate {
+            name: "serde".into(),
+            version: "1.0.0".into(),
+            sha256: "a".repeat(64),
+            url: "https://crates.io/api/v1/crates/serde/1.0.0/download".into(),
+            git: None,
+        };
+        let (_, empty) = vendor_identity(&plan(Vec::new())).unwrap();
+        let (_, one) = vendor_identity(&plan(vec![serde])).unwrap();
+        assert_eq!(empty.inputs["schema"], "cargo-vendor/2");
+        assert_eq!(empty.inputs["crates"], "0");
+        assert_eq!(one.inputs["crates"], "1");
+        assert_eq!(
+            empty.object_id(),
+            "9935a7a14a1d0612bf26f0856d9e7647f89fc7f9-vendor-1"
+        );
+        assert_eq!(
+            one.object_id(),
+            "1609a9586c135ae1de6c388f8c128b2bb0afd788-vendor-1"
+        );
+        assert_eq!(crate::kernel::objmeta::check_identity_grammar(&one), Ok(()));
+
+        // The `/1` spelling of the same one-crate plan: a different object
+        // id, which is the store-wide rebuild this bump accepts.
+        let mut old = one.clone();
+        old.inputs.insert("schema".into(), "cargo-vendor/1".into());
+        old.inputs.remove("crates");
+        assert_ne!(old.object_id(), one.object_id());
+
+        // The drift `/1` could not see.
+        let mut dropped = one.clone();
+        dropped.inputs.remove("crate:serde@1.0.0");
+        let reason = crate::kernel::objmeta::check_identity_grammar(&dropped).unwrap_err();
+        assert!(reason.contains("Cargo crate count relation"), "{reason}");
+        assert_ne!(dropped.object_id(), empty.object_id());
     }
 
     #[test]

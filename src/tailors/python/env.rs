@@ -48,6 +48,30 @@ pub(super) fn canonical_packages<'a>(
     Ok(packages)
 }
 
+/// The two spellings of the `python-env/3` native decision. The producer
+/// writes one of them on every commit, so a dropped `native_libs` key is a
+/// contract violation rather than a different legitimate environment.
+pub(super) const NATIVE_LIBS_MOUNTED: &str = "native-libs";
+pub(super) const NATIVE_NONE: &str = "none";
+
+/// The `python-env/3` digest over the whole package set: every `pkg:` input
+/// in identity order, key and value NUL-terminated so no key/value pair can
+/// be re-spelled as another. It is written unconditionally — the empty
+/// environment gets the digest of no packages at all — which is what makes a
+/// dropped sole `pkg:` key visible. The identity contract in `objects.rs`
+/// recomputes it from the same function.
+pub(super) fn package_digest(inputs: &BTreeMap<String, String>) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for (key, value) in inputs.iter().filter(|(key, _)| key.starts_with("pkg:")) {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
 /// Build the one canonical environment identity used by both planning and
 /// realization. `cpython_id` is pure during planning and is the realized
 /// interpreter object's id during execution; every other input is shared.
@@ -61,7 +85,7 @@ pub(super) fn environment_identity(
         .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
-    inputs.insert("schema".to_string(), "python-env/2".to_string());
+    inputs.insert("schema".to_string(), "python-env/3".to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -97,6 +121,19 @@ pub(super) fn environment_identity(
         };
         inputs.insert(format!("pkg:{}", p.name), value);
     }
+    // The two unconditional inputs `python-env/3` adds. Under /2 a one-wheel
+    // plan that lost its only `pkg:` key hashed to the legitimate empty
+    // environment, and a native sdist that lost `native_libs` passed every
+    // check, because every check keyed on the presence of the key it checked.
+    inputs.insert("package_digest".to_string(), package_digest(&inputs));
+    inputs.insert(
+        "native".to_string(),
+        match native_libs_id {
+            Some(_) => NATIVE_LIBS_MOUNTED,
+            None => NATIVE_NONE,
+        }
+        .to_string(),
+    );
     if let Some(native_libs_id) = native_libs_id {
         inputs.insert("native_libs".into(), native_libs_id);
     }
@@ -109,7 +146,7 @@ pub(super) fn environment_identity(
 }
 
 /// Compute an environment object id without realizing its files. Build
-/// planning uses this so an isolated sdist can commit its schema-3 identity
+/// planning uses this so an isolated sdist can commit its isolated-build identity
 /// into the parent before the parent cache lookup.
 pub(crate) fn planned_env_object_id(
     store: &Store,
@@ -553,6 +590,82 @@ mod tests {
         id
     }
 
+    /// `python-env/3` goldens, on both platforms, from fixed inputs: a
+    /// fixed store root (a real identity input) and one wheel. The identity
+    /// constructor is a pure function of its platform argument, so the
+    /// Darwin value is computed here and the macOS gate only confirms it.
+    /// The `/2` spelling of the same plan is a different object id, so the
+    /// bump reissues every environment; and the drift `/2` could not see —
+    /// a one-wheel plan losing its only `pkg:` key — no longer collides
+    /// with the empty environment.
+    #[test]
+    fn environment_identity_goldens_and_dropped_sole_wheel() {
+        crate::tailors::install_kinds();
+        let store = Store {
+            root: PathBuf::from("/fixture/tog-store"),
+        };
+        let empty_plan = Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: Vec::new(),
+        };
+        let wheel_plan = Plan {
+            packages: vec![LockedPackage {
+                name: "example".into(),
+                version: "1.0.0".into(),
+                filename: "example-1.0.0-py3-none-any.whl".into(),
+                url: "https://files.pythonhosted.org/example.whl".into(),
+                sha256: "a".repeat(64),
+                kind: ArtifactKind::Wheel,
+                git: None,
+            }],
+            ..empty_plan.clone()
+        };
+        for (platform, golden) in [
+            (
+                Platform::X86_64UnknownLinuxGnu,
+                "306c7508efb42b2526003af9975593dc92cf1abc-env-3.12.14",
+            ),
+            (
+                Platform::Aarch64AppleDarwin,
+                "8c17d18f771550bb1f0178cb694ae02b1f565806-env-3.12.14",
+            ),
+        ] {
+            let cpython = python::object_id_for(platform, "3.12.14").unwrap();
+            let empty = environment_identity(&store, platform, &empty_plan, &cpython).unwrap();
+            let wheel = environment_identity(&store, platform, &wheel_plan, &cpython).unwrap();
+            assert_eq!(wheel.inputs["schema"], "python-env/3");
+            assert_eq!(wheel.inputs["native"], NATIVE_NONE);
+            assert_eq!(wheel.object_id(), golden, "{}", platform.triple());
+            assert_eq!(
+                crate::kernel::objmeta::check_identity_grammar(&wheel),
+                Ok(())
+            );
+            assert_ne!(
+                empty.inputs["package_digest"],
+                wheel.inputs["package_digest"]
+            );
+
+            // The `/2` spelling of the same plan: a different object id,
+            // which is the store-wide rebuild this bump accepts.
+            let mut old = wheel.clone();
+            old.inputs.insert("schema".into(), "python-env/2".into());
+            old.inputs.remove("package_digest");
+            old.inputs.remove("native");
+            assert_ne!(old.object_id(), wheel.object_id());
+
+            // The drift `/2` could not see.
+            let mut dropped = wheel.clone();
+            dropped.inputs.remove("pkg:example");
+            let reason = crate::kernel::objmeta::check_identity_grammar(&dropped).unwrap_err();
+            assert!(
+                reason.contains("Python environment package digest"),
+                "{reason}"
+            );
+            assert_ne!(dropped.object_id(), empty.object_id());
+        }
+    }
+
     #[test]
     fn fast_sdist_parent_input_keeps_the_legacy_identity() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
@@ -566,29 +679,32 @@ mod tests {
             packages: vec![fast.clone()],
         };
         let actual = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
+        let mut inputs = BTreeMap::from([
+            ("schema".to_string(), "python-env/3".to_string()),
+            (
+                "store_root".into(),
+                store.root.to_string_lossy().into_owned(),
+            ),
+            (
+                "cpython".into(),
+                python::object_id_for(Platform::host().unwrap(), "3.12.14").unwrap(),
+            ),
+            (
+                "pkg:fast-golden".into(),
+                format!(
+                    "Sdist:{}:{}",
+                    fast.sha256,
+                    crate::tailors::python::build::derivation_fingerprint()
+                ),
+            ),
+        ]);
+        inputs.insert("package_digest".into(), package_digest(&inputs));
+        inputs.insert("native".into(), NATIVE_NONE.into());
         let expected = Identity {
             kind: "python-env".into(),
             name: "env".into(),
             version: "3.12.14".into(),
-            inputs: BTreeMap::from([
-                ("schema".into(), "python-env/2".into()),
-                (
-                    "store_root".into(),
-                    store.root.to_string_lossy().into_owned(),
-                ),
-                (
-                    "cpython".into(),
-                    python::object_id_for(Platform::host().unwrap(), "3.12.14").unwrap(),
-                ),
-                (
-                    "pkg:fast-golden".into(),
-                    format!(
-                        "Sdist:{}:{}",
-                        fast.sha256,
-                        crate::tailors::python::build::derivation_fingerprint()
-                    ),
-                ),
-            ]),
+            inputs,
         }
         .object_id();
         assert_eq!(actual, expected);
@@ -614,7 +730,7 @@ mod tests {
         let second = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
         assert_ne!(
             first, second,
-            "schema-3 build-env input must affect parent id"
+            "isolated-build build_env input must affect parent id"
         );
         assert_eq!(
             key,

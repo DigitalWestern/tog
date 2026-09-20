@@ -101,6 +101,14 @@ fn object_id(path: &Path, label: &str) -> io::Result<String> {
         })
 }
 
+/// The four spellings of the `sdist-build/4` mode fields. The producer
+/// writes one of each on every commit, so dropping a whole `rust`/`vendor`
+/// or `native_libs`/`native_linker` pair no longer leaves a valid identity.
+pub(super) const BUILD_MODE_RUST: &str = "rust-vendor";
+pub(super) const BUILD_MODE_PLAIN: &str = "plain";
+pub(super) const NATIVE_MODE_LIBS: &str = "native-libs";
+pub(super) const NATIVE_MODE_NONE: &str = "none";
+
 fn isolated_sdist_identity_from_ids(
     platform: Platform,
     pkg: &LockedPackage,
@@ -111,11 +119,27 @@ fn isolated_sdist_identity_from_ids(
     native_libs_id: Option<&str>,
 ) -> Identity {
     let mut inputs = BTreeMap::from([
-        ("schema".into(), "sdist-build/3".into()),
+        ("schema".into(), "sdist-build/4".into()),
         ("sdist_sha256".into(), pkg.sha256.clone()),
         ("python".into(), format!("{}:{}", pin.version, pin.sha256)),
         ("platform".into(), platform.triple().into()),
         ("build_env".into(), build_env_id.into()),
+        (
+            "build_mode".into(),
+            match rust_id {
+                Some(_) => BUILD_MODE_RUST,
+                None => BUILD_MODE_PLAIN,
+            }
+            .into(),
+        ),
+        (
+            "native_mode".into(),
+            match native_libs_id {
+                Some(_) => NATIVE_MODE_LIBS,
+                None => NATIVE_MODE_NONE,
+            }
+            .into(),
+        ),
     ]);
     if let Some(rust_id) = rust_id {
         inputs.insert("rust".into(), rust_id.into());
@@ -1047,7 +1071,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         git: None,
     };
     let schema_two = sdist_identity(platform, &pkg, pin);
-    let schema_three = sdist_build_identity(
+    let isolated = sdist_build_identity(
         platform,
         &pkg,
         pin,
@@ -1065,7 +1089,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         lock_text: String::new(),
         generated_lock: false,
     };
-    let schema_three_rust = sdist_build_identity(
+    let isolated_rust = sdist_build_identity(
         platform,
         &pkg,
         pin,
@@ -1076,7 +1100,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         None,
     )
     .expect("Rust isolated sdist identity");
-    let mut cases = vec![schema_two, schema_three, schema_three_rust];
+    let mut cases = vec![schema_two, isolated, isolated_rust];
     if platform == Platform::X86_64UnknownLinuxGnu {
         let store = test_store("matrix-native");
         let native_pkg = local_native_sdist_for_test(&store, "matrix-native");
@@ -1090,8 +1114,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         let planned = plan_sdist_identity_input(&store, platform, &rust_pkg, pin.version, None)
             .expect("Darwin Rust sdist identity plan");
         // Cargo.toml makes info.rust_build true, so plan_sdist_identity_input
-        // takes the schema-3 path even though Darwin has no native-libs pin.
-        assert_eq!(planned.identity.inputs["schema"], "sdist-build/3");
+        // takes the isolated-build path even though Darwin has no native-libs pin.
+        assert_eq!(planned.identity.inputs["schema"], "sdist-build/4");
         cases.push(planned.identity);
         let _ = crate::kernel::store::remove_tree(&store.root);
     }
@@ -1306,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_identity_has_schema_three_and_build_env() {
+    fn isolated_identity_has_schema_four_and_build_env() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1331,10 +1355,95 @@ mod tests {
         );
         assert_eq!(
             identity.object_id(),
-            "bbd092b50e11e7b3c04c0ebfd449d03e87baeded-example-1.0"
+            "680f5a153ffb1ff5a87d00bf0b051031f22072c0-example-1.0"
         );
-        assert_eq!(identity.inputs["schema"], "sdist-build/3");
+        assert_eq!(identity.inputs["schema"], "sdist-build/4");
         assert_eq!(identity.inputs["build_env"], "build-env-id");
+        assert_eq!(identity.inputs["build_mode"], BUILD_MODE_PLAIN);
+        assert_eq!(identity.inputs["native_mode"], NATIVE_MODE_NONE);
+    }
+
+    /// `sdist-build/4` golden, on both platforms, from fixed inputs. The
+    /// identity constructor is a pure function of its platform argument, so
+    /// the Darwin value is computed here and the macOS gate only confirms
+    /// it. The `/3` spelling of the same build is a different object id, so
+    /// the bump reissues every isolated build; and the drift `/3` could not
+    /// see — losing both halves of a pair — is now a contract error.
+    #[test]
+    fn isolated_identity_goldens_and_dropped_pairs() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::tailors::install_kinds();
+        let pkg = LockedPackage {
+            name: "example".into(),
+            version: "1.0".into(),
+            filename: "example-1.0.tar.gz".into(),
+            url: String::new(),
+            sha256: "a".repeat(64),
+            kind: ArtifactKind::Sdist,
+            git: None,
+        };
+        for (platform, native, golden) in [
+            (
+                Platform::X86_64UnknownLinuxGnu,
+                Some("native-libs-object"),
+                "875ff008bc85acd29b9c84db443abf7661be73bd-example-1.0",
+            ),
+            (
+                Platform::Aarch64AppleDarwin,
+                None,
+                "cd380e0c765b7051f9521fae34ba072efe78641c-example-1.0",
+            ),
+        ] {
+            let pin = crate::tailors::python::lookup(platform, "3.12.14").unwrap();
+            let identity = isolated_sdist_identity_from_ids(
+                platform,
+                &pkg,
+                pin,
+                "build-env-object",
+                Some("rust-object"),
+                Some("vendor-object"),
+                native,
+            );
+            assert_eq!(identity.inputs["schema"], "sdist-build/4");
+            assert_eq!(identity.inputs["build_mode"], BUILD_MODE_RUST);
+            assert_eq!(
+                identity.inputs["native_mode"],
+                match native {
+                    Some(_) => NATIVE_MODE_LIBS,
+                    None => NATIVE_MODE_NONE,
+                }
+            );
+            assert_eq!(identity.object_id(), golden, "{}", platform.triple());
+            assert_eq!(
+                crate::kernel::objmeta::check_identity_grammar(&identity),
+                Ok(())
+            );
+
+            // The same build under `sdist-build/3`: a different object id,
+            // which is the store-wide rebuild this bump accepts.
+            let mut old = identity.clone();
+            old.inputs.insert("schema".into(), "sdist-build/3".into());
+            old.inputs.remove("build_mode");
+            old.inputs.remove("native_mode");
+            assert_ne!(old.object_id(), identity.object_id());
+
+            // The drift `/3` could not see, in both spellings.
+            let mut no_rust = identity.clone();
+            no_rust.inputs.remove("rust");
+            no_rust.inputs.remove("vendor");
+            let reason = crate::kernel::objmeta::check_identity_grammar(&no_rust).unwrap_err();
+            assert!(reason.contains("sdist build_mode relation"), "{reason}");
+            if native.is_some() {
+                let mut no_native = identity.clone();
+                no_native.inputs.remove("native_libs");
+                no_native.inputs.remove("native_linker");
+                let reason =
+                    crate::kernel::objmeta::check_identity_grammar(&no_native).unwrap_err();
+                assert!(reason.contains("sdist native_mode relation"), "{reason}");
+            }
+        }
     }
 
     #[test]

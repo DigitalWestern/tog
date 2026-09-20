@@ -13,6 +13,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "dotnet-sdk",
         schema: Some("dotnet-sdk/1"),
+        superseded_by: None,
         live_required: &["schema", "artifact_sha512", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -27,6 +28,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "nuget-packages",
         schema: Some("nuget-packages/1"),
+        superseded_by: None,
         live_required: &["schema", "extractor"],
         live_optional: &["pkg:", "raw:"],
         legacy_only: &[],
