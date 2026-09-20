@@ -7,8 +7,8 @@
 //!
 //! What `write_file` guarantees: the file is created with O_EXCL under a
 //! random temporary name in the held parent, written, fsynced, and renamed
-//! over the destination, which is checked first and refused if it is a
-//! symlink or a directory. A concurrent same-user writer that swaps a
+//! over the destination, which is checked first and refused unless it is
+//! absent or a regular file. A concurrent same-user writer that swaps a
 //! symlink in after that check gets its symlink replaced, never written
 //! through; two writers of the same file each publish a complete file and
 //! the last rename wins. The temporary's inode is checked before the rename
@@ -115,11 +115,21 @@ impl ProjectRoot {
                     display.display()
                 )));
             }
+            // A socket refuses to open (ENXIO) before its type can be seen
+            // on the descriptor, so classify a failed open by the entry.
             Err(error) => {
+                if let Ok(stat) = stat_at(fd, name.as_bytes()) {
+                    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+                        return Err(refusal(format!(
+                            "{} is not a regular file; refusing to read it",
+                            display.display()
+                        )));
+                    }
+                }
                 return Err(io::Error::new(
                     error.kind(),
                     format!("read {}: {error}", display.display()),
-                ))
+                ));
             }
         };
         if !file.metadata()?.file_type().is_file() {
@@ -145,9 +155,9 @@ impl ProjectRoot {
 
     /// Publish `bytes` at a project-relative path atomically, creating
     /// missing parent directories. Refuses a symlink or a non-directory at
-    /// any parent, a symlink or a directory at the destination, and a
-    /// temporary name that stays occupied after a bounded number of fresh
-    /// random names.
+    /// any parent, a destination that is neither absent nor a regular file,
+    /// and a temporary name that stays occupied after a bounded number of
+    /// fresh random names.
     pub fn write_file(&self, relative: &Path, bytes: &[u8]) -> io::Result<()> {
         self.publish(relative, bytes, &mut random_temp_name)
     }
@@ -196,7 +206,13 @@ impl ProjectRoot {
                         display.display()
                     )))
                 }
-                _ => {}
+                libc::S_IFREG => {}
+                _ => {
+                    return Err(refusal(format!(
+                        "{} is not a regular file; refusing to replace it",
+                        display.display()
+                    )))
+                }
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -245,10 +261,11 @@ impl ProjectRoot {
         };
         let created = fd_stat(file.as_raw_fd())?;
         let mut renamed = false;
+        // `file` stays open through the identity checks below so the inode
+        // it names cannot be recycled under them.
         let result = (|| {
             file.write_all(bytes)?;
             file.sync_all()?;
-            drop(file);
             let current = stat_at(parent_fd, &temp)?;
             if !same_inode(&current, &created) {
                 return Err(refusal(format!(
@@ -268,6 +285,7 @@ impl ProjectRoot {
         if result.is_err() && !renamed {
             let _ = unlink_if_same(parent_fd, &temp, &created, 0);
         }
+        drop(file);
         result
     }
 }
@@ -348,7 +366,7 @@ fn random_temp_name(_name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, FileTypeExt as _};
 
     fn project(temp: &TempDir) -> PathBuf {
         let dir = temp.0.join("proj");
@@ -538,6 +556,27 @@ mod tests {
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
         assert!(error.to_string().contains("not a regular file"), "{error}");
+    }
+
+    #[test]
+    fn refuses_a_socket_for_reading_and_as_a_destination() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        fs::create_dir_all(dir.join(".tog")).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(dir.join(".tog/plan.json")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        let error = root
+            .write_file(Path::new(".tog/plan.json"), b"x")
+            .unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(fs::symlink_metadata(dir.join(".tog/plan.json"))
+            .unwrap()
+            .file_type()
+            .is_socket());
+        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
     }
 
     #[test]
