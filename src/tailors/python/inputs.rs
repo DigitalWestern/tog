@@ -103,11 +103,14 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
             if let Err(error) =
                 manifest.prepare_setup(platform, dir, &project, store, probed_version)
             {
-                // `InvalidData` out of prepare_setup is a descriptor refusal
-                // (a symlinked `.tog`, a non-regular cache), not a probe
-                // that did not work. The requirements-directory convention
-                // must not paper over a refusal that was raised on purpose.
-                if !dynamic_dependencies || error.kind() == io::ErrorKind::InvalidData {
+                // Every ordinary failure in here is already `InvalidData`
+                // (`unreadable` in the manifest layer hardcodes it, and it
+                // wraps the sandboxed egg_info probe), so the kind cannot
+                // tell a descriptor refusal from a probe that did not work.
+                // Fall back on both: a symlinked `.tog` is still refused a
+                // few lines below, at the first write through the project
+                // descriptor.
+                if !dynamic_dependencies {
                     return Err(error);
                 }
                 let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
@@ -591,15 +594,16 @@ mod tests {
         );
     }
 
+    /// A `setup.py egg_info` probe that cannot run must not abort planning:
+    /// a PEP 621 `dynamic = ["dependencies"]` project falls back to the
+    /// requirements-directory convention. Everything `prepare_setup` can
+    /// fail with is already `InvalidData` (`unreadable` in the manifest
+    /// layer hardcodes it), so the fallback cannot be gated on the kind.
     #[test]
-    fn a_refusal_is_not_swallowed_by_the_dynamic_dependencies_fallback() {
+    fn a_probe_failure_falls_back_to_the_requirements_directory() {
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(project_dir.join("requirements")).unwrap();
-        // Dynamic dependencies plus a setup.py, so a failed metadata probe
-        // falls back to the requirements-directory convention. The fallback
-        // manifest is empty, so on a swallowed refusal planning would finish
-        // and return an interpreter-only plan instead of failing.
         std::fs::write(
             project_dir.join("pyproject.toml"),
             "[project]\nname = \"p\"\nversion = \"0\"\ndynamic = [\"dependencies\"]\n",
@@ -610,19 +614,53 @@ mod tests {
             "from setuptools import setup\nsetup()\n",
         )
         .unwrap();
-        std::fs::write(project_dir.join("requirements/common.txt"), "").unwrap();
-        let outside = temp.0.join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
-        let store = store::Store {
-            root: temp.0.join("absent-store"),
-        };
+        let pinned = format!("six==1.17.0 --hash=sha256:{}\n", "a".repeat(64));
+        std::fs::write(project_dir.join("requirements/common.txt"), &pinned).unwrap();
+        // A store root that is a regular file: the probe's first store
+        // access fails offline and immediately, which is the cheapest
+        // stand-in for "egg_info cannot run here".
+        let store_root = temp.0.join("not-a-store");
+        std::fs::write(&store_root, b"").unwrap();
+        let store = store::Store { root: store_root };
 
-        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not a real directory"), "{error}");
-        assert!(!store.root.exists(), "a refused probe touched the store");
+        // Prime the plan cache under the key the fallback text produces, so
+        // planning finishes offline. A cache hit is itself the assertion:
+        // if the probe failure had aborted, or the fallback had read
+        // anything but requirements/common.txt, this key would not match.
+        let platform = Platform::host().unwrap();
+        let version = pyselect::select_python(platform, &[]).unwrap().pin.version;
+        let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+            pypi::host_glibc().unwrap()
+        } else {
+            pypi::Glibc(0, 0)
+        };
+        let plan = types::Plan {
+            ecosystem: "python".into(),
+            python_version: version.into(),
+            packages: Vec::new(),
+        };
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        project
+            .write_file(
+                Path::new(PLAN_CACHE),
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "input_hash": planner_input_hash(platform, version, &pinned, glibc),
+                    "plan": plan,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+        let (planned, selection, inputs) = read_plan(platform, &project_dir, &store).unwrap();
+        assert_eq!(planned.python_version, version);
+        assert_eq!(selection.pin.version, version);
+        assert!(
+            inputs
+                .iter()
+                .any(|record| record.path == "requirements/common.txt"),
+            "planning did not read the requirements directory: {:?}",
+            inputs.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
     }
 
     #[test]
