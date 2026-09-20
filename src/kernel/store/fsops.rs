@@ -32,7 +32,7 @@ pub(super) fn fd_set_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn fd_stat(fd: RawFd) -> io::Result<libc::stat> {
+pub(crate) fn fd_stat(fd: RawFd) -> io::Result<libc::stat> {
     // SAFETY: stat is initialized by fstat before it is read.
     let mut stat = unsafe { std::mem::zeroed() };
     // SAFETY: fd is borrowed for the duration of this call.
@@ -134,7 +134,7 @@ pub(crate) fn rename_at(dirfd: RawFd, old_name: &[u8], new_name: &[u8]) -> io::R
     Ok(())
 }
 
-pub(crate) fn unlink_at(dirfd: RawFd, name: &[u8]) {
+pub(super) fn unlink_at(dirfd: RawFd, name: &[u8]) {
     let Ok(name) = CString::new(name) else {
         return;
     };
@@ -191,7 +191,7 @@ pub(crate) fn stat_at(dirfd: RawFd, name: &[u8]) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
-pub(super) fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
+pub(crate) fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 

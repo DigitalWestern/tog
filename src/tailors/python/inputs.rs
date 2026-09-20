@@ -18,6 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const PLANNER_SCHEMA: &str = "python-planner/3";
+const PLAN_CACHE: &str = ".tog/plan.json";
 
 pub fn planner_input_hash(
     platform: Platform,
@@ -83,8 +84,6 @@ pub fn python_input_records(
 /// `setup.py egg_info`, so the selection is made here and handed back to the
 /// caller: planning, realization and the closure all use this one value.
 ///
-const PLAN_CACHE: &str = ".tog/plan.json";
-
 /// Planning hits PyPI, so successful plans are cached in `.tog/plan.json`
 /// keyed by a hash of the inputs; an unchanged lock replans offline.
 pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
@@ -243,7 +242,14 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     // The lock may have just been (re)written above: hash it now.
     let inputs = python_input_records(dir, &manifest)?;
     let input_hash = planner_input_hash(platform, pin.version, &text, glibc);
-    if let Some(cached) = project.read_file(Path::new(PLAN_CACHE))? {
+    // A symlinked or non-regular cache is a refusal; an unreadable regular
+    // file is a miss that the write below replaces.
+    let cached = match project.read_file(Path::new(PLAN_CACHE)) {
+        Ok(cached) => cached,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
+        Err(_) => None,
+    };
+    if let Some(cached) = cached {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&cached) {
             if v["input_hash"] == input_hash.as_str() {
                 if let Ok(plan) = serde_json::from_value::<types::Plan>(v["plan"].clone()) {

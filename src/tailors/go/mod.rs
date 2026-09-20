@@ -590,14 +590,20 @@ fn plan_cache_key(go_version: &str, gomod: &str, gosum: &str, src_digest: &str) 
     ))
 }
 
-/// Read the cached plan when its key matches. The cache file is
-/// attacker-editable project state, so a hit is validated before it is used;
-/// anything unreadable, unparsable, or stale is simply a miss.
 const PLAN_CACHE: &str = ".tog/go-plan.json";
 
+/// Read the cached plan when its key matches. The cache file is
+/// attacker-editable project state, so a hit is validated before it is used;
+/// anything unreadable, unparsable, or stale is simply a miss, while a
+/// symlinked or non-regular cache is refused.
 fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoPlan>> {
-    let Some(cached) = project.read_file(Path::new(PLAN_CACHE))? else {
-        return Ok(None);
+    let cached = match project.read_file(Path::new(PLAN_CACHE)) {
+        Ok(Some(cached)) => cached,
+        Ok(None) => return Ok(None),
+        // A symlinked or non-regular cache is a refusal; an unreadable
+        // regular file is a miss that the next write replaces.
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
+        Err(_) => return Ok(None),
     };
     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&cached) {
         if v["input_hash"] == input_hash {
@@ -1869,6 +1875,29 @@ mod tests {
         assert_eq!(got.module, "example.com/m");
         assert_eq!(got.modules, plan.modules);
         assert!(!store.root.exists(), "a cache hit touched the store");
+    }
+
+    #[test]
+    fn unreadable_plan_cache_is_a_miss_not_an_error() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        let input_hash = expected_input_hash(&project, &gomod, &gosum);
+        write_plan_cache(&project, &input_hash, &plan);
+        use std::os::unix::fs::PermissionsExt;
+        let cache = project.join(".tog/go-plan.json");
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o200)).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        assert!(cached_plan(&root, &input_hash).unwrap().is_none());
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            cached_plan(&root, &input_hash).unwrap().unwrap().modules,
+            plan.modules
+        );
     }
 
     #[test]

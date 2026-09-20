@@ -10,15 +10,16 @@
 //! over the destination, which is checked first and refused if it is a
 //! symlink or a directory. A concurrent same-user writer that swaps a
 //! symlink in after that check gets its symlink replaced, never written
-//! through; cooperating writers serialize on the project transaction lock.
-//! A replaced file is a fresh inode with mode 0644 under the umask, not
-//! the old file's mode. Temporary cleanup after a failure is best-effort.
-//!
-//! `open_file` is public because a caller may need the descriptor it read
-//! from (to hold it, or to compare its identity later), not just the bytes.
+//! through; two writers of the same file each publish a complete file and
+//! the last rename wins. The temporary's inode is checked before the rename
+//! and before cleanup, which narrows but cannot close the window in which
+//! a hostile same-user process swaps the temporary itself. A replaced file
+//! is a fresh inode with mode 0644 under the umask, not the old file's
+//! mode. Temporary cleanup after a failure is best-effort.
 
 use crate::kernel::store::{
-    fsync_directory, mkdir_at, open_file_at, rename_at, stat_at, unlink_at,
+    fd_stat, fsync_directory, mkdir_at, open_file_at, rename_at, same_inode, stat_at,
+    unlink_if_same,
 };
 use std::ffi::{CString, OsStr};
 use std::fs;
@@ -71,7 +72,7 @@ impl ProjectRoot {
 
     /// The canonical project path, for messages. Every operation goes
     /// through the descriptor, not this path.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
@@ -81,7 +82,7 @@ impl ProjectRoot {
     /// expected, or a destination that is not a regular file (a FIFO, a
     /// device, a directory) is an error, so a tampered cache fails closed
     /// instead of being read as a miss.
-    pub fn open_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+    fn open_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
         let (parents, name) = split_relative(relative)?;
         let mut display = self.path.clone();
         let mut held: Option<fs::File> = None;
@@ -131,7 +132,8 @@ impl ProjectRoot {
     }
 
     /// The bytes of a project-relative file, or `None` when it is absent.
-    /// Refusals are those of `open_file`.
+    /// Refusals (`InvalidData`) are those of `open_file`; a bad relative
+    /// path is `InvalidInput`; anything else is the OS error from the walk.
     pub fn read_file(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
         let Some(mut file) = self.open_file(relative)? else {
             return Ok(None);
@@ -241,20 +243,30 @@ impl ProjectRoot {
                 }
             }
         };
+        let created = fd_stat(file.as_raw_fd())?;
+        let mut renamed = false;
         let result = (|| {
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
+            let current = stat_at(parent_fd, &temp)?;
+            if !same_inode(&current, &created) {
+                return Err(refusal(format!(
+                    "temporary for {} was replaced while it was being written",
+                    display.display()
+                )));
+            }
             rename_at(parent_fd, &temp, name.as_bytes()).map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!("publish {}: {error}", display.display()),
                 )
             })?;
+            renamed = true;
             fsync_directory(parent_fd)
         })();
-        if result.is_err() {
-            unlink_at(parent_fd, &temp);
+        if result.is_err() && !renamed {
+            let _ = unlink_if_same(parent_fd, &temp, &created, 0);
         }
         result
     }
@@ -318,22 +330,18 @@ fn open_directory_at(
     })
 }
 
-/// `.<name>.tog-tmp.<pid>.<16 hex>`: a fresh random name per attempt, so an
+/// `.tog-tmp.<pid>.<16 hex>`: a fresh random name per attempt, so an
 /// occupied name (a crash leftover, or an entry planted at a guessable
-/// name) is stepped around, never unlinked and never written through.
-fn random_temp_name(name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
+/// name) is stepped around, never unlinked and never written through. The
+/// destination name is not part of it, so a destination of any valid
+/// length publishes.
+fn random_temp_name(_name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
     use ring::rand::SecureRandom as _;
     let mut nonce = [0u8; 8];
     ring::rand::SystemRandom::new()
         .fill(&mut nonce)
         .map_err(|_| io::Error::other("system randomness is unavailable"))?;
-    let mut temp = Vec::with_capacity(name.len() + 40);
-    temp.push(b'.');
-    temp.extend_from_slice(name);
-    temp.extend_from_slice(
-        format!(".tog-tmp.{}.{}", std::process::id(), hex::encode(nonce)).as_bytes(),
-    );
-    Ok(temp)
+    Ok(format!(".tog-tmp.{}.{}", std::process::id(), hex::encode(nonce)).into_bytes())
 }
 
 #[cfg(test)]
@@ -567,13 +575,62 @@ mod tests {
     }
 
     #[test]
-    fn name_too_long_is_an_error_not_a_panic() {
+    fn a_name_at_name_max_publishes_and_a_longer_one_is_an_error() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        let long = "n".repeat(300);
-        let error = root.write_file(Path::new(&long), b"x").unwrap_err();
+        let longest = "n".repeat(255);
+        root.write_file(Path::new(&longest), b"x").unwrap();
+        assert_eq!(root.read_file(Path::new(&longest)).unwrap().unwrap(), b"x");
+        let error = root
+            .write_file(Path::new(&"n".repeat(256)), b"x")
+            .unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ENAMETOOLONG), "{error}");
-        assert!(entries(root.path()).is_empty());
+        assert_eq!(entries(root.path()), vec![longest]);
+    }
+
+    /// The temp-name hook runs after the destination check and before the
+    /// temporary is created, which is where a concurrent writer would act.
+    #[test]
+    fn a_symlink_swapped_in_after_the_check_is_replaced_not_followed() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let victim = temp.0.join("victim");
+        fs::write(&victim, b"original").unwrap();
+        fs::create_dir_all(dir.join(".tog")).unwrap();
+        fs::write(dir.join(".tog/plan.json"), b"old").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let link = dir.join(".tog/plan.json");
+        let mut swap = |name: &[u8], attempt: usize| {
+            fs::remove_file(&link).unwrap();
+            symlink(&victim, &link).unwrap();
+            fixed_temp_name(name, attempt)
+        };
+        root.publish(Path::new(".tog/plan.json"), b"new", &mut swap)
+            .unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"original");
+        let published = fs::symlink_metadata(&link).unwrap();
+        assert!(published.file_type().is_file());
+        assert_eq!(fs::read(&link).unwrap(), b"new");
+        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
+    }
+
+    #[test]
+    fn a_rename_failure_after_the_temporary_exists_cleans_it_up() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        fs::create_dir_all(dir.join(".tog")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let destination = dir.join(".tog/plan.json");
+        let mut swap_in_directory = |name: &[u8], attempt: usize| {
+            fs::create_dir(&destination).unwrap();
+            fixed_temp_name(name, attempt)
+        };
+        let error = root
+            .publish(Path::new(".tog/plan.json"), b"new", &mut swap_in_directory)
+            .unwrap_err();
+        assert!(error.to_string().contains("publish"), "{error}");
+        assert!(destination.is_dir());
+        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
     }
 
     #[test]
@@ -611,8 +668,20 @@ mod tests {
         symlink(&outside, dir.join(".tog")).unwrap();
         fs::create_dir_all(dir.join("real/plan.json")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        let open_descriptors = || fs::read_dir("/proc/self/fd").unwrap().count();
+        // Other test threads open files concurrently, so count only the
+        // descriptors that point into this fixture.
+        let fixture = temp.0.canonicalize().unwrap();
+        let open_descriptors = || {
+            fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter(|entry| {
+                    fs::read_link(entry.as_ref().unwrap().path())
+                        .is_ok_and(|target| target.starts_with(&fixture))
+                })
+                .count()
+        };
         let before = open_descriptors();
+        assert_eq!(before, 1, "the held project root");
         for _ in 0..50 {
             root.write_file(Path::new(".tog/plan.json"), b"x")
                 .unwrap_err();
@@ -621,13 +690,7 @@ mod tests {
                 .unwrap_err();
             root.read_file(Path::new("real/plan.json")).unwrap_err();
         }
-        // The count is process-wide and other test threads open files too,
-        // so allow their noise; a leak here would add at least 50.
-        let after = open_descriptors();
-        assert!(
-            after < before + 25,
-            "descriptors: {before} before, {after} after"
-        );
+        assert_eq!(open_descriptors(), before);
     }
 
     #[test]
