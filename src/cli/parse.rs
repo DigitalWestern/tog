@@ -683,6 +683,25 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             _ if arg.starts_with("--forget=") => {
                 gc.forget.push(valid_root_key(&arg["--forget=".len()..])?);
             }
+            "--drop-object" => {
+                index += 1;
+                let first = index;
+                while index < args.len() && !args[index].starts_with("--") {
+                    gc.drop_objects.push(valid_object_id(&args[index])?);
+                    index += 1;
+                }
+                if first == index {
+                    return Err(UsageError::new(
+                        "--drop-object needs at least one store object id",
+                        Some("gc"),
+                    ));
+                }
+                continue;
+            }
+            _ if arg.starts_with("--drop-object=") => {
+                gc.drop_objects
+                    .push(valid_object_id(&arg["--drop-object=".len()..])?);
+            }
             "--keep-days" => {
                 let value = args
                     .get(index + 1)
@@ -724,6 +743,33 @@ fn valid_root_key(value: &str) -> Result<String, UsageError> {
                 "'{value}' is not a root key: expected 40 hex characters (`tog store \
                  roots` prints keys)"
             ),
+            Some("gc"),
+        ))
+    }
+}
+
+/// Object ids are store directory names: 40 hex characters, a hyphen, then
+/// the name and version. Checking the shape in argv keeps `--drop-object`
+/// from ever handing a path-shaped or traversing value to a removal path.
+///
+/// The rule is spelled out here rather than called from the kernel because
+/// the CLI layer may not reach into it (ARCHITECTURE.md, layering rule 1);
+/// `store::is_object_id` remains the authority, and the kernel re-checks
+/// every id it is given.
+fn valid_object_id(value: &str) -> Result<String, UsageError> {
+    let bytes = value.as_bytes();
+    let well_formed = bytes.len() > 41
+        && bytes[..40].iter().all(u8::is_ascii_hexdigit)
+        && bytes[40] == b'-'
+        && !value.contains("..")
+        && bytes[41..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-');
+    if well_formed {
+        Ok(value.to_string())
+    } else {
+        Err(UsageError::new(
+            format!("--drop-object expects a store object id (<40 hex>-<name>-<version>), got '{value}'"),
             Some("gc"),
         ))
     }
@@ -1442,6 +1488,7 @@ mod tests {
                 migrate_metadata: false,
                 register: vec!["/a".into(), "/b".into(), "/c".into()],
                 forget: Vec::new(),
+                drop_objects: Vec::new(),
             })
         );
         assert_eq!(
@@ -1479,6 +1526,44 @@ mod tests {
             message(&["gc", "--forget", "nope"]),
             "'nope' is not a root key: expected 40 hex characters (`tog store roots` \
              prints keys)"
+        );
+        let object = format!("{}-cpython-3.11.9", "a".repeat(40));
+        let other = format!("{}-ruff-0.6.9", "b".repeat(40));
+        assert_eq!(
+            command(&[
+                "gc",
+                "--drop-object",
+                &object,
+                &format!("--drop-object={other}")
+            ]),
+            Command::Gc(GcArgs {
+                drop_objects: vec![object.clone(), other],
+                ..GcArgs::default()
+            })
+        );
+        assert_eq!(
+            message(&["gc", "--drop-object"]),
+            "--drop-object needs at least one store object id"
+        );
+        assert_eq!(
+            message(&["gc", "--drop-object", "--dry-run"]),
+            "--drop-object needs at least one store object id"
+        );
+        assert_eq!(
+            message(&["gc", "--drop-object", "cpython"]),
+            "--drop-object expects a store object id (<40 hex>-<name>-<version>), got 'cpython'"
+        );
+        assert_eq!(
+            message(&["gc", "--drop-object="]),
+            "--drop-object expects a store object id (<40 hex>-<name>-<version>), got ''"
+        );
+        let traversal = format!("{}-../escape", "a".repeat(40));
+        assert_eq!(
+            message(&["gc", "--drop-object", &traversal]),
+            format!(
+                "--drop-object expects a store object id (<40 hex>-<name>-<version>), got \
+                 '{traversal}'"
+            )
         );
         assert_eq!(message(&["gc", "--keep-days"]), "--keep-days needs <n>");
         assert_eq!(

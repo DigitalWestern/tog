@@ -697,6 +697,110 @@ fn command_dispatch_runs_automatic_metadata_maintenance() {
     assert!(record["schema"] == "object-meta/2", "{record}");
 }
 
+/// Issue #101. A record whose identity no longer hashes to the id it is
+/// filed under cannot be read, so the fail-closed sweep refuses — and used
+/// to reprint that refusal on every single command with no way out. The
+/// warning is now news rather than noise, and `--drop-object` is the exit.
+#[test]
+fn an_unreadable_record_warns_once_and_is_cleared_by_drop_object() {
+    let home = TempDir::new("wedged-record");
+    let store_root = home.0.join("store");
+
+    // A project root, so the sweep has an initialized registry to work from.
+    std::fs::create_dir_all(&store_root).unwrap();
+    let canonical_store = store_root.canonicalize().unwrap();
+    let project = home.0.join("project");
+    std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+    let env_object = publish_certified_object(&canonical_store, "wedged-fixture-env");
+    std::fs::write(
+        project.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": env_object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", project.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    let identity = tog::kernel::types::Identity {
+        kind: "cpython".into(),
+        name: "cpython".into(),
+        version: "3.11.9".into(),
+        inputs: [
+            ("artifact_sha256".to_string(), "1".repeat(64)),
+            (
+                "platform".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    // The real-world shape: the identity was rewritten in place, so the id
+    // the record is filed under is the hash of text that no longer exists.
+    let real = identity.object_id();
+    let id = format!(
+        "{}{}",
+        if real.starts_with('0') { '1' } else { '0' },
+        &real[1..]
+    );
+    let object = canonical_store.join("objects").join(&id);
+    std::fs::create_dir_all(&object).unwrap();
+    std::fs::write(object.join("payload"), "cpython").unwrap();
+    let meta_path = canonical_store.join("meta").join(format!("{id}.json"));
+    std::fs::write(
+        &meta_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": id,
+            "identity": identity,
+            "created": 1,
+            "exceptions": [],
+            "refs": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // `x` fails offline, but its dispatch runs maintenance over the store.
+    let first = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
+    let first = text(&first.stderr);
+    assert!(
+        first.contains("metadata maintenance deferred")
+            && first.contains(&format!("--drop-object {id}")),
+        "the deferral was not announced: {first}"
+    );
+    let second = tog(&home.0, &home.0, &["x", "ruff", "--version"]);
+    let second = text(&second.stderr);
+    assert!(
+        !second.contains("metadata maintenance deferred"),
+        "the same deferral was repeated: {second}"
+    );
+
+    // The command every refusal names must print the list, not refuse on it.
+    let out = tog(&home.0, &home.0, &["gc", "--migrate-metadata"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let listed = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(
+        listed.contains(&format!("--drop-object {id}")),
+        "the recovery command is not named: {listed}"
+    );
+
+    let out = tog(&home.0, &home.0, &["gc", "--drop-object", &id]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!object.exists(), "{}", text(&out.stdout));
+    assert!(!meta_path.exists(), "{}", text(&out.stdout));
+
+    let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
 #[test]
 fn x_clean_is_offline_and_strict_about_trailing_arguments() {
     let home = TempDir::new("x-clean");

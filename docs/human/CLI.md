@@ -318,9 +318,25 @@ concurrent sync cannot lose one. Sharp edges:
   its key.
 - `--migrate-metadata` upgrades provable legacy object metadata to
   `object-meta/2` and stops without sweeping (`N upgraded, M unresolved`);
-  it is incompatible with the registry and collection options. The same
-  migration also runs automatically before the first resource-consuming job,
-  deferred when another job owns the store and retried later.
+  it is incompatible with the registry and collection options. It never
+  deletes anything: its job is to list every record that stops the sweep,
+  including the ones nothing can read, each with the command that clears it.
+  The same migration also runs automatically before the first
+  resource-consuming job. When it is deferred because records are
+  unresolved, the warning is printed once per store and again whenever the
+  list of records changes, since it would otherwise precede every command
+  until someone acted on it; `tog gc --migrate-metadata` repeats it on
+  demand. A deferral because another Tog job owns the store is transient
+  and still prints every time.
+- `--drop-object <id>...` removes an object and its record outright, for the
+  records the sweep cannot use: unusable, still legacy after migration, or
+  missing their object (and an object missing its record). Everything in the
+  store is content-addressed, so the next sync that needs the object rebuilds
+  it at the same id. It refuses an object whose record is readable and
+  certified — that is the sweep's decision, reached by forgetting the roots
+  that protect it — and it refuses to leave a readable record naming an
+  object it removed, naming the whole set that has to go together instead.
+  It takes `--dry-run` and nothing else.
 - `--project` also collects old unused project forests and backups; legacy
   sibling-home forests are never swept and are reported as skipped.
 

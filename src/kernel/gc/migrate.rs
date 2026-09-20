@@ -50,29 +50,104 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
         )?;
         return Ok(MigrationReport::default());
     };
-    let report = match migrate_metadata_locked(store, &activity, false, out, true) {
-        Ok((report, _)) => report,
-        Err(error) => {
-            // A malformed historical record must not stop a non-destructive
-            // shared job from using an otherwise valid cached projection. The
-            // destructive path stays fail-closed, and the explicit migration
-            // command still surfaces this error.
-            writeln!(
-                out,
-                "metadata maintenance deferred: {error}; retry after resolving the record"
-            )?;
-            return Ok(MigrationReport::default());
-        }
-    };
-    if report.unresolved != 0 {
+    // Maintenance narration is captured rather than written straight out,
+    // because a store that cannot finish maintenance cannot finish it on the
+    // next command either: printed unconditionally, the same paragraph would
+    // precede every single invocation forever. The marker below turns it
+    // into news — printed when it first appears and whenever it changes.
+    let mut buffer: Vec<u8> = Vec::new();
+    let (report, deferral) =
+        match migrate_metadata_locked(store, &activity, false, &mut buffer, true) {
+            Ok((report, _)) if report.unresolved == 0 => {
+                if !buffer.is_empty() {
+                    out.write_all(&buffer)?;
+                }
+                clear_deferral_marker(store)?;
+                return Ok(report);
+            }
+            Ok((report, _)) => {
+                writeln!(
+                    buffer,
+                    "metadata maintenance deferred: {} record(s) remain unresolved; GC \
+                     stays blocked until they are resolved",
+                    report.unresolved
+                )?;
+                (report, buffer)
+            }
+            Err(error) => {
+                // A malformed historical record must not stop a non-destructive
+                // shared job from using an otherwise valid cached projection. The
+                // destructive path stays fail-closed, and the explicit migration
+                // command still surfaces this error.
+                writeln!(
+                    buffer,
+                    "metadata maintenance deferred: {error}; retry after resolving the record"
+                )?;
+                (MigrationReport::default(), buffer)
+            }
+        };
+    // A byte-for-byte comparison, not a "have we warned before" flag: the
+    // moment the store's problems change, the operator sees the new list.
+    let marker = deferral_marker(store);
+    if fs::read(&marker).ok().as_deref() == Some(deferral.as_slice()) {
+        return Ok(report);
+    }
+    // Print first, remember second. The marker's only job is to say "the
+    // operator has already seen exactly this text", so it must not be
+    // written until the text has actually reached them: a marker written
+    // before a failing write would silence the warning on every later run.
+    out.write_all(&deferral)?;
+    // We hold the exclusive lease, so this write should not fail. If it
+    // does, say nothing about printing once — the claim would be false.
+    let recorded = write_deferral_marker(store, &marker, &deferral).is_ok();
+    if recorded {
         writeln!(
             out,
-            "metadata maintenance deferred: {} record(s) remain unresolved; GC stays blocked \
-             until they are resolved",
-            report.unresolved
+            "this warning is shown once per store; `tog gc --migrate-metadata` repeats it"
         )?;
     }
     Ok(report)
+}
+
+/// Where the last deferral text is remembered. A plain file at the store
+/// root: the sweep enumerates named subdirectories only, so an extra regular
+/// file here is inert.
+pub(super) fn deferral_marker(store: &Store) -> PathBuf {
+    store.root.join("maintenance-deferred")
+}
+
+/// Forget the remembered deferral, so the next one is announced again.
+pub(super) fn clear_deferral_marker(store: &Store) -> io::Result<()> {
+    match fs::remove_file(deferral_marker(store)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write the marker through `tmp/` and rename, so a crash mid-write can
+/// never leave a truncated marker that silences a warning it does not match.
+fn write_deferral_marker(store: &Store, marker: &Path, text: &[u8]) -> io::Result<()> {
+    let tmp = store
+        .root
+        .join("tmp")
+        .join(format!("maintenance-deferred.{}", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)?;
+    if let Err(error) = file.write_all(text).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&tmp, marker) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(super) fn migrate_metadata_locked<W: Write>(
@@ -87,8 +162,68 @@ pub(super) fn migrate_metadata_locked<W: Write>(
     // Every migration input is re-read here, under the exclusive token. An
     // earlier probe is a hint about whether to bother, never a snapshot to
     // write from.
-    let index = crate::kernel::objmeta::MetaIndex::read(store)?;
+    // The lenient read is deliberate here, and only here. A record nothing
+    // can parse is the one thing migration must still be able to *report*:
+    // refusing to read the store would make the command the operator is
+    // sent to by every other refusal refuse as well.
+    let (index, unusable) = crate::kernel::objmeta::MetaIndex::read_reporting_unusable(store)?;
     let mut report = MigrationReport::default();
+    for (file, reason) in &unusable {
+        let stem = file.strip_suffix(".json").unwrap_or(file);
+        let advice = if store::is_object_id(stem) {
+            format!(
+                "Drop it with `tog gc --drop-object {stem}` (the next sync that needs the \
+                 object rebuilds it), or restore the file from a backup."
+            )
+        } else {
+            format!("Delete meta/{file} by hand, or restore the file from a backup.")
+        };
+        writeln!(
+            out,
+            "metadata record unusable: meta/{file} — {reason}. {advice}"
+        )?;
+    }
+    report.unresolved = unusable.len();
+    if !unusable.is_empty() {
+        // Nothing is adapted while a record is missing from the index.
+        //
+        // An adapter resolves an indirect reference by asking the index for
+        // the *one* record whose identity produces a fingerprint, and both
+        // "no match" and "more than one match" are refusals. A record that
+        // was skipped is a record the index cannot offer as the second
+        // candidate, so an ambiguity the strict reader would have refused
+        // can come back as a confident unique match — and certify a
+        // dependency set naming the wrong object, which is a licence to
+        // delete the one actually in use.
+        //
+        // So migration stops at reporting. Every legacy record is counted as
+        // unresolved, because none of them has been proven, and the store
+        // stays exactly as it was found.
+        let held = index
+            .iter()
+            .filter(|(_, record)| record.evidence == crate::kernel::objmeta::Evidence::Legacy)
+            .count();
+        writeln!(
+            out,
+            "metadata migration held: {} unusable record(s) must be resolved before legacy \
+             records can be proven",
+            unusable.len()
+        )?;
+        report.unresolved += held;
+        writeln!(
+            out,
+            "metadata migration: 0 upgraded, {} unresolved{}",
+            report.unresolved,
+            if dry_run {
+                " (dry run)"
+            } else if automatic {
+                " (deferred)"
+            } else {
+                ""
+            }
+        )?;
+        return Ok((report, BTreeMap::new()));
+    }
     if !index.has_legacy() {
         return Ok((report, BTreeMap::new()));
     }
@@ -147,10 +282,12 @@ pub(super) fn migrate_metadata_locked<W: Write>(
         writeln!(
             out,
             "metadata migration unresolved: object {id} — {reason}. The record keeps its \
-             conservative legacy retention and no sweep will run until it is resolved."
+             conservative legacy retention and no sweep will run until it is resolved. Drop it \
+             with `tog gc --drop-object {id}` (the next sync that needs the object rebuilds \
+             it), or restore the file from a backup."
         )?;
     }
-    report.unresolved = unresolved.len();
+    report.unresolved = unresolved.len() + unusable.len();
 
     if dry_run {
         for id in upgrades.keys() {

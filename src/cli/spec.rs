@@ -287,7 +287,7 @@ line is ok, warn, or fail with the fix; exit status 1 on any fail.",
         name: "gc",
         group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
-        usage: "tog gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--migrate-metadata] [--register <dir>...] [--forget <key>...]",
+        usage: "tog gc [--dry-run] [--keep-days <n>] [--project] [--collect-legacy] [--migrate-metadata] [--drop-object <id>...] [--register <dir>...] [--forget <key>...]",
         description: "\
 Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
@@ -300,7 +300,9 @@ that has become unavailable stops the sweep instead of losing its record,
 so make it available again or forget it with --forget. Cleanup is skipped
 while another Tog job is using this store, and any object whose
 recorded evidence cannot be certified stops the sweep rather than being
-guessed at. Usable on a copied store from any host.",
+guessed at; --migrate-metadata lists every record that stops it and
+--drop-object removes the ones that cannot be repaired. Usable on a copied
+store from any host.",
         options: &[
             (
                 "--dry-run",
@@ -316,6 +318,11 @@ guessed at. Usable on a copied store from any host.",
             (
                 "--migrate-metadata",
                 "upgrade provable legacy object metadata without collecting",
+            ),
+            (
+                "--drop-object <id>...",
+                "drop an object whose metadata is unusable, legacy, or missing, together \
+                 with its record; the next sync rebuilds it",
             ),
             (
                 "--register <dir>...",

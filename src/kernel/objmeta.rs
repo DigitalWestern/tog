@@ -123,38 +123,27 @@ pub struct MetaIndex {
 impl MetaIndex {
     /// Read and validate every `meta/<id>.json`. Purely a read: no mtime is
     /// refreshed and no object directory is opened.
+    ///
+    /// This is the strict reader the sweep uses: a single record it cannot
+    /// parse stops everything, because a record nothing can read cannot
+    /// prove what the object it describes still needs.
     pub fn read(store: &store::Store) -> io::Result<MetaIndex> {
-        let meta_dir = store.root.join("meta");
-        let stat = fs::symlink_metadata(&meta_dir)?;
-        if stat.file_type().is_symlink() || !stat.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "meta is not a real directory",
-            ));
-        }
-        let mut entries = BTreeMap::new();
-        for entry in fs::read_dir(&meta_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            // Every refusal names the record and a command that will list
-            // every other unusable record in one pass, so an operator never
-            // has to rerun a sweep to discover the next one.
-            let record = read_record_at(&path).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{error}; nothing can be swept until this record is usable — run \
-                         `tog gc --migrate-metadata` for the full list, then restore or \
-                         rebuild the objects it names"
-                    ),
-                )
-            })?;
-            entries.insert(record.id.clone(), record);
-        }
-        Ok(MetaIndex { entries })
+        read_index(store, None)
+    }
+
+    /// Read every record, skipping the ones that are structurally unusable
+    /// and reporting them as `meta file name -> reason`.
+    ///
+    /// Migration and `--drop-object` have to *talk about* a record nothing
+    /// can parse, so neither can use the strict reader: refusing to read the
+    /// store is exactly what leaves an operator with no way out. This
+    /// relaxes nothing for the sweep, which still goes through `read`.
+    pub fn read_reporting_unusable(
+        store: &store::Store,
+    ) -> io::Result<(MetaIndex, BTreeMap<String, String>)> {
+        let mut unusable = BTreeMap::new();
+        let index = read_index(store, Some(&mut unusable))?;
+        Ok((index, unusable))
     }
 
     pub fn get(&self, id: &str) -> Option<&Record> {
@@ -229,6 +218,71 @@ impl MetaIndex {
             )),
         }
     }
+}
+
+/// The one directory walk both index readers share, so a record can never be
+/// understood one way by the sweep and another way by maintenance.
+///
+/// `unusable` is the only difference between them. When it is `Some`, a
+/// record `read_record_at` rejects as malformed is recorded there and left
+/// out of the index; when it is `None`, the same rejection stops the read.
+/// An I/O error that is not about a record's content always stops the read,
+/// in both modes: a `meta` directory that cannot be listed is not a record
+/// an operator can drop.
+fn read_index(
+    store: &store::Store,
+    mut unusable: Option<&mut BTreeMap<String, String>>,
+) -> io::Result<MetaIndex> {
+    let meta_dir = store.root.join("meta");
+    let stat = fs::symlink_metadata(&meta_dir)?;
+    if stat.file_type().is_symlink() || !stat.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "meta is not a real directory",
+        ));
+    }
+    let mut entries = BTreeMap::new();
+    for entry in fs::read_dir(&meta_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let error = match read_record_at(&path) {
+            Ok(record) => {
+                entries.insert(record.id.clone(), record);
+                continue;
+            }
+            Err(error) => error,
+        };
+        let Some(unusable) = unusable.as_deref_mut() else {
+            // Strict mode. Every refusal names the record and both commands
+            // that end the deadlock: one lists every other unusable record
+            // in a single pass, the other removes a record that cannot be
+            // repaired.
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; nothing can be swept until this record is usable. Run `tog gc \
+                     --migrate-metadata` to list every unusable record, then drop the ones \
+                     you cannot repair with `tog gc --drop-object <id>` (the next sync \
+                     rebuilds the object)"
+                ),
+            ));
+        };
+        if error.kind() != io::ErrorKind::InvalidData {
+            // A read that failed for a reason other than the record's own
+            // content — a permission, a vanished file — is returned bare.
+            // The advice above names `--migrate-metadata`, and in lenient
+            // mode that is usually the command already running: telling an
+            // operator to rerun the thing that just failed is worse than
+            // telling them nothing.
+            return Err(error);
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        unusable.insert(name, error.to_string());
+    }
+    Ok(MetaIndex { entries })
 }
 
 /// Parse and validate one metadata file. Shared by the index and by the
