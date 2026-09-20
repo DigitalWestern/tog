@@ -331,11 +331,12 @@ mod tests {
     /// work on.
     fn commit_legacy_fixture(store: &Store, identity: &Identity, refs: Option<&[&str]>) -> String {
         let id = identity.object_id();
-        if crate::kernel::objmeta::check_identity_grammar(identity).is_err() {
-            // Historical records: an unknown kind, or a schema since
-            // superseded. Publish the legacy-shaped object by hand, because
-            // the live commit guard exists to reject exactly these — but a
-            // store synced before the bump still has them on disk.
+        if crate::kernel::objmeta::is_historical_only(identity) {
+            // An unknown kind, or a schema since superseded: a shape no live
+            // producer can commit, but one a store synced by an older tog
+            // still has on disk. Publish the legacy-shaped object by hand.
+            // Anything else goes through the real commit below, so a fixture
+            // with a typo'd input still fails at the guard.
             let object = store.object_path(&id);
             fs::create_dir_all(&object).unwrap();
             fs::write(object.join("payload"), &identity.name).unwrap();
