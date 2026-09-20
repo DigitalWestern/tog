@@ -32,6 +32,18 @@ const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const TEMP_ATTEMPTS: usize = 8;
 
+/// What a project-relative name resolves to, without following symlinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    /// No such name, or a parent directory that does not exist.
+    Absent,
+    Regular,
+    Directory,
+    Symlink,
+    /// A FIFO, a socket, or a device.
+    Other,
+}
+
 /// A project directory held open as a descriptor.
 #[derive(Debug)]
 pub struct ProjectRoot {
@@ -83,21 +95,10 @@ impl ProjectRoot {
     /// device, a directory) is an error, so a tampered cache fails closed
     /// instead of being read as a miss.
     fn open_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
-        let (parents, name) = split_relative(relative)?;
         let mut display = self.path.clone();
-        let mut held: Option<fs::File> = None;
-        for parent in parents {
-            display.push(parent);
-            let fd = held
-                .as_ref()
-                .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-            match open_directory_at(fd, parent.as_bytes(), &display, "read") {
-                Ok(dir) => held = Some(dir),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error),
-            }
-        }
-        display.push(name);
+        let Some((held, name)) = self.open_parent(relative, "read", &mut display)? else {
+            return Ok(None);
+        };
         let fd = held
             .as_ref()
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
@@ -162,6 +163,155 @@ impl ProjectRoot {
         self.publish(relative, bytes, &mut random_temp_name)
     }
 
+    /// What a project-relative path names, seen from the held descriptor
+    /// without following a symlink at any component. A caller can refuse a
+    /// tampered destination before it does work a later refusal would have
+    /// to unwind. An absent parent reads as `Entry::Absent`, the same as an
+    /// absent name: neither can be written through.
+    pub fn entry(&self, relative: &Path) -> io::Result<Entry> {
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "inspect", &mut display)? else {
+            return Ok(Entry::Absent);
+        };
+        let fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        match stat_at(fd, name.as_bytes()) {
+            Ok(stat) => Ok(match stat.st_mode & libc::S_IFMT {
+                libc::S_IFREG => Entry::Regular,
+                libc::S_IFDIR => Entry::Directory,
+                libc::S_IFLNK => Entry::Symlink,
+                _ => Entry::Other,
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Entry::Absent),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Remove a project-relative regular file through the held descriptor.
+    /// `Ok(())` when the file or any parent is already absent. A symlink, a
+    /// directory, or anything else at the destination is refused rather than
+    /// unlinked, so a `.tog` or a cache entry swapped for a symlink cannot
+    /// make a caller delete something outside the project. The unlink
+    /// carries the inode the check saw, so an entry replaced in between is
+    /// left alone rather than removed blind.
+    pub fn remove_file(&self, relative: &Path) -> io::Result<()> {
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "remove", &mut display)? else {
+            return Ok(());
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        let stat = match stat_at(parent_fd, name.as_bytes()) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFREG => {}
+            libc::S_IFLNK => {
+                return Err(refusal(format!(
+                    "{} is a symlink; refusing to remove it",
+                    display.display()
+                )))
+            }
+            libc::S_IFDIR => {
+                return Err(refusal(format!(
+                    "{} is a directory; refusing to remove it",
+                    display.display()
+                )))
+            }
+            _ => {
+                return Err(refusal(format!(
+                    "{} is not a regular file; refusing to remove it",
+                    display.display()
+                )))
+            }
+        }
+        // `Ok(false)` means the entry went away or was replaced between the
+        // check above and the unlink. Both are the caller's desired end
+        // state -- the file it asked to remove is not there -- and removing
+        // whatever took its place is exactly what this walk refuses to do,
+        // so there is nothing to report.
+        unlink_if_same(parent_fd, name.as_bytes(), &stat, 0).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("remove {}: {error}", display.display()),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Create a project-relative directory and any missing parents, walking
+    /// from the held descriptor one component at a time. Refuses a symlink
+    /// or a non-directory at any component, so a caller that then reads or
+    /// writes inside it cannot be redirected outside the project. An
+    /// existing real directory is left as it is.
+    pub fn create_dir_all(&self, relative: &Path) -> io::Result<()> {
+        let (mut components, name) = split_relative(relative)?;
+        components.push(name);
+        let mut display = self.path.clone();
+        self.open_creating(&components, &mut display)?;
+        Ok(())
+    }
+
+    /// Walk to the parent directory of a project-relative path, creating
+    /// nothing. Returns the held parent descriptor (`None` when the project
+    /// root itself is the parent) together with the final name, and pushes
+    /// the whole path onto `display`. `Ok(None)` when a parent is absent.
+    fn open_parent<'a>(
+        &self,
+        relative: &'a Path,
+        verb: &str,
+        display: &mut PathBuf,
+    ) -> io::Result<Option<(Option<fs::File>, &'a OsStr)>> {
+        let (parents, name) = split_relative(relative)?;
+        let mut held: Option<fs::File> = None;
+        for parent in parents {
+            display.push(parent);
+            let fd = held
+                .as_ref()
+                .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+            match open_directory_at(fd, parent.as_bytes(), display, verb) {
+                Ok(dir) => held = Some(dir),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        display.push(name);
+        Ok(Some((held, name)))
+    }
+
+    /// Open each component in turn from the held descriptor, creating the
+    /// ones that are absent. Returns the last descriptor, or `None` when
+    /// `components` is empty and the project root itself is the parent.
+    fn open_creating(
+        &self,
+        components: &[&OsStr],
+        display: &mut PathBuf,
+    ) -> io::Result<Option<fs::File>> {
+        let mut held: Option<fs::File> = None;
+        for component in components {
+            display.push(component);
+            let fd = held
+                .as_ref()
+                .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+            let created = mkdir_at(fd, component.as_bytes(), 0o755).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("create {}: {error}", display.display()),
+                )
+            })?;
+            let dir = open_directory_at(fd, component.as_bytes(), display, "write")?;
+            if created {
+                fsync_directory(fd)?;
+            }
+            held = Some(dir);
+        }
+        Ok(held)
+    }
+
     fn publish(
         &self,
         relative: &Path,
@@ -170,24 +320,7 @@ impl ProjectRoot {
     ) -> io::Result<()> {
         let (parents, name) = split_relative(relative)?;
         let mut display = self.path.clone();
-        let mut held: Option<fs::File> = None;
-        for parent in parents {
-            display.push(parent);
-            let fd = held
-                .as_ref()
-                .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-            let created = mkdir_at(fd, parent.as_bytes(), 0o755).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("create {}: {error}", display.display()),
-                )
-            })?;
-            let dir = open_directory_at(fd, parent.as_bytes(), &display, "write")?;
-            if created {
-                fsync_directory(fd)?;
-            }
-            held = Some(dir);
-        }
+        let held = self.open_creating(&parents, &mut display)?;
         display.push(name);
         let parent_fd = held
             .as_ref()
@@ -410,6 +543,137 @@ mod tests {
         root.write_file(path, b"two").unwrap();
         assert_eq!(root.read_file(path).unwrap().unwrap(), b"two");
         assert_eq!(entries(&root.path().join(".tog")), vec!["plan.json"]);
+    }
+
+    #[test]
+    fn remove_file_deletes_a_regular_file_and_tolerates_an_absent_one() {
+        let temp = TempDir::new();
+        let root = ProjectRoot::open(&project(&temp)).unwrap();
+        let path = Path::new(".tog/lock-source.hash");
+        // Absent name, and absent parent, are both a no-op.
+        root.remove_file(path).unwrap();
+        root.write_file(path, b"abc").unwrap();
+        root.remove_file(path).unwrap();
+        assert_eq!(root.read_file(path).unwrap(), None);
+        assert!(entries(&root.path().join(".tog")).is_empty());
+        root.remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn remove_file_refuses_a_symlinked_parent_and_a_symlinked_target() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("lock-source.hash"), b"keep").unwrap();
+        symlink(&outside, dir.join(".tog")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let error = root
+            .remove_file(Path::new(".tog/lock-source.hash"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        assert_eq!(fs::read(outside.join("lock-source.hash")).unwrap(), b"keep");
+
+        // And a symlink at the destination name itself, under a real parent.
+        let other = temp.0.join("other-proj");
+        fs::create_dir_all(other.join(".tog")).unwrap();
+        symlink(
+            outside.join("lock-source.hash"),
+            other.join(".tog/lock-source.hash"),
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&other).unwrap();
+        let error = root
+            .remove_file(Path::new(".tog/lock-source.hash"))
+            .unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+        assert_eq!(fs::read(outside.join("lock-source.hash")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn remove_file_refuses_a_directory() {
+        let temp = TempDir::new();
+        let root = ProjectRoot::open(&project(&temp)).unwrap();
+        root.create_dir_all(Path::new(".tog/closures")).unwrap();
+        let error = root.remove_file(Path::new(".tog/closures")).unwrap_err();
+        assert!(error.to_string().contains("is a directory"), "{error}");
+        assert!(root.path().join(".tog/closures").is_dir());
+    }
+
+    #[test]
+    fn entry_classifies_without_following_a_symlink() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside.json");
+        fs::write(&outside, b"outside").unwrap();
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        symlink(&outside, dir.join(".tog/closures/python.json")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+
+        assert_eq!(root.entry(Path::new(".tog/absent")).unwrap(), Entry::Absent);
+        assert_eq!(
+            root.entry(Path::new("no-such-dir/name")).unwrap(),
+            Entry::Absent
+        );
+        assert_eq!(
+            root.entry(Path::new(".tog/closures")).unwrap(),
+            Entry::Directory
+        );
+        // The symlink is reported as a symlink, not as the regular file it
+        // points at, so a caller refuses instead of writing through it.
+        assert_eq!(
+            root.entry(Path::new(".tog/closures/python.json")).unwrap(),
+            Entry::Symlink
+        );
+        root.write_file(Path::new(".tog/plan.json"), b"{}").unwrap();
+        assert_eq!(
+            root.entry(Path::new(".tog/plan.json")).unwrap(),
+            Entry::Regular
+        );
+    }
+
+    #[test]
+    fn entry_refuses_a_symlinked_ancestor() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, dir.join(".tog")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let error = root.entry(Path::new(".tog/plan.json")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn create_dir_all_makes_the_chain_and_is_idempotent() {
+        let temp = TempDir::new();
+        let root = ProjectRoot::open(&project(&temp)).unwrap();
+        root.create_dir_all(Path::new(".tog/closures")).unwrap();
+        assert!(root.path().join(".tog/closures").is_dir());
+        root.create_dir_all(Path::new(".tog/closures")).unwrap();
+        assert_eq!(entries(&root.path().join(".tog")), vec!["closures"]);
+    }
+
+    #[test]
+    fn create_dir_all_refuses_a_symlinked_component() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, dir.join(".tog")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let error = root.create_dir_all(Path::new(".tog/closures")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        assert!(entries(&outside).is_empty(), "created through the symlink");
     }
 
     #[test]

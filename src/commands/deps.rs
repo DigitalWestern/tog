@@ -26,6 +26,7 @@ use crate::commands::shared::project_dir;
 use crate::commands::sync;
 use crate::commands::x as xrun;
 use crate::kernel::context::Context;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::sandbox;
@@ -816,11 +817,10 @@ fn python(
             } else {
                 // The ordinary sync re-locks when the source hash changes; a
                 // stale stamp from an unchanged source (update with no lock
-                // yet) is cleared so sync resolves afresh.
-                let stamp = project.join(".tog/lock-source.hash");
-                if stamp.is_file() {
-                    fs::remove_file(&stamp)?;
-                }
+                // yet) is cleared so sync resolves afresh. Through the held
+                // project descriptor, so a symlinked `.tog` cannot redirect
+                // the unlink outside the project.
+                ProjectRoot::open(project)?.remove_file(Path::new(".tog/lock-source.hash"))?;
                 if verb == Verb::Update {
                     files.push("(re-locks on sync)".to_string());
                 }
