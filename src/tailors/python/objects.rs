@@ -233,7 +233,7 @@ fn python_env_v3_contract(identity: &Identity) -> Result<(), String> {
     let declared = inputs
         .get("package_digest")
         .ok_or_else(|| "Python environment package digest: no package_digest input".to_string())?;
-    let recomputed = super::env::package_digest(inputs);
+    let recomputed = super::env::package_digest_of_inputs(inputs);
     if *declared != recomputed {
         return Err(format!(
             "Python environment package digest: package_digest {declared} does not match the \
@@ -386,6 +386,10 @@ fn python_env_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, Strin
 /// `python-env/3`: the same byte sources. `package_digest` and `native` are
 /// drift guards over inputs that are already named here, so neither adds a
 /// dependency of its own.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
 fn python_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     python_env_inner(
         record,
@@ -583,6 +587,10 @@ fn sdist_build_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, Stri
 /// `sdist-build/4`: the same byte sources as `/3`. `build_mode` and
 /// `native_mode` restate decisions the object ids above already carry, so
 /// neither adds a dependency.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
 fn sdist_build_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     sdist_build_isolated(
         record,

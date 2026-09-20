@@ -331,10 +331,11 @@ mod tests {
     /// work on.
     fn commit_legacy_fixture(store: &Store, identity: &Identity, refs: Option<&[&str]>) -> String {
         let id = identity.object_id();
-        if identity.kind == "not-a-known-kind" {
-            // Unknown-kind fixtures are historical records. Publish this
-            // legacy-shaped object by hand because the live commit guard must
-            // reject the same unknown kind.
+        if crate::kernel::objmeta::check_identity_grammar(identity).is_err() {
+            // Historical records: an unknown kind, or a schema since
+            // superseded. Publish the legacy-shaped object by hand, because
+            // the live commit guard exists to reject exactly these — but a
+            // store synced before the bump still has them on disk.
             let object = store.object_path(&id);
             fs::create_dir_all(&object).unwrap();
             fs::write(object.join("payload"), &identity.name).unwrap();
@@ -772,34 +773,28 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         closure(&project, &store.object_path(&rooted), serde_json::json!({}));
         store.register_root(&project).unwrap();
+        // A pre-object-meta/2 record, which is the case that actually needs
+        // the row: `migrate_metadata` only adapts `Evidence::Legacy`, and a
+        // record it cannot adapt closes every sweep. A crate whose sha256 is
+        // in the cache gives the adapter something real to reconstruct.
+        let crate_sha256 = "d".repeat(64);
+        cached_artifact(&store, &crate_sha256);
         let identity = Identity {
             kind: "cargo-vendor".into(),
             name: "vendor".into(),
             version: "1".into(),
-            inputs: BTreeMap::from([("schema".into(), "cargo-vendor/1".into())]),
+            inputs: BTreeMap::from([
+                ("schema".into(), "cargo-vendor/1".into()),
+                ("crate:serde@1.0.0".into(), crate_sha256.clone()),
+            ]),
         };
-        let id = identity.object_id();
-        // Written by hand: the commit-time guard refuses a superseded schema,
-        // which is the point. This is what such a record looks like in a
-        // store that was synced before the bump.
+        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
         let object = store.object_path(&id);
-        fs::create_dir_all(&object).unwrap();
-        fs::write(object.join("payload"), "vendor").unwrap();
-        fs::write(
-            store.root.join("meta").join(format!("{id}.json")),
-            serde_json::json!({
-                "schema": "object-meta/2",
-                "id": id,
-                "identity": identity,
-                "created": 0,
-                "exceptions": [],
-                "dependencies": [],
-                "cache_digests": [],
-                "evidence": "explicit",
-            })
-            .to_string(),
-        )
-        .unwrap();
+        assert_eq!(
+            record(&store, &id).evidence,
+            crate::kernel::objmeta::Evidence::Legacy,
+            "the fixture must be a real legacy record, not an explicit one"
+        );
         age(&object);
 
         let mut output = Vec::new();
@@ -815,6 +810,9 @@ mod tests {
             &mut output,
         )
         .expect("a superseded schema must not block the sweep");
+        // The superseded row is what let the sweep read this record at all:
+        // without it the adapter is missing, the record stays legacy, and
+        // the sweep above refuses instead of returning a report.
         assert_eq!(report.objects, 1);
         assert!(!object.exists());
     }

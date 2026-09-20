@@ -363,8 +363,14 @@ successor together, accepting one store-wide rebuild of those kinds:
 | `sdist-build` | `sdist-build/4` | `build_mode` and `native_mode` | dropping *both* halves of `rust`/`vendor` or `native_libs`/`native_linker` left the valid shape that never had one |
 
 Each added input is written unconditionally, including in the empty case, and
-the contract recomputes it from the producer's own function. A dropped `pkg:`
-key no longer collides with a legitimate identity, it fails the commit.
+the producer derives it from the *plan* — the locked package list, the
+declared artifact list, the crate vector — in a traversal separate from the
+loop that writes the identity inputs. The contract then recomputes it from
+the inputs the finished identity carries. Those are two different sources on
+purpose: a producer whose insert loop writes one fewer input than its plan
+names makes them disagree, so the drift fails the commit instead of
+colliding with a legitimate smaller identity. Deriving both sides from the
+input map would move the added input along with the drift and catch nothing.
 (A dropped `provisioned:` key was always caught: the `pkg:` value names the
 package, and the contract asks the producer's own provisioning decision
 whether that package must carry one.)
