@@ -243,7 +243,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     } else {
         // Native libraries are unsupported on Darwin, so the local native
         // sdist would take plan_sdist_identity_input's schema-2 fast path.
-        // It is intentionally omitted here; the Darwin schema-3 matrix case
+        // It is intentionally omitted here; the Darwin isolated-build matrix case
         // uses a Rust sdist whose Cargo.toml selects that path.
     }
     cases.extend(build::live_identity_cases(platform));

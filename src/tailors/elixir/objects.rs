@@ -13,6 +13,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "beam",
         schema: Some("beam-toolchain/1"),
+        superseded_by: None,
         live_required: &[
             "schema",
             "otp_sha256",
@@ -41,6 +42,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "hex-deps",
         schema: Some("hex-deps/1"),
+        superseded_by: None,
         live_required: &["schema", "beam"],
         live_optional: &["dep:"],
         legacy_only: &[],

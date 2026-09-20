@@ -759,6 +759,66 @@ mod tests {
         assert!(!artifact_path.exists());
     }
 
+    /// An object minted under a schema that has since been superseded is
+    /// ordinary garbage once nothing roots it. Its row stays registered, so
+    /// the sweep can read the record and delete the object; losing the row
+    /// would instead block every sweep on a store that has one.
+    #[test]
+    fn an_object_of_a_superseded_schema_is_swept_as_garbage() {
+        let temp = TempStore::new("superseded-schema");
+        let store = temp.store();
+        let rooted = commit(&store, "rooted", None);
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&rooted), serde_json::json!({}));
+        store.register_root(&project).unwrap();
+        let identity = Identity {
+            kind: "cargo-vendor".into(),
+            name: "vendor".into(),
+            version: "1".into(),
+            inputs: BTreeMap::from([("schema".into(), "cargo-vendor/1".into())]),
+        };
+        let id = identity.object_id();
+        // Written by hand: the commit-time guard refuses a superseded schema,
+        // which is the point. This is what such a record looks like in a
+        // store that was synced before the bump.
+        let object = store.object_path(&id);
+        fs::create_dir_all(&object).unwrap();
+        fs::write(object.join("payload"), "vendor").unwrap();
+        fs::write(
+            store.root.join("meta").join(format!("{id}.json")),
+            serde_json::json!({
+                "schema": "object-meta/2",
+                "id": id,
+                "identity": identity,
+                "created": 0,
+                "exceptions": [],
+                "dependencies": [],
+                "cache_digests": [],
+                "evidence": "explicit",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        age(&object);
+
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+                forgotten: Vec::new(),
+            },
+            &mut output,
+        )
+        .expect("a superseded schema must not block the sweep");
+        assert_eq!(report.objects, 1);
+        assert!(!object.exists());
+    }
+
     #[test]
     fn dry_run_reports_sizes_without_removing() {
         let temp = TempStore::new("dry-run");

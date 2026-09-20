@@ -886,6 +886,93 @@ mod tests {
         );
     }
 
+    /// `node-env/4` goldens, on both platforms, from fixed inputs: a fixed
+    /// store root (a real identity input), two packages and one declared
+    /// artifact. The identity constructor is a pure function of its
+    /// platform argument, so the Darwin value is computed here and the
+    /// macOS gate only confirms it. The `/3` spelling of the same plan is a
+    /// different object id, so the bump reissues every environment; and the
+    /// two drifts `/3` could not see — one package or the declared artifact
+    /// dropped — are now contract errors.
+    #[test]
+    fn node_env_identity_goldens_and_dropped_plan_entries() {
+        crate::tailors::install_kinds();
+        let store = Store {
+            root: PathBuf::from("/fixture/tog-store"),
+        };
+        let package = |path: &str, name: &str, version: &str| NpmPackage {
+            path: path.into(),
+            name: name.into(),
+            version: version.into(),
+            url: format!("https://registry.example.invalid/{name}.tgz"),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+        };
+        let artifact = DeclaredArtifact {
+            url: "https://artifacts.example.invalid/tool.tar.gz".into(),
+            sha256: "a".repeat(64),
+            path: ".npm/tool.tar.gz".into(),
+        };
+        for (platform, golden) in [
+            (
+                Platform::X86_64UnknownLinuxGnu,
+                "26333746f02786ed4d81de465ca6ee4c43e07000-env-24.20.0",
+            ),
+            (
+                Platform::Aarch64AppleDarwin,
+                "aa486e4a07068ad33e42126fc5b58b042200b055-env-24.20.0",
+            ),
+        ] {
+            let node = node_identity(node_pin(platform).unwrap());
+            let node_object = PathBuf::from(node.object_id());
+            let plan = NpmPlan {
+                node_version: node.version.clone(),
+                packages: vec![
+                    package("node_modules/example", "example", "1.0.0"),
+                    package("node_modules/second-example", "second-example", "2.0.0"),
+                ],
+                links: Vec::new(),
+                workspaces: Vec::new(),
+                lock_source: "fixture".into(),
+            };
+            let identity = realize::node_env_identity(
+                &store,
+                platform,
+                &node_object,
+                &plan,
+                std::slice::from_ref(&artifact),
+                None,
+            )
+            .unwrap();
+            assert_eq!(identity.inputs["schema"], "node-env/4");
+            assert_eq!(identity.inputs["native"], realize::NATIVE_NONE);
+            assert_eq!(identity.object_id(), golden, "{}", platform.triple());
+            assert_eq!(
+                crate::kernel::objmeta::check_identity_grammar(&identity),
+                Ok(())
+            );
+
+            // The `/3` spelling of the same plan: a different object id,
+            // which is the store-wide rebuild this bump accepts.
+            let mut old = identity.clone();
+            old.inputs.insert("schema".into(), "node-env/3".into());
+            old.inputs.remove("plan_digest");
+            old.inputs.remove("native");
+            assert_ne!(old.object_id(), identity.object_id());
+
+            // The two drifts `/3` could not see.
+            for key in ["pkg:node_modules/example", "artifact:.npm/tool.tar.gz"] {
+                let mut dropped = identity.clone();
+                dropped.inputs.remove(key);
+                let reason = crate::kernel::objmeta::check_identity_grammar(&dropped).unwrap_err();
+                assert!(reason.contains("Node plan digest"), "{key}: {reason}");
+            }
+        }
+    }
+
     #[test]
     fn darwin_identity_unchanged() {
         let node = node_pin(Platform::Aarch64AppleDarwin).unwrap();

@@ -13,6 +13,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "ruby",
         schema: Some("ruby-toolchain/1"),
+        superseded_by: None,
         live_required: &["schema", "artifact_sha256", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -27,6 +28,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "ruby-gems",
         schema: Some("ruby-gems/1"),
+        superseded_by: None,
         live_required: &["schema", "installer", "ruby_platform"],
         live_optional: &["gem:"],
         legacy_only: &[],
