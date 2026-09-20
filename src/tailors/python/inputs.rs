@@ -103,7 +103,11 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
             if let Err(error) =
                 manifest.prepare_setup(platform, dir, &project, store, probed_version)
             {
-                if !dynamic_dependencies {
+                // `InvalidData` out of prepare_setup is a descriptor refusal
+                // (a symlinked `.tog`, a non-regular cache), not a probe
+                // that did not work. The requirements-directory convention
+                // must not paper over a refusal that was raised on purpose.
+                if !dynamic_dependencies || error.kind() == io::ErrorKind::InvalidData {
                     return Err(error);
                 }
                 let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
@@ -585,6 +589,40 @@ mod tests {
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote the lock stamp through the symlinked .tog"
         );
+    }
+
+    #[test]
+    fn a_refusal_is_not_swallowed_by_the_dynamic_dependencies_fallback() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(project_dir.join("requirements")).unwrap();
+        // Dynamic dependencies plus a setup.py, so a failed metadata probe
+        // falls back to the requirements-directory convention. The fallback
+        // manifest is empty, so on a swallowed refusal planning would finish
+        // and return an interpreter-only plan instead of failing.
+        std::fs::write(
+            project_dir.join("pyproject.toml"),
+            "[project]\nname = \"p\"\nversion = \"0\"\ndynamic = [\"dependencies\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        std::fs::write(project_dir.join("requirements/common.txt"), "").unwrap();
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        let store = store::Store {
+            root: temp.0.join("absent-store"),
+        };
+
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a real directory"), "{error}");
+        assert!(!store.root.exists(), "a refused probe touched the store");
     }
 
     #[test]

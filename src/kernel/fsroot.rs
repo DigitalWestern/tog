@@ -229,6 +229,11 @@ impl ProjectRoot {
                 )))
             }
         }
+        // `Ok(false)` means the entry went away or was replaced between the
+        // check above and the unlink. Both are the caller's desired end
+        // state -- the file it asked to remove is not there -- and removing
+        // whatever took its place is exactly what this walk refuses to do,
+        // so there is nothing to report.
         unlink_if_same(parent_fd, name.as_bytes(), &stat, 0).map_err(|error| {
             io::Error::new(
                 error.kind(),
