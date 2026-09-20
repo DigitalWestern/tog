@@ -1445,7 +1445,7 @@ mod tests {
                 assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
             }
         }
-        let _ = fs::remove_dir_all(temp);
+        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
