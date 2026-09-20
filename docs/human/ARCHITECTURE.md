@@ -434,6 +434,8 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
                     projection.rs projection refs, env.rs TOG_STORE,
                     fsops.rs descriptor-level filesystem helpers
     fetch.rs        verified downloads
+    fsroot.rs       ProjectRoot: project files read and published through a
+                    held directory descriptor, never through a symlink
     archive.rs      archive validation and delegated extraction
     dirhash.rs      Go module dirhash verification
     gitsrc.rs       git sources realized by commit

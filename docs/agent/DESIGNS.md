@@ -32,7 +32,7 @@ history use them.
 2. Release catalog and publisher trust (WP3)
 3. Daily-driver gaps (WP4 open items)
 4. The company layer (WP5)
-5. GC-safety leftovers (supervision gaps, `fsroot`, missing tests)
+5. GC-safety leftovers (supervision gaps, missing tests)
 6. Backlog
 
 ---
@@ -301,9 +301,8 @@ and every input descriptor-relative beneath that held descriptor with
 Descriptor-anchored closure publication has landed in `src/project.rs`;
 `src/store.rs` and `src/xrun.rs` also contain no-follow directory/deletion
 helpers. The old claim that the tree contains no `openat`/`O_NOFOLLOW` was
-stale. The current GC implementation keeps these descriptor-relative
-primitives in those modules; WP2 PR 3 may extract the shared pieces as
-`src/fsroot.rs` and extend them for lock/input discovery. Keep the root
+stale. `src/kernel/fsroot.rs` (`ProjectRoot`) is now the shared helper:
+WP2 PR 3 extends it for lock/input discovery. Keep the root
 descriptor, walk components with `openat`/`O_NOFOLLOW`, create with `O_EXCL`,
 and rename descriptor-relative. Path-based `fs::read`/`fs::write`/`fs::rename`
 do not satisfy the refusal tests in this section.
@@ -434,7 +433,7 @@ project directory through `run_checked` (`src/ruby.rs:290-297`,
 
 What frozen calls instead is named, owned, and tested like every other
 guarantee in this design. `src/toolchain_input.rs`, owned by PR 3 below
-exactly as `src/fsroot.rs` is, exposes one reader per ecosystem that returns
+exactly as `src/kernel/fsroot.rs` is, exposes one reader per ecosystem that returns
 the toolchain request from declarative sources only — the `path`/`field` pairs
 the precedence table lists — and nothing in it calls a planner. Its unit tests
 assert per ecosystem that the reader spawns no process at all, which is a
@@ -695,7 +694,7 @@ file appearing at a path recorded `absent` reports stale, and one appearing at
 a path with no row at all is impossible because every consulted path has a row;
 frozen validation against a project whose Gemfile writes a marker when
 evaluated completes with no marker, and every `src/toolchain_input.rs` reader spawns no
-process; and the project-side `src/fsroot.rs` refusals all
+process; and the project-side `src/kernel/fsroot.rs` refusals all
 fail closed — a symlinked `tog-toolchain.toml`, a symlinked input file, a
 symlinked ancestor directory of either, and an occupied temp name. ACTIVATION
 stays dormant until selection sources and runtime propagation land: the feature
@@ -704,7 +703,7 @@ is off, and the lock is neither written nor required.
 0. **Exact selection fixes (landed as two PRs)** — #21 `wp2/python-exact-selection` (`src/pyselect.rs`, `src/python.rs`) and #22 `wp2/go-selected-version` (`src/golang.rs`), each with its own unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
 1. **Shipped-table adapter and source selection (landed)** — pin modules, `src/platform.rs`, typed source-policy interface with configurable endpoint defaults, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
 2. **Secure archive extractor (landed)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar.
-3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It extends the descriptor-relative primitives currently in `src/store.rs`/`src/project.rs` (which may be extracted as `src/fsroot.rs`) for lock/input-specific rules (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `tog-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
+3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It extends `src/kernel/fsroot.rs` for lock/input-specific rules (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `tog-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
 4. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
 5. **Activation and update** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: update, two-store replay including the dropped-`release` upgrade replay, no-pin creation, stale/frozen refusal (with `frozen_validation_failure_precedes_all_writes` and the Gemfile-marker regression), added-higher-precedence-source staleness, unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff.
 
@@ -792,7 +791,7 @@ so this file does not drift from it:
 
 **PR 3 — lock core, dormant.**
 - *Files:* new `src/toolchain_input.rs` (per-ecosystem declarative readers),
-  extend the descriptor-relative helper extracted by GC C as `src/fsroot.rs` (root helper: `openat`/`O_NOFOLLOW`
+  extend `src/kernel/fsroot.rs` (`ProjectRoot`: `openat`/`O_NOFOLLOW`
   walk, `O_EXCL` create on a `/dev/urandom` name, file `fsync`, `renameat`,
   directory `fsync`), plus `src/cli.rs`, `src/main.rs`, project input
   handling; move `src/sbom.rs`'s `/dev/urandom` read into the shared helper
@@ -1219,29 +1218,6 @@ problem, one level lower: these helpers take a `&Path` and no token at all,
 so threading a token through them is a signature change, not a call change.
 They are the reason B.5's completion criteria are not cleared.
 
-### Store ownership checks and `src/fsroot.rs`
-
-Never started. The rules the helper must enforce:
-
-Enforced at the `ClosureRefs` API boundary, before anything is written:
-- every object id validates as above;
-- every projection ref rejects absolute paths, `..`, empty components, and
-  NUL;
-- **store ownership:** an object path supplied by a caller must have
-  `path.parent().parent() == store.root` after canonicalization; a projection
-  must resolve under `store.root/{forests,backups}` through no-follow anchored
-  directories. Cross-store references are rejected with the offending path
-  in the message. Only the legacy importer may construct retention-only
-  sibling references; those must never become deletion authority.
-- the `Store` is **passed explicitly**. Delete
-  `project::store_from_closure_body` and its fallback to `Store::open()` from
-  normal publication. Update `xrun::originating_store`, which currently calls
-  this helper, in the same PR: new x markers carry explicit canonical store
-  provenance; existing markers/closures use a narrow declarative, validated
-  legacy-origin reader. An ambiguous origin skips cleanup. Do not retain a
-  generic recursive JSON path guess under a different name.
-
-
 ### Missing named tests
 
 The GC design named 26 tests for durable project records. On 2026-09-16 no
@@ -1281,7 +1257,6 @@ the rest stand.
 | M5 hardening: RECORD verification and rewrite, Mach-service allowlist, deployment-target tags, streaming extractors | stands. Streaming extractors connect to the WP2 extractor's architectural finding (read tar headers directly instead of parsing `tar -tv`); do them together |
 | Sol review 3 leftovers: dependency-order lifecycle execution and ancestor `.bin` paths; true npm optional-failure parity; planner subprocess sandboxing; process-tree quiescence after install scripts; Xcode/SDK fingerprint in build identity | stands. **Process-tree quiescence overlaps GC Package B**: B's supervisor bounds the awaited direct child; descendants surviving its exit remain outside the guarantee. Do not claim B closes this |
 | Store-object content verification on use (same-user replacement is undetected), or an explicitly narrower documented trust boundary | stands, and GC Package D's replacement recheck is *not* this — D checks the deletion candidate, not the object a job is about to use |
-| Contained atomic writes for the remaining project-side plan caches | stands; `src/fsroot.rs` (never extracted, see §5; WP2 PR 3 extends it) is the helper they should use |
 | Per-package store objects with copy-on-write assembly | stands; deferred by the "env-level granularity" MVP decision |
 | Reproducibility spot-checks (rebuild twice, compare, quarantine mismatches) | stands |
 | Bytecode precompilation at realize time | stands |

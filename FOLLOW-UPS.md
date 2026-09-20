@@ -76,15 +76,12 @@ by position.
   helpers take no token at all, so protection cannot be proved at the call
   site. The same fix removes the `Store::has` lock-order inversion. Site
   table in `docs/agent/DESIGNS.md` §5.
-- **`src/fsroot.rs`: descriptor-relative project writes.** Never started.
-  Also the base for contained plan-cache writes and for the toolchain lock.
-  Rules in `docs/agent/DESIGNS.md` §5.
 - **Descriptor-relative project access in sync.** Every command reads the
   project by pathname, so a same-user process that swaps the project
   directory mid-sync can make tog sync the replacement
   (`docs/human/LIMITATIONS.md`). Raised by review on 2026-09-16 and declined
   there as pre-existing. Closing it means every tailor reads through a held
-  directory descriptor. Probably builds on `src/fsroot.rs`.
+  directory descriptor. Builds on `src/kernel/fsroot.rs`.
 - **Missing GC tests.** 18 of the 26 tests the GC design named do not exist
   by name. List in `docs/agent/DESIGNS.md` §5.
 - **GC mutation survivor: redundant root marking.** Removing the marking set
@@ -116,6 +113,10 @@ by position.
   (2026-09-15) each failed once in a full parallel run and passed on every
   rerun. The panic messages were not captured. Capture them next time before
   changing anything.
+  `tailors::node::lock_import::tests::pnpm_9_base32_patch_hashes_are_accepted_and_stored_verbatim`
+  (2026-09-20) failed once the same way at `lock_import/mod.rs:1009`, the
+  `policy::pending().len() == 1` assertion, although it holds
+  `exception_guard`; so some other test records an exception without it.
 - **Independent review of `Store::roots_for_sweep`.** The one production
   change in the 2026-09-10 macOS fix commit (`fb8b1d6`): unusable root
   records are routed into the sweep's refusal. It was never reviewed by an

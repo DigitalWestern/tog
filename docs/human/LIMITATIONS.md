@@ -114,8 +114,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
   replacement after commit is undetected.
 - **Delegated planning runs unsandboxed with user privileges** (uv, npm, cargo, go, bundler):
-  a hostile manifest executes code at PLAN time. **Plan caches for go/python lack contained
-  atomic writes**: a symlinked `.tog` could redirect a cache write outside the project.
+  a hostile manifest executes code at PLAN time.
 - **Only the Go toolchain tarball goes through the pre-materialization extractor**; CPython,
   Node, Rust, Ruby, .NET, Elixir/OTP and native-library tarballs still rely on the platform
   tar's own defences. The listing is read from the archive's own headers (ustar names and the
