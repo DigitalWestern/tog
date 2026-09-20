@@ -8,7 +8,7 @@
 
 pub mod status;
 
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
 use crate::kernel::store::{fsync_directory, rename_at, ProjectionBase, ProjectionRef, Store};
@@ -380,6 +380,35 @@ fn write_closure_inner(
     // time; readers must not assume the body's object ids are valid for
     // the current host. Additive field, schema unchanged.
     let platform = Platform::host()?.triple();
+    // Refuse a tampered destination here, before the root record is written,
+    // so a refused publication never leaves a root behind for a closure that
+    // was never published. `write_file` checks again at rename time; this is
+    // the early, actionable copy of the same rule.
+    match project.entry(&closure_path)? {
+        Entry::Absent | Entry::Regular => {}
+        Entry::Symlink => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a symlink; remove it and run tog sync again",
+                    project.path().join(&closure_path).display()
+                ),
+            ))
+        }
+        kind => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a {} where the closure belongs; remove it and run tog sync again",
+                    project.path().join(&closure_path).display(),
+                    match kind {
+                        Entry::Directory => "directory",
+                        _ => "special file",
+                    }
+                ),
+            ))
+        }
+    }
     // Protect the complete object set before publishing the visible closure.
     // The compatibility writer below is retained only for old synthetic
     // callers whose placeholder paths predate full object ids; real producer
@@ -1665,7 +1694,22 @@ mod closure_platform_tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
+        assert!(
+            error.to_string().contains("run tog sync again"),
+            "the refusal does not say what to do: {error}"
+        );
         assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        // The refusal lands before the root record, so a project whose
+        // closure was never published owns no root either.
+        assert!(
+            store.roots().unwrap().is_empty(),
+            "a refused closure still registered a root"
+        );
+        assert!(
+            !project.join(".tog/closures/python.json").is_symlink()
+                || fs::read_link(project.join(".tog/closures/python.json")).unwrap() == outside,
+            "the symlink was replaced"
+        );
 
         attribution.discard();
         let _ = fs::remove_dir_all(root);

@@ -6,6 +6,7 @@
 //! exact artifact URL selected from their own file list; they still enter the
 //! ordinary Python `Plan` and realization path.
 
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -33,6 +34,11 @@ pub use poetry::*;
 pub use requirements::*;
 use setup::*;
 pub use uv::*;
+
+/// The setup.py metadata cache, project-relative. Read by pathname (a
+/// tampered cache is a miss, not a failure) and written through the held
+/// project descriptor.
+const SETUP_CACHE: &str = ".tog/egg-info.json";
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -132,6 +138,7 @@ impl Manifest {
         &mut self,
         platform: Platform,
         dir: &Path,
+        project: &ProjectRoot,
         store: &Store,
         python_version: &str,
     ) -> io::Result<()> {
@@ -139,7 +146,7 @@ impl Manifest {
             return Ok(());
         }
         let tree_hash = setup_tree_hash(dir)?;
-        let cache_path = dir.join(".tog/egg-info.json");
+        let cache_path = dir.join(SETUP_CACHE);
         if let Ok(text) = fs::read_to_string(&cache_path) {
             if let Ok(cache) = serde_json::from_str::<SetupCache>(&text) {
                 if setup_cache_matches(
@@ -221,8 +228,9 @@ impl Manifest {
             platform: platform.triple().to_string(),
             build_toolchain: build::derivation_fingerprint(),
         };
-        fs::create_dir_all(dir.join(".tog"))?;
-        fs::write(&cache_path, serde_json::to_vec_pretty(&cache)?)?;
+        // Through the held project descriptor: a symlinked `.tog` must not
+        // carry this cache outside the project.
+        project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
         self.source = self.requirements_text();

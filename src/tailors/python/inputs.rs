@@ -100,7 +100,9 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         let mut stabilized = false;
         for _ in 0..MAX_SETUP_PROBES {
             let probed_version = selection.pin.version;
-            if let Err(error) = manifest.prepare_setup(platform, dir, store, probed_version) {
+            if let Err(error) =
+                manifest.prepare_setup(platform, dir, &project, store, probed_version)
+            {
                 if !dynamic_dependencies {
                     return Err(error);
                 }
@@ -405,17 +407,12 @@ pub fn locked_requirements(
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
     }
-    write_lock_stamp(project, &source_hash)?;
+    // The stamp is the only file tog writes here, and it goes through the
+    // held project descriptor, so a `.tog` swapped for a symlink is refused
+    // rather than followed. `requirements.lock.txt` beside it is uv's own
+    // write by pathname.
+    project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())?;
     std::fs::read_to_string(&lock_path)
-}
-
-/// Record the hash that decides whether `uv pip compile` must re-run. This
-/// is the only file `locked_requirements` writes itself, and it goes through
-/// the held project descriptor, so a `.tog` swapped for a symlink is refused
-/// rather than followed. `requirements.lock.txt` beside it is uv's own write
-/// by pathname.
-fn write_lock_stamp(project: &ProjectRoot, source_hash: &str) -> io::Result<()> {
-    project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())
 }
 
 pub fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
@@ -530,18 +527,60 @@ mod tests {
         );
     }
 
+    /// Plant the pinned uv as a script that writes the lock uv would have
+    /// produced. `ensure_uv_for` returns a store object it already has, so
+    /// `locked_requirements` reaches its stamp write with no network.
+    fn store_with_stub_uv(root: &Path) -> store::Store {
+        use std::os::unix::fs::PermissionsExt as _;
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = store::Store {
+            root: root.canonicalize().unwrap(),
+        };
+        crate::tailors::install_kinds();
+        let host = Platform::host().unwrap();
+        let pin = python::UV.iter().find(|pin| pin.platform == host).unwrap();
+        let staged = store.stage().unwrap();
+        let uv = staged.join("uv");
+        std::fs::write(
+            &uv,
+            "#!/bin/sh\necho 'six==1.17.0 --hash=sha256:aaaa' > requirements.lock.txt\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        store
+            .commit_with_deps(
+                &python::uv_identity(pin),
+                &staged,
+                &[],
+                &store::ObjectDeps::new(),
+            )
+            .unwrap();
+        store
+    }
+
     #[test]
     fn lock_stamp_behind_a_symlinked_tog_is_refused() {
+        let _supervision = supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();
+        // Unpinned, so planning has to re-lock and reach the stamp write.
+        std::fs::write(project_dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
         let outside = temp.0.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        let store = store_with_stub_uv(&temp.0.join("store"));
 
-        let project = ProjectRoot::open(&project_dir).unwrap();
-        let error = write_lock_stamp(&project, "abc").unwrap_err().to_string();
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("not a real directory"), "{error}");
+        // uv's own lock landed in the project; only tog's stamp was refused.
+        assert!(project_dir.join("requirements.lock.txt").is_file());
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote the lock stamp through the symlinked .tog"

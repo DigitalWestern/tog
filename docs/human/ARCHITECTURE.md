@@ -51,11 +51,20 @@ manifests and lockfiles into a typed `Plan`. The kernel realizes it: verify
 downloads into the cache, provision pinned toolchains, commit objects
 atomically. Projection writes the symlink and the closure JSON. Plans are
 cached in `.tog/plan.json` keyed by input hash, so unchanged locks never
-touch the network again. Every file tog writes under `.tog/` goes through
-`kernel::fsroot::ProjectRoot` — the closure JSON, the plan cache, and the
-Python manifest snapshots and lock stamp — so a `.tog` swapped for a symlink
-is refused rather than followed. Files a delegated tool writes for itself
-(`uv pip compile`'s `requirements.lock.txt`) are still named by pathname.
+touch the network again.
+
+Six writes under `.tog/` go through `kernel::fsroot::ProjectRoot`, which
+walks every component from a held project descriptor with `O_NOFOLLOW`, so a
+`.tog` swapped for a symlink is refused rather than followed: the closure
+JSON (`.tog/closures/<ecosystem>.json`), the plan cache (`.tog/plan.json`),
+the Python manifest snapshots (`.tog/manifest-requirements.txt`,
+`.tog/manifest-constraints.txt`), the lock stamp (`.tog/lock-source.hash`,
+also removed through the descriptor by `tog update`), and the setup.py
+metadata cache (`.tog/egg-info.json`). The rest of `.tog/` is still written
+by pathname: `uv pip compile` writes `requirements.lock.txt` itself, and the
+cargo tailor creates `.tog/cargo-home/` with `tog-config.toml` and a `cargo`
+shim behind its own canonicalized containment check. Closing those is
+"Descriptor-relative project access in sync" in `FOLLOW-UPS.md`.
 
 ## Vocabulary
 
