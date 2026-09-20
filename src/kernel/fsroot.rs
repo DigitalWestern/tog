@@ -162,6 +162,48 @@ impl ProjectRoot {
         self.publish(relative, bytes, &mut random_temp_name)
     }
 
+    /// Create a project-relative directory and any missing parents, walking
+    /// from the held descriptor one component at a time. Refuses a symlink
+    /// or a non-directory at any component, so a caller that then reads or
+    /// writes inside it cannot be redirected outside the project. An
+    /// existing real directory is left as it is.
+    pub fn create_dir_all(&self, relative: &Path) -> io::Result<()> {
+        let (mut components, name) = split_relative(relative)?;
+        components.push(name);
+        let mut display = self.path.clone();
+        self.open_creating(&components, &mut display)?;
+        Ok(())
+    }
+
+    /// Open each component in turn from the held descriptor, creating the
+    /// ones that are absent. Returns the last descriptor, or `None` when
+    /// `components` is empty and the project root itself is the parent.
+    fn open_creating(
+        &self,
+        components: &[&OsStr],
+        display: &mut PathBuf,
+    ) -> io::Result<Option<fs::File>> {
+        let mut held: Option<fs::File> = None;
+        for component in components {
+            display.push(component);
+            let fd = held
+                .as_ref()
+                .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+            let created = mkdir_at(fd, component.as_bytes(), 0o755).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("create {}: {error}", display.display()),
+                )
+            })?;
+            let dir = open_directory_at(fd, component.as_bytes(), display, "write")?;
+            if created {
+                fsync_directory(fd)?;
+            }
+            held = Some(dir);
+        }
+        Ok(held)
+    }
+
     fn publish(
         &self,
         relative: &Path,
@@ -170,24 +212,7 @@ impl ProjectRoot {
     ) -> io::Result<()> {
         let (parents, name) = split_relative(relative)?;
         let mut display = self.path.clone();
-        let mut held: Option<fs::File> = None;
-        for parent in parents {
-            display.push(parent);
-            let fd = held
-                .as_ref()
-                .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-            let created = mkdir_at(fd, parent.as_bytes(), 0o755).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("create {}: {error}", display.display()),
-                )
-            })?;
-            let dir = open_directory_at(fd, parent.as_bytes(), &display, "write")?;
-            if created {
-                fsync_directory(fd)?;
-            }
-            held = Some(dir);
-        }
+        let held = self.open_creating(&parents, &mut display)?;
         display.push(name);
         let parent_fd = held
             .as_ref()
@@ -410,6 +435,32 @@ mod tests {
         root.write_file(path, b"two").unwrap();
         assert_eq!(root.read_file(path).unwrap().unwrap(), b"two");
         assert_eq!(entries(&root.path().join(".tog")), vec!["plan.json"]);
+    }
+
+    #[test]
+    fn create_dir_all_makes_the_chain_and_is_idempotent() {
+        let temp = TempDir::new();
+        let root = ProjectRoot::open(&project(&temp)).unwrap();
+        root.create_dir_all(Path::new(".tog/closures")).unwrap();
+        assert!(root.path().join(".tog/closures").is_dir());
+        root.create_dir_all(Path::new(".tog/closures")).unwrap();
+        assert_eq!(entries(&root.path().join(".tog")), vec!["closures"]);
+    }
+
+    #[test]
+    fn create_dir_all_refuses_a_symlinked_component() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, dir.join(".tog")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let error = root.create_dir_all(Path::new(".tog/closures")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        assert!(entries(&outside).is_empty(), "created through the symlink");
     }
 
     #[test]

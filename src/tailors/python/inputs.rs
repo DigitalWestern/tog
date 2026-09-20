@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 
 pub const PLANNER_SCHEMA: &str = "python-planner/3";
 const PLAN_CACHE: &str = ".tog/plan.json";
+const MANIFEST_REQUIREMENTS: &str = ".tog/manifest-requirements.txt";
+const MANIFEST_CONSTRAINTS: &str = ".tog/manifest-constraints.txt";
+const LOCK_STAMP: &str = ".tog/lock-source.hash";
 
 pub fn planner_input_hash(
     platform: Platform,
@@ -176,11 +179,16 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     } else if is_fully_pinned(&source) && resolver_source == source {
         None
     } else {
-        let path = dir.join(".tog/manifest-requirements.txt");
-        std::fs::create_dir_all(dir.join(".tog"))?;
+        // The compile input is named to uv by pathname, but tog writes it
+        // through the held project descriptor so a symlinked `.tog` is
+        // refused rather than followed.
+        let path = dir.join(MANIFEST_REQUIREMENTS);
         let mut text = if manifest.has_constraints() {
-            let constraints = dir.join(".tog/manifest-constraints.txt");
-            std::fs::write(&constraints, manifest.constraints_text())?;
+            let constraints = dir.join(MANIFEST_CONSTRAINTS);
+            project.write_file(
+                Path::new(MANIFEST_CONSTRAINTS),
+                manifest.constraints_text().as_bytes(),
+            )?;
             format!(
                 "{}-c {}\n",
                 manifest.normalized_requirements_text(),
@@ -192,7 +200,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         if text.is_empty() {
             text.push('\n');
         }
-        std::fs::write(&path, text)?;
+        project.write_file(Path::new(MANIFEST_REQUIREMENTS), text.as_bytes())?;
         Some(path)
     };
     let compile_path = if generated_input.is_some() {
@@ -212,6 +220,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
                 locked_requirements(
                     platform,
                     dir,
+                    &project,
                     store,
                     &input,
                     &resolver_source,
@@ -224,6 +233,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         locked_requirements(
             platform,
             dir,
+            &project,
             store,
             &input,
             &resolver_source,
@@ -338,6 +348,7 @@ pub fn is_fully_pinned(text: &str) -> bool {
 pub fn locked_requirements(
     platform: Platform,
     dir: &Path,
+    project: &ProjectRoot,
     store: &store::Store,
     input: &str,
     source: &str,
@@ -345,7 +356,7 @@ pub fn locked_requirements(
     compile_path: Option<&Path>,
 ) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
-    let stamp_path = dir.join(".tog/lock-source.hash");
+    let stamp_path = dir.join(LOCK_STAMP);
     let source_hash = if compile_path.is_some_and(|path| {
         !path
             .components()
@@ -394,9 +405,17 @@ pub fn locked_requirements(
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
     }
-    std::fs::create_dir_all(dir.join(".tog"))?;
-    std::fs::write(&stamp_path, &source_hash)?;
+    write_lock_stamp(project, &source_hash)?;
     std::fs::read_to_string(&lock_path)
+}
+
+/// Record the hash that decides whether `uv pip compile` must re-run. This
+/// is the only file `locked_requirements` writes itself, and it goes through
+/// the held project descriptor, so a `.tog` swapped for a symlink is refused
+/// rather than followed. `requirements.lock.txt` beside it is uv's own write
+/// by pathname.
+fn write_lock_stamp(project: &ProjectRoot, source_hash: &str) -> io::Result<()> {
+    project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())
 }
 
 pub fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
@@ -508,6 +527,54 @@ mod tests {
                 .next()
                 .is_none(),
             "wrote through the symlinked .tog"
+        );
+    }
+
+    #[test]
+    fn lock_stamp_behind_a_symlinked_tog_is_refused() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let error = write_lock_stamp(&project, "abc").unwrap_err().to_string();
+        assert!(error.contains("not a real directory"), "{error}");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "wrote the lock stamp through the symlinked .tog"
+        );
+    }
+
+    #[test]
+    fn manifest_snapshots_behind_a_symlinked_tog_are_refused() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // A pyproject manifest needs a generated uv compile input, so the
+        // manifest snapshot is written before uv or the store is reached.
+        std::fs::write(
+            project_dir.join("pyproject.toml"),
+            "[project]\nname = \"p\"\nversion = \"0\"\ndependencies = [\"six\"]\n",
+        )
+        .unwrap();
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        let store = store::Store {
+            root: temp.0.join("absent-store"),
+        };
+
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a real directory"), "{error}");
+        assert!(!store.root.exists(), "a refused snapshot touched the store");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "wrote a manifest snapshot through the symlinked .tog"
         );
     }
 

@@ -51,7 +51,11 @@ manifests and lockfiles into a typed `Plan`. The kernel realizes it: verify
 downloads into the cache, provision pinned toolchains, commit objects
 atomically. Projection writes the symlink and the closure JSON. Plans are
 cached in `.tog/plan.json` keyed by input hash, so unchanged locks never
-touch the network again.
+touch the network again. Every file tog writes under `.tog/` goes through
+`kernel::fsroot::ProjectRoot` — the closure JSON, the plan cache, and the
+Python manifest snapshots and lock stamp — so a `.tog` swapped for a symlink
+is refused rather than followed. Files a delegated tool writes for itself
+(`uv pip compile`'s `requirements.lock.txt`) are still named by pathname.
 
 ## Vocabulary
 
