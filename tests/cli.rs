@@ -4,8 +4,6 @@
 //! with a next step, pass-through for `run`).
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1661,9 +1659,14 @@ fn audit_compares_the_rustfmt_record_to_its_pin() {
     );
 }
 
-#[cfg(unix)]
+// APFS rejects non-UTF-8 filenames with EILSEQ. The filesystem case runs
+// on Linux; audit's rendering unit tests cover these bytes on both hosts.
+#[cfg(target_os = "linux")]
 #[test]
 fn audit_json_handles_non_utf8_project_and_closure_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
     let home = TempDir::new("audit-non-utf8-home");
     let parent = TempDir::new("audit-non-utf8-parent");
     let project = parent.0.join(OsString::from_vec(vec![

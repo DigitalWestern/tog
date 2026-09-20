@@ -1251,6 +1251,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn json_preserves_non_utf8_project_and_closure_path_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // Rendering does not need filesystem access, so this also covers
+        // hosts whose filesystem cannot create a name containing 0xff.
+        let project = PathBuf::from(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
+        let path = project.join(".tog/closures/python.json");
+        let report = report(
+            permissive(),
+            vec![Verdict {
+                ecosystem: "python".into(),
+                record_sha256: "0".repeat(64),
+                path: path.clone(),
+                signature: Signature::Unsigned,
+                freshness: Freshness::NotEvaluated,
+                denied: None,
+                unknown: None,
+                permitted: None,
+            }],
+        );
+        let value: Value = serde_json::from_str(&render(&project, &report, true).unwrap()).unwrap();
+        assert_eq!(value["project"], "project-\u{fffd}");
+        assert_eq!(
+            value["project_bytes"],
+            hex::encode(project.as_os_str().as_bytes())
+        );
+        assert_eq!(
+            value["closures"][0]["path"],
+            "project-\u{fffd}/.tog/closures/python.json"
+        );
+        assert_eq!(
+            value["closures"][0]["path_bytes"],
+            hex::encode(path.as_os_str().as_bytes())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn json_policy_source_lossily_serializes_non_utf8_paths() {
         let path = PathBuf::from(std::ffi::OsString::from_vec(vec![
             b'p', b'o', b'l', b'i', b'c', b'y', b'-', 0xff, b'.', b't', b'o', b'm', b'l',
@@ -2127,7 +2165,14 @@ mod tests {
             ),
             (
                 "platform edited",
-                tampered(|v| v["platform"] = json!("aarch64-apple-darwin")),
+                tampered(|v| {
+                    let foreign = Platform::ALL
+                        .iter()
+                        .copied()
+                        .find(|p| *p != host())
+                        .unwrap();
+                    v["platform"] = json!(foreign.triple());
+                }),
             ),
             (
                 "unknown envelope field added",
