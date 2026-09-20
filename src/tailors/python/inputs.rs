@@ -3,6 +3,7 @@
 //! the project-local plan cache.
 
 use crate::comforter;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
@@ -17,6 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const PLANNER_SCHEMA: &str = "python-planner/3";
+const PLAN_CACHE: &str = ".tog/plan.json";
 
 pub fn planner_input_hash(
     platform: Platform,
@@ -85,6 +87,7 @@ pub fn python_input_records(
 /// Planning hits PyPI, so successful plans are cached in `.tog/plan.json`
 /// keyed by a hash of the inputs; an unchanged lock replans offline.
 pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
+    let project = ProjectRoot::open(dir)?;
     let mut manifest = manifest::discover(platform, dir)?;
     let mut selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
     if manifest.requires_setup() {
@@ -239,9 +242,15 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     // The lock may have just been (re)written above: hash it now.
     let inputs = python_input_records(dir, &manifest)?;
     let input_hash = planner_input_hash(platform, pin.version, &text, glibc);
-    let cache_path = dir.join(".tog/plan.json");
-    if let Ok(cached) = std::fs::read_to_string(&cache_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
+    // A symlinked or non-regular cache is a refusal; an unreadable regular
+    // file is a miss that the write below replaces.
+    let cached = match project.read_file(Path::new(PLAN_CACHE)) {
+        Ok(cached) => cached,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
+        Err(_) => None,
+    };
+    if let Some(cached) = cached {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&cached) {
             if v["input_hash"] == input_hash.as_str() {
                 if let Ok(plan) = serde_json::from_value::<types::Plan>(v["plan"].clone()) {
                     return Ok((plan, selection, inputs));
@@ -251,10 +260,9 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     }
 
     let plan = pypi::plan_python(platform, &text, pin.version)?;
-    std::fs::create_dir_all(dir.join(".tog"))?;
-    std::fs::write(
-        &cache_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+    project.write_file(
+        Path::new(PLAN_CACHE),
+        &serde_json::to_vec_pretty(&serde_json::json!({
             "input_hash": input_hash,
             "plan": plan,
         }))?,
@@ -469,6 +477,38 @@ mod tests {
                 hex::encode(Sha256::digest(format!("3.12\x00{source}").as_bytes()))
             );
         }
+    }
+
+    #[test]
+    fn plan_cache_behind_a_symlinked_tog_is_refused() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = temp.0.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        // Hash-pinned, so planning never needs uv and the cache read is the
+        // first store-free step that can refuse.
+        std::fs::write(
+            project.join("requirements.txt"),
+            format!("six==1.17.0 --hash=sha256:{}\n", "a".repeat(64)),
+        )
+        .unwrap();
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(outside.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        let store = store::Store {
+            root: temp.0.join("absent-store"),
+        };
+        let e = read_plan(Platform::host().unwrap(), &project, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not a real directory"), "{e}");
+        assert!(!store.root.exists(), "a refused cache touched the store");
+        assert!(
+            std::fs::read_dir(outside.join(".tog"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "wrote through the symlinked .tog"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod tailor;
 use crate::kernel::archive::Compression;
 use crate::kernel::dirhash;
 use crate::kernel::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -589,17 +590,26 @@ fn plan_cache_key(go_version: &str, gomod: &str, gosum: &str, src_digest: &str) 
     ))
 }
 
+const PLAN_CACHE: &str = ".tog/go-plan.json";
+
 /// Read the cached plan when its key matches. The cache file is
 /// attacker-editable project state, so a hit is validated before it is used;
-/// anything unreadable, unparsable, or stale is simply a miss.
-fn cached_plan(cache_path: &Path, input_hash: &str) -> io::Result<Option<GoPlan>> {
-    if let Ok(cached) = fs::read_to_string(cache_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
-            if v["input_hash"] == input_hash {
-                if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
-                    validate_plan(&plan)?;
-                    return Ok(Some(plan));
-                }
+/// anything unreadable, unparsable, or stale is simply a miss, while a
+/// symlinked or non-regular cache is refused.
+fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoPlan>> {
+    let cached = match project.read_file(Path::new(PLAN_CACHE)) {
+        Ok(Some(cached)) => cached,
+        Ok(None) => return Ok(None),
+        // A symlinked or non-regular cache is a refusal; an unreadable
+        // regular file is a miss that the next write replaces.
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&cached) {
+        if v["input_hash"] == input_hash {
+            if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
+                validate_plan(&plan)?;
+                return Ok(Some(plan));
             }
         }
     }
@@ -821,6 +831,7 @@ pub fn plan_go(
     go_obj: &Path,
 ) -> io::Result<GoPlan> {
     reject_workspaces(project_dir)?;
+    let project = ProjectRoot::open(project_dir)?;
     let gomod = fs::read_to_string(project_dir.join("go.mod"))
         .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
@@ -829,8 +840,7 @@ pub fn plan_go(
 
     let src_digest = source_digest(project_dir)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
-    let cache_path = project_dir.join(".tog/go-plan.json");
-    if let Some(plan) = cached_plan(&cache_path, &input_hash)? {
+    if let Some(plan) = cached_plan(&project, &input_hash)? {
         return Ok(plan);
     }
 
@@ -872,10 +882,9 @@ pub fn plan_go(
     if now_mod != gomod || now_sum != gosum {
         return Err(err("go.mod/go.sum changed while planning; re-run tog sync"));
     }
-    fs::create_dir_all(project_dir.join(".tog"))?;
-    fs::write(
-        &cache_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+    project.write_file(
+        Path::new(PLAN_CACHE),
+        &serde_json::to_vec_pretty(&serde_json::json!({
             "input_hash": input_hash,
             "plan": plan,
         }))?,
@@ -1866,6 +1875,56 @@ mod tests {
         assert_eq!(got.module, "example.com/m");
         assert_eq!(got.modules, plan.modules);
         assert!(!store.root.exists(), "a cache hit touched the store");
+    }
+
+    #[test]
+    fn unreadable_plan_cache_is_a_miss_not_an_error() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        let input_hash = expected_input_hash(&project, &gomod, &gosum);
+        write_plan_cache(&project, &input_hash, &plan);
+        use std::os::unix::fs::PermissionsExt;
+        let cache = project.join(".tog/go-plan.json");
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o200)).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        assert!(cached_plan(&root, &input_hash).unwrap().is_none());
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            cached_plan(&root, &input_hash).unwrap().unwrap().modules,
+            plan.modules
+        );
+    }
+
+    #[test]
+    fn plan_cache_behind_a_symlinked_tog_is_refused() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        let outside = temp.0.join("outside");
+        write_plan_cache(
+            &outside,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let e = plan_go(
+            &store,
+            Platform::host().unwrap(),
+            &project,
+            Path::new("/nonexistent/go"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("not a real directory"), "{e}");
+        assert!(!store.root.exists(), "a refused cache touched the store");
     }
 
     #[test]

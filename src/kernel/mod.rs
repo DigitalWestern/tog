@@ -9,6 +9,7 @@ pub mod cyclonedx;
 pub mod digest;
 pub mod dirhash;
 pub mod fetch;
+pub mod fsroot;
 pub mod gc;
 pub mod gitsrc;
 pub mod objmeta;
