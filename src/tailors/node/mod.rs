@@ -973,6 +973,107 @@ mod tests {
         }
     }
 
+    /// The real shape of the drift, not a mutated finished identity: a
+    /// producer whose input loops never write one planned package or one
+    /// declared artifact. The plan digest comes from the lockfile plan and
+    /// the artifact list, so it still covers what the identity is missing
+    /// and the contract refuses the commit.
+    ///
+    /// Building the digest from the input map instead would move it along
+    /// with the drift, and each of these would be a legitimate smaller
+    /// plan's identity — the `node-env/3` gap the bump exists to close.
+    #[test]
+    fn a_producer_that_skips_a_plan_input_is_refused() {
+        crate::tailors::install_kinds();
+        let store = Store {
+            root: PathBuf::from("/fixture/tog-store"),
+        };
+        let package = |path: &str, name: &str, version: &str| NpmPackage {
+            path: path.into(),
+            name: name.into(),
+            version: version.into(),
+            url: format!("https://registry.example.invalid/{name}.tgz"),
+            integrity: TEST_SRI.into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+        };
+        let artifact = DeclaredArtifact {
+            url: "https://artifacts.example.invalid/tool.tar.gz".into(),
+            sha256: "a".repeat(64),
+            path: ".npm/tool.tar.gz".into(),
+        };
+        for platform in Platform::ALL.iter().copied() {
+            let node = node_identity(node_pin(platform).unwrap());
+            let node_object = PathBuf::from(node.object_id());
+            let plan = NpmPlan {
+                node_version: node.version.clone(),
+                packages: vec![
+                    package("node_modules/example", "example", "1.0.0"),
+                    package("node_modules/second-example", "second-example", "2.0.0"),
+                ],
+                links: Vec::new(),
+                workspaces: Vec::new(),
+                lock_source: "fixture".into(),
+            };
+            let artifacts = std::slice::from_ref(&artifact);
+            let honest =
+                realize::node_env_identity(&store, platform, &node_object, &plan, artifacts, None)
+                    .unwrap();
+
+            for skipped in [
+                "pkg:node_modules/second-example",
+                "artifact:.npm/tool.tar.gz",
+            ] {
+                let drifted = realize::node_env_identity_skipping_input(
+                    &store,
+                    platform,
+                    &node_object,
+                    &plan,
+                    artifacts,
+                    None,
+                    skipped,
+                )
+                .unwrap();
+                assert!(!drifted.inputs.contains_key(skipped));
+                let reason = crate::kernel::objmeta::check_identity_grammar(&drifted).unwrap_err();
+                assert!(
+                    reason.contains("Node plan digest"),
+                    "{} {skipped}: {reason}",
+                    platform.triple()
+                );
+                assert_ne!(drifted.object_id(), honest.object_id());
+
+                // The legitimate smaller plan the drift used to impersonate
+                // is a different identity, and it commits cleanly.
+                let smaller = match skipped.strip_prefix("pkg:") {
+                    Some(path) => {
+                        let mut smaller = plan.clone();
+                        smaller.packages.retain(|p| p.path != path);
+                        realize::node_env_identity(
+                            &store,
+                            platform,
+                            &node_object,
+                            &smaller,
+                            artifacts,
+                            None,
+                        )
+                    }
+                    None => {
+                        realize::node_env_identity(&store, platform, &node_object, &plan, &[], None)
+                    }
+                }
+                .unwrap();
+                assert_eq!(
+                    crate::kernel::objmeta::check_identity_grammar(&smaller),
+                    Ok(())
+                );
+                assert_ne!(drifted.object_id(), smaller.object_id());
+            }
+        }
+    }
+
     #[test]
     fn darwin_identity_unchanged() {
         let node = node_pin(Platform::Aarch64AppleDarwin).unwrap();

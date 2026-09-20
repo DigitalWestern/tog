@@ -144,7 +144,7 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
     let declared = inputs
         .get("plan_digest")
         .ok_or_else(|| "Node plan digest: no plan_digest input".to_string())?;
-    let recomputed = super::realize::plan_digest(inputs);
+    let recomputed = super::realize::plan_digest_of_inputs(inputs);
     if *declared != recomputed {
         return Err(format!(
             "Node plan digest: plan_digest {declared} does not match the {recomputed} this \
@@ -197,6 +197,10 @@ fn node_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
 
 /// `node-env/4`: the same byte sources. `plan_digest` and `native` are drift
 /// guards over entries already named here, so neither adds a dependency.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
 fn node_env_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     node_env_inner(
         record,

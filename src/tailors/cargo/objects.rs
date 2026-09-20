@@ -179,6 +179,10 @@ fn cargo_vendor(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String
 
 /// `cargo-vendor/2`: the same dependency set. The added `crates` count is a
 /// drift guard, not a byte source, so it contributes nothing here.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
 fn cargo_vendor_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     cargo_vendor_inner(record, index, &["schema", "crates"])
 }

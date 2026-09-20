@@ -1172,6 +1172,54 @@ mod tests {
         assert_eq!(cache, vec![format!("sha256:{checksum}")]);
     }
 
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `cargo-vendor/2` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `crates` input does
+    /// not leak into the dependency set.
+    #[test]
+    fn adapter_cargo_vendor_cargo_vendor_2_recovers_the_expected_dependencies() {
+        let checksum = sha256('d');
+        let git = oid('e', "repo");
+        let (objects, cache) = proven(
+            ident(
+                "cargo-vendor",
+                "vendor",
+                "2",
+                &[
+                    ("schema", "cargo-vendor/2"),
+                    ("crates", "2"),
+                    ("crate:serde@1.0.0", &checksum),
+                    ("crate:local@0.1.0", &format!("git:{git}")),
+                ],
+            ),
+            vec![stub(&git)],
+        );
+        assert_eq!(objects, vec![git]);
+        assert_eq!(cache, vec![format!("sha256:{checksum}")]);
+    }
+
+    /// `crates` belongs to `/2` alone: a `/1` record that carries it is a
+    /// shape no producer ever wrote, and the two rows must not share a path.
+    #[test]
+    fn adapter_cargo_vendor_schemas_do_not_share_a_path() {
+        let checksum = sha256('d');
+        let reason = unresolved(
+            ident(
+                "cargo-vendor",
+                "vendor",
+                "1",
+                &[
+                    ("schema", "cargo-vendor/1"),
+                    ("crates", "1"),
+                    ("crate:serde@1.0.0", &checksum),
+                ],
+            ),
+            vec![],
+        );
+        assert!(reason.contains("crates"), "{reason}");
+    }
+
     #[test]
     fn adapter_cargo_vendor_refuses_a_git_crate_whose_source_object_is_gone() {
         let git = oid('e', "repo");
@@ -1535,6 +1583,86 @@ mod tests {
         assert_eq!(cache, expected_cache);
     }
 
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `node-env/4` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `plan_digest` and
+    /// `native` inputs do not leak into the dependency set.
+    #[test]
+    fn adapter_node_env_node_env_4_recovers_the_expected_dependencies() {
+        let node = oid('1', "nodejs");
+        let libs = oid('2', "libset");
+        let git = oid('3', "repo");
+        let (integrity, provisioned, artifact) = (sha512('5'), sha256('6'), sha256('7'));
+        let (objects, cache) = proven(
+            ident(
+                "node-env",
+                "env",
+                "24.20.0",
+                &[
+                    ("schema", "node-env/4"),
+                    ("store_root", "/tmp/store"),
+                    ("nodejs", &node),
+                    ("layout", "node_modules"),
+                    ("workspaces", ""),
+                    ("native_libs", &libs),
+                    ("native", "native-libs"),
+                    ("plan_digest", &format!("sha256:{}", sha256('8'))),
+                    (
+                        "pkg:node_modules/left-pad",
+                        &format!("sha512:{integrity}:left-pad@1.3.0:patch[]:bin[]"),
+                    ),
+                    (
+                        "pkg:node_modules/from-git",
+                        &format!("git:{git}:from-git@0.0.0:patch[]:bin[]"),
+                    ),
+                    (
+                        "provisioned:node_modules/electron",
+                        &format!("electron-v1:{provisioned}"),
+                    ),
+                    ("artifact:node_modules/thing", &artifact),
+                ],
+            ),
+            vec![stub(&node), stub(&libs), stub(&git)],
+        );
+        let mut expected_objects = vec![node, libs, git];
+        expected_objects.sort();
+        assert_eq!(objects, expected_objects);
+        let mut expected_cache = vec![
+            format!("sha512:{integrity}"),
+            format!("sha256:{provisioned}"),
+            format!("sha256:{artifact}"),
+        ];
+        expected_cache.sort();
+        assert_eq!(cache, expected_cache);
+    }
+
+    /// `plan_digest` and `native` belong to `/4` alone: a `/3` record that
+    /// carries either is a shape no producer ever wrote.
+    #[test]
+    fn adapter_node_env_schemas_do_not_share_a_path() {
+        let node = oid('1', "nodejs");
+        for key in ["plan_digest", "native"] {
+            let reason = unresolved(
+                ident(
+                    "node-env",
+                    "env",
+                    "24.20.0",
+                    &[
+                        ("schema", "node-env/3"),
+                        ("store_root", "/tmp/store"),
+                        ("nodejs", &node),
+                        ("layout", "node_modules"),
+                        ("workspaces", ""),
+                        (key, "value"),
+                    ],
+                ),
+                vec![stub(&node)],
+            );
+            assert!(reason.contains(key), "{reason}");
+        }
+    }
+
     /// npm publishes sha1, sha256 and sha512 integrity; the algorithm in the
     /// entry decides the cache namespace, and is never assumed to be sha256.
     #[test]
@@ -1684,6 +1812,81 @@ mod tests {
         assert_eq!(cache, vec![format!("sha256:{sdist}")]);
     }
 
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `sdist-build/4` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `build_mode` and
+    /// `native_mode` inputs do not leak into the dependency set.
+    #[test]
+    fn adapter_sdist_build_sdist_build_4_recovers_the_expected_dependencies() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        let sdist = sha256('2');
+        let build_env = oid('a', "env");
+        let rust = oid('b', "rust");
+        let vendor = oid('c', "vendor");
+        let libs = oid('d', "libset");
+        let (objects, cache) = proven(
+            ident(
+                "sdist-build",
+                "widget",
+                "1.0.0",
+                &[
+                    ("schema", "sdist-build/4"),
+                    ("sdist_sha256", &sdist),
+                    ("python", &format!("3.11.9:{artifact}")),
+                    ("platform", "x86_64-unknown-linux-gnu"),
+                    ("build_env", &build_env),
+                    ("build_mode", "rust-vendor"),
+                    ("native_mode", "native-libs"),
+                    ("rust", &rust),
+                    ("vendor", &vendor),
+                    ("native_libs", &libs),
+                    ("native_linker", "native-libs-rpath/1"),
+                ],
+            ),
+            vec![
+                cpython.clone(),
+                stub(&build_env),
+                stub(&rust),
+                stub(&vendor),
+                stub(&libs),
+            ],
+        );
+        let mut expected = vec![cpython.id, build_env, rust, vendor, libs];
+        expected.sort();
+        assert_eq!(objects, expected);
+        assert_eq!(cache, vec![format!("sha256:{sdist}")]);
+    }
+
+    /// `build_mode` and `native_mode` belong to `/4` alone: a `/3` record
+    /// that carries either is a shape no producer ever wrote.
+    #[test]
+    fn adapter_sdist_build_3_and_4_do_not_share_a_path() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        let build_env = oid('a', "env");
+        for key in ["build_mode", "native_mode"] {
+            let reason = unresolved(
+                ident(
+                    "sdist-build",
+                    "widget",
+                    "1.0.0",
+                    &[
+                        ("schema", "sdist-build/3"),
+                        ("sdist_sha256", &sha256('2')),
+                        ("python", &format!("3.11.9:{artifact}")),
+                        ("platform", "x86_64-unknown-linux-gnu"),
+                        ("build_env", &build_env),
+                        (key, "value"),
+                    ],
+                ),
+                vec![cpython.clone(), stub(&build_env)],
+            );
+            assert!(reason.contains(key), "{reason}");
+        }
+    }
+
     /// The two sdist-build schemas must never share a path: `/2` names its
     /// build toolchain by digest list, `/3` names a build environment object.
     #[test]
@@ -1771,6 +1974,65 @@ mod tests {
         expected.sort();
         assert_eq!(objects, expected);
         assert_eq!(cache, vec![format!("sha256:{wheel}")]);
+    }
+
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `python-env/3` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `package_digest` and
+    /// `native` inputs do not leak into the dependency set.
+    #[test]
+    fn adapter_python_env_python_env_3_recovers_the_expected_dependencies() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        let wheel = sha256('5');
+        let built = oid('f', "widget-1.0.0");
+        let (objects, cache) = proven(
+            ident(
+                "python-env",
+                "env",
+                "3.11.9",
+                &[
+                    ("schema", "python-env/3"),
+                    ("store_root", "/tmp/store"),
+                    ("cpython", &cpython.id),
+                    ("package_digest", &format!("sha256:{}", sha256('9'))),
+                    ("native", "none"),
+                    ("pkg:flask", &format!("Wheel:{wheel}")),
+                    ("pkg:widget", &format!("Sdist:{}:{built}", sha256('2'))),
+                ],
+            ),
+            vec![cpython.clone(), stub(&built)],
+        );
+        let mut expected = vec![cpython.id, built];
+        expected.sort();
+        assert_eq!(objects, expected);
+        assert_eq!(cache, vec![format!("sha256:{wheel}")]);
+    }
+
+    /// `package_digest` and `native` belong to `/3` alone: a `/2` record
+    /// that carries either is a shape no producer ever wrote.
+    #[test]
+    fn adapter_python_env_schemas_do_not_share_a_path() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        for key in ["package_digest", "native"] {
+            let reason = unresolved(
+                ident(
+                    "python-env",
+                    "env",
+                    "3.11.9",
+                    &[
+                        ("schema", "python-env/2"),
+                        ("store_root", "/tmp/store"),
+                        ("cpython", &cpython.id),
+                        (key, "value"),
+                    ],
+                ),
+                vec![cpython.clone()],
+            );
+            assert!(reason.contains(key), "{reason}");
+        }
     }
 
     /// The historical fast path recorded a derivation *fingerprint*, not an
