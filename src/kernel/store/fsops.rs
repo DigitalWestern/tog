@@ -1,6 +1,8 @@
-//! Descriptor-level filesystem helpers (kernel store): openat/renameat/
-//! unlinkat wrappers, same-inode checks, and tree removal that never follows
-//! a symlink. Shared by the registry, object commit, and gc.
+//! Descriptor-level filesystem helpers (kernel store): openat/mkdirat/
+//! renameat/unlinkat wrappers, same-inode checks, and tree removal that
+//! never follows a symlink. Shared by the registry, object commit, gc, and
+//! the project-write helper in `kernel::fsroot`, which is why the
+//! `pub(crate)` wrappers exist: every raw syscall wrapper lives here.
 
 use super::*;
 
@@ -99,7 +101,7 @@ pub(super) fn ensure_directory_tree(root: &Path, relative: &Path) -> io::Result<
     Ok(())
 }
 
-pub(super) fn open_file_at(
+pub(crate) fn open_file_at(
     dirfd: RawFd,
     name: &[u8],
     flags: libc::c_int,
@@ -119,7 +121,7 @@ pub(super) fn open_file_at(
     Ok(unsafe { fs::File::from_raw_fd(fd) })
 }
 
-pub(super) fn rename_at(dirfd: RawFd, old_name: &[u8], new_name: &[u8]) -> io::Result<()> {
+pub(crate) fn rename_at(dirfd: RawFd, old_name: &[u8], new_name: &[u8]) -> io::Result<()> {
     let old_name = CString::new(old_name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
     let new_name = CString::new(new_name)
@@ -132,13 +134,47 @@ pub(super) fn rename_at(dirfd: RawFd, old_name: &[u8], new_name: &[u8]) -> io::R
     Ok(())
 }
 
-pub(super) fn unlink_at(dirfd: RawFd, name: &[u8]) {
+pub(crate) fn unlink_at(dirfd: RawFd, name: &[u8]) {
     let Ok(name) = CString::new(name) else {
         return;
     };
     // SAFETY: dirfd is borrowed and name is a valid relative entry name.
     unsafe {
         let _ = libc::unlinkat(dirfd, name.as_ptr(), 0);
+    }
+}
+
+/// Create one directory entry under `dirfd`. `Ok(true)` when this call
+/// created it, `Ok(false)` when an entry of that name already existed
+/// (whatever its type: the caller opens it with O_NOFOLLOW to find out).
+pub(crate) fn mkdir_at(dirfd: RawFd, name: &[u8], mode: libc::mode_t) -> io::Result<bool> {
+    let name = CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory entry contains NUL"))?;
+    // SAFETY: dirfd is borrowed for the call and name is a NUL-terminated
+    // relative entry name.
+    if unsafe { libc::mkdirat(dirfd, name.as_ptr(), mode) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        return Ok(false);
+    }
+    Err(error)
+}
+
+/// fsync a directory descriptor so a just-created, renamed, or unlinked
+/// entry is durable. Plain fsync rather than `File::sync_all`, whose Darwin
+/// F_FULLFSYNC is not defined for directories; EINTR is retried.
+pub(crate) fn fsync_directory(dirfd: RawFd) -> io::Result<()> {
+    loop {
+        // SAFETY: dirfd is borrowed for the duration of the call.
+        if unsafe { libc::fsync(dirfd) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 

@@ -14,6 +14,7 @@ pub mod tailor;
 use crate::kernel::archive::Compression;
 use crate::kernel::dirhash;
 use crate::kernel::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -592,14 +593,17 @@ fn plan_cache_key(go_version: &str, gomod: &str, gosum: &str, src_digest: &str) 
 /// Read the cached plan when its key matches. The cache file is
 /// attacker-editable project state, so a hit is validated before it is used;
 /// anything unreadable, unparsable, or stale is simply a miss.
-fn cached_plan(cache_path: &Path, input_hash: &str) -> io::Result<Option<GoPlan>> {
-    if let Ok(cached) = fs::read_to_string(cache_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
-            if v["input_hash"] == input_hash {
-                if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
-                    validate_plan(&plan)?;
-                    return Ok(Some(plan));
-                }
+const PLAN_CACHE: &str = ".tog/go-plan.json";
+
+fn cached_plan(project: &ProjectRoot, input_hash: &str) -> io::Result<Option<GoPlan>> {
+    let Some(cached) = project.read_file(Path::new(PLAN_CACHE))? else {
+        return Ok(None);
+    };
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&cached) {
+        if v["input_hash"] == input_hash {
+            if let Ok(plan) = serde_json::from_value::<GoPlan>(v["plan"].clone()) {
+                validate_plan(&plan)?;
+                return Ok(Some(plan));
             }
         }
     }
@@ -821,6 +825,7 @@ pub fn plan_go(
     go_obj: &Path,
 ) -> io::Result<GoPlan> {
     reject_workspaces(project_dir)?;
+    let project = ProjectRoot::open(project_dir)?;
     let gomod = fs::read_to_string(project_dir.join("go.mod"))
         .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
@@ -829,8 +834,7 @@ pub fn plan_go(
 
     let src_digest = source_digest(project_dir)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
-    let cache_path = project_dir.join(".tog/go-plan.json");
-    if let Some(plan) = cached_plan(&cache_path, &input_hash)? {
+    if let Some(plan) = cached_plan(&project, &input_hash)? {
         return Ok(plan);
     }
 
@@ -872,10 +876,9 @@ pub fn plan_go(
     if now_mod != gomod || now_sum != gosum {
         return Err(err("go.mod/go.sum changed while planning; re-run tog sync"));
     }
-    fs::create_dir_all(project_dir.join(".tog"))?;
-    fs::write(
-        &cache_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+    project.write_file(
+        Path::new(PLAN_CACHE),
+        &serde_json::to_vec_pretty(&serde_json::json!({
             "input_hash": input_hash,
             "plan": plan,
         }))?,
@@ -1866,6 +1869,33 @@ mod tests {
         assert_eq!(got.module, "example.com/m");
         assert_eq!(got.modules, plan.modules);
         assert!(!store.root.exists(), "a cache hit touched the store");
+    }
+
+    #[test]
+    fn plan_cache_behind_a_symlinked_tog_is_refused() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (gomod, gosum, plan) = plan_fixture(&project);
+        let outside = temp.0.join("outside");
+        write_plan_cache(
+            &outside,
+            &expected_input_hash(&project, &gomod, &gosum),
+            &plan,
+        );
+        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let e = plan_go(
+            &store,
+            Platform::host().unwrap(),
+            &project,
+            Path::new("/nonexistent/go"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("not a real directory"), "{e}");
+        assert!(!store.root.exists(), "a refused cache touched the store");
     }
 
     #[test]
