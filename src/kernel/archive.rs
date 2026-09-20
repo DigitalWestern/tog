@@ -254,8 +254,8 @@ fn read_archive(archive: &Path, compression: Compression) -> io::Result<Vec<Entr
 }
 
 /// Header state that a `L`, `K` or `x` block leaves for the member that
-/// follows it. PAX wins over GNU long names when both name the same thing,
-/// which is the precedence GNU tar applies.
+/// follows it. Conflicting GNU and PAX names or link targets are refused:
+/// GNU tar and bsdtar apply different precedence to those extensions.
 #[derive(Default)]
 struct Pending {
     long_name: Option<String>,
@@ -362,6 +362,18 @@ fn read_entries(mut reader: impl Read) -> io::Result<Vec<Entry>> {
             }
         }
         let mut link = utf8(c_string(&block[157..257]), "link target")?.to_string();
+        for (gnu, pax, field) in [
+            (&pending.long_name, &pending.pax_path, "path"),
+            (&pending.long_link, &pending.pax_linkpath, "linkpath"),
+        ] {
+            if let (Some(gnu), Some(pax)) = (gnu, pax) {
+                if gnu != pax {
+                    return Err(err(format!(
+                        "archive entry {header_name:?} has conflicting GNU and PAX {field} values; refusing to extract"
+                    )));
+                }
+            }
+        }
         if let Some(long) = pending.long_name.take() {
             name = long;
         }
@@ -1360,12 +1372,10 @@ mod tests {
         .unwrap();
         assert_eq!(names(&entries), vec!["pkg/real-name", "pkg/after"]);
 
-        // PAX beats a GNU long name for the same member, and `linkpath`
-        // replaces the header's link field.
+        // PAX `path` and `linkpath` replace the header's name and link fields.
         let entries = list_members(
             "pax-path",
             &[
-                gnu_long(b'L', "pkg/from-longlink"),
                 pax(&[
                     ("path", "pkg/from-pax"),
                     ("linkpath", "deep/target"),
@@ -1379,6 +1389,63 @@ mod tests {
         .unwrap();
         assert_eq!(names(&entries), vec!["pkg/from-pax"]);
         assert_eq!(entries[0].link.as_deref(), Some("deep/target"));
+    }
+
+    #[test]
+    fn matching_gnu_and_pax_extensions_are_accepted_in_either_order() {
+        for reverse in [false, true] {
+            let mut members = vec![
+                gnu_long(b'L', "pkg/link"),
+                gnu_long(b'K', "target"),
+                pax(&[("path", "pkg/link"), ("linkpath", "target")]),
+            ];
+            if reverse {
+                members.reverse();
+            }
+            members.push(ustar("pkg/header-name", b'2', "header-target", b""));
+            let entries = list_members("matching-extensions", &members).unwrap();
+            assert_eq!(names(&entries), vec!["pkg/link"]);
+            assert_eq!(entries[0].link.as_deref(), Some("target"));
+        }
+    }
+
+    #[test]
+    fn conflicting_gnu_and_pax_extensions_are_refused_before_writes() {
+        let temp = temp_dir("conflicting-extensions");
+        let sentinel = temp.join("outside-sentinel");
+        fs::write(&sentinel, b"untouched").unwrap();
+        let destination = temp.join("dest");
+        fs::create_dir_all(&destination).unwrap();
+        for (kind, key, value) in [(b'L', "path", "pkg/link"), (b'K', "linkpath", "benign")] {
+            for reverse in [false, true] {
+                let mut extensions = vec![
+                    gnu_long(kind, "../../outside-sentinel"),
+                    pax(&[(key, value)]),
+                ];
+                if reverse {
+                    extensions.reverse();
+                }
+                let mut members = vec![
+                    ustar("pkg/", b'5', "", b""),
+                    ustar("pkg/benign", b'0', "", b"hello"),
+                ];
+                members.extend(extensions);
+                members.push(ustar("pkg/link", b'2', "benign", b""));
+                let archive = temp.join("conflict.tar");
+                write_tar(&archive, &members);
+                let error = extract(host(), &archive, &destination, 1, Compression::None)
+                    .expect_err("conflicting extensions must be refused before extraction");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("conflicting GNU and PAX {key}")),
+                    "{key}, reverse={reverse}: {error}"
+                );
+                assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+                assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+            }
+        }
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -1835,7 +1902,7 @@ mod tests {
         fs::write(source.join("pkg/bin/tool"), b"tool").unwrap();
         std::os::unix::fs::symlink("tool", source.join("pkg/bin/alias")).unwrap();
         let archive = temp.join("pkg.tar.gz");
-        assert!(Command::new("/usr/bin/tar")
+        assert!(crate::kernel::testutil::tar_create()
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
@@ -1855,7 +1922,7 @@ mod tests {
     }
 
     /// The same tree written by tar in each of the formats a real toolchain
-    /// tarball arrives in: the reader must list all three identically.
+    /// tarball arrives in: the reader must list them identically.
     #[test]
     fn real_tar_formats_all_list_the_same_tree() {
         let temp = temp_dir("formats");
@@ -1864,9 +1931,13 @@ mod tests {
         fs::write(source.join("pkg/bin/tool"), b"tool").unwrap();
         std::os::unix::fs::symlink("tool", source.join("pkg/bin/alias")).unwrap();
         let mut listings = Vec::new();
-        for format in ["gnu", "ustar", "posix", "oldgnu"] {
+        let formats: &[&str] = match host() {
+            Platform::Aarch64AppleDarwin => &["gnutar", "ustar", "pax"],
+            Platform::X86_64UnknownLinuxGnu => &["gnu", "ustar", "posix", "oldgnu"],
+        };
+        for &format in formats {
             let archive = temp.join(format!("{format}.tar"));
-            assert!(Command::new("/usr/bin/tar")
+            assert!(crate::kernel::testutil::tar_create()
                 .arg(format!("--format={format}"))
                 .arg("-cf")
                 .arg(&archive)

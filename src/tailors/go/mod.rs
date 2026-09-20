@@ -1580,7 +1580,7 @@ mod tests {
         std::fs::write(source.join("go/pkg/README"), b"pkg").unwrap();
         let archive = temp.join("go.tar.gz");
         std::fs::create_dir_all(&source).unwrap();
-        assert!(Command::new("/usr/bin/tar")
+        assert!(crate::kernel::testutil::tar_create()
             .args(["-czf"])
             .arg(&archive)
             .args(["-C"])
@@ -1601,7 +1601,7 @@ mod tests {
         std::fs::create_dir_all(nested_source.join("outer/go/bin")).unwrap();
         std::fs::write(nested_source.join("outer/go/bin/go"), b"go").unwrap();
         let nested_archive = temp.join("nested.tar.gz");
-        assert!(Command::new("/usr/bin/tar")
+        assert!(crate::kernel::testutil::tar_create()
             .args(["-czf"])
             .arg(&nested_archive)
             .args(["-C"])

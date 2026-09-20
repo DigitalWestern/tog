@@ -96,6 +96,10 @@ Rules the Linux port settled, which apply to any future platform:
   (Xcode clang on macOS, `/usr` gcc on Linux). Pinning it is a backlog item.
 - **Darwin identity goldens stay byte-identical.** A platform change that
   alters a macOS object id is a bug.
+- **Archive extensions must agree.** GNU tar and macOS bsdtar give different
+  precedence to mixed GNU and PAX headers. The reader refuses conflicting
+  paths or link targets before extraction on either platform, including
+  conflicts that a names-only listing cannot reveal.
 
 ## The tailors
 

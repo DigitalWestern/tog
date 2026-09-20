@@ -1706,7 +1706,10 @@ mod tests {
             closure["inputs"],
             serde_json::json!([{"path": "package.json", "sha256": "abc"}])
         );
-        assert_eq!(closure["env_object"], env.to_string_lossy().into_owned());
+        assert_eq!(
+            closure["env_object"],
+            env.canonicalize().unwrap().to_string_lossy().into_owned()
+        );
         assert!(closure["native_libs"].is_null());
         assert_eq!(
             closure["forest_path"].as_str().unwrap(),
