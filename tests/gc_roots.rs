@@ -217,9 +217,9 @@ fn forget_removes_only_the_exact_key_that_was_asked_for() {
     let forget = fixture.run(&["gc", "--forget", &upper]);
     assert!(forget.status.success(), "{}", stderr(&forget));
     assert!(
-        stdout(&forget).contains(&upper) && stdout(&forget).contains("upper"),
+        stderr(&forget).contains(&upper) && stderr(&forget).contains("upper"),
         "forgot a record the user did not name: {}",
-        stdout(&forget)
+        stderr(&forget)
     );
     assert_eq!(
         fixture.record_names(),
@@ -489,9 +489,9 @@ fn dry_run_never_writes_a_record() {
     let preview = fixture.run(&["gc", "--dry-run", "--forget", &key]);
     assert!(preview.status.success(), "{}", stderr(&preview));
     assert!(
-        stdout(&preview).contains("would forget root"),
+        stderr(&preview).contains("would forget root"),
         "{}",
-        stdout(&preview)
+        stderr(&preview)
     );
     assert_eq!(
         fixture.record_names(),
@@ -527,7 +527,7 @@ fn a_corrupt_record_never_blocks_forgetting_a_key() {
     // The unrelated key is forgettable while the broken records sit there.
     let forget = fixture.run(&["gc", "--forget", &healthy]);
     assert!(forget.status.success(), "{}", stderr(&forget));
-    assert!(stdout(&forget).contains(&healthy), "{}", stdout(&forget));
+    assert!(stderr(&forget).contains(&healthy), "{}", stderr(&forget));
     assert_eq!(
         fixture.record_names(),
         vec![hostile.clone(), corrupt.clone()]
@@ -538,9 +538,9 @@ fn a_corrupt_record_never_blocks_forgetting_a_key() {
         let forget = fixture.run(&["gc", "--forget", key]);
         assert!(forget.status.success(), "{}", stderr(&forget));
         assert!(
-            stdout(&forget).contains("unusable record"),
+            stderr(&forget).contains("unusable record"),
             "{}",
-            stdout(&forget)
+            stderr(&forget)
         );
     }
     assert!(fixture.record_names().is_empty());

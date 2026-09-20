@@ -1727,7 +1727,7 @@ mod closure_platform_tests {
         let key = std::sync::Arc::new(SigningKey::load(&key_path).unwrap());
         set_signing_key_for_test(Some(key));
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        crate::kernel::policy::record("skipped_optional", "dev", "not requested").unwrap();
+        crate::kernel::policy::record("skipped-optional", "dev", "not requested").unwrap();
         let written = super::write_closure_legacy(
             &project,
             "python",
@@ -1746,7 +1746,7 @@ mod closure_platform_tests {
             crate::kernel::signing::Verification::Valid(public)
         );
         assert_eq!(closure["signature"]["key"], public.hex());
-        assert_eq!(closure["body"]["exceptions"][0]["kind"], "skipped_optional");
+        assert_eq!(closure["body"]["exceptions"][0]["kind"], "skipped-optional");
         let mut edited = closure.clone();
         edited["body"]["exceptions"] = serde_json::json!([]);
         assert!(matches!(

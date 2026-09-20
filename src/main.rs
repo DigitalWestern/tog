@@ -36,13 +36,27 @@ fn main() {
             exit(cli::EXIT_USAGE);
         }
     };
+    // Under `--json` stdout is the document and stderr is the failure, as
+    // a JSON object: a script that asked for JSON must never have to parse
+    // an English sentence to find out what went wrong.
+    let json = match &pending {
+        commands::Pending::Command(command) => command.json_output(),
+        _ => false,
+    };
+    let report = |message: &str| {
+        if json {
+            ui::error_json(message)
+        } else {
+            ui::error(message)
+        }
+    };
     if let Err(error) = ui::init(options.quiet, options.verbose, options.no_color) {
-        ui::error(&format!("cannot set up output: {error}"));
+        report(&format!("cannot set up output: {error}"));
         exit(cli::EXIT_FAILURE);
     }
     if let Some(dir) = &options.directory {
         if let Err(error) = std::env::set_current_dir(dir) {
-            ui::error(&format!(
+            report(&format!(
                 "cannot change directory to {}: {error}",
                 dir.display()
             ));
@@ -53,14 +67,14 @@ fn main() {
     let command = match commands::resolve(pending) {
         Ok(command) => command,
         Err(error) => {
-            ui::error(&error.to_string());
+            report(&error.to_string());
             exit(cli::EXIT_FAILURE);
         }
     };
     let code = match commands::dispatch(command) {
         Ok(code) => code,
         Err(error) => {
-            ui::error(&error.to_string());
+            report(&error.to_string());
             cli::EXIT_FAILURE
         }
     };

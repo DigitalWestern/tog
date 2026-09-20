@@ -24,64 +24,49 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         if VERSION_WORDS.contains(&arg) {
             return Ok(Parsed::Print(version_text()));
         }
-        match arg {
-            "-C" | "--directory" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| UsageError::new(format!("{arg} needs a directory"), None))?;
-                options.directory = Some(PathBuf::from(value));
-                index += 2;
-            }
-            _ if arg.starts_with("--directory=") => {
-                options.directory = Some(non_empty(
-                    &arg["--directory=".len()..],
-                    "--directory",
-                    None,
-                )?);
-                index += 1;
-            }
-            _ if arg.starts_with("-C") => {
-                options.directory = Some(PathBuf::from(&arg[2..]));
-                index += 1;
-            }
-            "-q" | "--quiet" => {
-                options.quiet = true;
-                index += 1;
-            }
-            "-v" | "--verbose" => {
-                options.verbose = true;
-                index += 1;
-            }
-            "--no-color" => {
-                options.no_color = true;
-                index += 1;
-            }
-            _ if arg.starts_with('-') => {
-                let known = [
-                    "--directory",
-                    "--quiet",
-                    "--verbose",
-                    "--no-color",
-                    "--help",
-                    "--version",
-                ];
-                return Err(UsageError::new(
-                    with_suggestion(
-                        format!("unknown option '{arg}'"),
-                        flag_name(arg),
-                        known.iter().copied(),
-                    ),
-                    None,
-                ));
-            }
-            _ => break,
+        if let Some(used) = global_flag(args, index, &mut options)? {
+            index += used;
+            continue;
         }
+        if arg.starts_with('-') {
+            let known = [
+                "--directory",
+                "--quiet",
+                "--verbose",
+                "--no-color",
+                "--help",
+                "--version",
+            ];
+            return Err(UsageError::new(
+                with_suggestion(
+                    format!("unknown option '{arg}'"),
+                    flag_name(arg),
+                    known.iter().copied(),
+                ),
+                None,
+            ));
+        }
+        break;
     }
     let Some(word) = args.get(index).map(String::as_str) else {
         return Ok(Parsed::Implicit(options));
     };
-    let rest = &args[index + 1..];
     let name = canonical_name(word);
+    let rest = args[index + 1..].to_vec();
+    // A global option is the same option wherever it appears, so every
+    // command whose grammar owns its arguments accepts one after the verb
+    // too. `run` and `build` hand everything after the verb to the program;
+    // `fmt` and `x` own only the options that precede the tool's own
+    // arguments; an unknown first word is a package.json script, and its
+    // arguments are the script's.
+    let rest = match name {
+        "run" | "build" => rest,
+        _ if spec(name).is_some() => {
+            take_global_flags(&rest, &mut options, matches!(name, "fmt" | "x"))?
+        }
+        _ => rest,
+    };
+    let rest = &rest[..];
     let command = match name {
         "sync" => parse_sync(rest)?,
         "fmt" => parse_fmt(rest)?,
@@ -120,6 +105,77 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         None => return Ok(Parsed::Print(help(spec(name).expect("known command")))),
     };
     Ok(Parsed::Run(Invocation { options, command }))
+}
+
+/// Read one global option at `args[index]`. `Ok(Some(n))` consumed `n`
+/// arguments; `Ok(None)` when this argument is not a global option.
+fn global_flag(
+    args: &[String],
+    index: usize,
+    options: &mut Options,
+) -> Result<Option<usize>, UsageError> {
+    let arg = args[index].as_str();
+    match arg {
+        "-C" | "--directory" => {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| UsageError::new(format!("{arg} needs a directory"), None))?;
+            options.directory = Some(PathBuf::from(value));
+            Ok(Some(2))
+        }
+        "-q" | "--quiet" => {
+            options.quiet = true;
+            Ok(Some(1))
+        }
+        "-v" | "--verbose" => {
+            options.verbose = true;
+            Ok(Some(1))
+        }
+        "--no-color" => {
+            options.no_color = true;
+            Ok(Some(1))
+        }
+        _ if arg.starts_with("--directory=") => {
+            options.directory = Some(non_empty(
+                &arg["--directory=".len()..],
+                "--directory",
+                None,
+            )?);
+            Ok(Some(1))
+        }
+        _ if arg.starts_with("-C") => {
+            options.directory = Some(PathBuf::from(&arg[2..]));
+            Ok(Some(1))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Take every global option out of one command's arguments, leaving the
+/// command's own grammar untouched. `leading` stops at `--` or at the first
+/// argument that is not an option, so nothing a tool owns is ever consumed.
+fn take_global_flags(
+    args: &[String],
+    options: &mut Options,
+    leading: bool,
+) -> Result<Vec<String>, UsageError> {
+    let mut rest = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" || (leading && !arg.starts_with('-')) {
+            rest.extend_from_slice(&args[index..]);
+            break;
+        }
+        match global_flag(args, index, options)? {
+            Some(used) => index += used,
+            None => {
+                rest.push(args[index].clone());
+                index += 1;
+            }
+        }
+    }
+    Ok(rest)
 }
 
 fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
@@ -218,12 +274,11 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
     }))
 }
 
+/// `plan` already prints JSON, so `--json` is accepted and only promises
+/// what every `--json` command promises: nothing but JSON on stdout, and a
+/// JSON error object on stderr when it fails.
 fn parse_plan(args: &[String]) -> Result<Option<Command>, UsageError> {
-    match args.first().map(String::as_str) {
-        None => Ok(Some(Command::Plan)),
-        Some("-h" | "--help") => Ok(None),
-        Some(other) => Err(reject("plan", other)),
-    }
+    Ok(parse_json_only(args, "plan")?.map(|json| Command::Plan { json }))
 }
 
 /// Commands whose only option is `--json`. `Ok(Some(json))`.
@@ -1181,13 +1236,11 @@ mod tests {
         }
     }
 
+    /// `plan` prints JSON, so it accepts the flag that says so.
     #[test]
-    fn plan_takes_nothing() {
-        assert_eq!(command(&["plan"]), Command::Plan);
-        assert_eq!(
-            message(&["plan", "--json"]),
-            "plan: unknown option '--json'"
-        );
+    fn plan_takes_only_json() {
+        assert_eq!(command(&["plan"]), Command::Plan { json: false });
+        assert_eq!(command(&["plan", "--json"]), Command::Plan { json: true });
         assert_eq!(message(&["plan", "x"]), "plan: unexpected argument 'x'");
     }
 
@@ -1622,6 +1675,9 @@ mod tests {
             &["-C/work", "plan"],
             &["--directory", "/work", "plan"],
             &["--directory=/work", "plan"],
+            // The same option, after the command.
+            &["plan", "-C", "/work"],
+            &["plan", "--directory=/work"],
         ] {
             assert_eq!(
                 run(words),
@@ -1630,7 +1686,7 @@ mod tests {
                         directory: Some(PathBuf::from("/work")),
                         ..Options::default()
                     },
-                    command: Command::Plan
+                    command: Command::Plan { json: false }
                 },
                 "{words:?}"
             );
@@ -1664,13 +1720,59 @@ mod tests {
         );
         assert_eq!(printed(&["-V"]), format!("tog {VERSION}\n"));
         assert!(run(&["-v", "plan"]).options.verbose);
-        assert_eq!(message(&["sync", "-q"]), "sync: unknown option '-q'");
         assert_eq!(
             command(&["run", "pytest", "-q"]),
             Command::Run {
                 command: argv(&["pytest", "-q"])
             }
         );
+    }
+
+    /// A global option means the same thing wherever it is typed, so the
+    /// position it is typed in is not a usage error.
+    #[test]
+    fn global_options_are_accepted_after_the_command() {
+        assert!(run(&["sync", "-q"]).options.quiet);
+        assert_eq!(
+            command(&["sync", "-q", "--fresh"]),
+            Command::Sync {
+                fresh: true,
+                strict: false
+            }
+        );
+        assert!(run(&["ls", "-v"]).options.verbose);
+        assert_eq!(
+            command(&["ls", "-v", "python"]),
+            Command::Ls {
+                ecosystem: Some("python".into()),
+                json: false
+            }
+        );
+        assert!(run(&["status", "--json", "--no-color"]).options.no_color);
+        assert_eq!(
+            run(&["gc", "--dry-run", "--directory=/w"])
+                .options
+                .directory,
+            Some(PathBuf::from("/w"))
+        );
+        // Pass-through is still sacred: `run` and `build` hand every
+        // argument to the program, and `fmt`/`x` stop at the tool's own.
+        assert!(!run(&["run", "pytest", "-q"]).options.quiet);
+        assert!(!run(&["x", "ruff", "-q"]).options.quiet);
+        assert!(run(&["x", "-q", "ruff"]).options.quiet);
+        assert_eq!(
+            command(&["x", "-q", "ruff", "-q"]),
+            Command::X {
+                ecosystem: None,
+                from: None,
+                tool: "ruff".into(),
+                args: argv(&["-q"])
+            }
+        );
+        assert!(!run(&["fmt", "--", "-v"]).options.verbose);
+        assert!(run(&["fmt", "-v", "--check"]).options.verbose);
+        // An unknown option is still an unknown option.
+        assert_eq!(message(&["sync", "-j"]), "sync: unknown option '-j'");
     }
 
     #[test]

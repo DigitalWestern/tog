@@ -824,9 +824,13 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // lease its own parent holds.
         "nested-gc" => {
             let mut command = tog_command(&["gc", "--dry-run"]);
-            let status = supervise::status(&mut command, activity).unwrap();
-            say(&format!("NESTED {}", code_of(status)));
-            code_of(status)
+            // gc narrates on stderr (CLI.md: stdout is for documents), and
+            // this harness's marker stream is its stdout, so the busy line
+            // is folded into it here.
+            let output = supervise::output(&mut command, activity).unwrap();
+            say(String::from_utf8_lossy(&output.stderr).trim_end());
+            say(&format!("NESTED {}", code_of(output.status)));
+            code_of(output.status)
         }
         // A nested read-only command must simply finish.
         "nested-roots" => {
