@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 
 pub const PLANNER_SCHEMA: &str = "python-planner/3";
 const PLAN_CACHE: &str = ".tog/plan.json";
+const MANIFEST_REQUIREMENTS: &str = ".tog/manifest-requirements.txt";
+const MANIFEST_CONSTRAINTS: &str = ".tog/manifest-constraints.txt";
+const LOCK_STAMP: &str = ".tog/lock-source.hash";
 
 pub fn planner_input_hash(
     platform: Platform,
@@ -97,7 +100,16 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         let mut stabilized = false;
         for _ in 0..MAX_SETUP_PROBES {
             let probed_version = selection.pin.version;
-            if let Err(error) = manifest.prepare_setup(platform, dir, store, probed_version) {
+            if let Err(error) =
+                manifest.prepare_setup(platform, dir, &project, store, probed_version)
+            {
+                // Every ordinary failure in here is already `InvalidData`
+                // (`unreadable` in the manifest layer hardcodes it, and it
+                // wraps the sandboxed egg_info probe), so the kind cannot
+                // tell a descriptor refusal from a probe that did not work.
+                // Fall back on both: a symlinked `.tog` is still refused a
+                // few lines below, at the first write through the project
+                // descriptor.
                 if !dynamic_dependencies {
                     return Err(error);
                 }
@@ -176,11 +188,16 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     } else if is_fully_pinned(&source) && resolver_source == source {
         None
     } else {
-        let path = dir.join(".tog/manifest-requirements.txt");
-        std::fs::create_dir_all(dir.join(".tog"))?;
+        // The compile input is named to uv by pathname, but tog writes it
+        // through the held project descriptor so a symlinked `.tog` is
+        // refused rather than followed.
+        let path = dir.join(MANIFEST_REQUIREMENTS);
         let mut text = if manifest.has_constraints() {
-            let constraints = dir.join(".tog/manifest-constraints.txt");
-            std::fs::write(&constraints, manifest.constraints_text())?;
+            let constraints = dir.join(MANIFEST_CONSTRAINTS);
+            project.write_file(
+                Path::new(MANIFEST_CONSTRAINTS),
+                manifest.constraints_text().as_bytes(),
+            )?;
             format!(
                 "{}-c {}\n",
                 manifest.normalized_requirements_text(),
@@ -192,7 +209,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         if text.is_empty() {
             text.push('\n');
         }
-        std::fs::write(&path, text)?;
+        project.write_file(Path::new(MANIFEST_REQUIREMENTS), text.as_bytes())?;
         Some(path)
     };
     let compile_path = if generated_input.is_some() {
@@ -212,6 +229,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
                 locked_requirements(
                     platform,
                     dir,
+                    &project,
                     store,
                     &input,
                     &resolver_source,
@@ -224,6 +242,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         locked_requirements(
             platform,
             dir,
+            &project,
             store,
             &input,
             &resolver_source,
@@ -338,6 +357,7 @@ pub fn is_fully_pinned(text: &str) -> bool {
 pub fn locked_requirements(
     platform: Platform,
     dir: &Path,
+    project: &ProjectRoot,
     store: &store::Store,
     input: &str,
     source: &str,
@@ -345,7 +365,7 @@ pub fn locked_requirements(
     compile_path: Option<&Path>,
 ) -> io::Result<String> {
     let lock_path = dir.join("requirements.lock.txt");
-    let stamp_path = dir.join(".tog/lock-source.hash");
+    let stamp_path = dir.join(LOCK_STAMP);
     let source_hash = if compile_path.is_some_and(|path| {
         !path
             .components()
@@ -394,8 +414,11 @@ pub fn locked_requirements(
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
     }
-    std::fs::create_dir_all(dir.join(".tog"))?;
-    std::fs::write(&stamp_path, &source_hash)?;
+    // The stamp is the only file tog writes here, and it goes through the
+    // held project descriptor, so a `.tog` swapped for a symlink is refused
+    // rather than followed. `requirements.lock.txt` beside it is uv's own
+    // write by pathname.
+    project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())?;
     std::fs::read_to_string(&lock_path)
 }
 
@@ -508,6 +531,165 @@ mod tests {
                 .next()
                 .is_none(),
             "wrote through the symlinked .tog"
+        );
+    }
+
+    /// Plant the pinned uv as a script that writes the lock uv would have
+    /// produced. `ensure_uv_for` returns a store object it already has, so
+    /// `locked_requirements` reaches its stamp write with no network.
+    fn store_with_stub_uv(root: &Path) -> store::Store {
+        use std::os::unix::fs::PermissionsExt as _;
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = store::Store {
+            root: root.canonicalize().unwrap(),
+        };
+        crate::tailors::install_kinds();
+        let host = Platform::host().unwrap();
+        let pin = python::UV.iter().find(|pin| pin.platform == host).unwrap();
+        let staged = store.stage().unwrap();
+        let uv = staged.join("uv");
+        std::fs::write(
+            &uv,
+            "#!/bin/sh\necho 'six==1.17.0 --hash=sha256:aaaa' > requirements.lock.txt\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        store
+            .commit_with_deps(
+                &python::uv_identity(pin),
+                &staged,
+                &[],
+                &store::ObjectDeps::new(),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn lock_stamp_behind_a_symlinked_tog_is_refused() {
+        let _supervision = supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // Unpinned, so planning has to re-lock and reach the stamp write.
+        std::fs::write(project_dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        let store = store_with_stub_uv(&temp.0.join("store"));
+
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a real directory"), "{error}");
+        // uv's own lock landed in the project; only tog's stamp was refused.
+        assert!(project_dir.join("requirements.lock.txt").is_file());
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "wrote the lock stamp through the symlinked .tog"
+        );
+    }
+
+    /// A `setup.py egg_info` probe that cannot run must not abort planning:
+    /// a PEP 621 `dynamic = ["dependencies"]` project falls back to the
+    /// requirements-directory convention. Everything `prepare_setup` can
+    /// fail with is already `InvalidData` (`unreadable` in the manifest
+    /// layer hardcodes it), so the fallback cannot be gated on the kind.
+    #[test]
+    fn a_probe_failure_falls_back_to_the_requirements_directory() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(project_dir.join("requirements")).unwrap();
+        std::fs::write(
+            project_dir.join("pyproject.toml"),
+            "[project]\nname = \"p\"\nversion = \"0\"\ndynamic = [\"dependencies\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        let pinned = format!("six==1.17.0 --hash=sha256:{}\n", "a".repeat(64));
+        std::fs::write(project_dir.join("requirements/common.txt"), &pinned).unwrap();
+        // A store root that is a regular file: the probe's first store
+        // access fails offline and immediately, which is the cheapest
+        // stand-in for "egg_info cannot run here".
+        let store_root = temp.0.join("not-a-store");
+        std::fs::write(&store_root, b"").unwrap();
+        let store = store::Store { root: store_root };
+
+        // Prime the plan cache under the key the fallback text produces, so
+        // planning finishes offline. A cache hit is itself the assertion:
+        // if the probe failure had aborted, or the fallback had read
+        // anything but requirements/common.txt, this key would not match.
+        let platform = Platform::host().unwrap();
+        let version = pyselect::select_python(platform, &[]).unwrap().pin.version;
+        let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
+            pypi::host_glibc().unwrap()
+        } else {
+            pypi::Glibc(0, 0)
+        };
+        let plan = types::Plan {
+            ecosystem: "python".into(),
+            python_version: version.into(),
+            packages: Vec::new(),
+        };
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        project
+            .write_file(
+                Path::new(PLAN_CACHE),
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "input_hash": planner_input_hash(platform, version, &pinned, glibc),
+                    "plan": plan,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+        let (planned, selection, inputs) = read_plan(platform, &project_dir, &store).unwrap();
+        assert_eq!(planned.python_version, version);
+        assert_eq!(selection.pin.version, version);
+        assert!(
+            inputs
+                .iter()
+                .any(|record| record.path == "requirements/common.txt"),
+            "planning did not read the requirements directory: {:?}",
+            inputs.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn manifest_snapshots_behind_a_symlinked_tog_are_refused() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // A pyproject manifest needs a generated uv compile input, so the
+        // manifest snapshot is written before uv or the store is reached.
+        std::fs::write(
+            project_dir.join("pyproject.toml"),
+            "[project]\nname = \"p\"\nversion = \"0\"\ndependencies = [\"six\"]\n",
+        )
+        .unwrap();
+        let outside = temp.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        let store = store::Store {
+            root: temp.0.join("absent-store"),
+        };
+
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a real directory"), "{error}");
+        assert!(!store.root.exists(), "a refused snapshot touched the store");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "wrote a manifest snapshot through the symlinked .tog"
         );
     }
 

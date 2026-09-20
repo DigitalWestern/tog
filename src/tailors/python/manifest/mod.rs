@@ -6,6 +6,7 @@
 //! exact artifact URL selected from their own file list; they still enter the
 //! ordinary Python `Plan` and realization path.
 
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
@@ -33,6 +34,11 @@ pub use poetry::*;
 pub use requirements::*;
 use setup::*;
 pub use uv::*;
+
+/// The setup.py metadata cache, project-relative. Both read and written
+/// through the held project descriptor: a hit chooses the requirements the
+/// plan is built from, so a tampered one is a refusal, not a miss.
+const SETUP_CACHE: &str = ".tog/egg-info.json";
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -132,6 +138,7 @@ impl Manifest {
         &mut self,
         platform: Platform,
         dir: &Path,
+        project: &ProjectRoot,
         store: &Store,
         python_version: &str,
     ) -> io::Result<()> {
@@ -139,9 +146,19 @@ impl Manifest {
             return Ok(());
         }
         let tree_hash = setup_tree_hash(dir)?;
-        let cache_path = dir.join(".tog/egg-info.json");
-        if let Ok(text) = fs::read_to_string(&cache_path) {
-            if let Ok(cache) = serde_json::from_str::<SetupCache>(&text) {
+        // Read through the held descriptor, and treat a refusal as an error
+        // rather than a miss. A cache hit decides the requirements this plan
+        // is built from, and `setup_cache_matches` gates only on the tree
+        // hash, platform, interpreter and toolchain fingerprint — all of
+        // them computable by whoever planted a symlinked `.tog`. An
+        // unreadable or malformed regular file is still a plain miss.
+        let cached = match project.read_file(Path::new(SETUP_CACHE)) {
+            Ok(cached) => cached,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
+            Err(_) => None,
+        };
+        if let Some(bytes) = cached {
+            if let Ok(cache) = serde_json::from_slice::<SetupCache>(&bytes) {
                 if setup_cache_matches(
                     &cache,
                     &tree_hash,
@@ -221,8 +238,9 @@ impl Manifest {
             platform: platform.triple().to_string(),
             build_toolchain: build::derivation_fingerprint(),
         };
-        fs::create_dir_all(dir.join(".tog"))?;
-        fs::write(&cache_path, serde_json::to_vec_pretty(&cache)?)?;
+        // Through the held project descriptor: a symlinked `.tog` must not
+        // carry this cache outside the project.
+        project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
         self.source = self.requirements_text();
@@ -364,6 +382,66 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn a_setup_cache_behind_a_symlinked_tog_is_refused_not_honoured() {
+        let root = temp_project("egg-info-symlink");
+        let dir = root.join("project");
+        let outside = root.join("outside");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            dir.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+
+        let platform = Platform::host().unwrap();
+        let python_version = "3.12.14";
+        // A cache that matches on every field prepare_setup gates on, all of
+        // them computable by whoever plants the symlink. Only the descriptor
+        // walk stands between it and the plan.
+        let planted = SetupCache {
+            tree_hash: setup_tree_hash(&dir).unwrap(),
+            requirements: vec!["attacker-controlled==1.0".to_string()],
+            requires_python: None,
+            python_version: python_version.to_string(),
+            platform: platform.triple().to_string(),
+            build_toolchain: build::derivation_fingerprint(),
+        };
+        fs::write(
+            outside.join("egg-info.json"),
+            serde_json::to_vec_pretty(&planted).unwrap(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join(".tog")).unwrap();
+
+        let mut manifest = discover(platform, &dir).unwrap();
+        assert!(manifest.requires_setup(), "fixture is not a setup.py tree");
+        let project = ProjectRoot::open(&dir).unwrap();
+        let store = Store {
+            root: root.join("absent-store"),
+        };
+        let error = manifest
+            .prepare_setup(platform, &dir, &project, &store, python_version)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        assert!(
+            !manifest
+                .requirements
+                .iter()
+                .any(|entry| entry.contains("attacker-controlled")),
+            "the planted cache reached the plan: {:?}",
+            manifest.requirements
+        );
+        assert!(!store.root.exists(), "a refused cache touched the store");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

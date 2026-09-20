@@ -8,9 +8,10 @@
 
 pub mod status;
 
+use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
-use crate::kernel::store::{ProjectionBase, ProjectionRef, Store};
+use crate::kernel::store::{fsync_directory, rename_at, ProjectionBase, ProjectionRef, Store};
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -21,7 +22,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static CLOSURE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SYMLINK_SWAP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The closure-signing key for this invocation: `Some(None)` once preflight
 /// found no `TOG_SIGNING_KEY`, `Some(Some(key))` once it loaded one,
@@ -345,8 +346,6 @@ fn write_closure_inner(
     // Writing closures for a project that cannot be registered would leave
     // provenance behind for a project no root record can protect.
     Store::check_registrable(&project_dir)?;
-    let tog_dir = project_dir.join(".tog");
-    let closures_dir = tog_dir.join("closures");
     // Keep the per-project transaction lock through both durable root
     // publication and the visible closure rename. A second producer cannot
     // observe a root from one generation paired with a closure from another.
@@ -357,40 +356,18 @@ fn write_closure_inner(
     };
     let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
 
-    // Keep the directory chain open while creating and publishing the file.
-    // Path-based create/open/rename would let a swapped parent redirect a
-    // closure write after the lexical containment checks below.
-    let project_fd = open_directory(&project_dir, "project directory")?;
-    mkdir_at(project_fd.as_raw_fd(), ".tog", &tog_dir)?;
-    let tog_fd = open_directory_at(project_fd.as_raw_fd(), ".tog", &tog_dir)?;
-    mkdir_at(tog_fd.as_raw_fd(), "closures", &closures_dir)?;
-    let closures_fd = open_directory_at(tog_fd.as_raw_fd(), "closures", &closures_dir)?;
+    // Hold the project directory open and publish through it. Every
+    // component of `.tog/closures/<ecosystem>.json` is walked with
+    // O_NOFOLLOW from that descriptor, so a `.tog` or `.tog/closures`
+    // swapped for a symlink is refused instead of carrying provenance
+    // outside the project (same class as the cargo-home/bin escape).
+    let project = ProjectRoot::open(&project_dir)?;
+    let closure_path = Path::new(".tog/closures").join(format!("{ecosystem}.json"));
+    // Create the directory before the root record is registered: root
+    // registration imports whatever closures the project already has, and a
+    // symlinked `.tog` must be refused before anything is written.
+    project.create_dir_all(Path::new(".tog/closures"))?;
 
-    for (path, label) in [(&tog_dir, ".tog"), (&closures_dir, ".tog/closures")] {
-        let metadata = fs::symlink_metadata(path)?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err(io::Error::other(format!(
-                "{} is not a real directory; refusing to write closures",
-                path.display()
-            )));
-        }
-        let canonical = path.canonicalize()?;
-        if !canonical.starts_with(&project_dir) {
-            return Err(io::Error::other(format!(
-                "{label} at {} escapes the project; refusing to write closures",
-                canonical.display()
-            )));
-        }
-    }
-    // A symlinked closures dir would carry provenance writes outside the
-    // project (same class as the cargo-home/bin escape).
-    let dir = closures_dir.canonicalize()?;
-    if !dir.starts_with(&project_dir) {
-        return Err(io::Error::other(format!(
-            "{} escapes the project; refusing to write closures there",
-            dir.display()
-        )));
-    }
     // Claim after validating the body and before writing the closure. If a
     // later write step fails, the claimed exceptions are gone with the frame;
     // the token is marked published only after the write completes.
@@ -403,6 +380,35 @@ fn write_closure_inner(
     // time; readers must not assume the body's object ids are valid for
     // the current host. Additive field, schema unchanged.
     let platform = Platform::host()?.triple();
+    // Refuse a tampered destination here, before the root record is written,
+    // so a refused publication never leaves a root behind for a closure that
+    // was never published. `write_file` checks again at rename time; this is
+    // the early, actionable copy of the same rule.
+    match project.entry(&closure_path)? {
+        Entry::Absent | Entry::Regular => {}
+        Entry::Symlink => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a symlink; remove it and run tog sync again",
+                    project.path().join(&closure_path).display()
+                ),
+            ))
+        }
+        kind => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a {} where the closure belongs; remove it and run tog sync again",
+                    project.path().join(&closure_path).display(),
+                    match kind {
+                        Entry::Directory => "directory",
+                        _ => "special file",
+                    }
+                ),
+            ))
+        }
+    }
     // Protect the complete object set before publishing the visible closure.
     // The compatibility writer below is retained only for old synthetic
     // callers whose placeholder paths predate full object ids; real producer
@@ -442,46 +448,7 @@ fn write_closure_inner(
     if let Some(key) = signing_key() {
         key.sign(&mut envelope)?;
     }
-    let dest = dir.join(format!("{ecosystem}.json"));
-    let bytes = serde_json::to_vec_pretty(&envelope)?;
-    let dest_name = dest
-        .file_name()
-        .ok_or_else(|| io::Error::other("closure destination has no file name"))?;
-    let (tmp_name, mut file) = loop {
-        let counter = CLOSURE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let candidate = format!(
-            ".{ecosystem}.json.tmp.{}.{}.{}",
-            std::process::id(),
-            nanos,
-            counter
-        );
-        match open_closure_temp(closures_fd.as_raw_fd(), &candidate) {
-            Ok(file) => break (candidate, file),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    };
-    let result = (|| {
-        use std::io::Write as _;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        rename_at(
-            closures_fd.as_raw_fd(),
-            &tmp_name,
-            closures_fd.as_raw_fd(),
-            dest_name,
-        )?;
-        fsync_directory(&closures_fd)
-    })();
-    if result.is_err() {
-        unlink_at(closures_fd.as_raw_fd(), &tmp_name);
-    }
-    result?;
+    project.write_file(&closure_path, &serde_json::to_vec_pretty(&envelope)?)?;
     if !durable_root {
         store.register_root_with_activity(activity, &project_dir)?;
     }
@@ -493,7 +460,7 @@ fn open_directory(path: &Path, label: &str) -> io::Result<fs::File> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{label} contains a NUL byte; refusing to write closures"),
+            format!("{label} contains a NUL byte; refusing to open it"),
         )
     })?;
     // SAFETY: path is a valid NUL-terminated path and the returned fd is
@@ -512,62 +479,6 @@ fn open_directory(path: &Path, label: &str) -> io::Result<fs::File> {
         ));
     }
     // SAFETY: fd was returned by open above and is now owned by File.
-    Ok(unsafe { fs::File::from_raw_fd(fd) })
-}
-
-fn mkdir_at(parent_fd: RawFd, name: &str, path: &Path) -> io::Result<()> {
-    let name_c = CString::new(name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{name:?} contains a NUL byte; refusing to write closures"),
-        )
-    })?;
-    // SAFETY: parent_fd is an open directory and name_c is NUL-terminated.
-    let result = unsafe { libc::mkdirat(parent_fd, name_c.as_ptr(), 0o755) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EEXIST) {
-            return Err(io::Error::new(
-                error.kind(),
-                format!("create {}: {error}", path.display()),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn open_directory_at(parent_fd: RawFd, name: &str, path: &Path) -> io::Result<fs::File> {
-    let name_c = CString::new(name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{name:?} contains a NUL byte; refusing to write closures"),
-        )
-    })?;
-    // SAFETY: parent_fd is an open directory and name_c is NUL-terminated.
-    let fd = unsafe {
-        libc::openat(
-            parent_fd,
-            name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        if matches!(
-            error.raw_os_error(),
-            Some(code) if code == libc::ELOOP || code == libc::ENOTDIR
-        ) {
-            return Err(io::Error::other(format!(
-                "{} is not a real directory; refusing to write closures",
-                path.display()
-            )));
-        }
-        return Err(io::Error::new(
-            error.kind(),
-            format!("open {}: {error}", path.display()),
-        ));
-    }
-    // SAFETY: fd was returned by openat above and is now owned by File.
     Ok(unsafe { fs::File::from_raw_fd(fd) })
 }
 
@@ -597,7 +508,7 @@ pub(crate) fn replace_project_symlink(path: &Path, target: &Path, label: &str) -
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let counter = CLOSURE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let counter = SYMLINK_SWAP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temporary = format!(
         ".{}.tog-swap.{}.{}.{}",
         destination.to_string_lossy(),
@@ -623,11 +534,14 @@ pub(crate) fn replace_project_symlink(path: &Path, target: &Path, label: &str) -
     }
     let result = rename_at(
         parent_fd.as_raw_fd(),
-        &temporary,
-        parent_fd.as_raw_fd(),
-        destination,
+        temporary.as_bytes(),
+        destination.as_bytes(),
     )
-    .and_then(|()| fsync_directory(&parent_fd));
+    .map_err(|error| io::Error::new(error.kind(), format!("publish {label}: {error}")))
+    .and_then(|()| {
+        fsync_directory(parent_fd.as_raw_fd())
+            .map_err(|error| io::Error::new(error.kind(), format!("sync {label} parent: {error}")))
+    });
     if result.is_err() {
         unlink_at(parent_fd.as_raw_fd(), &temporary);
     }
@@ -684,73 +598,6 @@ fn ensure_real_directory_chain(path: &Path, label: &str) -> io::Result<()> {
                 ),
             ));
         }
-    }
-    Ok(())
-}
-
-fn open_closure_temp(parent_fd: RawFd, name: &str) -> io::Result<fs::File> {
-    let name_c = CString::new(name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("closure temp name {name:?} contains a NUL byte"),
-        )
-    })?;
-    // SAFETY: parent_fd is an open directory and name_c is NUL-terminated.
-    let fd = unsafe {
-        libc::openat(
-            parent_fd,
-            name_c.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd was returned by openat above and is now owned by File.
-    Ok(unsafe { fs::File::from_raw_fd(fd) })
-}
-
-fn rename_at(
-    old_dir_fd: RawFd,
-    old_name: &str,
-    new_dir_fd: RawFd,
-    new_name: &std::ffi::OsStr,
-) -> io::Result<()> {
-    let old_name = CString::new(old_name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "closure temporary name contains a NUL byte",
-        )
-    })?;
-    let new_name = CString::new(new_name.as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "closure destination name contains a NUL byte",
-        )
-    })?;
-    // SAFETY: both fds remain open directory handles and both names are
-    // NUL-terminated relative names.
-    let result =
-        unsafe { libc::renameat(old_dir_fd, old_name.as_ptr(), new_dir_fd, new_name.as_ptr()) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        return Err(io::Error::new(
-            error.kind(),
-            format!("publish closure: {error}"),
-        ));
-    }
-    Ok(())
-}
-
-fn fsync_directory(dir: &fs::File) -> io::Result<()> {
-    // SAFETY: dir owns a valid open directory fd.
-    if unsafe { libc::fsync(dir.as_raw_fd()) } < 0 {
-        let error = io::Error::last_os_error();
-        return Err(io::Error::new(
-            error.kind(),
-            format!("sync closure directory: {error}"),
-        ));
     }
     Ok(())
 }
@@ -1811,6 +1658,58 @@ mod closure_platform_tests {
         assert!(error.to_string().contains(".tog"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+        attribution.discard();
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(store.root);
+    }
+
+    #[test]
+    fn write_closure_rejects_a_symlinked_destination_without_writing_through_it() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "tog-closure-dest-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let outside = root.join("outside.json");
+        let store = test_store("closure-dest-symlink");
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::write(&outside, b"untouched").unwrap();
+        symlink(&outside, project.join(".tog/closures/python.json")).unwrap();
+
+        let error = super::write_closure_legacy(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &mut attribution,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+        assert!(
+            error.to_string().contains("run tog sync again"),
+            "the refusal does not say what to do: {error}"
+        );
+        assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        // The refusal lands before the root record, so a project whose
+        // closure was never published owns no root either.
+        assert!(
+            store.roots().unwrap().is_empty(),
+            "a refused closure still registered a root"
+        );
+        assert!(
+            !project.join(".tog/closures/python.json").is_symlink()
+                || fs::read_link(project.join(".tog/closures/python.json")).unwrap() == outside,
+            "the symlink was replaced"
+        );
 
         attribution.discard();
         let _ = fs::remove_dir_all(root);
