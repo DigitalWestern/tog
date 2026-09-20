@@ -115,8 +115,8 @@ impl ProjectRoot {
                     display.display()
                 )));
             }
-            // A socket refuses to open (ENXIO) before its type can be seen
-            // on the descriptor, so classify a failed open by the entry.
+            // A socket refuses to open before its type can be seen on a
+            // descriptor, so classify a failed open by the entry itself.
             Err(error) => {
                 if let Ok(stat) = stat_at(fd, name.as_bytes()) {
                     if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
