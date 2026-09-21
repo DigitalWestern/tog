@@ -25,7 +25,7 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Toolchain lock (WP2) | PR 1 shipped (2026-09-18): the pin tables are catalog rows (`src/kernel/toolchain/`), with the cross-platform selector, the typed source policy and legacy seeding, all unit-tested. PR 2b shipped: tar headers read directly. The identity schema successors `cargo-vendor/2`, `python-env/3`, `node-env/4` and `sdist-build/4` shipped 2026-09-20 (PRs #121 and #124), so #47 is unblocked. No lock file is written yet; the remaining PRs are in `docs/agent/DESIGNS.md` §1 |
 | Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
 | User-experience review (2026-09-19) | Shipped on Linux: the CLI contract, help layout and `--json` promise (#122, #123); daily-use and error text — download progress, pip/npm guidance, the signing notice, distro `doctor` hints, error context (#125); docs and installer — a getting-started walkthrough, `install.sh --uninstall`, the `.tog/` commit rule (#128, this PR). Still open: #103, #106, #108, and the vocabulary half of #112 |
-| Comment-audit leftovers | #92 to #96 shipped in #126 (cargo scratch prefix, one ruby download, node messages, a dead python helper). #88 to #91 are in #127, still open |
+| Comment-audit leftovers | #88 to #96 shipped in #126 and #127: cargo scratch prefix, one ruby download, node messages, a dead python helper, registry init, `tar_command` platform, the value-flag rule, `object_path_exists` renamed |
 
 ## What is next
 
