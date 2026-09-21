@@ -531,4 +531,44 @@ mod tests {
             "{error}"
         );
     }
+
+    #[test]
+    fn an_unconstrained_python_project_keeps_the_shipped_default() {
+        use crate::kernel::toolchain::input::InputRow;
+        use crate::kernel::toolchain::select_for;
+        let catalog = by_id("python").unwrap().toolchain_catalog().unwrap();
+        let row = |path: &str, field: &str, value: Option<&str>| InputRow {
+            path: std::path::PathBuf::from(path),
+            field: field.into(),
+            value: value.map(str::to_string),
+            absent: value.is_none(),
+            sha256: value.map(|_| "a".repeat(64)),
+        };
+        let rows = |version: Option<&str>, requires: Option<&str>| {
+            vec![
+                row(".python-version", "version", version),
+                row("pyproject.toml", "project.requires-python", requires),
+                row("pyproject.toml", "tool.poetry.dependencies.python", None),
+            ]
+        };
+        let version = |rows: &[InputRow]| {
+            select_for(&catalog, "python", rows)
+                .unwrap()
+                .component("cpython")
+                .unwrap()
+                .version
+                .clone()
+        };
+        assert_eq!(
+            version(&rows(None, None)),
+            crate::tailors::python::pyselect::DEFAULT_VERSION
+        );
+        assert_eq!(
+            version(&rows(None, Some(">=3.9"))),
+            crate::tailors::python::pyselect::DEFAULT_VERSION
+        );
+        assert_eq!(version(&rows(None, Some(">=3.13"))), "3.14.7");
+        assert_eq!(version(&rows(Some("3.13"), None)), "3.13.15");
+        assert_eq!(version(&rows(Some("3.11.16"), Some(">=3.9"))), "3.11.16");
+    }
 }

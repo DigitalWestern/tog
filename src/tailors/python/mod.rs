@@ -323,7 +323,10 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
             artifacts,
         });
     }
-    Catalog::new("python", bundles)
+    // An unconstrained project keeps the shipped default; a range that the
+    // default satisfies keeps it too. Only an explicit request moves it.
+    let default = crate::kernel::toolchain::Request::exact("cpython", pyselect::DEFAULT_VERSION)?;
+    Ok(Catalog::new("python", bundles)?.with_preference(default))
 }
 
 /// A pre-lock Python closure records the selected CPython version under

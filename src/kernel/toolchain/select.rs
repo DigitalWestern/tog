@@ -336,6 +336,15 @@ impl Catalog {
     /// `request`. Selection never consults the host platform.
     pub fn select(&self, request: &Request) -> io::Result<&Bundle> {
         let ranked = self.ranked()?;
+        if let Some(preference) = self.preference() {
+            for candidate in &ranked {
+                if request.matches(candidate.bundle, &candidate.versions)?
+                    && preference.matches(candidate.bundle, &candidate.versions)?
+                {
+                    return Ok(candidate.bundle);
+                }
+            }
+        }
         for candidate in &ranked {
             if request.matches(candidate.bundle, &candidate.versions)? {
                 return Ok(candidate.bundle);
@@ -624,5 +633,34 @@ mod tests {
         );
         assert!(selected.artifact(LINUX, "node-gyp").is_none());
         let _: &ArtifactRow = selected.artifact(LINUX, "node").unwrap();
+    }
+
+    #[test]
+    fn a_preference_wins_only_when_the_request_allows_it() {
+        let catalog = Catalog::new(
+            "python",
+            vec![
+                bundle("py312", "cpython", "3.12.14", Platform::ALL),
+                bundle("py313", "cpython", "3.13.15", Platform::ALL),
+                bundle("py314", "cpython", "3.14.7", Platform::ALL),
+            ],
+        )
+        .unwrap()
+        .with_preference(Request::exact("cpython", "3.12.14").unwrap());
+        // Empty and range requests take the preferred release, not the newest.
+        assert_eq!(catalog.select(&Request::newest()).unwrap().release, "py312");
+        let range = Request::newest().with(
+            "cpython",
+            VersionRequest::Specifiers(vec![Specifier::new(Op::Ge, v("3.11")).unwrap()]),
+        );
+        assert_eq!(catalog.select(&range).unwrap().release, "py312");
+        // A request the preference cannot satisfy falls back to the newest match.
+        let newer = Request::newest().with(
+            "cpython",
+            VersionRequest::Specifiers(vec![Specifier::new(Op::Ge, v("3.13")).unwrap()]),
+        );
+        assert_eq!(catalog.select(&newer).unwrap().release, "py314");
+        let prefix = Request::newest().with("cpython", VersionRequest::Prefix(v("3.13")));
+        assert_eq!(catalog.select(&prefix).unwrap().release, "py313");
     }
 }
