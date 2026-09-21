@@ -448,11 +448,14 @@ pub fn load_with_sources(
     // said so would be wrong. Only when no file asked for strictness is
     // the flag or the variable the thing to change, flag first because it
     // is the one on the line the reader just typed.
+    // Between the two, the variable outlives the command as well: with
+    // both set, dropping --strict leaves TOG_STRICT=1 refusing, so the
+    // flag is named only when it is the whole reason.
     if policy.strict_source.is_none() {
-        if cli_strict {
-            policy.strict_source = Some(StrictSource::Flag);
-        } else if env_strict {
+        if env_strict {
             policy.strict_source = Some(StrictSource::Env);
+        } else if cli_strict {
+            policy.strict_source = Some(StrictSource::Flag);
         }
     }
     policy.strict |= cli_strict || env_strict;
@@ -1318,6 +1321,18 @@ deny = ["git-dependency"]"#,
         assert!(flag.path.is_none());
         assert!(flag.strict);
         assert!(flag.deny.is_empty());
+        assert!(
+            refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1").contains("rerun without --strict")
+        );
+
+        // With the variable set too, dropping the flag lifts nothing, so
+        // the refusal names the variable instead.
+        let _strict = EnvVarGuard::set("TOG_STRICT", "1");
+        let (policy, _) = load_with_sources(&root, true).unwrap();
+        assert!(policy.strict);
+        let message = refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1");
+        assert!(message.contains("unset TOG_STRICT"), "{message}");
+        assert!(!message.contains("rerun without --strict"), "{message}");
         let _ = fs::remove_dir_all(root);
     }
 

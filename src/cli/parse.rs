@@ -152,13 +152,22 @@ fn global_flag(
     }
 }
 
-/// Does this command's option take a value in the next argument? Read from
-/// the command table (`--eco <ecosystem>`, `--policy <file>`, ...), so the
-/// answer cannot drift from the help text.
-fn takes_a_value(spec: &Spec, arg: &str) -> bool {
-    spec.options.iter().any(|(flag, _)| {
-        flag.contains('<') && option_spellings(flag).any(|spelling| spelling == arg)
+/// Does this command's option take a value in the following argument(s)?
+/// `Some(true)` for a list (`--register <dir>...`), `Some(false)` for a
+/// single value (`--policy <file>`), `None` for a plain switch. Read from
+/// the command table, so the answer cannot drift from the help text.
+fn value_slot(spec: &Spec, arg: &str) -> Option<bool> {
+    spec.options.iter().find_map(|(flag, _)| {
+        (flag.contains('<') && option_spellings(flag).any(|spelling| spelling == arg))
+            .then(|| flag.ends_with("..."))
     })
+}
+
+/// Is `arg` one of this command's own options? What ends a list of values.
+fn is_command_option(spec: &Spec, arg: &str) -> bool {
+    spec.options
+        .iter()
+        .any(|(flag, _)| option_spellings(flag).any(|spelling| spelling == flag_name(arg)))
 }
 
 /// Take every global option out of one command's arguments, leaving the
@@ -167,6 +176,8 @@ fn takes_a_value(spec: &Spec, arg: &str) -> bool {
 /// (`fmt`, `x`), everything from its first non-option word on; and the value
 /// slot of one of the command's own value-taking options, so `tog sbom -o -v`
 /// still writes a file named `-v` rather than turning it into `--verbose`.
+/// A list option (`--register <dir>...`) holds its slot until the next
+/// option this command knows, the same boundary its own parser uses.
 fn take_global_flags(
     args: &[String],
     options: &mut Options,
@@ -181,10 +192,19 @@ fn take_global_flags(
             rest.extend_from_slice(&args[index..]);
             break;
         }
-        if takes_a_value(spec, arg) {
-            let end = (index + 2).min(args.len());
-            rest.extend_from_slice(&args[index..end]);
-            index = end;
+        if let Some(list) = value_slot(spec, arg) {
+            rest.push(args[index].clone());
+            index += 1;
+            let mut taken = 0;
+            while index < args.len()
+                && (list || taken == 0)
+                && args[index] != "--"
+                && !(taken > 0 && is_command_option(spec, &args[index]))
+            {
+                rest.push(args[index].clone());
+                index += 1;
+                taken += 1;
+            }
             continue;
         }
         match global_flag(args, index, options, Some(spec.name))? {
@@ -687,11 +707,13 @@ fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
     while let Some(arg) = args.get(index).map(String::as_str) {
         match arg {
             "-h" | "--help" => return Ok(None),
+            // Both spellings take the same value through the same rule, so
+            // an empty path cannot slip in by being written as two words.
             "-o" | "--output" => {
                 let value = args.get(index + 1).ok_or_else(|| {
                     UsageError::new(format!("{arg} needs a file path"), Some("sbom"))
                 })?;
-                output = Some(PathBuf::from(value));
+                output = Some(non_empty(value, "--output", Some("sbom"))?);
                 index += 1;
             }
             _ if arg.starts_with("--output=") => {
@@ -1526,6 +1548,13 @@ mod tests {
         }
         assert_eq!(message(&["sbom", "--output"]), "--output needs a file path");
         assert_eq!(message(&["sbom", "--output="]), "--output= needs a value");
+        // An empty path is refused in either spelling, not turned into a
+        // write to the current directory.
+        assert_eq!(message(&["sbom", "-o", ""]), "--output= needs a value");
+        assert_eq!(
+            message(&["sbom", "--output", ""]),
+            "--output= needs a value"
+        );
         assert_eq!(
             message(&["sbom", "--out", "x"]),
             "sbom: unknown option '--out'; did you mean '--output'?"
@@ -1812,6 +1841,28 @@ mod tests {
         assert_eq!(
             message(&["gc", "--keep-days", "-v"]),
             "--keep-days expects a whole number of days, got '-v'"
+        );
+        // A list option holds its slot for every value, the same boundary
+        // gc's own parser uses: a directory may be called '-v' too.
+        let parsed = run(&["gc", "--register", "a", "-v", "b"]);
+        assert!(!parsed.options.verbose);
+        assert_eq!(
+            parsed.command,
+            Command::Gc(GcArgs {
+                register: vec![PathBuf::from("a"), PathBuf::from("-v"), PathBuf::from("b")],
+                ..GcArgs::default()
+            })
+        );
+        // The next option this command knows still ends the list.
+        let parsed = run(&["gc", "--register", "a", "--dry-run", "-v"]);
+        assert!(parsed.options.verbose);
+        assert_eq!(
+            parsed.command,
+            Command::Gc(GcArgs {
+                register: vec![PathBuf::from("a")],
+                dry_run: true,
+                ..GcArgs::default()
+            })
         );
 
         // A global option that is wrong after the verb points at that
