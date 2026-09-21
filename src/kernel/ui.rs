@@ -144,6 +144,14 @@ pub fn error(message: &str) {
     write_error_channel(&format!("tog: {}: {message}\n", paint("error", RED)));
 }
 
+/// The same failure for a `--json` command: one JSON object on stderr, so
+/// stdout carries the document or nothing at all and a script never parses
+/// prose. Never colored: this line is read by a program.
+pub fn error_json(message: &str) {
+    let object = serde_json::json!({ "error": message });
+    write_error_channel(&format!("{object}\n"));
+}
+
 /// Something the user should know but that did not stop the command.
 /// Suppressed by `--quiet` like all narration.
 pub fn warning(message: &str) {

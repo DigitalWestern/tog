@@ -14,6 +14,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "cpython",
         schema: None,
+        superseded_by: None,
         live_required: &["artifact_sha256", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -28,6 +29,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "uv",
         schema: None,
+        superseded_by: None,
         live_required: &["artifact_sha256", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -42,6 +44,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "native-libs",
         schema: None,
+        superseded_by: None,
         live_required: &["platform", "manifest_sha256", "store_root"],
         live_optional: &[],
         legacy_only: &[],
@@ -56,6 +59,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "python-env",
         schema: Some("python-env/2"),
+        superseded_by: Some("python-env/3"),
         live_required: &["schema", "store_root", "cpython"],
         live_optional: &["native_libs", "pkg:"],
         legacy_only: &[],
@@ -68,8 +72,30 @@ pub static KINDS: &[KindAdapter] = &[
         adapt: python_env_v2,
     },
     KindAdapter {
+        kind: "python-env",
+        schema: Some("python-env/3"),
+        superseded_by: None,
+        live_required: &[
+            "schema",
+            "store_root",
+            "cpython",
+            "package_digest",
+            "native",
+        ],
+        live_optional: &["native_libs", "pkg:"],
+        legacy_only: &[],
+        live_contract: Some(python_env_v3_contract),
+        grammar: Grammar {
+            required: &["schema", "cpython", "package_digest", "native"],
+            optional: &["store_root", "native_libs"],
+            groups: &[("pkg:", None)],
+        },
+        adapt: python_env_v3,
+    },
+    KindAdapter {
         kind: "sdist-build",
         schema: Some("sdist-build/2"),
+        superseded_by: None,
         live_required: &["schema", "sdist_sha256", "python", "platform", "toolchain"],
         live_optional: &[],
         legacy_only: &[],
@@ -84,6 +110,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "sdist-build",
         schema: Some("sdist-build/3"),
+        superseded_by: Some("sdist-build/4"),
         live_required: &["schema", "sdist_sha256", "python", "platform", "build_env"],
         live_optional: &["rust", "vendor", "native_libs", "native_linker"],
         legacy_only: &[],
@@ -94,6 +121,37 @@ pub static KINDS: &[KindAdapter] = &[
             groups: &[],
         },
         adapt: sdist_build_v3,
+    },
+    KindAdapter {
+        kind: "sdist-build",
+        schema: Some("sdist-build/4"),
+        superseded_by: None,
+        live_required: &[
+            "schema",
+            "sdist_sha256",
+            "python",
+            "platform",
+            "build_env",
+            "build_mode",
+            "native_mode",
+        ],
+        live_optional: &["rust", "vendor", "native_libs", "native_linker"],
+        legacy_only: &[],
+        live_contract: Some(sdist_build_v4_contract),
+        grammar: Grammar {
+            required: &[
+                "schema",
+                "sdist_sha256",
+                "python",
+                "platform",
+                "build_env",
+                "build_mode",
+                "native_mode",
+            ],
+            optional: &["rust", "vendor", "native_libs", "native_linker"],
+            groups: &[],
+        },
+        adapt: sdist_build_v4,
     },
 ];
 
@@ -110,12 +168,12 @@ fn native_libs_contract(identity: &Identity) -> Result<(), String> {
     Ok(())
 }
 
-/// `python-env/2` cannot detect two identity drifts. If a one-wheel plan
-/// drops its sole `pkg:` key, the result is indistinguishable from the
-/// legitimate empty environment. If an inspected native sdist drops its
-/// `native_libs` key, all native checks are conditional on that key and the
-/// drift passes. `python-env/3` would need an unconditional package count or
-/// plan digest to distinguish those identities.
+/// `python-env/2` could not detect two identity drifts. A one-wheel plan
+/// that dropped its sole `pkg:` key was indistinguishable from the
+/// legitimate empty environment, and an inspected native sdist that dropped
+/// its `native_libs` key passed, because every native check was conditional
+/// on that key. `python-env/3` closes both; this row survives only for
+/// records already in the store.
 fn python_env_contract(identity: &Identity) -> Result<(), String> {
     let inputs = &identity.inputs;
     // An environment with no packages is legitimate. The producer writes no
@@ -161,11 +219,48 @@ fn python_env_contract(identity: &Identity) -> Result<(), String> {
     Ok(())
 }
 
-/// `sdist-build/3` cannot detect either pair being dropped as a whole.
+/// `python-env/3` adds two unconditional inputs to the `/2` shape: a
+/// `package_digest` over every `pkg:` entry, and a `native` decision the
+/// producer spells out whether or not it mounts the library set. A dropped
+/// sole `pkg:` key now leaves a digest no package set produces, and a
+/// dropped `native_libs` key leaves `native` claiming a mount that is not
+/// there. Both are recomputed here from the producer's own functions.
+fn python_env_v3_contract(identity: &Identity) -> Result<(), String> {
+    // The `/2` relations run first: when one of them can name the exact
+    // pairing that broke, that is a better diagnostic than "the digest moved".
+    python_env_contract(identity)?;
+    let inputs = &identity.inputs;
+    let declared = inputs
+        .get("package_digest")
+        .ok_or_else(|| "Python environment package digest: no package_digest input".to_string())?;
+    let recomputed = super::env::package_digest_of_inputs(inputs);
+    if *declared != recomputed {
+        return Err(format!(
+            "Python environment package digest: package_digest {declared} does not match the \
+             {recomputed} this package set hashes to"
+        ));
+    }
+    let native = inputs
+        .get("native")
+        .ok_or_else(|| "Python environment native decision: no native input".to_string())?;
+    let expected = match inputs.contains_key("native_libs") {
+        true => super::env::NATIVE_LIBS_MOUNTED,
+        false => super::env::NATIVE_NONE,
+    };
+    if native != expected {
+        return Err(format!(
+            "Python environment native decision: native {native:?} does not match the \
+             {expected:?} this identity's native_libs input implies"
+        ));
+    }
+    Ok(())
+}
+
+/// `sdist-build/3` could not detect either pair being dropped as a whole.
 /// Dropping both `rust` and `vendor`, or both `native_libs` and
-/// `native_linker`, leaves the same valid no-pair shape because the current
-/// checks only reject one-sided pairs. `sdist-build/4` would need explicit
-/// build-mode and native-mode fields.
+/// `native_linker`, left the same valid no-pair shape, because these checks
+/// only reject one-sided pairs. `sdist-build/4` closes both with explicit
+/// mode fields; this row survives only for records already in the store.
 fn sdist_build_v3_contract(identity: &Identity) -> Result<(), String> {
     let platform = platform_of(identity)?.ok_or_else(|| {
         "Python sdist platform contract: the producer must record a platform input".to_string()
@@ -187,6 +282,44 @@ fn sdist_build_v3_contract(identity: &Identity) -> Result<(), String> {
         if identity.inputs.contains_key(left) != identity.inputs.contains_key(right) {
             return Err(format!(
                 "{relation}: {left} and {right} must appear together"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `sdist-build/4` adds the two unconditional mode fields. `build_mode` says
+/// whether this build had a Rust toolchain and vendor tree, and
+/// `native_mode` whether it mounted the native library set, so dropping a
+/// whole pair no longer collapses into the valid shape that never had one.
+fn sdist_build_v4_contract(identity: &Identity) -> Result<(), String> {
+    sdist_build_v3_contract(identity)?;
+    let inputs = &identity.inputs;
+    for (field, key, present, absent) in [
+        (
+            "build_mode",
+            "rust",
+            super::build::BUILD_MODE_RUST,
+            super::build::BUILD_MODE_PLAIN,
+        ),
+        (
+            "native_mode",
+            "native_libs",
+            super::build::NATIVE_MODE_LIBS,
+            super::build::NATIVE_MODE_NONE,
+        ),
+    ] {
+        let declared = inputs
+            .get(field)
+            .ok_or_else(|| format!("sdist {field} relation: no {field} input"))?;
+        let expected = match inputs.contains_key(key) {
+            true => present,
+            false => absent,
+        };
+        if declared != expected {
+            return Err(format!(
+                "sdist {field} relation: {field} {declared:?} does not match the {expected:?} \
+                 this identity's {key} input implies"
             ));
         }
     }
@@ -238,11 +371,45 @@ fn native_libs(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String
 /// `python-env/2`: CPython and the native library set are direct object ids.
 /// A wheel contributes its sha256. An sdist contributes the **built wheel's
 /// object**, which the entry names in one of two shipped spellings:
-/// `Sdist:<sha256>:<object id>` for an isolated (`sdist-build/3`) build, and
+/// `Sdist:<sha256>:<object id>` for an isolated build, and
 /// `Sdist:<sha256>:sdist-build/2;toolchain:<digests>` for the historical
 /// fast path, whose derivation fingerprint is not an object id and must be
 /// matched against the `sdist-build/2` records in the store.
 fn python_env_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    python_env_inner(
+        record,
+        index,
+        &["schema", "store_root", "cpython", "native_libs"],
+    )
+}
+
+/// `python-env/3`: the same byte sources. `package_digest` and `native` are
+/// drift guards over inputs that are already named here, so neither adds a
+/// dependency of its own.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
+fn python_env_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    python_env_inner(
+        record,
+        index,
+        &[
+            "schema",
+            "store_root",
+            "cpython",
+            "native_libs",
+            "package_digest",
+            "native",
+        ],
+    )
+}
+
+fn python_env_inner(
+    record: &Record,
+    index: &MetaIndex,
+    scalars: &[&str],
+) -> Result<ObjectDeps, String> {
     let cpython = input(record, "cpython")?;
     let mut deps = ObjectDeps::new();
     add_object(&mut deps, cpython, index, "cpython")?;
@@ -270,10 +437,7 @@ fn python_env_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, Strin
         .unwrap_or_default();
     for (key, value) in &record.identity.inputs {
         let Some(name) = key.strip_prefix("pkg:") else {
-            if !matches!(
-                key.as_str(),
-                "schema" | "store_root" | "cpython" | "native_libs"
-            ) {
+            if !scalars.contains(&key.as_str()) {
                 return Err(format!("unexpected identity input {key}"));
             }
             continue;
@@ -403,6 +567,55 @@ fn sdist_build_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, Stri
 /// toolchain, vendor tree and native library set, are direct object ids; the
 /// interpreter is a fingerprint; the sdist tarball is the one cached artifact.
 fn sdist_build_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    sdist_build_isolated(
+        record,
+        index,
+        &[
+            "schema",
+            "sdist_sha256",
+            "python",
+            "platform",
+            "build_env",
+            "rust",
+            "vendor",
+            "native_libs",
+            "native_linker",
+        ],
+    )
+}
+
+/// `sdist-build/4`: the same byte sources as `/3`. `build_mode` and
+/// `native_mode` restate decisions the object ids above already carry, so
+/// neither adds a dependency.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
+fn sdist_build_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    sdist_build_isolated(
+        record,
+        index,
+        &[
+            "schema",
+            "sdist_sha256",
+            "python",
+            "platform",
+            "build_env",
+            "build_mode",
+            "native_mode",
+            "rust",
+            "vendor",
+            "native_libs",
+            "native_linker",
+        ],
+    )
+}
+
+fn sdist_build_isolated(
+    record: &Record,
+    index: &MetaIndex,
+    allowed: &[&str],
+) -> Result<ObjectDeps, String> {
     let mut deps = ObjectDeps::new();
     let cpython = cpython_for_sdist(record, index)?;
     add_object(&mut deps, &cpython, index, "python")?;
@@ -419,18 +632,7 @@ fn sdist_build_v3(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, Stri
         }
     }
     for key in record.identity.inputs.keys() {
-        if !matches!(
-            key.as_str(),
-            "schema"
-                | "sdist_sha256"
-                | "python"
-                | "platform"
-                | "build_env"
-                | "rust"
-                | "vendor"
-                | "native_libs"
-                | "native_linker"
-        ) {
+        if !allowed.contains(&key.as_str()) {
             return Err(format!("unexpected identity input {key}"));
         }
     }

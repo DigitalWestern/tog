@@ -208,8 +208,23 @@ pub struct EcosystemStatus {
 }
 
 impl EcosystemStatus {
+    /// Only a closure this binary compared against the files on disk is
+    /// synced. `Unchecked` is the answer "this could not be verified", and
+    /// a CI gate that reads it as a pass passes anything old enough.
     pub fn is_synced(&self) -> bool {
-        matches!(self.state, State::Synced | State::Unchecked(_))
+        matches!(self.state, State::Synced)
+    }
+
+    /// The state word `--json` reports and the summary line counts.
+    pub fn word(&self) -> &'static str {
+        match self.state {
+            State::Synced => "synced",
+            State::NotSynced => "not-synced",
+            State::Changed(_) => "changed",
+            State::ProjectionMissing(_) => "projection-missing",
+            State::ForeignPlatform(_) => "foreign-platform",
+            State::Unchecked(_) => "unchecked",
+        }
     }
 }
 
@@ -272,17 +287,16 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
             "project": dir,
             "synced": rows.iter().all(EcosystemStatus::is_synced),
             "ecosystems": rows.iter().map(|row| {
-                let (state, detail): (&str, Value) = match &row.state {
-                    State::Synced => ("synced", Value::Null),
-                    State::NotSynced => ("not-synced", Value::Null),
-                    State::Changed(files) => ("changed", json!(files)),
-                    State::ProjectionMissing(what) => ("projection-missing", json!(what)),
-                    State::ForeignPlatform(platform) => ("foreign-platform", json!(platform)),
-                    State::Unchecked(why) => ("synced-unchecked", json!(why)),
+                let detail: Value = match &row.state {
+                    State::Synced | State::NotSynced => Value::Null,
+                    State::Changed(files) => json!(files),
+                    State::ProjectionMissing(what) => json!(what),
+                    State::ForeignPlatform(platform) => json!(platform),
+                    State::Unchecked(why) => json!(why),
                 };
                 json!({
                     "ecosystem": row.ecosystem,
-                    "state": state,
+                    "state": row.word(),
                     "detail": detail,
                     "summary": row.summary,
                 })
@@ -308,13 +322,52 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                 format!("missing     {what} is not the synced projection; run 'tog sync'")
             }
             State::ForeignPlatform(platform) => {
-                format!("elsewhere   synced on {platform}; run 'tog sync' on this host")
+                format!("elsewhere   last synced on {platform}, not on this host; run 'tog sync'")
             }
-            State::Unchecked(why) => format!("synced      ({}) — {why}", row.summary),
+            State::Unchecked(why) => format!("unchecked   {why}"),
         };
         out.push_str(&format!("{:width$}  {line}\n", row.ecosystem));
     }
+    out.push_str(&verdict(rows));
     Ok(out)
+}
+
+/// The last line (or three) of `tog status`: what the rows add up to, and
+/// what the words that are not `synced` mean. A reader who scrolled past
+/// the rows should not have to count them, and a state the binary could not
+/// check has to say so where the verdict is read.
+fn verdict(rows: &[EcosystemStatus]) -> String {
+    let synced = rows.iter().filter(|row| row.is_synced()).count();
+    if synced == rows.len() {
+        return format!("\n{synced} of {} synced.\n", rows.len());
+    }
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for row in rows.iter().filter(|row| !row.is_synced()) {
+        match counts.iter_mut().find(|(word, _)| *word == row.word()) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((row.word(), 1)),
+        }
+    }
+    let listed = counts
+        .iter()
+        .map(|(word, count)| format!("{count} {word}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = format!("\n{synced} of {} synced; {listed}.\n", rows.len());
+    if rows.iter().any(|row| row.word() == "unchecked") {
+        out.push_str(
+            "unchecked: this closure predates the recording tog needs to compare it,\n\
+             so it is not a pass; run 'tog sync' once to make it checkable.\n",
+        );
+    }
+    if rows.iter().any(|row| row.word() == "foreign-platform") {
+        out.push_str(
+            "elsewhere: the closure was written on another platform and says nothing\n\
+             about this host.\n",
+        );
+    }
+    out.push_str("Exit status is 0 only when every ecosystem is synced.\n");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -684,10 +737,12 @@ pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
         .unwrap_or(0);
     let mut out = String::new();
     for check in checks {
+        // The words are the ones CLI.md promises, in the spelling it
+        // promises them in: ok, warn, fail.
         let level = match check.level {
             Level::Ok => "ok  ",
             Level::Warn => "warn",
-            Level::Fail => "FAIL",
+            Level::Fail => "fail",
         };
         out.push_str(&format!(
             "{level}  {:width$}  {}\n",
@@ -1005,7 +1060,9 @@ mod tests {
         assert_eq!(value["ecosystems"][0]["state"], "changed");
         assert_eq!(value["ecosystems"][0]["detail"][0], "requirements.txt");
 
-        // A closure without recorded inputs is synced-but-unchecked.
+        // A closure without recorded inputs cannot be checked, and an
+        // unchecked closure is not a synced one: it fails the gate, says
+        // why on its own row, and the summary counts it.
         write_closure(
             dir,
             "python",
@@ -1014,7 +1071,20 @@ mod tests {
         );
         let rows = status(platform, dir).unwrap();
         assert!(matches!(rows[0].state, State::Unchecked(_)));
-        assert!(rows[0].is_synced());
+        assert!(!rows[0].is_synced());
+        let text = render_status(dir, &rows, false).unwrap();
+        assert!(
+            text.contains("python  unchecked   inputs were not"),
+            "{text}"
+        );
+        assert!(text.contains("of 3 synced; 1 unchecked"), "{text}");
+        assert!(
+            text.contains("Exit status is 0 only when every ecosystem is synced."),
+            "{text}"
+        );
+        let value: Value = serde_json::from_str(&render_status(dir, &rows, true).unwrap()).unwrap();
+        assert_eq!(value["synced"], false);
+        assert_eq!(value["ecosystems"][0]["state"], "unchecked");
 
         // A foreign platform is reported, not compared.
         write_closure(
@@ -1296,10 +1366,21 @@ mod tests {
         let last_check = text
             .lines()
             .filter(|line| {
-                line.starts_with("ok  ") || line.starts_with("warn") || line.starts_with("FAIL")
+                line.starts_with("ok  ") || line.starts_with("warn") || line.starts_with("fail")
             })
             .next_back()
             .unwrap();
         assert!(last_check.ends_with(&detail("project").detail), "{text}");
+
+        // The three level words are the ones CLI.md documents, lowercase.
+        let failing = vec![
+            check("platform", Level::Ok, "ok"),
+            check("sandbox", Level::Warn, "warn"),
+            check("store", Level::Fail, "unwritable"),
+        ];
+        let text = render_doctor(&failing, false).unwrap();
+        assert!(text.contains("fail  store     unwritable"), "{text}");
+        assert!(!text.contains("FAIL"), "{text}");
+        assert!(text.ends_with("1 check failed.\n"), "{text}");
     }
 }

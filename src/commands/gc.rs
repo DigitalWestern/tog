@@ -16,7 +16,10 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         forgotten: args.forget.clone(),
     };
     let store = store::Store::open()?;
-    let mut stdout = io::stdout().lock();
+    // gc narrates; it does not produce a document. CLI.md reserves stdout
+    // for results (`plan`, `sbom`, `store path`, the `--json` forms), so
+    // every line below goes to stderr, where `--quiet` can silence it.
+    let mut narrate = io::stderr().lock();
     // A dry run writes nothing and registration is a write, so the two
     // cannot both be honoured. Previewing the sweep as though the project
     // were registered would mean protecting a root with no record, which is
@@ -38,7 +41,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
                 "a Tog job is using this store; retry when it finishes",
             ));
         }
-        writeln!(stdout, "cleanup skipped: a Tog job is using this store")?;
+        writeln!(narrate, "cleanup skipped: a Tog job is using this store")?;
         return Ok(());
     };
     // Dropping is a targeted removal, not a sweep and not a registry edit.
@@ -61,7 +64,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
             &activity,
             &args.drop_objects,
             args.dry_run,
-            &mut stdout,
+            &mut narrate,
         )?;
         return Ok(());
     }
@@ -77,7 +80,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
                 "--migrate-metadata cannot be combined with registry or collection options",
             ));
         }
-        let report = gc::migrate_metadata(&store, &activity, args.dry_run, &mut stdout)?;
+        let report = gc::migrate_metadata(&store, &activity, args.dry_run, &mut narrate)?;
         if report.unresolved != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -110,27 +113,27 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         if options.dry_run {
             let record = store.root_record_from_project(project)?;
             writeln!(
-                stdout,
+                narrate,
                 "tog: would register root {} ({} objects)",
                 record.project_path.display(),
                 record.objects.len()
             )?;
         } else {
             let entry = store.register_root_from_project_with_activity(&activity, project)?;
-            writeln!(stdout, "tog: registered root {}", entry.path.display())?;
+            writeln!(narrate, "tog: registered root {}", entry.path.display())?;
         }
     }
     for key in &args.forget {
         if options.dry_run {
             let entry = store.lookup_root(key)?;
             writeln!(
-                stdout,
+                narrate,
                 "tog: would forget root {key} ({})",
                 entry.describe()
             )?;
         } else {
             let entry = store.forget_root_with_activity(&activity, key)?;
-            writeln!(stdout, "tog: forgot root {key} ({})", entry.describe())?;
+            writeln!(narrate, "tog: forgot root {key} ({})", entry.describe())?;
         }
     }
     // Forgetting is the explicit recovery action, not an implicit sweep. A
@@ -140,10 +143,10 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         return Ok(());
     }
     let dry_run = options.dry_run;
-    let report = gc::collect_with_activity(&store, &activity, options, &mut stdout)?;
+    let report = gc::collect_with_activity(&store, &activity, options, &mut narrate)?;
     let verb = if dry_run { "would free" } else { "freed" };
     writeln!(
-        stdout,
+        narrate,
         "tog: gc {verb} {} MB ({} objects, {} cached artifacts)",
         report.freed_bytes / (1024 * 1024),
         report.objects,

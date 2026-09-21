@@ -12,7 +12,10 @@
 //! - `run` and `build` pass their arguments through to the program untouched
 //!   (only a leading `-h`/`--help` is tog's; `--` forces pass-through);
 //! - `-C <dir>` runs the command as if started in `<dir>`; `-q`, `-v` and
-//!   `--no-color` set the output conventions (see `ui`);
+//!   `--no-color` set the output conventions (see `ui`). A global option is
+//!   accepted before or after the verb, except where the rest of argv
+//!   belongs to a program (`run`, `build`) or to a tool (`fmt`, `x`, after
+//!   its own options);
 //! - a bare `tog` and an unknown first word are *not* decided here: the
 //!   dispatcher turns them into `sync` inside a project and into a
 //!   package.json script run when one matches.
@@ -46,7 +49,9 @@ pub enum Command {
         ecosystem: Option<String>,
         args: Vec<String>,
     },
-    Plan,
+    Plan {
+        json: bool,
+    },
     /// Everything after `build` (ecosystem name and tool arguments); the
     /// ecosystem is inferred by the dispatcher from the project layout.
     Build {
@@ -114,6 +119,22 @@ pub enum Command {
     Completions {
         shell: Shell,
     },
+}
+
+impl Command {
+    /// Did this invocation ask for machine-readable output? Under `--json`
+    /// stdout carries nothing but the JSON document and a failure is a JSON
+    /// object on stderr, so a script never has to parse prose.
+    pub fn json_output(&self) -> bool {
+        matches!(
+            self,
+            Command::Status { json: true }
+                | Command::Audit { json: true, .. }
+                | Command::Ls { json: true, .. }
+                | Command::Doctor { json: true }
+                | Command::Plan { json: true }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

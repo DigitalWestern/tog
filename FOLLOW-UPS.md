@@ -28,7 +28,7 @@ by position.
   running `tog sync` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
   namespaces are allowed there.
-- **Is `skipped_optional` an exception at all?** An optional dependency
+- **Is `skipped-optional` an exception at all?** An optional dependency
   group the user did not request is a choice, not a waiver, yet it drives the
   strict hit rate down to 8/30 on Python (`docs/agent/HITRATE.md`).
 - **Key and credential policy for the trust work.** Where trusted publisher

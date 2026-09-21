@@ -260,6 +260,74 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
     crate::tailors::python::artifacts::provisioned_version(name, version)
 }
 
+/// The two spellings of the `node-env/4` native decision. The producer
+/// writes one of them on every commit, so a dropped `native_libs` key is a
+/// contract violation rather than a different legitimate environment.
+pub(crate) const NATIVE_LIBS_MOUNTED: &str = "native-libs";
+pub(crate) const NATIVE_NONE: &str = "none";
+
+/// The `node-env/4` digest over the package set and the declared artifacts:
+/// every `pkg:` and `artifact:` entry, key and value NUL-terminated so no
+/// pair can be re-spelled as another, in the order a `BTreeMap` yields them.
+/// It is written unconditionally — the empty lockfile gets the digest of
+/// nothing.
+///
+/// The two callers below take their entries from **different sources on
+/// purpose**. The producer digests the lockfile plan and the declared
+/// artifact list; the identity contract in `objects.rs` digests the `pkg:`
+/// and `artifact:` inputs the finished identity actually carries. A producer
+/// that writes one fewer input than its plan names makes the two disagree,
+/// which is the drift `node-env/4` exists to catch. Digesting the input map
+/// on both sides would move the digest along with the drift and catch
+/// nothing.
+fn plan_digest_of(entries: &BTreeMap<String, String>) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for (key, value) in entries {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// The contract's side: over the `pkg:` and `artifact:` inputs this identity
+/// carries.
+pub(crate) fn plan_digest_of_inputs(inputs: &BTreeMap<String, String>) -> String {
+    plan_digest_of(
+        &inputs
+            .iter()
+            .filter(|(key, _)| key.starts_with("pkg:") || key.starts_with("artifact:"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+/// The producer's side: a traversal of the plan's own package list and the
+/// declared artifact list, separate from the loops that write the identity
+/// inputs. `values` holds the entry computed for each; a package or artifact
+/// with no computed entry is a producer bug, not a smaller environment.
+fn plan_digest_of_plan(
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    values: &BTreeMap<String, String>,
+) -> io::Result<String> {
+    let mut entries = BTreeMap::new();
+    let planned = plan
+        .packages
+        .iter()
+        .map(|p| format!("pkg:{}", p.path))
+        .chain(artifacts.iter().map(|a| format!("artifact:{}", a.path)));
+    for key in planned {
+        let value = values
+            .get(&key)
+            .ok_or_else(|| err(format!("plan names {key} with no identity entry")))?;
+        entries.insert(key, value.clone());
+    }
+    Ok(plan_digest_of(&entries))
+}
+
 pub(super) fn node_env_identity(
     store: &Store,
     platform: Platform,
@@ -268,12 +336,62 @@ pub(super) fn node_env_identity(
     artifacts: &[DeclaredArtifact],
     native_libs_id: Option<&str>,
 ) -> io::Result<Identity> {
+    node_env_identity_inner(
+        store,
+        platform,
+        node_obj,
+        plan,
+        artifacts,
+        native_libs_id,
+        None,
+    )
+}
+
+/// The exact producer drift `node-env/4` exists to catch: the plan names
+/// `skip_entry` (a `pkg:` or `artifact:` key), the input loops never write
+/// it, and the plan digest is still taken over the whole plan. Only tests
+/// build this.
+#[cfg(test)]
+pub(crate) fn node_env_identity_skipping_input(
+    store: &Store,
+    platform: Platform,
+    node_obj: &Path,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    native_libs_id: Option<&str>,
+    skip_entry: &str,
+) -> io::Result<Identity> {
+    node_env_identity_inner(
+        store,
+        platform,
+        node_obj,
+        plan,
+        artifacts,
+        native_libs_id,
+        Some(skip_entry),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn node_env_identity_inner(
+    store: &Store,
+    platform: Platform,
+    node_obj: &Path,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    native_libs_id: Option<&str>,
+    skip_entry: Option<&str>,
+) -> io::Result<Identity> {
     let mut inputs = BTreeMap::new();
+    // Every entry the plan digest covers, computed once, keyed exactly as
+    // the identity input it becomes.
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
     // /3: install scripts run sandboxed; name@version joined the per-pkg
-    // identity (they reach scripts as npm_package_* env). Remaining known
-    // impurity, documented: host Xcode/SDK version is not fingerprinted
-    // (same standing as python sdist builds).
-    inputs.insert("schema".to_string(), "node-env/3".to_string());
+    // identity (they reach scripts as npm_package_* env). /4: a plan digest
+    // over the packages and declared artifacts plus an explicit native
+    // decision. Remaining known impurity, documented: host Xcode/SDK version
+    // is not fingerprinted (same standing as python sdist builds).
+    inputs.insert("schema".to_string(), "node-env/4".to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -307,7 +425,7 @@ pub(super) fn node_env_identity(
                 None => format!("patch[{}]", patch.hash),
             },
         };
-        if inputs
+        if values
             .insert(
                 format!("pkg:{}", p.path),
                 format!(
@@ -323,6 +441,15 @@ pub(super) fn node_env_identity(
             return Err(err(format!("duplicate lockfile path: {}", p.path)));
         }
     }
+    // One identity input per planned package.
+    for p in &plan.packages {
+        let key = format!("pkg:{}", p.path);
+        if skip_entry == Some(key.as_str()) {
+            continue;
+        }
+        let value = values[&key].clone();
+        inputs.insert(key, value);
+    }
     // A provisioned artifact is a build input too: a GitHub release asset can
     // be replaced, so the package version alone does not determine the bytes
     // that reach the install script.
@@ -336,13 +463,42 @@ pub(super) fn node_env_identity(
     // Declared artifacts are build inputs: they change what install
     // scripts produce, so they are part of the identity.
     for a in artifacts {
-        if inputs
+        if values
             .insert(format!("artifact:{}", a.path), a.sha256.clone())
             .is_some()
         {
             return Err(err(format!("duplicate artifact path: {}", a.path)));
         }
     }
+    for a in artifacts {
+        let key = format!("artifact:{}", a.path);
+        if skip_entry == Some(key.as_str()) {
+            continue;
+        }
+        let value = values[&key].clone();
+        inputs.insert(key, value);
+    }
+    // The two unconditional inputs `node-env/4` adds. Under /3 a
+    // multi-package plan that lost one `pkg:` key still had another, and a
+    // lost `artifact:` or Linux `native_libs` key passed, because every check
+    // keyed on the presence of the key it checked.
+    //
+    // The digest is taken from the plan, not from `inputs`: if the loops
+    // above ever write fewer inputs than the plan names, this value still
+    // covers the whole plan and the contract's recomputation over the
+    // identity disagrees with it.
+    inputs.insert(
+        "plan_digest".to_string(),
+        plan_digest_of_plan(plan, artifacts, &values)?,
+    );
+    inputs.insert(
+        "native".to_string(),
+        match native_libs_id {
+            Some(_) => NATIVE_LIBS_MOUNTED,
+            None => NATIVE_NONE,
+        }
+        .to_string(),
+    );
     if let Some(native_libs_id) = native_libs_id {
         inputs.insert("native_libs".into(), native_libs_id.into());
     }

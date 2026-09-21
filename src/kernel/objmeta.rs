@@ -526,6 +526,12 @@ pub struct Grammar {
 pub struct KindAdapter {
     pub kind: &'static str,
     pub schema: Option<&'static str>,
+    /// The schema value that replaced this one, for a row no producer writes
+    /// any more. A superseded row stays registered so legacy records of the
+    /// old layout still migrate and their objects are swept as ordinary
+    /// garbage rather than blocking every sweep; publishing one is refused,
+    /// so a producer cannot quietly keep minting the retired identity.
+    pub superseded_by: Option<&'static str>,
     /// Inputs required from the current producer at every commit. These are
     /// separate from `grammar.required`, which preserves legacy compatibility.
     pub live_required: &'static [&'static str],
@@ -546,6 +552,7 @@ pub struct KindAdapter {
 static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
     kind: "git-source",
     schema: Some("git-source/2"),
+    superseded_by: None,
     live_required: &["schema", "url", "commit"],
     live_optional: &[],
     legacy_only: &[],
@@ -565,6 +572,7 @@ static KERNEL_KINDS: &[KindAdapter] = &[KindAdapter {
 static TEST_KINDS: &[KindAdapter] = &[KindAdapter {
     kind: "test",
     schema: None,
+    superseded_by: None,
     live_required: &[],
     live_optional: &["input"],
     legacy_only: &[],
@@ -747,6 +755,14 @@ pub(crate) fn check_identity_grammar(identity: &Identity) -> Result<(), String> 
     let schema = schema_input_of(identity);
     match adapter_for(&identity.kind, schema) {
         Some(adapter) => {
+            if let Some(successor) = adapter.superseded_by {
+                return Err(format!(
+                    "kind {}, schema {schema:?} is superseded by {successor}; the current \
+                     producer must publish the successor identity. This row is kept only so \
+                     records already in the store still migrate",
+                    identity.kind
+                ));
+            }
             enforce_live_grammar(identity, adapter)?;
             if let Some(contract) = adapter.live_contract {
                 contract(identity)?;
@@ -1156,6 +1172,54 @@ mod tests {
         assert_eq!(cache, vec![format!("sha256:{checksum}")]);
     }
 
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `cargo-vendor/2` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `crates` input does
+    /// not leak into the dependency set.
+    #[test]
+    fn adapter_cargo_vendor_cargo_vendor_2_recovers_the_expected_dependencies() {
+        let checksum = sha256('d');
+        let git = oid('e', "repo");
+        let (objects, cache) = proven(
+            ident(
+                "cargo-vendor",
+                "vendor",
+                "2",
+                &[
+                    ("schema", "cargo-vendor/2"),
+                    ("crates", "2"),
+                    ("crate:serde@1.0.0", &checksum),
+                    ("crate:local@0.1.0", &format!("git:{git}")),
+                ],
+            ),
+            vec![stub(&git)],
+        );
+        assert_eq!(objects, vec![git]);
+        assert_eq!(cache, vec![format!("sha256:{checksum}")]);
+    }
+
+    /// `crates` belongs to `/2` alone: a `/1` record that carries it is a
+    /// shape no producer ever wrote, and the two rows must not share a path.
+    #[test]
+    fn adapter_cargo_vendor_schemas_do_not_share_a_path() {
+        let checksum = sha256('d');
+        let reason = unresolved(
+            ident(
+                "cargo-vendor",
+                "vendor",
+                "1",
+                &[
+                    ("schema", "cargo-vendor/1"),
+                    ("crates", "1"),
+                    ("crate:serde@1.0.0", &checksum),
+                ],
+            ),
+            vec![],
+        );
+        assert!(reason.contains("crates"), "{reason}");
+    }
+
     #[test]
     fn adapter_cargo_vendor_refuses_a_git_crate_whose_source_object_is_gone() {
         let git = oid('e', "repo");
@@ -1519,6 +1583,86 @@ mod tests {
         assert_eq!(cache, expected_cache);
     }
 
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `node-env/4` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `plan_digest` and
+    /// `native` inputs do not leak into the dependency set.
+    #[test]
+    fn adapter_node_env_node_env_4_recovers_the_expected_dependencies() {
+        let node = oid('1', "nodejs");
+        let libs = oid('2', "libset");
+        let git = oid('3', "repo");
+        let (integrity, provisioned, artifact) = (sha512('5'), sha256('6'), sha256('7'));
+        let (objects, cache) = proven(
+            ident(
+                "node-env",
+                "env",
+                "24.20.0",
+                &[
+                    ("schema", "node-env/4"),
+                    ("store_root", "/tmp/store"),
+                    ("nodejs", &node),
+                    ("layout", "node_modules"),
+                    ("workspaces", ""),
+                    ("native_libs", &libs),
+                    ("native", "native-libs"),
+                    ("plan_digest", &format!("sha256:{}", sha256('8'))),
+                    (
+                        "pkg:node_modules/left-pad",
+                        &format!("sha512:{integrity}:left-pad@1.3.0:patch[]:bin[]"),
+                    ),
+                    (
+                        "pkg:node_modules/from-git",
+                        &format!("git:{git}:from-git@0.0.0:patch[]:bin[]"),
+                    ),
+                    (
+                        "provisioned:node_modules/electron",
+                        &format!("electron-v1:{provisioned}"),
+                    ),
+                    ("artifact:node_modules/thing", &artifact),
+                ],
+            ),
+            vec![stub(&node), stub(&libs), stub(&git)],
+        );
+        let mut expected_objects = vec![node, libs, git];
+        expected_objects.sort();
+        assert_eq!(objects, expected_objects);
+        let mut expected_cache = vec![
+            format!("sha512:{integrity}"),
+            format!("sha256:{provisioned}"),
+            format!("sha256:{artifact}"),
+        ];
+        expected_cache.sort();
+        assert_eq!(cache, expected_cache);
+    }
+
+    /// `plan_digest` and `native` belong to `/4` alone: a `/3` record that
+    /// carries either is a shape no producer ever wrote.
+    #[test]
+    fn adapter_node_env_schemas_do_not_share_a_path() {
+        let node = oid('1', "nodejs");
+        for key in ["plan_digest", "native"] {
+            let reason = unresolved(
+                ident(
+                    "node-env",
+                    "env",
+                    "24.20.0",
+                    &[
+                        ("schema", "node-env/3"),
+                        ("store_root", "/tmp/store"),
+                        ("nodejs", &node),
+                        ("layout", "node_modules"),
+                        ("workspaces", ""),
+                        (key, "value"),
+                    ],
+                ),
+                vec![stub(&node)],
+            );
+            assert!(reason.contains(key), "{reason}");
+        }
+    }
+
     /// npm publishes sha1, sha256 and sha512 integrity; the algorithm in the
     /// entry decides the cache namespace, and is never assumed to be sha256.
     #[test]
@@ -1668,6 +1812,81 @@ mod tests {
         assert_eq!(cache, vec![format!("sha256:{sdist}")]);
     }
 
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `sdist-build/4` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `build_mode` and
+    /// `native_mode` inputs do not leak into the dependency set.
+    #[test]
+    fn adapter_sdist_build_sdist_build_4_recovers_the_expected_dependencies() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        let sdist = sha256('2');
+        let build_env = oid('a', "env");
+        let rust = oid('b', "rust");
+        let vendor = oid('c', "vendor");
+        let libs = oid('d', "libset");
+        let (objects, cache) = proven(
+            ident(
+                "sdist-build",
+                "widget",
+                "1.0.0",
+                &[
+                    ("schema", "sdist-build/4"),
+                    ("sdist_sha256", &sdist),
+                    ("python", &format!("3.11.9:{artifact}")),
+                    ("platform", "x86_64-unknown-linux-gnu"),
+                    ("build_env", &build_env),
+                    ("build_mode", "rust-vendor"),
+                    ("native_mode", "native-libs"),
+                    ("rust", &rust),
+                    ("vendor", &vendor),
+                    ("native_libs", &libs),
+                    ("native_linker", "native-libs-rpath/1"),
+                ],
+            ),
+            vec![
+                cpython.clone(),
+                stub(&build_env),
+                stub(&rust),
+                stub(&vendor),
+                stub(&libs),
+            ],
+        );
+        let mut expected = vec![cpython.id, build_env, rust, vendor, libs];
+        expected.sort();
+        assert_eq!(objects, expected);
+        assert_eq!(cache, vec![format!("sha256:{sdist}")]);
+    }
+
+    /// `build_mode` and `native_mode` belong to `/4` alone: a `/3` record
+    /// that carries either is a shape no producer ever wrote.
+    #[test]
+    fn adapter_sdist_build_3_and_4_do_not_share_a_path() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        let build_env = oid('a', "env");
+        for key in ["build_mode", "native_mode"] {
+            let reason = unresolved(
+                ident(
+                    "sdist-build",
+                    "widget",
+                    "1.0.0",
+                    &[
+                        ("schema", "sdist-build/3"),
+                        ("sdist_sha256", &sha256('2')),
+                        ("python", &format!("3.11.9:{artifact}")),
+                        ("platform", "x86_64-unknown-linux-gnu"),
+                        ("build_env", &build_env),
+                        (key, "value"),
+                    ],
+                ),
+                vec![cpython.clone(), stub(&build_env)],
+            );
+            assert!(reason.contains(key), "{reason}");
+        }
+    }
+
     /// The two sdist-build schemas must never share a path: `/2` names its
     /// build toolchain by digest list, `/3` names a build environment object.
     #[test]
@@ -1755,6 +1974,65 @@ mod tests {
         expected.sort();
         assert_eq!(objects, expected);
         assert_eq!(cache, vec![format!("sha256:{wheel}")]);
+    }
+
+    /// The successor row's adapter. Legacy migration cannot reach a
+    /// post-bump schema in practice — every `python-env/3` object was
+    /// committed with explicit evidence — so this test is the only thing
+    /// that exercises it, and the only proof the added `package_digest` and
+    /// `native` inputs do not leak into the dependency set.
+    #[test]
+    fn adapter_python_env_python_env_3_recovers_the_expected_dependencies() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        let wheel = sha256('5');
+        let built = oid('f', "widget-1.0.0");
+        let (objects, cache) = proven(
+            ident(
+                "python-env",
+                "env",
+                "3.11.9",
+                &[
+                    ("schema", "python-env/3"),
+                    ("store_root", "/tmp/store"),
+                    ("cpython", &cpython.id),
+                    ("package_digest", &format!("sha256:{}", sha256('9'))),
+                    ("native", "none"),
+                    ("pkg:flask", &format!("Wheel:{wheel}")),
+                    ("pkg:widget", &format!("Sdist:{}:{built}", sha256('2'))),
+                ],
+            ),
+            vec![cpython.clone(), stub(&built)],
+        );
+        let mut expected = vec![cpython.id, built];
+        expected.sort();
+        assert_eq!(objects, expected);
+        assert_eq!(cache, vec![format!("sha256:{wheel}")]);
+    }
+
+    /// `package_digest` and `native` belong to `/3` alone: a `/2` record
+    /// that carries either is a shape no producer ever wrote.
+    #[test]
+    fn adapter_python_env_schemas_do_not_share_a_path() {
+        let artifact = sha256('1');
+        let cpython = cpython_record("3.11.9", &artifact, "x86_64-unknown-linux-gnu");
+        for key in ["package_digest", "native"] {
+            let reason = unresolved(
+                ident(
+                    "python-env",
+                    "env",
+                    "3.11.9",
+                    &[
+                        ("schema", "python-env/2"),
+                        ("store_root", "/tmp/store"),
+                        ("cpython", &cpython.id),
+                        (key, "value"),
+                    ],
+                ),
+                vec![cpython.clone()],
+            );
+            assert!(reason.contains(key), "{reason}");
+        }
     }
 
     /// The historical fast path recorded a derivation *fingerprint*, not an
@@ -2411,6 +2689,12 @@ mod tests {
                 if row.kind == "native-libs" && platform.is_macos() {
                     continue;
                 }
+                // A superseded row has no live producer by definition. Its
+                // own test below proves it refuses publication and that its
+                // successor is registered.
+                if row.superseded_by.is_some() {
+                    continue;
+                }
                 let row_cases: Vec<_> = cases
                     .iter()
                     .filter(|identity| {
@@ -2456,6 +2740,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A superseded row is kept so records already in the store still
+    /// migrate and their objects are swept as ordinary garbage. Two things
+    /// must hold: its successor is a registered row, and no producer can
+    /// publish the retired schema again.
+    #[test]
+    fn every_superseded_row_names_a_registered_successor_and_refuses_publication() {
+        install_shipped_kinds();
+        let rows: Vec<&KindAdapter> = registered_kinds().collect();
+        let mut seen = 0;
+        for row in &rows {
+            let Some(successor) = row.superseded_by else {
+                continue;
+            };
+            seen += 1;
+            assert!(
+                rows.iter()
+                    .any(|other| other.kind == row.kind && other.schema == Some(successor)),
+                "{} is superseded by {successor}, which is not a registered row",
+                row.kind
+            );
+            let mut inputs: BTreeMap<String, String> = row
+                .live_required
+                .iter()
+                .map(|key| ((*key).to_string(), "x".to_string()))
+                .collect();
+            inputs.insert(
+                "schema".into(),
+                row.schema.expect("a superseded row has a schema").into(),
+            );
+            let identity = Identity {
+                kind: row.kind.into(),
+                name: "x".into(),
+                version: "1".into(),
+                inputs,
+            };
+            let reason = check_identity_grammar(&identity).unwrap_err();
+            assert!(reason.contains("superseded by"), "{reason}");
+            assert!(reason.contains(successor), "{reason}");
+        }
+        // The four bumped in one change: a row silently losing its marker
+        // would otherwise make this test vacuous.
+        assert_eq!(seen, 4);
     }
 
     fn live_identity_cases(platform: Platform) -> Vec<Identity> {
@@ -2557,12 +2885,12 @@ mod tests {
             "BEAM relocation relation",
         );
 
-        let node_empty = case_with_input(&linux, "node-env", Some("node-env/3"), "layout");
+        let node_empty = case_with_input(&linux, "node-env", Some("node-env/4"), "layout");
         assert_relation_breaks(&node_empty, &["layout"], "Node layout/package relation");
         let node_packages = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/3"),
+            Some("node-env/4"),
             "pkg:node_modules/example",
         );
         assert_relation_breaks(
@@ -2570,7 +2898,7 @@ mod tests {
             &["pkg:node_modules/example"],
             "Node layout/package relation",
         );
-        let node_native = case_with_input(&linux, "node-env", Some("node-env/3"), "native_libs");
+        let node_native = case_with_input(&linux, "node-env", Some("node-env/4"), "native_libs");
         assert_relation_breaks(
             &node_native,
             &["pkg:node_modules/example"],
@@ -2579,7 +2907,7 @@ mod tests {
         let node_provisioned = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/3"),
+            Some("node-env/4"),
             "provisioned:node_modules/electron",
         );
         assert_relation_breaks(
@@ -2597,7 +2925,7 @@ mod tests {
         let mut node_darwin_native = case_with_input(
             &darwin,
             "node-env",
-            Some("node-env/3"),
+            Some("node-env/4"),
             "pkg:node_modules/example",
         );
         node_darwin_native
@@ -2606,14 +2934,14 @@ mod tests {
         let reason = check_identity_grammar(&node_darwin_native).unwrap_err();
         assert!(reason.contains("Node native platform relation"), "{reason}");
 
-        let python_env = case_with_input(&linux, "python-env", Some("python-env/2"), "native_libs");
+        let python_env = case_with_input(&linux, "python-env", Some("python-env/3"), "native_libs");
         assert_relation_breaks(
             &python_env,
             &["pkg:matrix-python-native"],
             "Python environment native_libs/pkg relation",
         );
         let mut orphan_native =
-            case_with_input(&linux, "python-env", Some("python-env/2"), "pkg:example");
+            case_with_input(&linux, "python-env", Some("python-env/3"), "pkg:example");
         orphan_native
             .inputs
             .insert("native_libs".into(), "native-libs-object".into());
@@ -2623,7 +2951,7 @@ mod tests {
             "{reason}"
         );
         let mut python_darwin_native =
-            case_with_input(&darwin, "python-env", Some("python-env/2"), "pkg:example");
+            case_with_input(&darwin, "python-env", Some("python-env/3"), "pkg:example");
         python_darwin_native
             .inputs
             .insert("pkg:example".into(), "Sdist:fixture".into());
@@ -2645,7 +2973,7 @@ mod tests {
         let reason = check_identity_grammar(&native_libs_darwin).unwrap_err();
         assert!(reason.contains("native-libs platform contract"), "{reason}");
 
-        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/3"), "rust");
+        let sdist_rust = case_with_input(&linux, "sdist-build", Some("sdist-build/4"), "rust");
         assert_relation_breaks(
             &sdist_rust,
             &["rust", "vendor"],
@@ -2654,7 +2982,7 @@ mod tests {
         let sdist_native = case_with_input(
             &linux,
             "sdist-build",
-            Some("sdist-build/3"),
+            Some("sdist-build/4"),
             "native_linker",
         );
         assert_relation_breaks(
@@ -2663,7 +2991,7 @@ mod tests {
             "sdist native_libs/native_linker relation",
         );
         let mut sdist_darwin_native =
-            case_with_input(&darwin, "sdist-build", Some("sdist-build/3"), "build_env");
+            case_with_input(&darwin, "sdist-build", Some("sdist-build/4"), "build_env");
         sdist_darwin_native
             .inputs
             .insert("native_libs".into(), "native-libs-object".into());
@@ -2691,14 +3019,19 @@ mod tests {
         assert!(reason.contains("BEAM relocation relation"), "{reason}");
     }
 
+    /// The first drift `python-env/3` closes: a one-wheel plan that drops
+    /// its only `pkg:` key. Under `/2` the result was the legitimate empty
+    /// environment, byte for byte. `package_digest` is written
+    /// unconditionally, so the two are now different identities and the
+    /// contract names the mismatch.
     #[test]
-    fn python_env_one_wheel_dropped_is_a_documented_schema_limitation() {
+    fn python_env_one_wheel_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
         let empty = linux
             .iter()
             .find(|identity| {
                 identity.kind == "python-env"
-                    && schema_input_of(identity) == Some("python-env/2")
+                    && schema_input_of(identity) == Some("python-env/3")
                     && !identity.inputs.keys().any(|key| key.starts_with("pkg:"))
             })
             .expect("empty Python environment matrix case");
@@ -2706,7 +3039,7 @@ mod tests {
             .iter()
             .find(|identity| {
                 identity.kind == "python-env"
-                    && schema_input_of(identity) == Some("python-env/2")
+                    && schema_input_of(identity) == Some("python-env/3")
                     && identity
                         .inputs
                         .values()
@@ -2722,32 +3055,46 @@ mod tests {
             .expect("one-wheel Python package input");
         dropped.inputs.remove(&package_key);
 
-        // python-env/3 must add an unconditional package count or plan digest;
-        // keep this accepted drift as the reminder to tighten this assertion.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
-        assert_eq!(dropped.object_id(), empty.object_id());
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(
+            reason.contains("Python environment package digest"),
+            "{reason}"
+        );
+        assert_ne!(dropped.object_id(), empty.object_id());
+        assert_eq!(check_identity_grammar(empty), Ok(()));
+        assert_eq!(check_identity_grammar(one_wheel), Ok(()));
     }
 
+    /// The second drift `python-env/3` closes: an inspected native sdist
+    /// that drops its `native_libs` key. Under `/2` every native check was
+    /// conditional on that key. The `native` input says what the producer
+    /// decided, so its absence is a contradiction rather than a silence.
     #[test]
-    fn python_env_native_libs_dropped_is_a_documented_schema_limitation() {
+    fn python_env_native_libs_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let native = case_with_input(&linux, "python-env", Some("python-env/2"), "native_libs");
+        let native = case_with_input(&linux, "python-env", Some("python-env/3"), "native_libs");
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
 
-        // python-env/3 must add an unconditional package count or plan digest;
-        // the current contract cannot tell this from a non-native environment.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(
+            reason.contains("Python environment native decision"),
+            "{reason}"
+        );
+        assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
+    /// The first drift `node-env/4` closes: one package dropped from a
+    /// multi-package plan. Under `/3` another `pkg:` key remained, so every
+    /// presence check passed. `plan_digest` covers the whole set.
     #[test]
-    fn node_env_package_dropped_is_a_documented_schema_limitation() {
+    fn node_env_package_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
         let multi_package = linux
             .iter()
             .find(|identity| {
                 identity.kind == "node-env"
-                    && schema_input_of(identity) == Some("node-env/3")
+                    && schema_input_of(identity) == Some("node-env/4")
                     && identity
                         .inputs
                         .keys()
@@ -2765,26 +3112,29 @@ mod tests {
             .expect("multi-package Node package input");
         dropped.inputs.remove(&package_key);
 
-        // node-env/4 must add an explicit provisioning/native decision; keep
-        // this accepted drift as the reminder.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(reason.contains("Node plan digest"), "{reason}");
+        assert_eq!(check_identity_grammar(multi_package), Ok(()));
     }
 
+    /// The second drift `node-env/4` closes: a declared `artifact:` key
+    /// dropped. Under `/3` the artifact group was optional, so nothing
+    /// could prove one had been kept. `plan_digest` spans artifacts too.
     #[test]
-    fn node_env_artifact_dropped_is_a_documented_schema_limitation() {
+    fn node_env_artifact_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
         let declared = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/3"),
+            Some("node-env/4"),
             "artifact:.npm/tool.tar.gz",
         );
         let mut dropped = declared.clone();
         dropped.inputs.remove("artifact:.npm/tool.tar.gz");
 
-        // node-env/4 must add an explicit provisioning/native decision field;
-        // optional artifact inputs cannot currently prove that one was kept.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(reason.contains("Node plan digest"), "{reason}");
+        assert_eq!(check_identity_grammar(&declared), Ok(()));
     }
 
     #[test]
@@ -2794,7 +3144,7 @@ mod tests {
             let provisioned = case_with_input(
                 &cases,
                 "node-env",
-                Some("node-env/3"),
+                Some("node-env/4"),
                 "provisioned:node_modules/electron",
             );
             let mut dropped = provisioned.clone();
@@ -2812,47 +3162,55 @@ mod tests {
         }
     }
 
+    /// The third drift `node-env/4` closes: a Linux `native_libs` key
+    /// dropped. Under `/3` the native checks were conditional on that key.
     #[test]
-    fn node_env_native_libs_dropped_is_a_documented_schema_limitation() {
+    fn node_env_native_libs_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let native = case_with_input(&linux, "node-env", Some("node-env/3"), "native_libs");
+        let native = case_with_input(&linux, "node-env", Some("node-env/4"), "native_libs");
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
 
-        // node-env/4 must add an explicit provisioning/native decision field;
-        // native_libs is currently checked only when the key exists.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(reason.contains("Node native decision"), "{reason}");
+        assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
+    /// The first drift `sdist-build/4` closes: both halves of the
+    /// `rust`/`vendor` pair dropped together. Under `/3` only a one-sided
+    /// pair was rejected, so the drifted build looked like a build that
+    /// never had a Rust extension at all.
     #[test]
-    fn sdist_build_rust_vendor_dropped_is_a_documented_schema_limitation() {
+    fn sdist_build_rust_vendor_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/3"), "rust");
+        let rust = case_with_input(&linux, "sdist-build", Some("sdist-build/4"), "rust");
         let mut dropped = rust.clone();
         dropped.inputs.remove("rust");
         dropped.inputs.remove("vendor");
 
-        // sdist-build/4 must add an explicit build-mode field; dropping both
-        // Rust inputs currently leaves the valid no-Rust shape.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(reason.contains("sdist build_mode relation"), "{reason}");
+        assert_eq!(check_identity_grammar(&rust), Ok(()));
     }
 
+    /// The second drift `sdist-build/4` closes: both halves of the
+    /// `native_libs`/`native_linker` pair dropped together.
     #[test]
-    fn sdist_build_native_pair_dropped_is_a_documented_schema_limitation() {
+    fn sdist_build_native_pair_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
         let native = case_with_input(
             &linux,
             "sdist-build",
-            Some("sdist-build/3"),
+            Some("sdist-build/4"),
             "native_linker",
         );
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
         dropped.inputs.remove("native_linker");
 
-        // sdist-build/4 must add an explicit native-mode field; dropping both
-        // native inputs currently leaves the valid non-native shape.
-        assert_eq!(check_identity_grammar(&dropped), Ok(()));
+        let reason = check_identity_grammar(&dropped).unwrap_err();
+        assert!(reason.contains("sdist native_mode relation"), "{reason}");
+        assert_eq!(check_identity_grammar(&native), Ok(()));
     }
 
     #[test]
@@ -2863,7 +3221,7 @@ mod tests {
                 .iter()
                 .find(|identity| {
                     identity.kind == "cargo-vendor"
-                        && schema_input_of(identity) == Some("cargo-vendor/1")
+                        && schema_input_of(identity) == Some("cargo-vendor/2")
                         && identity
                             .inputs
                             .keys()
@@ -3005,14 +3363,18 @@ mod tests {
         }
     }
 
+    /// The drift `cargo-vendor/2` closes: a one-crate plan that drops its
+    /// only `crate:` key. `version` is `max(1, crate_count)`, so under `/1`
+    /// the drifted plan hashed to the empty plan's object id. The explicit
+    /// `crates` count separates them.
     #[test]
-    fn cargo_vendor_one_crate_dropped_is_a_documented_schema_limitation() {
+    fn cargo_vendor_one_crate_dropped_is_detected() {
         let cases = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
         let empty = cases
             .iter()
             .find(|identity| {
                 identity.kind == "cargo-vendor"
-                    && schema_input_of(identity) == Some("cargo-vendor/1")
+                    && schema_input_of(identity) == Some("cargo-vendor/2")
                     && !identity.inputs.keys().any(|key| key.starts_with("crate:"))
             })
             .expect("empty cargo-vendor matrix case");
@@ -3040,15 +3402,14 @@ mod tests {
                         >= 2
             })
             .expect("multi-crate cargo-vendor matrix case");
+        // The version relation is unchanged: it still cannot tell an empty
+        // plan from a one-crate plan, which is exactly why `crates` exists.
         assert_eq!(empty.version, "1");
-        assert_eq!(
-            empty.object_id(),
-            "fc7c4bf367736226eeb22ce0af6f285ceded8a1d-vendor-1"
-        );
+        assert_eq!(empty.inputs["crates"], "0");
         assert_eq!(one_crate.version, "1");
+        assert_eq!(one_crate.inputs["crates"], "1");
         assert_eq!(multi_crate.version, "2");
-        // cargo-vendor/2 must add an unconditional crate count; keep this
-        // accepted collision as the reminder to tighten the contract.
+        assert_eq!(multi_crate.inputs["crates"], "2");
         let mut dropped_one_crate = one_crate.clone();
         let dropped_key = dropped_one_crate
             .inputs
@@ -3057,8 +3418,9 @@ mod tests {
             .cloned()
             .expect("one-crate identity input");
         dropped_one_crate.inputs.remove(&dropped_key);
-        assert_eq!(check_identity_grammar(&dropped_one_crate), Ok(()));
-        assert_eq!(dropped_one_crate.object_id(), empty.object_id());
+        let reason = check_identity_grammar(&dropped_one_crate).unwrap_err();
+        assert!(reason.contains("Cargo crate count relation"), "{reason}");
+        assert_ne!(dropped_one_crate.object_id(), empty.object_id());
         assert_eq!(check_identity_grammar(empty), Ok(()));
         assert_eq!(check_identity_grammar(one_crate), Ok(()));
         assert_eq!(check_identity_grammar(multi_crate), Ok(()));

@@ -61,8 +61,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   `fmt` pass the program's status through. A literal `-h` tool argument needs `--` first.
 - **`tog status` compares recorded inputs only.** `-r` includes, `requirements/` members,
   and workspace-member package.json are not recorded. Cargo/Ruby/Elixir/.NET compare the lock
-  hash only; Go catches `require`/`replace` only via `go.sum`; pre-field closures show "synced
-  (unchecked)".
+  hash only; Go catches `require`/`replace` only via `go.sum`; a closure written before those
+  fields were recorded is reported `unchecked` and fails the command, since nothing about it
+  can be compared.
 - **There is no committed toolchain lock yet (designed, not built).**
   `.node-version`/`.ruby-version`/`.tool-versions` are not consulted; Node, Ruby and Elixir
   are single-pin. The lock and catalog/digest machinery are design-only

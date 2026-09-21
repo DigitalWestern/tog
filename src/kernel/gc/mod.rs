@@ -331,10 +331,11 @@ mod tests {
     /// work on.
     fn commit_legacy_fixture(store: &Store, identity: &Identity, refs: Option<&[&str]>) -> String {
         let id = identity.object_id();
-        if identity.kind == "not-a-known-kind" {
-            // Unknown-kind fixtures are historical records. Publish this
-            // legacy-shaped object by hand because the live commit guard must
-            // reject the same unknown kind.
+        if crate::kernel::objmeta::check_identity_grammar(identity).is_err() {
+            // Historical records: an unknown kind, or a schema since
+            // superseded. Publish the legacy-shaped object by hand, because
+            // the live commit guard exists to reject exactly these — but a
+            // store synced before the bump still has them on disk.
             let object = store.object_path(&id);
             fs::create_dir_all(&object).unwrap();
             fs::write(object.join("payload"), &identity.name).unwrap();
@@ -757,6 +758,63 @@ mod tests {
         assert_eq!(report.cached_artifacts, 1);
         assert!(!store.object_path(&id).exists());
         assert!(!artifact_path.exists());
+    }
+
+    /// An object minted under a schema that has since been superseded is
+    /// ordinary garbage once nothing roots it. Its row stays registered, so
+    /// the sweep can read the record and delete the object; losing the row
+    /// would instead block every sweep on a store that has one.
+    #[test]
+    fn an_object_of_a_superseded_schema_is_swept_as_garbage() {
+        let temp = TempStore::new("superseded-schema");
+        let store = temp.store();
+        let rooted = commit(&store, "rooted", None);
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        closure(&project, &store.object_path(&rooted), serde_json::json!({}));
+        store.register_root(&project).unwrap();
+        // A pre-object-meta/2 record, which is the case that actually needs
+        // the row: `migrate_metadata` only adapts `Evidence::Legacy`, and a
+        // record it cannot adapt closes every sweep. A crate whose sha256 is
+        // in the cache gives the adapter something real to reconstruct.
+        let crate_sha256 = "d".repeat(64);
+        cached_artifact(&store, &crate_sha256);
+        let identity = Identity {
+            kind: "cargo-vendor".into(),
+            name: "vendor".into(),
+            version: "1".into(),
+            inputs: BTreeMap::from([
+                ("schema".into(), "cargo-vendor/1".into()),
+                ("crate:serde@1.0.0".into(), crate_sha256.clone()),
+            ]),
+        };
+        let id = commit_legacy_fixture(&store, &identity, Some(&[]));
+        let object = store.object_path(&id);
+        assert_eq!(
+            record(&store, &id).evidence,
+            crate::kernel::objmeta::Evidence::Legacy,
+            "the fixture must be a real legacy record, not an explicit one"
+        );
+        age(&object);
+
+        let mut output = Vec::new();
+        let report = collect(
+            &store,
+            Options {
+                dry_run: false,
+                keep_days: 0,
+                project: false,
+                collect_legacy: false,
+                forgotten: Vec::new(),
+            },
+            &mut output,
+        )
+        .expect("a superseded schema must not block the sweep");
+        // The superseded row is what let the sweep read this record at all:
+        // without it the adapter is missing, the record stays legacy, and
+        // the sweep above refuses instead of returning a report.
+        assert_eq!(report.objects, 1);
+        assert!(!object.exists());
     }
 
     #[test]

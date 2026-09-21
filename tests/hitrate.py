@@ -64,12 +64,14 @@ CLASSES = [
 
 # Exception kinds a company policy would deny (docs/human/policy-company.toml).
 # An ok that carried only other kinds (file-collision, requirement-skipped,
-# built_from_source, ...) still counts as a company-policy ok; strict counts
-# only oks with zero exceptions.
+# built-from-source, ...) still counts as a company-policy ok; strict counts
+# only oks with zero exceptions. Both separators are listed so a CSV written
+# before the kind names were unified on the hyphen still classifies.
 COMPANY_DENY = {
     "install-script-failed", "weak-integrity", "unattested-mutable-state",
-    "unattested_index", "git-dependency", "lock_disagreement",
-    "artifact_not_provisioned",
+    "unattested-index", "git-dependency", "lock-disagreement",
+    "artifact-not-provisioned",
+    "unattested_index", "lock_disagreement", "artifact_not_provisioned",
 }
 
 CSV_COLUMNS = [

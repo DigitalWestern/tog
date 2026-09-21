@@ -13,6 +13,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "rust",
         schema: Some("rust-toolchain/1"),
+        superseded_by: None,
         live_required: &[
             "schema",
             "cargo_sha256",
@@ -33,6 +34,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "rustfmt",
         schema: Some("rustfmt/1"),
+        superseded_by: None,
         live_required: &["schema", "rust_object", "rustfmt_sha256", "platform"],
         live_optional: &[],
         legacy_only: &[],
@@ -47,6 +49,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "cargo-vendor",
         schema: Some("cargo-vendor/1"),
+        superseded_by: Some("cargo-vendor/2"),
         live_required: &["schema"],
         live_optional: &["crate:"],
         legacy_only: &[],
@@ -58,14 +61,29 @@ pub static KINDS: &[KindAdapter] = &[
         },
         adapt: cargo_vendor,
     },
+    KindAdapter {
+        kind: "cargo-vendor",
+        schema: Some("cargo-vendor/2"),
+        superseded_by: None,
+        live_required: &["schema", "crates"],
+        live_optional: &["crate:"],
+        legacy_only: &[],
+        live_contract: Some(cargo_vendor_v2_contract),
+        grammar: Grammar {
+            required: &["schema", "crates"],
+            optional: &[],
+            groups: &[("crate:", None)],
+        },
+        adapt: cargo_vendor_v2,
+    },
 ];
 
-/// The `cargo-vendor/1` producer uses `identity.version == max(1,
-/// crate_count)`. Under this schema, a one-crate plan whose producer dropped
-/// its `crate:` key is indistinguishable from the legitimate empty plan.
-/// Removing that ambiguity requires `cargo-vendor/2` with a separate count
-/// input. That is a deliberate future identity change, not something this
-/// guard can do.
+/// The `cargo-vendor/1` producer used `identity.version == max(1,
+/// crate_count)`. Under that schema a one-crate plan whose producer dropped
+/// its `crate:` key was indistinguishable from the legitimate empty plan,
+/// because `max(1, 0)` and `max(1, 1)` are the same number. `cargo-vendor/2`
+/// closes it with a separate `crates` count; this row survives only for
+/// records already in the store.
 fn cargo_vendor_contract(identity: &Identity) -> Result<(), String> {
     let crates = identity
         .inputs
@@ -82,6 +100,35 @@ fn cargo_vendor_contract(identity: &Identity) -> Result<(), String> {
     if version != expected {
         return Err(format!(
             "Cargo crate count/version relation: version {version} does not match {crates} crate: inputs"
+        ));
+    }
+    Ok(())
+}
+
+/// `cargo-vendor/2` adds the `crates` input: the exact number of `crate:`
+/// keys, written unconditionally, including the zero of an empty plan. A
+/// dropped sole `crate:` key now leaves `crates` at 1 with no crate entry, so
+/// the empty plan and the drifted one-crate plan are different identities and
+/// this contract names the difference.
+fn cargo_vendor_v2_contract(identity: &Identity) -> Result<(), String> {
+    // The `/1` relation runs first: where the version relation can already
+    // name the drift, that message is the more specific one.
+    cargo_vendor_contract(identity)?;
+    let crates = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("crate:"))
+        .count();
+    let declared = identity
+        .inputs
+        .get("crates")
+        .ok_or_else(|| "Cargo crate count relation: no crates input".to_string())?;
+    let declared = declared
+        .parse::<usize>()
+        .map_err(|_| format!("Cargo crate count relation: crates {declared:?} is not a count"))?;
+    if declared != crates {
+        return Err(format!(
+            "Cargo crate count relation: crates {declared} does not match {crates} crate: inputs"
         ));
     }
     Ok(())
@@ -127,10 +174,28 @@ fn rustfmt(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
 /// recording it would make the same identity publishable with two different
 /// dependency sets. See the deviation note in the ARCHITECTURE.md matrix.
 fn cargo_vendor(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    cargo_vendor_inner(record, index, &["schema"])
+}
+
+/// `cargo-vendor/2`: the same dependency set. The added `crates` count is a
+/// drift guard, not a byte source, so it contributes nothing here.
+///
+/// Every object of this schema was committed with explicit evidence,
+/// so legacy migration cannot reach it in practice; the metadata
+/// goldens in `kernel/objmeta.rs` are what exercise this adapter.
+fn cargo_vendor_v2(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    cargo_vendor_inner(record, index, &["schema", "crates"])
+}
+
+fn cargo_vendor_inner(
+    record: &Record,
+    index: &MetaIndex,
+    scalars: &[&str],
+) -> Result<ObjectDeps, String> {
     let mut deps = ObjectDeps::new();
     for (key, value) in &record.identity.inputs {
         let Some(krate) = key.strip_prefix("crate:") else {
-            if key == "schema" {
+            if scalars.contains(&key.as_str()) {
                 continue;
             }
             return Err(format!("unexpected identity input {key}"));
