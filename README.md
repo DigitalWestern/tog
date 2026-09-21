@@ -187,26 +187,36 @@ repository that ignores all of `.tog/` can never make `tog audit` pass.
 | `.tog/manifest-*.txt`, `.tog/lock-source.hash`, `.tog/egg-info.json` | no | Python manifest snapshots and stamps |
 | `.tog/cargo-home/` | no | the Cargo config and shim a sandboxed build runs with |
 
-The matching `.gitignore` stanza — ignore the cache, keep the records:
+The matching `.gitignore` stanza — ignore the cache, keep the records. The
+`**/` is not decoration: a monorepo gets one `.tog/` per subproject, and a
+root-anchored `.tog/*` would miss every one of them.
 
 ```gitignore
 .venv
 node_modules/
-.tog/*
-!.tog/closures/
-!.tog/policy.toml
+**/.tog/*
+!**/.tog/closures/
+!**/.tog/policy.toml
 ```
 
-Two things to know before you adopt this. A closure is one file per
-ecosystem, not one per platform, and it records the platform it was synced
-on, so a mixed Mac and Linux team overwrites one record with the other; the
-loser reads `elsewhere` in `tog status` and `stale` in `tog audit`. And
-every sync rewrites the record's `projected_at`, so any local `tog sync`
-leaves the committed file dirty even when nothing about the environment
-changed. Both point the same way: let one protected CI job on one platform
-write the closures the gate judges, and leave local syncs out of commits.
-The job is in
-[docs/human/CLI.md](docs/human/CLI.md#gating-a-pull-request-on-the-closures).
+Three things to know before you adopt this.
+
+- A committed closure is a *record*, not a certificate. `tog ls` and
+  `tog sbom` read one with no store and no projection, and a closure diff is
+  how a reviewer sees that a pull request added a `git-dependency`. But
+  `tog status` and `tog audit` also check the local `.venv` /
+  `node_modules`, so on a fresh checkout they exit 1 until something syncs.
+  A CI gate therefore syncs first and audits what that sync wrote.
+- A closure is one file per ecosystem, not one per platform, and it records
+  the platform it was synced on, so a mixed Mac and Linux team overwrites
+  one record with the other; the loser reads `elsewhere` in `tog status`.
+- Every sync rewrites the record's `projected_at`, so a local `tog sync`
+  dirties the committed file even when nothing about the environment
+  changed.
+
+The last two point the same way: let one protected job on one platform write
+the closures that get committed. The CI recipe is in
+[docs/human/CLI.md](docs/human/CLI.md#gating-a-pull-request-with-sync-and-audit).
 
 ## Working across machines
 

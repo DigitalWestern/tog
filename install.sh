@@ -35,6 +35,14 @@
 
 set -eu
 
+# Every path below hangs off HOME, and `set -u` would report it as a bare
+# "unbound variable" with no hint about what to do.
+if [ -z "${HOME:-}" ]; then
+    printf 'tog-install: error: %s\n' \
+        "HOME is not set; run this as a real user, or pass --dir=<path> with HOME=<path> set" >&2
+    exit 1
+fi
+
 REPO="DigitalWestern/tog"
 VERSION="${TOG_VERSION:-latest}"
 INSTALL_DIR="${TOG_INSTALL_DIR:-$HOME/.local/bin}"
@@ -57,6 +65,10 @@ zdotdir="${ZDOTDIR:-$HOME}"
 say()  { printf 'tog-install: %s\n' "$*" >&2; }
 fail() { printf 'tog-install: error: %s\n' "$*" >&2; exit 1; }
 
+# $1 single-quoted for a shell, with embedded apostrophes escaped, so a path
+# printed as a command to run is safe to paste whatever is in it.
+shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"; }
+
 usage() {
     cat <<'EOF'
 Usage: install.sh [--version=<tag>] [--dir=<path>] [--no-modify-path] [--no-completions]
@@ -74,7 +86,10 @@ EOF
 for arg in "$@"; do
     case "$arg" in
         --version=*) VERSION="${arg#--version=}" ;;
-        --dir=*) INSTALL_DIR="${arg#--dir=}" ;;
+        --dir=*)
+            INSTALL_DIR="${arg#--dir=}"
+            [ -n "$INSTALL_DIR" ] || fail "--dir= needs a path (e.g. --dir=\$HOME/bin)"
+            ;;
         --no-modify-path) MODIFY_PATH=0 ;;
         --no-completions) COMPLETIONS=0 ;;
         --uninstall) UNINSTALL=1 ;;
@@ -82,6 +97,8 @@ for arg in "$@"; do
         *) fail "unknown option '$arg' (try --help)" ;;
     esac
 done
+# TOG_INSTALL_DIR= (set but empty) reaches here the same way --dir= does.
+[ -n "$INSTALL_DIR" ] || fail "install directory is empty; set TOG_INSTALL_DIR or pass --dir=<path>"
 
 # --- uninstall --------------------------------------------------------------
 # Removes exactly what the header says this script writes, and nothing else.
@@ -97,37 +114,79 @@ drop_file() {
     return 0
 }
 
-# Delete the marked block in place, keeping the file's mode and owner.
+# Delete the marked block. A startup file is somebody's shell, so: refuse
+# unless the markers pair (an edited or truncated file would otherwise lose
+# everything after the begin marker), keep a .tog.bak, and swap the rewritten
+# copy in by rename so an interrupted uninstall cannot leave a half-file.
 strip_block() {
     file="$1"
     [ -f "$file" ] || return 0
-    grep -Fq "$MARK_BEGIN" "$file" 2>/dev/null || return 0
+    begins="$(grep -Fc "$MARK_BEGIN" "$file" 2>/dev/null || true)"
+    ends="$(grep -Fc "$MARK_END" "$file" 2>/dev/null || true)"
+    [ "${begins:-0}" = 0 ] && return 0
+    if [ "${begins:-0}" != "${ends:-0}" ]; then
+        say "$file has $begins '$MARK_BEGIN' and $ends '$MARK_END' markers; refusing to edit it. Remove the block by hand."
+        return 0
+    fi
     scratch="$file.tog-uninstall.$$"
-    awk -v begin="$MARK_BEGIN" -v end="$MARK_END" '
+    # cp first so the scratch file carries the original's mode, then truncate
+    # it with the rewritten content: the rename cannot change the file's bits.
+    cp "$file" "$file.tog.bak" 2>/dev/null \
+        || { say "could not back up $file (left as it is)"; return 0; }
+    cp "$file" "$scratch" 2>/dev/null \
+        || { say "could not rewrite $file (left as it is)"; return 0; }
+    if awk -v begin="$MARK_BEGIN" -v end="$MARK_END" '
         $0 == begin { skip = 1; next }
         $0 == end   { skip = 0; next }
         skip { next }
         { print }
-    ' "$file" >"$scratch" 2>/dev/null \
-        || { say "could not rewrite $file (left as it is)"; rm -f "$scratch"; return 0; }
-    if cat "$scratch" >"$file" 2>/dev/null; then
-        say "removed the tog block from $file"
+    ' "$file" >"$scratch" 2>/dev/null && mv -f "$scratch" "$file"; then
+        say "removed the tog block from $file (previous copy: $file.tog.bak)"
     else
         say "could not rewrite $file (left as it is)"
+        rm -f "$scratch"
     fi
-    rm -f "$scratch"
+}
+
+# Is <path> a file this script would have installed? A symlink out of the
+# install directory belongs to a package manager or to the user, and anything
+# whose --version does not say "tog " is somebody else's program.
+removable() {
+    [ -f "$1" ] || return 1
+    if [ -L "$1" ]; then
+        target="$(readlink "$1")"
+        case "$target" in
+            /*) resolved="$target" ;;
+            *) resolved="$INSTALL_DIR/$target" ;;
+        esac
+        case "$resolved" in
+            "$INSTALL_DIR"/*) ;;
+            *)
+                say "$1 is a symlink to $resolved, outside $INSTALL_DIR; leaving it alone"
+                return 1
+                ;;
+        esac
+    fi
+    version="$("$1" --version 2>/dev/null || true)"
+    case "$version" in
+        "tog "*) return 0 ;;
+        *)
+            say "$1 does not identify itself as tog; leaving it alone"
+            return 1
+            ;;
+    esac
 }
 
 uninstall() {
-    if [ -f "$INSTALL_DIR/tog" ]; then
-        gone="$("$INSTALL_DIR/tog" --version 2>/dev/null || echo tog)"
+    if [ ! -e "$INSTALL_DIR/tog" ] && [ ! -L "$INSTALL_DIR/tog" ]; then
+        say "no tog binary at $INSTALL_DIR/tog (use --dir=<path> if it is elsewhere)"
+    elif removable "$INSTALL_DIR/tog"; then
+        gone="$version"
         if rm -f "$INSTALL_DIR/tog"; then
             say "removed $gone from $INSTALL_DIR/tog"
         else
             say "could not remove $INSTALL_DIR/tog"
         fi
-    else
-        say "no tog binary at $INSTALL_DIR/tog (use --dir=<path> if it is elsewhere)"
     fi
     drop_file "$TOG_HOME/env"
     drop_file "$TOG_HOME/completions/_tog"
@@ -150,7 +209,7 @@ uninstall() {
     for extra in "$TOG_HOME/x" "$TOG_HOME/forests"; do
         if [ -d "$extra" ]; then say "  $extra"; fi
     done
-    say "to reclaim that space:  rm -rf '$STORE'"
+    say "to reclaim that space:  rm -rf $(shquote "$STORE")"
     say "projects keep their own .venv, node_modules and .tog/ until you delete them"
     say "done. The current terminal may still have tog cached; run 'hash -r'"
 }

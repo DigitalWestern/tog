@@ -637,10 +637,14 @@ mod tests {
         );
     }
 
-    /// Every spelling the parser accepts is on the help screen, and a USAGE
-    /// line never omits an option its own OPTIONS block lists (#100).
+    /// The extra spellings the parser accepts but the option table used to
+    /// hide are on the help screen, and no USAGE line omits the primary long
+    /// spelling of an option its own OPTIONS block lists (#100). The second
+    /// half checks one spelling per option on purpose: `tog x` lists
+    /// `--python` and `--node` in OPTIONS but keeps its usage line to
+    /// `[--py | --npm]` to stay inside eighty columns.
     #[test]
-    fn help_documents_every_spelling_the_parser_accepts() {
+    fn help_lists_the_extra_spellings_and_usage_matches_options() {
         for (command, spellings) in [
             ("add", &["-D", "--dev"][..]),
             ("remove", &["-D", "--dev"]),

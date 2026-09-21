@@ -150,7 +150,56 @@ out="$(run_installer "$H" /bin/zsh "$BASE_PATH" --uninstall 2>&1)" || { echo "$o
 check "says there is no binary"           grep -Fq 'no tog binary at' <<<"$out"
 if grep -Fq downloading <<<"$out"; then bad "--uninstall downloaded something"; else ok "--uninstall never downloads"; fi
 
-echo "== 11. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
+echo "== 11. --uninstall refuses a startup file whose markers do not pair"
+H="$WORK/h12"; mkdir -p "$H"; echo '# mine' > "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+# Somebody edited the block out by hand and left the opening marker behind.
+grep -v '^# <<< tog <<<$' "$H/.bashrc" > "$H/.bashrc.tmp" && mv "$H/.bashrc.tmp" "$H/.bashrc"
+echo '# after the unclosed block' >> "$H/.bashrc"
+before="$(cat "$H/.bashrc")"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "refuses the unbalanced file"       grep -Fq 'refusing to edit it' <<<"$out"
+check "leaves the unbalanced file byte-identical" test "$before" = "$(cat "$H/.bashrc")"
+check "content after the marker survives" grep -Fq '# after the unclosed block' "$H/.bashrc"
+check "no backup written for a refusal"   test ! -e "$H/.bashrc.tog.bak"
+check "the binary still went"             test ! -e "$H/.local/bin/tog"
+
+echo "== 12. a balanced strip keeps a backup and the file's mode"
+H="$WORK/h13"; mkdir -p "$H"; echo '# mine' > "$H/.bashrc"; chmod 600 "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+mode_before="$(ls -l "$H/.bashrc" | cut -c1-10)"
+run_installer "$H" /bin/bash "$BASE_PATH" --uninstall >/dev/null 2>&1 || bad "--uninstall exited non-zero"
+check "backup kept"                       grep -Fq '# >>> tog >>>' "$H/.bashrc.tog.bak"
+check "block gone from the live file"     test "$(count_marks "$H/.bashrc")" = 0
+check "mode preserved across the rewrite" test "$mode_before" = "$(ls -l "$H/.bashrc" | cut -c1-10)"
+
+echo "== 13. --uninstall does not delete something that is not tog"
+H="$WORK/h14"; mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "someone-elses-tool 2.0"\n' > "$H/.local/bin/tog"
+chmod 755 "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "imposter left in place"            test -x "$H/.local/bin/tog"
+check "says why it left it"               grep -Fq 'does not identify itself as tog' <<<"$out"
+# A symlink out of the install directory is a package manager's, not ours.
+H="$WORK/h15"; mkdir -p "$H/.local/bin" "$H/opt"
+cp "$BIN" "$H/opt/tog"
+ln -s "$H/opt/tog" "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "outside symlink left in place"     test -L "$H/.local/bin/tog"
+check "says it is a symlink elsewhere"    grep -Fq 'outside' <<<"$out"
+
+echo "== 14. empty --dir and missing HOME are usage errors, not surprises"
+if run_installer "$WORK/h16" /bin/bash "$BASE_PATH" --dir= >/dev/null 2>&1; then
+    bad "--dir= was accepted"
+else ok "--dir= is refused"; fi
+if env -i PATH="$BASE_PATH" TERM=dumb TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
+    sh "$ROOT/install.sh" >/dev/null 2>&1; then
+    bad "installer ran with no HOME"
+else ok "no HOME is refused"; fi
+out="$(env -i PATH="$BASE_PATH" TERM=dumb sh "$ROOT/install.sh" 2>&1 || true)"
+check "the no-HOME message names HOME"    grep -Fq 'HOME is not set' <<<"$out"
+
+echo "== 15. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
 for value in 0 1; do
     H="$WORK/h11-$value"; mkdir -p "$H"
     env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \

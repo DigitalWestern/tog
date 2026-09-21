@@ -22,8 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh 
 ```
 
 It downloads the release binary for your machine, checks its sha256, puts it
-in `~/.local/bin`, installs bash/zsh/fish completions, and tells you where
-the store will be and roughly how large it gets. A script cannot change the
+in `~/.local/bin`, installs bash and zsh completions (and fish's too, but
+only when fish is on PATH or is your `$SHELL`), and tells you where the
+store will be and roughly how large it gets. A script cannot change the
 PATH of the terminal that ran it, so the last thing it prints is the one
 command that fixes that terminal:
 
@@ -47,7 +48,7 @@ sandbox and native builds need them; the
 $ tog doctor
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
-ok    disk         12.6 GiB free under the store
+ok    disk         12.1 GiB free under the store
 ok    toolchains   none realized yet; the first 'tog sync' downloads what the project needs
 ok    sandbox      bubblewrap at /usr/bin/bwrap
 ok    c-toolchain  cc, c++, make, pkg-config, patch on PATH
@@ -73,7 +74,7 @@ synced: .venv -> /tmp/tog-demo/store/objects/4002574e4e21aab52a9e4abe4ff2b2c6e91
 tog: warning: closures are written unsigned, which is fine until you want 'tog audit' to vouch for them (set TOG_SIGNING_KEY=<key file>; 'tog keygen' makes one). Said once per store
 ```
 
-7.9 seconds from an empty store, most of it downloading CPython. On a
+5.1 seconds from an empty store, most of it downloading CPython. On a
 terminal the download draws a progress line; this transcript was piped to a
 file, so it has none. You did not install Python: tog fetched a pinned,
 hash-verified 3.12.14 into the store and built the venv out of it.
@@ -118,11 +119,28 @@ $ tog sync
 synced: node_modules -> /tmp/tog-demo/store/objects/9d0333722d78ff1fa9a845b3693f9794be556d7c-env-24.20.0
 ```
 
-4.3 seconds, including downloading Node 24.20.0. A directory holding both a
+3.7 seconds, including downloading Node 24.20.0. A directory holding both a
 `requirements.txt` and a `package-lock.json` gets both ecosystems out of one
 `tog sync`, with no flags and no ordering.
 
-Scripts in `package.json` run without the `run`:
+This project's `package.json` declares one script:
+
+```
+$ cat package.json
+{
+  "name": "proj-npm",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "wrappy": "1.0.2"
+  },
+  "scripts": {
+    "dev": "node index.js"
+  }
+}
+```
+
+Scripts run without the `run`:
 
 ```
 $ tog dev
@@ -159,7 +177,7 @@ package contents are still read-only store objects.)
 **`.tog/` is small, and part of the project:**
 
 ```
-$ find .tog          # in api/
+$ find .tog | sort          # in api/
 .tog
 .tog/closures
 .tog/closures/python.json
@@ -185,7 +203,7 @@ $ du -sh /tmp/tog-demo/store
 
 That is two toolchains plus the verified download cache they came from. It
 does not grow per project: a second project on the same lock is a store hit
-on the same object id, in an eighth of a second.
+on the same object id, in a tenth of a second.
 
 ```
 $ cd ../api2 && tog
@@ -203,9 +221,14 @@ tog: gc would free 0 MB (0 objects, 0 cached artifacts)
 ## 6. Day two
 
 `tog status` answers one question: is what is projected still what the files
-on disk say? Offline, read-only, exit 0 only when every detected ecosystem
-is synced — which is what makes it usable as a "did you commit the lock" CI
-gate.
+on disk say? It compares three things per ecosystem — the manifest and lock
+inputs the closure recorded, the closure itself, and the `.venv` or
+`node_modules` symlink in this directory — and exits 0 only when every
+detected ecosystem is `synced`. It is offline and read-only, and it needs a
+projection: on a fresh checkout that has never synced it reports `missing`
+and exits 1, so it is a "is my working copy current" check rather than a
+records-only verifier that CI could run on its own. The CI shape is in
+[CLI.md](CLI.md#gating-a-pull-request-with-sync-and-audit).
 
 ```
 $ tog status
@@ -214,7 +237,7 @@ node  synced      (node 24.20.0; 3 packages)
 1 of 1 synced.
 ```
 
-Edit `package.json` and it says so, and names the file:
+Add a second script to `package.json` and it says so, naming the file:
 
 ```
 $ tog status
@@ -238,15 +261,18 @@ something other than a person reads the answer.
 
 ## 7. When it goes wrong
 
-Two errors you will hit first. Neither is a usage error, so both exit 1.
+Two you will hit first.
 
 ```
 $ tog
 tog: no project in /tmp/tog-demo/scratch: nothing to sync here.
 ```
 
-No manifest here. Tog prints its usage after that line so you can see what
-else it does; the full list of files it looked for is in `tog help sync`.
+No manifest here, so there was no command to run: that is a usage error and
+exits 2, and tog prints its usage after that line so you can see what else
+it does. The full list of files it looked for is in `tog help sync`. (Asking
+for a specific verb in the same directory — `tog plan`, say — is a command
+that failed rather than a malformed one, and exits 1.)
 
 ```
 $ tog run python --version
