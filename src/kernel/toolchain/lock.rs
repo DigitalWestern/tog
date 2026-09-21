@@ -124,6 +124,9 @@ impl ToolchainLock {
         }
         for (eco, entry) in &self.inner.toolchain {
             let bad = |what: String| invalid(format!("tog-toolchain.toml [{eco}]: {what}"));
+            if !is_bare_key(eco) {
+                return Err(bad("ecosystem name is not a bare TOML key".into()));
+            }
             if entry.runtime.is_empty() {
                 return Err(bad("empty runtime".into()));
             }
@@ -145,6 +148,11 @@ impl ToolchainLock {
                 return Err(bad("duplicate component".into()));
             }
             for name in &entry.components {
+                if !is_bare_key(name) {
+                    return Err(bad(format!(
+                        "component name {name:?} is not a bare TOML key"
+                    )));
+                }
                 if !entry.component.contains_key(name.as_str()) {
                     return Err(bad(format!("component {name} has no table")));
                 }
@@ -300,6 +308,15 @@ impl ToolchainLock {
     }
 }
 
+/// A TOML bare key: the writer emits ecosystem and component names unquoted
+/// in table headers, so every name it accepts must be one.
+fn is_bare_key(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn is_digest(text: &str) -> bool {
     let (algo, hex) = match text.split_once(':') {
         Some(pair) => pair,
@@ -413,6 +430,20 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         assert!(ToolchainLock::parse(bad_id.as_bytes()).is_err());
         let both = NODE_LOCK.replace("absent = true\n", "absent = true\nvalue = \"24.20.0\"\n");
         assert!(ToolchainLock::parse(both.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn names_the_writer_cannot_emit_bare_are_refused() {
+        // The canonical writer puts ecosystem and component names in table
+        // headers unquoted, so a name with a dot or quote would either
+        // re-parse as a different key or not parse at all.
+        let dotted_eco = NODE_LOCK.replace("[toolchain.node]", "[toolchain.\"no.de\"]");
+        assert!(ToolchainLock::parse(dotted_eco.as_bytes()).is_err());
+        let dotted_component = NODE_LOCK
+            .replace("\"node-gyp\"", "\"node.gyp\"")
+            .replace("component.node-gyp]", "component.\"node.gyp\"]");
+        let error = ToolchainLock::parse(dotted_component.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("bare TOML key"), "{error}");
     }
 
     #[test]

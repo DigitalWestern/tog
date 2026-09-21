@@ -25,10 +25,9 @@ pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static
     // lock (when present) through the held root descriptor, before the
     // store is opened. The result is unused and nothing is written or
     // required; a tampered input or lock still fails closed here.
-    if let Ok(root) = ProjectRoot::open(dir) {
-        let _inputs = input::discover_all(&root)?;
-        let _lock = ToolchainLock::read_via(&root)?;
-    }
+    let root = ProjectRoot::open(dir)?;
+    let _inputs = input::discover_all(&root)?;
+    let _lock = ToolchainLock::read_via(&root)?;
     let present = tailors::detected(dir)?;
     for tailor in &present {
         tailor.preflight(platform, dir)?;

@@ -7,9 +7,11 @@
 //! read inputs and compare them without planning dependencies.
 //!
 //! Discovery walks from a held project root so a symlinked input or ancestor
-//! fails closed instead of being read through. A project whose only version
-//! statement is computed (a `setup.py` or `mix.exs` with no declarative file)
-//! has no row with a value; the caller reports which file to add.
+//! fails closed instead of being read through. The consulted rows per
+//! ecosystem are the sources its own native tools honor, in that tool's
+//! precedence order, and only the declarative ones: a project whose only
+//! version statement is computed (a `setup.py`, `mix.exs`, or Gemfile
+//! directive) has no row with a value; the caller reports which file to add.
 
 use crate::kernel::fsroot::ProjectRoot;
 use sha2::{Digest as _, Sha256};
@@ -66,14 +68,16 @@ impl InputRow {
 /// First non-blank, non-comment line, trimmed.
 fn first_line(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        return Some(line.to_string());
-    }
-    None
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+}
+
+/// A TOML document, or `None` when the bytes are not valid TOML.
+fn toml_document(bytes: &[u8]) -> Option<toml::Value> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    toml::from_str(text).ok()
 }
 
 /// `.python-version`: a version like `3.12.1`.
@@ -81,9 +85,44 @@ pub fn read_python_version(bytes: &[u8]) -> Option<String> {
     first_line(bytes)
 }
 
+/// `pyproject.toml`: `[project] requires-python = ">=3.12"`.
+pub fn read_pyproject_requires_python(bytes: &[u8]) -> Option<String> {
+    toml_document(bytes)?
+        .get("project")?
+        .get("requires-python")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `pyproject.toml`: `[tool.poetry.dependencies] python = "^3.9"`, or the
+/// table spelling `python = { version = "^3.9" }`.
+pub fn read_pyproject_poetry_python(bytes: &[u8]) -> Option<String> {
+    let python = toml_document(bytes)?
+        .get("tool")?
+        .get("poetry")?
+        .get("dependencies")?
+        .get("python")?
+        .clone();
+    match python {
+        toml::Value::String(text) => Some(text),
+        toml::Value::Table(table) => table.get("version")?.as_str().map(str::to_string),
+        _ => None,
+    }
+}
+
 /// `.node-version`: a version like `24.20.0`, with an optional leading `v`.
 pub fn read_node_version(bytes: &[u8]) -> Option<String> {
     first_line(bytes).map(|line| line.strip_prefix('v').unwrap_or(&line).to_string())
+}
+
+/// `package.json`: `{"engines": {"node": ">=24"}}`.
+pub fn read_package_json_engines_node(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("engines")?
+        .get("node")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// `.ruby-version`: `3.3.0` or `ruby-3.3.0`.
@@ -96,51 +135,22 @@ pub fn read_ruby_version(bytes: &[u8]) -> Option<String> {
     })
 }
 
-/// One `.tool-versions` line per tool: `python 3.12.1`, `nodejs 24.20.0`,
-/// `ruby 3.3.0`, `golang 1.22.0`, `rust 1.96.1`, `elixir 1.17`, `dotnet 8.0.100`.
-fn tool_versions_field(bytes: &[u8], tool: &str) -> Option<String> {
+/// One `.tool-versions` line per tool: `ruby 3.3.0`, `erlang 27.0`,
+/// `elixir 1.17.0`. A line with a name and no version is skipped, not a
+/// reason to stop reading.
+pub fn read_tool_versions(bytes: &[u8], tool: &str) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
+        let line = line.split('#').next().unwrap_or("").trim();
         let mut parts = line.split_whitespace();
-        let name = parts.next()?;
-        let version = parts.next()?;
+        let (Some(name), Some(version)) = (parts.next(), parts.next()) else {
+            continue;
+        };
         if name == tool {
             return Some(version.to_string());
         }
     }
     None
-}
-
-pub fn read_tool_versions_python(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "python")
-}
-
-pub fn read_tool_versions_node(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "nodejs").or_else(|| tool_versions_field(bytes, "node"))
-}
-
-pub fn read_tool_versions_ruby(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "ruby")
-}
-
-pub fn read_tool_versions_go(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "golang").or_else(|| tool_versions_field(bytes, "go"))
-}
-
-pub fn read_tool_versions_rust(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "rust")
-}
-
-pub fn read_tool_versions_elixir(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "elixir")
-}
-
-pub fn read_tool_versions_dotnet(bytes: &[u8]) -> Option<String> {
-    tool_versions_field(bytes, "dotnet")
 }
 
 /// `global.json`: `{"sdk": {"version": "8.0.100"}}`.
@@ -155,31 +165,44 @@ pub fn read_global_json(bytes: &[u8]) -> Option<String> {
 
 /// `rust-toolchain.toml`: `[toolchain] channel = "1.96.1"`.
 pub fn read_rust_toolchain(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let value: toml::Value = toml::from_str(text).ok()?;
-    value
+    toml_document(bytes)?
         .get("toolchain")?
         .get("channel")?
         .as_str()
         .map(str::to_string)
 }
 
-/// `go.mod`: the `go 1.22.0` directive, or a `toolchain go1.22.0` line.
+/// Legacy `rust-toolchain`: a bare channel on the first line, or the same
+/// TOML document rustup accepts at that name.
+pub fn read_rust_toolchain_legacy(bytes: &[u8]) -> Option<String> {
+    read_rust_toolchain(bytes).or_else(|| first_line(bytes))
+}
+
+/// `go.mod`: the `go 1.22.0` directive, the module's minimum.
 pub fn read_go_mod(bytes: &[u8]) -> Option<String> {
+    go_mod_directive(bytes, "go")
+}
+
+/// `go.mod`: a `toolchain go1.22.0` line, the exact request. `toolchain
+/// default` means the same as no line, so it yields no value.
+pub fn read_go_mod_toolchain(bytes: &[u8]) -> Option<String> {
+    let value = go_mod_directive(bytes, "toolchain")?;
+    if value == "default" {
+        return None;
+    }
+    Some(value.strip_prefix("go").unwrap_or(&value).to_string())
+}
+
+fn go_mod_directive(bytes: &[u8], directive: &str) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("go ") {
-            let version = rest.split_whitespace().next()?;
-            if !version.is_empty() {
-                return Some(version.to_string());
-            }
-        }
-        if let Some(rest) = line.strip_prefix("toolchain ") {
-            let version = rest.split_whitespace().next()?.strip_prefix("go")?;
-            if !version.is_empty() {
-                return Some(version.to_string());
-            }
+        let line = line.split("//").next().unwrap_or("").trim();
+        let mut parts = line.split_whitespace();
+        let (Some(name), Some(value)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if name == directive {
+            return Some(value.to_string());
         }
     }
     None
@@ -225,40 +248,66 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
     let rows = match ecosystem {
         "python" => vec![
             row_for(root, ".python-version", "version", read_python_version)?,
-            row_for(root, ".tool-versions", "python", read_tool_versions_python)?,
+            row_for(
+                root,
+                "pyproject.toml",
+                "project.requires-python",
+                read_pyproject_requires_python,
+            )?,
+            row_for(
+                root,
+                "pyproject.toml",
+                "tool.poetry.dependencies.python",
+                read_pyproject_poetry_python,
+            )?,
         ],
         "node" => vec![
             row_for(root, ".node-version", "version", read_node_version)?,
-            row_for(root, ".tool-versions", "nodejs", read_tool_versions_node)?,
-            row_for(root, "package.json", "engines.node", |_| None)?,
+            row_for(
+                root,
+                "package.json",
+                "engines.node",
+                read_package_json_engines_node,
+            )?,
         ],
         "ruby" => vec![
             row_for(root, ".ruby-version", "version", read_ruby_version)?,
-            row_for(root, ".tool-versions", "ruby", read_tool_versions_ruby)?,
+            row_for(root, ".tool-versions", "ruby", |bytes| {
+                read_tool_versions(bytes, "ruby")
+            })?,
         ],
         "go" => vec![
             row_for(root, "go.mod", "go", read_go_mod)?,
-            row_for(root, ".tool-versions", "golang", read_tool_versions_go)?,
+            row_for(root, "go.mod", "toolchain", read_go_mod_toolchain)?,
         ],
         "rust" => vec![
+            row_for(
+                root,
+                "rust-toolchain",
+                "toolchain.channel",
+                read_rust_toolchain_legacy,
+            )?,
             row_for(
                 root,
                 "rust-toolchain.toml",
                 "toolchain.channel",
                 read_rust_toolchain,
             )?,
-            row_for(root, ".tool-versions", "rust", read_tool_versions_rust)?,
         ],
-        "elixir" => vec![row_for(
+        "elixir" => vec![
+            row_for(root, ".tool-versions", "erlang", |bytes| {
+                read_tool_versions(bytes, "erlang")
+            })?,
+            row_for(root, ".tool-versions", "elixir", |bytes| {
+                read_tool_versions(bytes, "elixir")
+            })?,
+        ],
+        "dotnet" => vec![row_for(
             root,
-            ".tool-versions",
-            "elixir",
-            read_tool_versions_elixir,
+            "global.json",
+            "sdk.version",
+            read_global_json,
         )?],
-        "dotnet" => vec![
-            row_for(root, "global.json", "sdk.version", read_global_json)?,
-            row_for(root, ".tool-versions", "dotnet", read_tool_versions_dotnet)?,
-        ],
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -284,18 +333,25 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    fn missing_and_present_shapes() {
+    fn project() -> (TempDir, ProjectRoot) {
         let temp = TempDir::new();
         let dir = temp.0.join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
+        (temp, root)
+    }
+
+    #[test]
+    fn missing_and_present_shapes() {
+        let (temp, root) = project();
+        let dir = temp.0.join("proj");
         let rows = discover(&root, "python").unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.absent && row.sha256.is_none()));
         std::fs::write(dir.join(".python-version"), "3.12.1\n").unwrap();
         let rows = discover(&root, "python").unwrap();
         assert_eq!(rows[0].value.as_deref(), Some("3.12.1"));
-        assert_eq!(rows[0].absent, false);
+        assert!(!rows[0].absent);
         assert!(rows[0].sha256.is_some());
     }
 
@@ -307,7 +363,18 @@ mod tests {
             Some("3.12".into())
         );
         assert_eq!(read_python_version(b""), None);
-        missing_and_present_shapes();
+    }
+
+    #[test]
+    fn python_pyproject_readers_find_each_field() {
+        let bytes = b"[project]\nrequires-python = \">=3.12\"\n\n[tool.poetry.dependencies]\npython = \"^3.9\"\n";
+        assert_eq!(read_pyproject_requires_python(bytes), Some(">=3.12".into()));
+        assert_eq!(read_pyproject_poetry_python(bytes), Some("^3.9".into()));
+        let table = b"[tool.poetry.dependencies]\npython = { version = \"^3.9\" }\n";
+        assert_eq!(read_pyproject_poetry_python(table), Some("^3.9".into()));
+        assert_eq!(read_pyproject_requires_python(b"[project]\n"), None);
+        assert_eq!(read_pyproject_poetry_python(b"[project]\n"), None);
+        assert_eq!(read_pyproject_requires_python(b"not toml ["), None);
     }
 
     #[test]
@@ -315,6 +382,17 @@ mod tests {
         assert_eq!(read_node_version(b"24.20.0\n"), Some("24.20.0".into()));
         assert_eq!(read_node_version(b"v24.20.0\n"), Some("24.20.0".into()));
         assert_eq!(read_node_version(b""), None);
+    }
+
+    #[test]
+    fn node_engines_reader_finds_the_range() {
+        let bytes = br#"{"name": "x", "engines": {"node": ">=24.20.0"}}"#;
+        assert_eq!(
+            read_package_json_engines_node(bytes),
+            Some(">=24.20.0".into())
+        );
+        assert_eq!(read_package_json_engines_node(b"{}"), None);
+        assert_eq!(read_package_json_engines_node(b"not json"), None);
     }
 
     #[test]
@@ -326,15 +404,20 @@ mod tests {
 
     #[test]
     fn tool_versions_reader_finds_each_tool() {
-        let bytes = b"python 3.12.1\nnodejs 24.20.0\nruby 3.3.0\ngolang 1.22.0\nrust 1.96.1\nelixir 1.17\ndotnet 8.0.100\n";
-        assert_eq!(read_tool_versions_python(bytes), Some("3.12.1".into()));
-        assert_eq!(read_tool_versions_node(bytes), Some("24.20.0".into()));
-        assert_eq!(read_tool_versions_ruby(bytes), Some("3.3.0".into()));
-        assert_eq!(read_tool_versions_go(bytes), Some("1.22.0".into()));
-        assert_eq!(read_tool_versions_rust(bytes), Some("1.96.1".into()));
-        assert_eq!(read_tool_versions_elixir(bytes), Some("1.17".into()));
-        assert_eq!(read_tool_versions_dotnet(bytes), Some("8.0.100".into()));
-        assert_eq!(read_tool_versions_python(b"ruby 3.3.0\n"), None);
+        let bytes = b"# pinned\npython 3.12.1 2.7.18\nruby 3.3.0 # trailing\nerlang 27.0\nelixir 1.17.0-otp-27\n";
+        assert_eq!(read_tool_versions(bytes, "python"), Some("3.12.1".into()));
+        assert_eq!(read_tool_versions(bytes, "ruby"), Some("3.3.0".into()));
+        assert_eq!(read_tool_versions(bytes, "erlang"), Some("27.0".into()));
+        assert_eq!(
+            read_tool_versions(bytes, "elixir"),
+            Some("1.17.0-otp-27".into())
+        );
+        assert_eq!(read_tool_versions(bytes, "nodejs"), None);
+        // A malformed line earlier in the file does not hide a later match.
+        assert_eq!(
+            read_tool_versions(b"ruby\nelixir 1.17\n", "elixir"),
+            Some("1.17".into())
+        );
     }
 
     #[test]
@@ -346,24 +429,29 @@ mod tests {
     }
 
     #[test]
-    fn rust_toolchain_reader_finds_channel() {
+    fn rust_toolchain_readers_find_channel() {
         let bytes = b"[toolchain]\nchannel = \"1.96.1\"\n";
         assert_eq!(read_rust_toolchain(bytes), Some("1.96.1".into()));
         assert_eq!(read_rust_toolchain(b"[toolchain]\n"), None);
         assert_eq!(read_rust_toolchain(b"not toml ["), None);
+        assert_eq!(read_rust_toolchain_legacy(bytes), Some("1.96.1".into()));
+        assert_eq!(
+            read_rust_toolchain_legacy(b"1.96.1\n"),
+            Some("1.96.1".into())
+        );
+        assert_eq!(read_rust_toolchain_legacy(b""), None);
     }
 
     #[test]
-    fn go_mod_reader_finds_go_directive() {
-        assert_eq!(
-            read_go_mod(b"module example.com/m\n\ngo 1.22.0\n"),
-            Some("1.22.0".into())
-        );
-        assert_eq!(
-            read_go_mod(b"module m\ntoolchain go1.22.0\n"),
-            Some("1.22.0".into())
-        );
+    fn go_mod_readers_separate_minimum_from_exact() {
+        let bytes = b"module example.com/m\n\ngo 1.22.0 // minimum\ntoolchain go1.24.2\n";
+        assert_eq!(read_go_mod(bytes), Some("1.22.0".into()));
+        assert_eq!(read_go_mod_toolchain(bytes), Some("1.24.2".into()));
         assert_eq!(read_go_mod(b"module m\n"), None);
+        assert_eq!(read_go_mod_toolchain(b"module m\ngo 1.22\n"), None);
+        assert_eq!(read_go_mod_toolchain(b"go 1.22\ntoolchain default\n"), None);
+        // A bare directive earlier in the file does not hide a later one.
+        assert_eq!(read_go_mod(b"go\ngo 1.22\n"), Some("1.22".into()));
     }
 
     #[test]
@@ -386,32 +474,28 @@ mod tests {
             ".status()",
             ".output()",
             "run_command",
+            "std::env",
         ] {
             assert!(
                 !non_test.contains(marker),
                 "reader mentions process API {marker:?}"
             );
         }
-        // And each ecosystem has its own parsing test above, so a reader
-        // that delegates to a tool would have nowhere to hide its output.
+        // Every ecosystem's rows parse under that guard, so a reader that
+        // delegates to a tool would have nowhere to hide its output.
+        let (_temp, root) = project();
         for ecosystem in ["python", "node", "ruby", "go", "rust", "elixir", "dotnet"] {
-            assert!(
-                text.contains(&format!("fn {ecosystem}_reader"))
-                    || text.contains(&format!("read_tool_versions_{ecosystem}"))
-                    || text.contains(ecosystem),
-                "no reader test names {ecosystem}"
-            );
+            let rows = discover(&root, ecosystem).unwrap();
+            assert!(!rows.is_empty(), "{ecosystem} consults no source");
         }
     }
 
     #[test]
     fn discovery_records_absence_instead_of_omitting() {
-        let temp = TempDir::new();
+        let (temp, root) = project();
         let dir = temp.0.join("proj");
-        std::fs::create_dir_all(&dir).unwrap();
-        let root = ProjectRoot::open(&dir).unwrap();
         let rows = discover(&root, "node").unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.absent));
         assert!(rows.iter().all(|row| row.sha256.is_none()));
         std::fs::write(dir.join("package.json"), "{}\n").unwrap();
@@ -422,6 +506,69 @@ mod tests {
             .unwrap();
         assert!(manifest.absent);
         assert!(manifest.sha256.is_some());
+        std::fs::write(
+            dir.join("package.json"),
+            "{\"engines\": {\"node\": \"24.20.0\"}}\n",
+        )
+        .unwrap();
+        let rows = discover(&root, "node").unwrap();
+        assert_eq!(rows[1].value.as_deref(), Some("24.20.0"));
+        assert!(!rows[1].absent);
+    }
+
+    #[test]
+    fn discovery_follows_the_precedence_table() {
+        let (_temp, root) = project();
+        let consulted = |ecosystem: &str| -> Vec<(String, String)> {
+            discover(&root, ecosystem)
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.path.display().to_string(), row.field))
+                .collect()
+        };
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(path, field)| (path.to_string(), field.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            consulted("python"),
+            pairs(&[
+                (".python-version", "version"),
+                ("pyproject.toml", "project.requires-python"),
+                ("pyproject.toml", "tool.poetry.dependencies.python"),
+            ])
+        );
+        assert_eq!(
+            consulted("node"),
+            pairs(&[
+                (".node-version", "version"),
+                ("package.json", "engines.node")
+            ])
+        );
+        assert_eq!(
+            consulted("rust"),
+            pairs(&[
+                ("rust-toolchain", "toolchain.channel"),
+                ("rust-toolchain.toml", "toolchain.channel"),
+            ])
+        );
+        assert_eq!(
+            consulted("go"),
+            pairs(&[("go.mod", "go"), ("go.mod", "toolchain")])
+        );
+        assert_eq!(
+            consulted("ruby"),
+            pairs(&[(".ruby-version", "version"), (".tool-versions", "ruby")])
+        );
+        assert_eq!(
+            consulted("elixir"),
+            pairs(&[(".tool-versions", "erlang"), (".tool-versions", "elixir")])
+        );
+        assert_eq!(
+            consulted("dotnet"),
+            pairs(&[("global.json", "sdk.version")])
+        );
     }
 
     #[test]
