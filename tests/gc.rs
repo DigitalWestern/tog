@@ -106,6 +106,19 @@ fn ok(output: Output, label: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// Like `ok`, for commands that narrate instead of printing a result.
+/// CLI.md: stdout is results, stderr is narration. `tog gc` writes its whole
+/// report to stderr, so assertions on gc narration read that stream.
+fn ok_narration(output: Output, label: &str) -> String {
+    assert!(
+        output.status.success(),
+        "{label} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stderr).unwrap()
+}
+
 fn age(path: &Path) {
     let old = SystemTime::now()
         .checked_sub(Duration::from_secs(2 * 24 * 60 * 60))
@@ -201,7 +214,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         .expect("node root key in listing");
 
     // Dry-run forget simulates only; the record survives.
-    let dry = ok(
+    let dry = ok_narration(
         tog(
             &bin,
             &python,
