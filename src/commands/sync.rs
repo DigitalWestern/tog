@@ -3,9 +3,11 @@
 
 use crate::commands::shared::no_inputs;
 use crate::kernel::context::{self, Context};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
+use crate::kernel::toolchain::{input, lock::ToolchainLock};
 use crate::tailors::{self, Tailor};
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -13,6 +15,15 @@ use std::path::Path;
 
 /// Check every detected ecosystem can sync, touching no store. Returns the
 /// tailors it checked so the sync runs exactly those.
+/// The toolchain-input ecosystem name for a tailor id; only the Rust tailor
+/// is named after its tool.
+fn ecosystem_of(tailor_id: &str) -> &str {
+    match tailor_id {
+        "cargo" => "rust",
+        other => other,
+    }
+}
+
 pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
     // Syncing ends by registering this project as a GC root. Check that the
     // path can be recorded before realizing or projecting anything: a
@@ -20,6 +31,15 @@ pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable(dir)?;
     let present = tailors::detected(dir)?;
+    // Dormant toolchain discovery: read the detected ecosystems' declarative
+    // inputs and the lock (when present) through the held root descriptor,
+    // before the store is opened. The result is unused and nothing is
+    // written or required; a tampered input or lock still fails closed
+    // here. Only detected ecosystems are consulted, so a stray symlink for
+    // an ecosystem the project does not use cannot stop its sync.
+    let root = ProjectRoot::open(dir)?;
+    let _inputs = input::discover_many(&root, present.iter().map(|t| ecosystem_of(t.id())))?;
+    let _lock = ToolchainLock::read_via(&root)?;
     for tailor in &present {
         tailor.preflight(platform, dir)?;
     }
@@ -323,6 +343,63 @@ mod tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("cannot protect"), "{error}");
+    }
+
+    #[test]
+    fn dormant_toolchain_discovery_writes_no_lock() {
+        // Preflight reads declarative inputs through the held root but the
+        // lock stays dormant: nothing is written and nothing is required.
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
+        let present = preflight_sync(Platform::host().unwrap(), &project).unwrap();
+        assert!(present.iter().any(|tailor| tailor.id() == "python"));
+        assert!(!project.join("tog-toolchain.toml").exists());
+        let root = ProjectRoot::open(&project).unwrap();
+        let rows = input::discover(&root, "python").unwrap();
+        assert_eq!(rows[0].value.as_deref(), Some("3.12.14"));
+        assert!(ToolchainLock::read_via(&root).unwrap().is_none());
+        // Every tailor id maps to an ecosystem discovery knows.
+        for tailor in tailors::registry() {
+            assert!(
+                input::ECOSYSTEMS.contains(&ecosystem_of(tailor.id())),
+                "{}",
+                tailor.id()
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_fails_closed_on_a_symlinked_toolchain_input() {
+        // The guarantee end to end: a symlinked input of a detected
+        // ecosystem stops sync before the store opens.
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let victim = temp.0.join("victim");
+        std::fs::write(&victim, "3.12.14\n").unwrap();
+        std::os::unix::fs::symlink(&victim, project.join(".python-version")).unwrap();
+        let Err(error) = preflight_sync(Platform::host().unwrap(), &project) else {
+            panic!("a symlinked .python-version was read through");
+        };
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+        // The same symlink for an ecosystem the project does not use is
+        // not consulted.
+        std::fs::remove_file(project.join(".python-version")).unwrap();
+        std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
+        std::os::unix::fs::symlink(&victim, project.join(".ruby-version")).unwrap();
+        preflight_sync(Platform::host().unwrap(), &project).unwrap();
     }
 
     #[test]
