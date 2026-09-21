@@ -248,6 +248,13 @@ pub fn shipped_selection() -> io::Result<Selected> {
     crate::kernel::toolchain::shipped(&toolchain_catalog()?)
 }
 
+/// The store object id of the Node a selection names, from the selection's
+/// own row and without realizing it: the same id `realize_runtime` commits.
+pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<String> {
+    let spec = node_row(selected, platform)?;
+    Ok(node_identity_of(&spec, platform).object_id())
+}
+
 /// The Node object identity, from the row the selection names. It is
 /// byte-identical to the one the pin table produced: the row carries the
 /// same version and the same artifact digest.

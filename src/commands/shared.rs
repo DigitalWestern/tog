@@ -72,9 +72,15 @@ pub(crate) fn selected_toolchain(
         )
     })?;
     for dir in cwd.ancestors() {
-        if dir.join(lock::LOCK_PATH).is_file() {
-            // Reading through the held root descriptor is what refuses a
-            // symlinked lock; the test above only decides where to look.
+        // Any entry under the lock's name decides where to look, a dangling
+        // symlink or a directory included: reading through the held root
+        // descriptor is what refuses those, and a lock that cannot be read
+        // must not fall through to the shipped default. A `.tog` directory
+        // is an explicit project boundary too, so an outer checkout's lock
+        // never decides an inner project's runtime; resolving there honors
+        // the project's own sources and a pre-lock closure.
+        let lock_entry = dir.join(lock::LOCK_PATH).symlink_metadata().is_ok();
+        if lock_entry || dir.join(".tog").is_dir() {
             let root = ProjectRoot::open(dir)?;
             let resolved = comforter::toolchain::resolve(
                 &root,
@@ -84,11 +90,6 @@ pub(crate) fn selected_toolchain(
                 false,
             )?;
             return resolved.get(tailor.lock_ecosystem()).cloned();
-        }
-        // A `.tog` directory is an explicit project boundary, so an outer
-        // checkout's lock never decides an inner project's runtime.
-        if dir.join(".tog").is_dir() {
-            break;
         }
     }
     runtime::shipped(&tailor.toolchain_catalog()?)
@@ -113,6 +114,62 @@ pub(crate) fn no_inputs() -> io::Error {
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    /// A CPython version the shipped catalog has that is not the default,
+    /// so a source naming it is visibly honored.
+    fn a_non_default_python() -> String {
+        let catalog = crate::tailors::by_id("python")
+            .unwrap()
+            .toolchain_catalog()
+            .unwrap();
+        let default = runtime::shipped(&catalog)
+            .unwrap()
+            .version("cpython")
+            .unwrap()
+            .to_string();
+        catalog
+            .bundles()
+            .iter()
+            .filter(|bundle| Platform::ALL.iter().all(|p| bundle.complete_for(*p)))
+            .filter_map(|bundle| bundle.component("cpython").map(|c| c.version.clone()))
+            .find(|version| *version != default)
+            .expect("the shipped catalog needs a second CPython")
+    }
+
+    #[test]
+    fn selected_toolchain_reads_the_project_not_the_shipped_default() {
+        let platform = Platform::host().unwrap();
+        let t = TempDir::new();
+        let other = a_non_default_python();
+
+        // No project at all: the shipped default, whatever a stray
+        // version file above says.
+        let bare = t.0.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let shipped = selected_toolchain(platform, &bare, "python").unwrap();
+        assert_eq!(shipped.source, crate::kernel::toolchain::Source::Shipped);
+        assert_ne!(shipped.version("cpython").unwrap(), other);
+
+        // A `.tog` boundary with no lock resolves the project's own
+        // sources, exactly as the sync that creates its lock would.
+        let project = t.0.join("project");
+        std::fs::create_dir_all(project.join(".tog")).unwrap();
+        std::fs::write(project.join(".python-version"), format!("{other}\n")).unwrap();
+        let selected = selected_toolchain(platform, &project.join("src"), "python").unwrap();
+        assert_eq!(selected.version("cpython").unwrap(), other);
+        assert_eq!(selected.source, crate::kernel::toolchain::Source::Shipped);
+
+        // A lock entry that is not a regular file refuses; it never falls
+        // through to the default.
+        let broken = t.0.join("broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::os::unix::fs::symlink("nowhere", broken.join(lock::LOCK_PATH)).unwrap();
+        let error = selected_toolchain(platform, &broken, "python").unwrap_err();
+        assert!(error.to_string().contains("tog-toolchain.toml"), "{error}");
+        let dir_lock = t.0.join("dir-lock");
+        std::fs::create_dir_all(dir_lock.join(lock::LOCK_PATH)).unwrap();
+        assert!(selected_toolchain(platform, &dir_lock, "python").is_err());
+    }
 
     #[test]
     fn projected_root_skips_plain_node_modules() {

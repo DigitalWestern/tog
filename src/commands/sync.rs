@@ -106,6 +106,19 @@ pub(crate) fn run_in_mode(
         );
         return Ok(());
     }
+    // A targeted update re-selects one section and copies the rest from
+    // the committed file unchecked. It publishes that lock and then syncs
+    // the way an ordinary sync would, so a section it left alone is still
+    // held against its sources and a stale one refuses instead of being
+    // realized.
+    if matches!(mode, Mode::Update { only: Some(_) }) {
+        {
+            let root = ProjectRoot::open(&dir)?;
+            let _published = project_toolchain::commit(&root, &mut toolchain, &mode)?;
+        }
+        let (present, mut toolchain) = preflight_sync(platform, &dir, Mode::Writable)?;
+        return sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &Mode::Writable);
+    }
     sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &mode)
 }
 

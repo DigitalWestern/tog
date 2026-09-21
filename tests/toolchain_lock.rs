@@ -525,9 +525,19 @@ fn update_toolchain_for_one_ecosystem_leaves_the_others_alone() {
 
     // The node section is what this adds; python is untouched, so the
     // python row still records the newest version even though the file
-    // moved.
+    // moved. The sync that follows is an ordinary sync, and it refuses
+    // that stale python row instead of realizing from it.
     let out = fixture.tog(&["update", "--toolchain", "node"]);
     let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("tog-toolchain.toml is stale for python"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("run `tog update --toolchain python`"),
+        "{stderr}"
+    );
     let lock = ToolchainLock::parse(&fixture.lock_bytes().unwrap()).unwrap();
     assert!(lock.ecosystem("node").is_some(), "{stderr}");
     assert_eq!(
@@ -880,26 +890,47 @@ fn foreign_platform_lock_is_refused() {
     fixture.write(".python-version", &format!("{newest}\n"));
     fixture.commit_lock("python");
 
-    // Drop this host's platform table from the committed file. Parsing
-    // still succeeds — the lock is well formed — so the refusal has to come
-    // from checking the rows against the host, which is where it belongs.
-    let host = Platform::host().unwrap().triple();
-    let bytes = fixture.lock_bytes().unwrap();
-    let text_form = String::from_utf8(bytes).unwrap();
-    let marker = format!("[toolchain.python.platforms.\"{host}\"");
-    let start = text_form.find(&marker).expect("a table for this host");
-    let end = text_form[start..]
-        .match_indices("\n[toolchain.python.platforms.")
-        .nth(1)
-        .map(|(at, _)| start + at + 1)
-        .unwrap_or(text_form.len());
-    let trimmed = format!("{}{}", &text_form[..start], &text_form[end..]);
-    std::fs::write(fixture.dir().join(LOCK_PATH), trimmed).unwrap();
+    // A lock minted from a bundle that has no rows for this host. It is
+    // internally consistent — its bundle_id matches its rows, so parsing
+    // succeeds — and the refusal has to come from checking the rows
+    // against the host, which is where it belongs.
+    let host = Platform::host().unwrap();
+    let full = ToolchainLock::parse(&fixture.lock_bytes().unwrap()).unwrap();
+    let section = full.ecosystem("python").unwrap();
+    let mut foreign = section.bundle().unwrap();
+    foreign.artifacts.retain(|row| row.platform != host);
+    assert!(!foreign.artifacts.is_empty(), "no foreign rows to keep");
+    let mut lock = ToolchainLock::new(env!("CARGO_PKG_VERSION"));
+    lock.set_ecosystem("python", &foreign, &section.inputs())
+        .unwrap();
+    std::fs::write(fixture.dir().join(LOCK_PATH), lock.canonical_bytes()).unwrap();
 
     let out = fixture.tog(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains(host), "{stderr}");
+    assert!(stderr.contains(host.triple()), "{stderr}");
     assert!(stderr.contains("tog update --toolchain python"), "{stderr}");
+    assert!(!fixture.store().exists(), "a refusal created the store");
+
+    // The same file with this host's table simply deleted is no longer
+    // the bundle its id names, and is refused as an edited file before any
+    // row is consulted.
+    let text_form = String::from_utf8(fixture.lock_bytes().unwrap()).unwrap();
+    fixture.commit_lock("python");
+    let intact = String::from_utf8(fixture.lock_bytes().unwrap()).unwrap();
+    let marker = format!("[toolchain.python.platforms.\"{}\"", host.triple());
+    let start = intact.find(&marker).expect("a table for this host");
+    let end = intact[start..]
+        .match_indices("\n[toolchain.python.platforms.")
+        .nth(1)
+        .map(|(at, _)| start + at + 1)
+        .unwrap_or(intact.len());
+    let trimmed = format!("{}{}", &intact[..start], &intact[end..]);
+    assert_ne!(trimmed, text_form);
+    std::fs::write(fixture.dir().join(LOCK_PATH), trimmed).unwrap();
+    let out = fixture.tog(&["sync"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("does not match its rows"), "{stderr}");
     assert!(!fixture.store().exists(), "a refusal created the store");
 }

@@ -16,7 +16,10 @@ by position.
    `tog status` must answer identically on both. Sync the same project on
    each machine and diff `tog-toolchain.toml` byte for byte. It is proven by
    test today, not by two machines, and it is part of the macOS gate at the
-   bottom of this file.
+   bottom of this file. The same run should sync one locked project into two
+   fresh stores on one machine and compare the realized object ids: the
+   offline replay test (`tests/toolchain_lock.rs`) proves the lock answers
+   without the catalog, not that two stores realize the same objects.
 
 ## Decisions waiting on the owner
 
@@ -97,7 +100,12 @@ by position.
   directory mid-sync can make tog sync the replacement
   (`docs/human/LIMITATIONS.md`). Raised by review on 2026-09-16 and declined
   there as pre-existing. Closing it means every tailor reads through a held
-  directory descriptor. Builds on `src/kernel/fsroot.rs`.
+  directory descriptor. Builds on `src/kernel/fsroot.rs`. The toolchain
+  lock has the same shape: `sync` preflight opens a `ProjectRoot`, drops it,
+  and `commit` and the publication recheck reopen the pathname
+  (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
+  directory the path names at recheck time. Carry one held root from
+  preflight through publication when the rest of sync does.
 - **Missing GC tests.** 18 of the 26 tests the GC design named do not exist
   by name. List in `docs/agent/DESIGNS.md` §5.
 - **GC mutation survivor: redundant root marking.** Removing the marking set
@@ -116,7 +124,12 @@ by position.
   CPython pin, `artifacts`, and `nativelibs` for node-gyp install scripts.
   A kernel-level toolchain/artifact provider would remove both. Each move is
   its own PR: relocate the module, keep object ids byte-identical, then
-  delete the allow-list row.
+  delete the allow-list row. Both edges sit outside the toolchain lock: the
+  node-gyp CPython and the sdist Rust are the shipped pins, not the
+  project's selection, and neither object id is part of the `node-env` or
+  sdist identity, so a shipped-pin change can alter a native build under an
+  unchanged id. Threading the selection through both and adding the helper
+  object to the identity is the same PR as the move.
 - **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The Python source

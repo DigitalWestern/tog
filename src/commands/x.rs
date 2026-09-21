@@ -104,26 +104,16 @@ pub(crate) fn x_toolchain(platform: Platform, cwd: &Path, ecosystem: &str) -> io
         .map_err(|error| other(format!("x: {error}")))
 }
 
-/// The store object id of the runtime a selection names. Python answers
-/// from the selected row without realizing; Node has no such accessor, and
-/// `x` puts the Node runtime on `PATH` for every node tool anyway, so
-/// realizing it here costs nothing that was not already spent.
-fn runtime_object_id(
-    store: &Store,
-    platform: Platform,
-    toolchain: &Selected,
-) -> io::Result<String> {
-    let path = match toolchain.ecosystem.as_str() {
-        "python" => {
-            return python::object_id_for(platform, toolchain.version("cpython")?);
-        }
-        _ => node::realize_runtime(store, platform, toolchain)?,
-    };
-    Ok(path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_string())
+/// The store object id of the runtime a selection names, from the selected
+/// bundle's own row and without touching the store. A shipped pin table
+/// could answer by version alone, but the key has to name the object the
+/// environment will actually run on, which is the one the selection's
+/// digest and recipe identify.
+fn runtime_object_id(platform: Platform, toolchain: &Selected) -> io::Result<String> {
+    match toolchain.ecosystem.as_str() {
+        "python" => python::runtime_object_id(platform, toolchain),
+        _ => node::runtime_object_id(platform, toolchain),
+    }
 }
 
 /// The name of the directory a cached `x` environment lives in under
@@ -141,7 +131,7 @@ pub fn environment_name(
         root: store_root.to_path_buf(),
     };
     let toolchain = x_toolchain(platform, cwd, ecosystem)?;
-    let runtime_object = runtime_object_id(&store, platform, &toolchain)?;
+    let runtime_object = runtime_object_id(platform, &toolchain)?;
     Ok(x_root_name(
         &store,
         platform,
@@ -1954,7 +1944,7 @@ pub fn launch(
     let store = Store::open()?;
     store.require_activity(activity, "x")?;
     let toolchain = x_toolchain(platform, cwd, ecosystem)?;
-    let runtime_object = runtime_object_id(&store, platform, &toolchain)?;
+    let runtime_object = runtime_object_id(platform, &toolchain)?;
     let root = x_home.join(".tog/x").join(x_root_name(
         &store,
         platform,
@@ -2212,7 +2202,7 @@ pub(crate) fn realize_node_tool(
     validate_exact_version(version)?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let toolchain = x_toolchain(platform, project, "node")?;
-    let runtime_object = runtime_object_id(store, platform, &toolchain)?;
+    let runtime_object = runtime_object_id(platform, &toolchain)?;
     let root = node_cache_root(
         store,
         platform,
@@ -2376,7 +2366,7 @@ fn realize_python(
     }
     let text = fs::read_to_string(&output)?;
     let plan = pypi::plan_python(platform, &text, pin.version)?;
-    let env = crate::tailors::python::env::realize_env(store, platform, &plan)?;
+    let env = crate::tailors::python::env::realize_env_for(store, platform, &plan, toolchain)?;
     crate::tailors::python::env::project_env_with_selection(
         root,
         &env,
@@ -2438,7 +2428,7 @@ fn realize_node(
         )));
     }
     let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
-    let env = node::realize_node_env(store, platform, &plan, &[])?;
+    let env = node::realize_node_env_for(store, platform, &plan, &[], toolchain)?;
     node::project_node_env(root, &env, platform, &plan, &[], false, attribution)?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())

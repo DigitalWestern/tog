@@ -287,6 +287,10 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     project_lock: &fs::File,
 ) -> io::Result<()> {
     store.require_activity(activity, "root publication")?;
+    // The first durable step of a projection switch: a toolchain source
+    // that moved during planning is caught here, before a user directory
+    // is moved or a visible link replaced, and again by the closure writer.
+    toolchain::recheck_before_publication()?;
     let (objects, projections) = refs.clone().into_record_parts();
     store
         .register_root_parts_with_project_lock(

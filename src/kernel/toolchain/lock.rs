@@ -282,6 +282,9 @@ impl ToolchainLock {
                 }
             }
             for (triple, platform) in &entry.platforms {
+                if Platform::from_triple(triple).is_none() {
+                    return Err(bad(format!("unsupported platform triple {triple:?}")));
+                }
                 if platform.artifacts.is_empty() {
                     return Err(bad(format!("platform {triple} has no artifacts")));
                 }
@@ -319,6 +322,18 @@ impl ToolchainLock {
                         )));
                     }
                 }
+            }
+            // The id is a hash of the rows it stands beside. A row edited
+            // by hand under the old id would otherwise pass every reader,
+            // and `status` would call a closure built from the real bundle
+            // current.
+            let computed = entry.bundle()?.bundle_id();
+            if computed != entry.bundle_id {
+                return Err(bad(format!(
+                    "bundle_id {} does not match its rows ({computed}); the file was edited, \
+                     run `tog update --toolchain {eco}`",
+                    entry.bundle_id
+                )));
             }
         }
         Ok(())
@@ -1053,6 +1068,51 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             assert_eq!(section.primary(), bundle.primary.as_slice());
             assert_eq!(section.inputs(), node_inputs());
         }
+    }
+
+    #[test]
+    fn an_edited_row_under_the_old_bundle_id_is_refused() {
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        let text = String::from_utf8(lock.canonical_bytes()).unwrap();
+        let (digest_line, _) = text
+            .lines()
+            .map(|line| (line, ()))
+            .find(|(line, _)| line.starts_with("digest = "))
+            .unwrap();
+        let edited = text.replacen(
+            digest_line,
+            "digest = \"sha256:00000000000000000000000000000000000000000000000000000000000000ff\"",
+            1,
+        );
+        let error = ToolchainLock::parse(edited.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[node]: bundle_id"), "{error}");
+        assert!(error.contains("does not match its rows"), "{error}");
+        assert!(
+            error.contains("run `tog update --toolchain node`"),
+            "{error}"
+        );
+
+        // Dropping a whole platform table changes the rows the same way.
+        let mut kept = String::new();
+        let mut skipping = false;
+        for line in text.lines() {
+            if line.starts_with("[toolchain.node.platforms.") {
+                skipping = line.contains("aarch64-apple-darwin");
+            }
+            if !skipping {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+        }
+        assert_ne!(kept, text);
+        let error = ToolchainLock::parse(kept.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not match its rows"), "{error}");
     }
 
     #[test]

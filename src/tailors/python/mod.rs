@@ -182,6 +182,16 @@ pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<Str
     Ok(cpython_identity(pin).object_id())
 }
 
+/// The store object id of the CPython a selection names, from the
+/// selection's own row and without realizing it: the same id
+/// `realize_runtime` commits, so a cache key that carries it names the
+/// interpreter the environment will run on rather than the one a version
+/// number would find in today's pin table.
+pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<String> {
+    let spec = row(selected, platform, "cpython", CPYTHON_RECIPE)?;
+    Ok(cpython_identity_of(&spec, platform)?.object_id())
+}
+
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let cpython_pin = lookup(platform, "3.12.14").expect("pinned CPython for test platform");
