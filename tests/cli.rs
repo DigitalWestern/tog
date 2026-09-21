@@ -135,7 +135,7 @@ fn usage_errors_exit_2_with_a_next_step() {
         (&["snyc"], "unknown command 'snyc'; did you mean 'sync'?", "tog --help"),
         (&["sync", "--fersh"], "sync: unknown option '--fersh'; did you mean '--fresh'?", "tog help sync"),
         (&["sync", "now"], "sync: unexpected argument 'now'", "tog help sync"),
-        (&["plan", "--json"], "plan: unknown option '--json'", "tog help plan"),
+        (&["plan", "--jsno"], "plan: unknown option '--jsno'; did you mean '--json'?", "tog help plan"),
         (&["gc", "--keep-days", "soon"], "--keep-days expects a whole number of days, got 'soon'", "tog help gc"),
         (&["gc", "--dryrun"], "gc: unknown option '--dryrun'; did you mean '--dry-run'?", "tog help gc"),
         (&["sbom", "--output"], "--output needs a file path", "tog help sbom"),
@@ -236,6 +236,159 @@ fn ls_accepts_every_ecosystem_name_it_can_print() {
         "{}",
         text(&out.stderr)
     );
+}
+
+/// A global option is the same option wherever it is typed. `tog ls -v` in
+/// particular was a usage error that pointed at help documenting `-v`.
+#[test]
+fn global_options_work_after_the_command() {
+    let home = TempDir::new("globals-home");
+    let project = TempDir::new("globals-project");
+    std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
+    std::fs::write(
+        project.0.join(".tog/closures/rustfmt.json"),
+        r#"{"schema":"closure/1","ecosystem":"rustfmt","projected_at":0,
+            "body":{"rust_version":"1.96.1",
+                    "rust_object":{"path":"/store/objects/r","id":"r"},
+                    "rustfmt_object":{"path":"/store/objects/f","id":"f"}}}"#,
+    )
+    .unwrap();
+
+    let out = tog(&project.0, &home.0, &["ls", "-v"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("rustfmt"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // The help for ls documents -v, and now the parser accepts it.
+    let help = tog(&project.0, &home.0, &["help", "ls"]);
+    assert!(
+        text(&help.stdout).contains("-v, --verbose"),
+        "{}",
+        text(&help.stdout)
+    );
+
+    // Every screen fits a standard terminal.
+    for args in [&["--help"][..], &["help", "gc"], &["help", "x"]] {
+        let out = tog(&project.0, &home.0, args);
+        for line in text(&out.stdout).lines() {
+            assert!(line.chars().count() <= 80, "{args:?}: {line}");
+        }
+    }
+
+    // -q after the command silences narration the same way it does before.
+    let empty = TempDir::new("globals-empty");
+    let out = tog(&empty.0, &home.0, &["status", "-q"]);
+    assert_eq!(out.status.code(), Some(1));
+    // Pass-through is untouched: `run` hands -v to the program.
+    let out = tog(&empty.0, &home.0, &["run", "-v"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("unknown option"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// `--json` is a promise about both streams: the document on stdout, and a
+/// failure as one JSON object on stderr.
+#[test]
+fn json_commands_report_failure_as_json_on_stderr() {
+    let home = TempDir::new("json-errors-home");
+    let project = TempDir::new("json-errors-project");
+    for args in [&["status", "--json"][..], &["ls", "--json"]] {
+        let out = tog(&project.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {}", text(&out.stdout));
+        let value: serde_json::Value =
+            serde_json::from_slice(&out.stderr).unwrap_or_else(|error| {
+                panic!(
+                    "{args:?}: stderr is not JSON ({error}): {}",
+                    text(&out.stderr)
+                )
+            });
+        assert!(
+            value["error"].as_str().is_some_and(|text| !text.is_empty()),
+            "{args:?}: {value}"
+        );
+    }
+    // Without --json the same failure is the prose error it always was.
+    let out = tog(&project.0, &home.0, &["status"]);
+    assert!(
+        text(&out.stderr).starts_with("tog: error: "),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // `plan` prints JSON, so it accepts --json instead of refusing it.
+    let out = tog(&project.0, &home.0, &["plan", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert!(value["error"].as_str().is_some(), "{value}");
+}
+
+/// `gc` narrates; CLI.md reserves stdout for documents, so its lines go to
+/// stderr where `--quiet` can silence them.
+#[test]
+fn gc_narrates_on_stderr_and_quiet_silences_it() {
+    let home = TempDir::new("gc-stream-home");
+    let store_root = home.0.join("store");
+    std::fs::create_dir_all(&store_root).unwrap();
+    let canonical_store = store_root.canonicalize().unwrap();
+    let project = home.0.join("project");
+    std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+    let env_object = publish_certified_object(&canonical_store, "gc-stream-env");
+    std::fs::write(
+        project.join(".tog/closures/python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "body": {"env_object": env_object.display().to_string()},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let registered = tog(
+        &home.0,
+        &home.0,
+        &["gc", "--register", project.to_str().unwrap()],
+    );
+    assert_eq!(
+        registered.status.code(),
+        Some(0),
+        "{}",
+        text(&registered.stderr)
+    );
+    assert!(
+        registered.stdout.is_empty(),
+        "gc wrote to stdout: {}",
+        text(&registered.stdout)
+    );
+    assert!(
+        text(&registered.stderr).contains("registered root"),
+        "{}",
+        text(&registered.stderr)
+    );
+
+    let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        out.stdout.is_empty(),
+        "gc wrote to stdout: {}",
+        text(&out.stdout)
+    );
+    assert!(
+        text(&out.stderr).contains("gc would free"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    let quiet = tog(&home.0, &home.0, &["gc", "--dry-run", "-q"]);
+    assert_eq!(quiet.status.code(), Some(0));
+    assert!(quiet.stdout.is_empty());
+    assert!(quiet.stderr.is_empty(), "{}", text(&quiet.stderr));
 }
 
 #[test]
@@ -512,6 +665,52 @@ fn inspect_verbs_offline() {
     assert!(text(&out.stdout).contains("complete -F _tog tog"));
     let out = tog(&project.0, &home.0, &["completions", "powershell"]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// A closure whose inputs were never recorded cannot be compared with the
+/// files on disk, so `status` must not report it synced or exit 0: a CI
+/// gate that trusts that word would admit any closure old enough.
+#[test]
+fn status_never_calls_an_unchecked_closure_synced() {
+    let home = TempDir::new("unchecked-home");
+    let project = TempDir::new("unchecked-project");
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let env = project.0.join("env-object");
+    std::fs::create_dir_all(env.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&env, project.0.join(".venv")).unwrap();
+    let platform = tog::kernel::platform::Platform::host().unwrap();
+    let closures = project.0.join(".tog/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    std::fs::write(
+        closures.join("python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": platform.triple(),
+            "projected_at": 1,
+            // No "inputs": the record predates input recording.
+            "body": {
+                "env_object": env,
+                "python": {"version": "3.12.14"},
+                "plan": {"packages": []},
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = tog(&project.0, &home.0, &["status"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{}", text(&out.stderr));
+    assert!(stdout.contains("python  unchecked"), "{stdout}");
+    assert!(stdout.contains("0 of 1 synced; 1 unchecked."), "{stdout}");
+    assert!(stdout.contains("Exit status is 0 only when"), "{stdout}");
+
+    let out = tog(&project.0, &home.0, &["status", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["synced"], false);
+    assert_eq!(value["ecosystems"][0]["state"], "unchecked");
 }
 
 // --- the offline paths of add/remove/x ---

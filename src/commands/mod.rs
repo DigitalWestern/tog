@@ -154,7 +154,13 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     }
     let needs_maintenance = matches!(
         &command,
-        Plan | Build { .. } | Run { .. } | Add { .. } | Remove { .. } | Update { .. } | X { .. }
+        Plan { .. }
+            | Build { .. }
+            | Run { .. }
+            | Add { .. }
+            | Remove { .. }
+            | Update { .. }
+            | X { .. }
     );
     // Every verb that can rewrite a closure (build realizes and republishes
     // the project's environment; add/remove/update sync after their edit)
@@ -169,7 +175,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     }
     let ctx = Context::open(platform, needs_maintenance)?;
     match command {
-        Plan => plan::run(&ctx).map(|_| 0),
+        Plan { .. } => plan::run(&ctx).map(|_| 0),
         Build { args } => build::run(&ctx, &args).map(|_| 0),
         Run { command } => run::run(&ctx, &command),
         Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),

@@ -462,7 +462,11 @@ pub fn evaluate(
         let mut permitted = BTreeMap::new();
         match recorded_exceptions(closure)? {
             Some(exceptions) => {
-                for exception in exceptions {
+                for mut exception in exceptions {
+                    // A record written before the kind names were unified
+                    // on the hyphen is judged, counted, and printed under
+                    // the one spelling this binary uses.
+                    exception.kind = policy::canonical_kind(&exception.kind).to_string();
                     if !policy::KINDS.contains(&exception.kind.as_str()) {
                         unknown.push(exception);
                     } else if policy::denied(policy, &exception.kind) {
@@ -1117,6 +1121,7 @@ mod tests {
             strict: false,
             deny: kinds.iter().map(|kind| kind.to_string()).collect(),
             signing: trusting(&[test_key()]),
+            ..Policy::default()
         }
     }
 
@@ -1183,7 +1188,7 @@ mod tests {
         let text = render(&temp.0, &report, false).unwrap();
         assert_eq!(
             text,
-            format!("python  clean         closure {record}: permitted: skipped_optional 2\n")
+            format!("python  clean         closure {record}: permitted: skipped-optional 2\n")
         );
         let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
         assert_eq!(value["passed"], true);
@@ -1403,7 +1408,7 @@ mod tests {
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  denied        closure {record}: 2 denied; permitted: skipped_optional 1\n"
+                "python  denied        closure {record}: 2 denied; permitted: skipped-optional 1\n"
             )),
             "{text}"
         );
@@ -1431,6 +1436,7 @@ mod tests {
             strict: true,
             deny: BTreeSet::new(),
             signing: trusting(&[test_key()]),
+            ..Policy::default()
         };
         let verdicts = judge(&temp.0, &strict, &closures);
         assert_eq!(verdicts[0].denied.as_deref().unwrap().len(), 1);
@@ -1474,7 +1480,7 @@ mod tests {
         let text = render(&temp.0, &report, false).unwrap();
         assert!(
             text.contains(&format!(
-                "python  unknown       closure {record}: 1 of unknown kind; permitted: skipped_optional 1\n"
+                "python  unknown       closure {record}: 1 of unknown kind; permitted: skipped-optional 1\n"
             )),
             "{text}"
         );
@@ -1533,6 +1539,7 @@ mod tests {
             strict: true,
             deny: BTreeSet::new(),
             signing: None,
+            ..Policy::default()
         };
         policy::union(&mut strict, &permissive);
         assert!(strict.strict);
@@ -1564,6 +1571,7 @@ mod tests {
             strict: false,
             deny: [GIT_DEPENDENCY.to_string()].into_iter().collect(),
             signing: None,
+            ..Policy::default()
         };
         let policy_file = temp.0.join("company.toml");
         let _env = policy::test_env_lock();
