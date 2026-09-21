@@ -177,7 +177,7 @@ fn is_command_option(spec: &Spec, arg: &str) -> bool {
 /// slot of one of the command's own value-taking options, so `tog sbom -o -v`
 /// still writes a file named `-v` rather than turning it into `--verbose`.
 /// A list option (`--register <dir>...`) holds its slot until the next
-/// option this command knows, the same boundary its own parser uses.
+/// long option, the same boundary its own parser uses.
 fn take_global_flags(
     args: &[String],
     options: &mut Options,
@@ -196,11 +196,17 @@ fn take_global_flags(
             rest.push(args[index].clone());
             index += 1;
             let mut taken = 0;
-            while index < args.len()
-                && (list || taken == 0)
-                && args[index] != "--"
-                && !(taken > 0 && is_command_option(spec, &args[index]))
-            {
+            while index < args.len() && (list || taken == 0) {
+                let value = args[index].as_str();
+                // A list ends where the command's own parser ends it: at
+                // the next long option, so `gc --register /p --no-color`
+                // still reads the global rather than refusing it.
+                let ends = value == "--"
+                    || (list && value.starts_with("--"))
+                    || (taken > 0 && is_command_option(spec, value));
+                if ends {
+                    break;
+                }
                 rest.push(args[index].clone());
                 index += 1;
                 taken += 1;
@@ -1852,6 +1858,23 @@ mod tests {
                 register: vec![PathBuf::from("a"), PathBuf::from("-v"), PathBuf::from("b")],
                 ..GcArgs::default()
             })
+        );
+        // A long option ends the list, the same boundary parse_gc uses,
+        // so a global after a list of values is still read as a global.
+        let parsed = run(&["gc", "--register", "/p", "--no-color"]);
+        assert!(parsed.options.no_color);
+        assert_eq!(
+            parsed.command,
+            Command::Gc(GcArgs {
+                register: vec![PathBuf::from("/p")],
+                ..GcArgs::default()
+            })
+        );
+        assert_eq!(
+            run(&["gc", "--register", "/p", "--directory", "/tmp"])
+                .options
+                .directory,
+            Some(PathBuf::from("/tmp"))
         );
         // The next option this command knows still ends the list.
         let parsed = run(&["gc", "--register", "a", "--dry-run", "-v"]);
