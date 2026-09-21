@@ -19,7 +19,7 @@ by position.
    bottom of this file. The same run should sync one locked project into two
    fresh stores on one machine and compare the realized object ids: the
    offline replay test (`tests/toolchain_lock.rs`) proves the lock answers
-   without the catalog, not that two stores realize the same objects.
+   without the catalog, not that two stores realize the same objects (#136).
 
 ## Decisions waiting on the owner
 
@@ -105,7 +105,7 @@ by position.
   and `commit` and the publication recheck reopen the pathname
   (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
   directory the path names at recheck time. Carry one held root from
-  preflight through publication when the rest of sync does.
+  preflight through publication when the rest of sync does (#132, with #55).
 - **Missing GC tests.** 18 of the 26 tests the GC design named do not exist
   by name. List in `docs/agent/DESIGNS.md` §5.
 - **GC mutation survivor: redundant root marking.** Removing the marking set
@@ -129,7 +129,19 @@ by position.
   project's selection, and neither object id is part of the `node-env` or
   sdist identity, so a shipped-pin change can alter a native build under an
   unchanged id. Threading the selection through both and adding the helper
-  object to the identity is the same PR as the move.
+  object to the identity is the same PR as the move (#135, with #63 and #64).
+- **Legacy seeding trusts the closure's version strings.** The first lock of
+  a pre-lock project is seeded from its closure, whose recorded versions are
+  read without checking the store objects they name, and no adapter builds
+  the `ProvedArtifact` evidence the seeder can use to tell two releases
+  apart. It fails closed on ambiguity today; validating the objects through
+  the store would let it seed with proof (#133).
+- **Rust targets and components are outside the lock.** Only the channel is
+  a lock row; `targets` and `components` are enforced per run from
+  `rust-toolchain.toml`, a component tog does not ship is a permissive
+  exception rather than a refusal, and a source that fails to parse gets the
+  same row as one with the field absent. Decide in or out, and make a parse
+  failure always stale (#134).
 - **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The Python source
