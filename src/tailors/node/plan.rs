@@ -466,9 +466,35 @@ pub fn check_lock_freshness(pkg_json: &str, lock_json: &str) -> io::Result<()> {
         let b = root[field].as_object().cloned().unwrap_or_default();
         if a != b {
             return Err(err(format!(
-                "package.json {field} disagree with package-lock.json;                  regenerate the lock (npm install --package-lock-only)"
+                "package.json {field} disagree with package-lock.json; regenerate the lock (npm install --package-lock-only)"
             )));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lock-freshness refusal is printed to the user verbatim, so it has
+    /// to read as one sentence: no run of spaces left behind by re-wrapping
+    /// the `format!`.
+    #[test]
+    fn the_lock_freshness_refusal_reads_as_one_sentence() {
+        let package = r#"{"dependencies":{"is-odd":"^3.0.0"}}"#;
+        let stale = r#"{"packages":{"":{"dependencies":{"is-odd":"^2.0.0"}}}}"#;
+        let error = check_lock_freshness(package, stale)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "package.json dependencies disagree with package-lock.json; \
+             regenerate the lock (npm install --package-lock-only)"
+        );
+        assert!(!error.contains("  "), "{error}");
+
+        let fresh = r#"{"packages":{"":{"dependencies":{"is-odd":"^3.0.0"}}}}"#;
+        check_lock_freshness(package, fresh).unwrap();
+    }
 }

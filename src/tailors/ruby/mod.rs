@@ -12,7 +12,8 @@
 pub mod objects;
 pub mod tailor;
 
-use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::digest::Algo;
+use crate::kernel::fetch::{download_verified_held, hash_file, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
@@ -576,6 +577,13 @@ pub struct RubyGem {
     pub sha256: String,
 }
 
+/// Where a planned gem's `.gem` is fetched from. rubygems.org is the only
+/// source the plan validator admits, so this is the single spelling of that
+/// URL rather than a per-gem field.
+fn gem_url(gem: &RubyGem) -> String {
+    format!("https://rubygems.org/downloads/{}.gem", gem.full_name)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubyPlan {
     pub ruby_version: String,
@@ -791,26 +799,33 @@ pub fn realize_gems(
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
     let mut artifacts: Vec<(&RubyGem, PathBuf)> = Vec::new();
+    // One download per gem, and the lease from that download is held through
+    // the sandboxed installs below, so no sweep can drop a `.gem` between
+    // verification and use. That is all the lease closes: a same-user
+    // replacement of a cache entry is still possible, so the install loop
+    // digests every artifact again immediately before it copies it.
+    let mut _cache_leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
-        let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let (out, file_path) = {
-            let file = download_verified_held(store, &url, &g.sha256)
-                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
-            let out = run_ruby(
-                store,
-                ruby_obj,
-                &scratch,
-                &scratch,
-                &[
-                    "ruby",
-                    helper.to_str().unwrap(),
-                    "spec",
-                    file.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
-                ],
-            )?;
-            (out, file.to_path_buf())
-        };
+        let url = gem_url(g);
+        let lease = download_verified_held(store, &url, &g.sha256)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
+        let file_path = lease.to_path_buf();
+        _cache_leases.push(lease);
+        let out = run_ruby(
+            store,
+            ruby_obj,
+            &scratch,
+            &scratch,
+            &[
+                "ruby",
+                helper.to_str().unwrap(),
+                "spec",
+                file_path
+                    .to_str()
+                    .ok_or_else(|| err("gem path not UTF-8"))?,
+            ],
+        )?;
         if !out.status.success() {
             return Err(err(format!(
                 "{}: gemspec read failed: {}",
@@ -851,20 +866,22 @@ pub fn realize_gems(
         artifacts.push((g, file_path));
     }
 
-    // The gemspec verification above is complete. Re-verify and retain every
-    // cache lease for the sandboxed installs below.
-    let mut _cache_leases = Vec::new();
-    for (g, file) in &mut artifacts {
-        let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let lease = download_verified_held(store, &url, &g.sha256)?;
-        *file = lease.to_path_buf();
-        _cache_leases.push(lease);
-    }
-
     let staged = store.stage()?;
     let bin = staged.join("bin");
     fs::create_dir_all(&bin)?;
     for (g, file) in &artifacts {
+        // Re-verify immediately before use. The lease held since the download
+        // stops a sweep, not a same-user replacement of the cache entry, so
+        // the bytes about to be installed are digested again here.
+        let hex = hash_file(file, Algo::Sha256)?;
+        if hex != g.sha256 {
+            return Err(err(format!(
+                "{}: cached gem {} no longer matches the plan digest (expected {}, found {hex})",
+                g.full_name,
+                file.display(),
+                g.sha256
+            )));
+        }
         // gem install only treats .gem-named arguments as local files (the
         // same lesson as pip and sdists); COPY from the cache, never link.
         let named = scratch.join(format!("{}.gem", g.full_name));
