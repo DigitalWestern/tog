@@ -89,10 +89,18 @@ pub(super) fn package_digest_of_inputs(inputs: &BTreeMap<String, String>) -> Str
     )
 }
 
+/// A package the plan names for which no entry was computed. Both traversals
+/// of the plan below can hit this, and both report it the same way: it is a
+/// producer bug, never a legitimately smaller environment.
+fn missing_entry(name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("plan names package {name} with no identity entry"),
+    )
+}
+
 /// The producer's side: a traversal of the plan's own package list, separate
-/// from the loop that writes the identity inputs. `values` holds the entry
-/// computed for each package; a package the plan names with no computed
-/// entry is a producer bug, not a smaller environment.
+/// from the loop that writes the identity inputs.
 fn package_digest_of_plan(
     packages: &[&crate::kernel::types::LockedPackage],
     values: &BTreeMap<String, String>,
@@ -100,12 +108,7 @@ fn package_digest_of_plan(
     let mut entries = BTreeMap::new();
     for p in packages {
         let key = format!("pkg:{}", p.name);
-        let value = values.get(&key).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("plan names package {} with no identity entry", p.name),
-            )
-        })?;
+        let value = values.get(&key).ok_or_else(|| missing_entry(&p.name))?;
         entries.insert(key, value.clone());
     }
     Ok(package_digest_of(&entries))
@@ -142,6 +145,8 @@ fn environment_identity_inner(
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
+    // The drift test seam, carried in release builds too: production always
+    // passes `None`, and only `environment_identity_skipping_input` does not.
     skip_package: Option<&str>,
 ) -> io::Result<Identity> {
     let pin = python::lookup(platform, &plan.python_version)
@@ -193,7 +198,10 @@ fn environment_identity_inner(
             continue;
         }
         let key = format!("pkg:{}", p.name);
-        let value = values[&key].clone();
+        let value = values
+            .get(&key)
+            .ok_or_else(|| missing_entry(&p.name))?
+            .clone();
         inputs.insert(key, value);
     }
     // The two unconditional inputs `python-env/3` adds. Under /2 a one-wheel
