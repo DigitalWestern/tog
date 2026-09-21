@@ -66,8 +66,25 @@ say()  { printf 'tog-install: %s\n' "$*" >&2; }
 fail() { printf 'tog-install: error: %s\n' "$*" >&2; exit 1; }
 
 # $1 single-quoted for a shell, with embedded apostrophes escaped, so a path
-# printed as a command to run is safe to paste whatever is in it.
-shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"; }
+# printed as a command to run is safe to paste whatever is in it. Done with
+# parameter expansion rather than sed: the sed program for this has to carry
+# backslashes through the shell's quoting and then through sed's replacement
+# rules, and getting that wrong is silent -- a path with two apostrophes came
+# out as a valid command for the wrong directory.
+shquote() {
+    _sq_rest="$1"
+    _sq_out=""
+    _sq_q="'"
+    while :; do
+        case "$_sq_rest" in
+            *"$_sq_q"*) ;;
+            *) break ;;
+        esac
+        _sq_out=$_sq_out${_sq_rest%%"$_sq_q"*}$_sq_q\\$_sq_q$_sq_q
+        _sq_rest=${_sq_rest#*"$_sq_q"}
+    done
+    printf '%s%s%s' "$_sq_q" "$_sq_out$_sq_rest" "$_sq_q"
+}
 
 usage() {
     cat <<'EOF'
@@ -180,6 +197,9 @@ removable() {
 uninstall() {
     if [ ! -e "$INSTALL_DIR/tog" ] && [ ! -L "$INSTALL_DIR/tog" ]; then
         say "no tog binary at $INSTALL_DIR/tog (use --dir=<path> if it is elsewhere)"
+    elif [ -L "$INSTALL_DIR/tog" ] && [ ! -e "$INSTALL_DIR/tog" ]; then
+        # Dangling: nothing to ask for a version, and nothing to be sure of.
+        say "$INSTALL_DIR/tog is a symlink to $(readlink "$INSTALL_DIR/tog"), which does not exist; leaving it alone"
     elif removable "$INSTALL_DIR/tog"; then
         gone="$version"
         if rm -f "$INSTALL_DIR/tog"; then

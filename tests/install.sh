@@ -199,7 +199,28 @@ else ok "no HOME is refused"; fi
 out="$(env -i PATH="$BASE_PATH" TERM=dumb sh "$ROOT/install.sh" 2>&1 || true)"
 check "the no-HOME message names HOME"    grep -Fq 'HOME is not set' <<<"$out"
 
-echo "== 15. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
+echo "== 15. the printed 'rm -rf' survives an apostrophe in the store path"
+H="$WORK/h17"; mkdir -p "$H"
+STORE_ODD="$H/it's a \"weird\" store"
+mkdir -p "$STORE_ODD"
+out="$(env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
+    TOG_STORE="$STORE_ODD" TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
+    sh "$ROOT/install.sh" --uninstall 2>&1)"
+# Take the argument the script told the user to run and feed it back to a
+# shell: it has to name the directory it started from, byte for byte.
+printed="$(sed -n 's/^tog-install: to reclaim that space:  rm -rf //p' <<<"$out")"
+back="$(eval "printf '%s' $printed" 2>/dev/null || echo '<eval failed>')"
+check "the rm line round-trips through a shell" test "$back" = "$STORE_ODD"
+
+echo "== 16. a broken symlink at the install path is reported, not ignored"
+H="$WORK/h18"; mkdir -p "$H/.local/bin"
+ln -s "$H/nowhere/tog" "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "broken symlink left in place"      test -L "$H/.local/bin/tog"
+check "says the target does not exist"    grep -Fq 'which does not exist' <<<"$out"
+check "does not claim there is no tog"    sh -c "! grep -Fq 'no tog binary at' <<<\"\$(cat)\"" <<<"$out"
+
+echo "== 17. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
 for value in 0 1; do
     H="$WORK/h11-$value"; mkdir -p "$H"
     env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \

@@ -464,7 +464,10 @@ jobs:
         env:
           TOG_SIGNING_KEY: ${{ runner.temp }}/tog.key
         run: |
-          install -m 600 /dev/stdin "$TOG_SIGNING_KEY" <<<'${{ secrets.TOG_SIGNING_KEY }}'
+          # printf, not a herestring: no bash dependency, and no newline
+          # appended to the key. umask before the write, so the file is
+          # never briefly world-readable.
+          (umask 077; printf '%s' '${{ secrets.TOG_SIGNING_KEY }}' > "$TOG_SIGNING_KEY")
           tog sync
           rm -f "$TOG_SIGNING_KEY"
 
