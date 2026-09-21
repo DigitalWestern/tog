@@ -304,10 +304,16 @@ pub(crate) fn plan_digest_of_inputs(inputs: &BTreeMap<String, String>) -> String
     )
 }
 
+/// An entry the plan names for which no value was computed. Every traversal
+/// of the plan below reports it the same way: it is a producer bug, never a
+/// legitimately smaller environment.
+fn missing_entry(key: &str) -> io::Error {
+    err(format!("plan names {key} with no identity entry"))
+}
+
 /// The producer's side: a traversal of the plan's own package list and the
 /// declared artifact list, separate from the loops that write the identity
-/// inputs. `values` holds the entry computed for each; a package or artifact
-/// with no computed entry is a producer bug, not a smaller environment.
+/// inputs.
 fn plan_digest_of_plan(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
@@ -320,9 +326,7 @@ fn plan_digest_of_plan(
         .map(|p| format!("pkg:{}", p.path))
         .chain(artifacts.iter().map(|a| format!("artifact:{}", a.path)));
     for key in planned {
-        let value = values
-            .get(&key)
-            .ok_or_else(|| err(format!("plan names {key} with no identity entry")))?;
+        let value = values.get(&key).ok_or_else(|| missing_entry(&key))?;
         entries.insert(key, value.clone());
     }
     Ok(plan_digest_of(&entries))
@@ -380,6 +384,8 @@ fn node_env_identity_inner(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs_id: Option<&str>,
+    // The drift test seam, carried in release builds too: production always
+    // passes `None`, and only `node_env_identity_skipping_input` does not.
     skip_entry: Option<&str>,
 ) -> io::Result<Identity> {
     let mut inputs = BTreeMap::new();
@@ -447,7 +453,7 @@ fn node_env_identity_inner(
         if skip_entry == Some(key.as_str()) {
             continue;
         }
-        let value = values[&key].clone();
+        let value = values.get(&key).ok_or_else(|| missing_entry(&key))?.clone();
         inputs.insert(key, value);
     }
     // A provisioned artifact is a build input too: a GitHub release asset can
@@ -475,7 +481,7 @@ fn node_env_identity_inner(
         if skip_entry == Some(key.as_str()) {
             continue;
         }
-        let value = values[&key].clone();
+        let value = values.get(&key).ok_or_else(|| missing_entry(&key))?.clone();
         inputs.insert(key, value);
     }
     // The two unconditional inputs `node-env/4` adds. Under /3 a

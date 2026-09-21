@@ -442,12 +442,21 @@ pub fn load_with_sources(
         )?;
     }
     let env_strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
-    // The nearest knob the reader can turn comes first: a flag they typed,
-    // then a variable they exported, then a file they would have to edit.
-    if cli_strict {
-        policy.strict_source = Some(StrictSource::Flag);
-    } else if env_strict && policy.strict_source.is_none() {
-        policy.strict_source = Some(StrictSource::Env);
+    // A file that already set `strict = true` keeps the attribution: it is
+    // the source that outlives the command, so dropping --strict or
+    // unsetting TOG_STRICT would not lift the refusal and a message that
+    // said so would be wrong. Only when no file asked for strictness is
+    // the flag or the variable the thing to change, flag first because it
+    // is the one on the line the reader just typed.
+    // Between the two, the variable outlives the command as well: with
+    // both set, dropping --strict leaves TOG_STRICT=1 refusing, so the
+    // flag is named only when it is the whole reason.
+    if policy.strict_source.is_none() {
+        if env_strict {
+            policy.strict_source = Some(StrictSource::Env);
+        } else if cli_strict {
+            policy.strict_source = Some(StrictSource::Flag);
+        }
     }
     policy.strict |= cli_strict || env_strict;
     if cli_strict {
@@ -1320,6 +1329,57 @@ deny = ["git-dependency"]"#,
         assert!(flag.path.is_none());
         assert!(flag.strict);
         assert!(flag.deny.is_empty());
+        assert!(
+            refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1").contains("rerun without --strict")
+        );
+
+        // With the variable set too, dropping the flag lifts nothing, so
+        // the refusal names the variable instead.
+        let _strict = EnvVarGuard::set("TOG_STRICT", "1");
+        let (policy, _) = load_with_sources(&root, true).unwrap();
+        assert!(policy.strict);
+        let message = refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1");
+        assert!(message.contains("unset TOG_STRICT"), "{message}");
+        assert!(!message.contains("rerun without --strict"), "{message}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A file that sets `strict = true` outlives the command, so it is the
+    /// source a refusal must name even when `--strict` or `TOG_STRICT=1`
+    /// asked for the same thing: dropping either one lifts nothing.
+    #[test]
+    fn a_strict_file_owns_the_refusal_even_under_the_flag() {
+        let root = std::env::temp_dir().join(format!(
+            "tog-policy-strict-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let machine = root.join(".tog/policy.toml");
+        fs::create_dir_all(root.join(".tog")).unwrap();
+        fs::write(&machine, "strict = true\n").unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", root.as_os_str());
+        let _policy = EnvVarGuard::remove("TOG_POLICY");
+
+        for (flag, env) in [(true, None), (false, Some("1")), (true, Some("1"))] {
+            let _strict = match env {
+                Some(value) => EnvVarGuard::set("TOG_STRICT", value),
+                None => EnvVarGuard::remove("TOG_STRICT"),
+            };
+            let (policy, _) = load_with_sources(&root, flag).unwrap();
+            assert!(policy.strict);
+            let message = refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1");
+            assert!(
+                message.contains(&machine.display().to_string())
+                    && message.contains("set 'strict = false'"),
+                "flag={flag} env={env:?}: {message}"
+            );
+            assert!(!message.contains("rerun without --strict"), "{message}");
+            assert!(!message.contains("unset TOG_STRICT"), "{message}");
+        }
         let _ = fs::remove_dir_all(root);
     }
 
