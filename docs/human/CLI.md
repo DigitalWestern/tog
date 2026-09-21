@@ -105,8 +105,9 @@ with what each one locks, is in 'tog help sync'.
   belongs to something else: `run` and `build` pass every argument after
   the verb to the program, `fmt` and `x` accept them only ahead of the
   tool's own arguments, and the value slot of a command's own option is
-  never searched (`tog sbom -o -v` writes a file named `-v`; the command
-  table says which options take a value).
+  never searched (`tog gc --register -v` registers a directory called
+  `-v`; the command table says which options take a value). What reaches
+  that slot is then the option's own business — see the next rule.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged, and `--` forces
   pass-through (`tog build --release` works). What tog keeps for itself is
@@ -114,6 +115,27 @@ with what each one locks, is in 'tog help sync'.
   global options while they still precede the tool's first non-option word:
   `tog x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
   a tool argument is spelled like one of those (`tog fmt -- -v`).
+- **An option's single value follows one rule.** An option that takes one
+  value refuses an empty one, and refuses a separate word that starts with
+  `-`: `tog sbom -o --json` is a mistyped flag, not a request to write a
+  file named `--json`, and `tog -C ""` is a usage error rather than a
+  directory change that fails later. A value that really does start with a
+  dash is given inline, after an `=`:
+
+      tog sbom --output=-report.json
+      tog --directory=-work plan
+
+  A lone `-` is a separate word starting with `-` like any other, so it is
+  refused too; `tog sbom --output=-` names a file called `-`. Nothing needs
+  it: `sbom` already writes to stdout when `--output` is left off.
+
+  The rule stops at the option's own grammar, so a value tog will not use
+  as a path is refused in both forms: `--eco` and `--from` name an
+  ecosystem and a package, `--forget` and `--drop-object` a key and an
+  object id, `--keep-days` a number, and none of those can start with a
+  dash. A list option (`--register <dir>...`) is the exception in the
+  other direction: it holds every word up to the next long option, so a
+  directory really called `-v` is registered rather than refused.
 
 ## Completions
 
