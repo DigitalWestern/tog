@@ -18,7 +18,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -375,8 +375,17 @@ pub fn resolve_toolchain(platform: Platform, gomod: &str) -> io::Result<&'static
         })
 }
 
-/// Resolve the Go version selected by a project's go.mod before realizing a
-/// toolchain. Callers use this result as the authority for `ensure_go_for`.
+/// Resolve the Go version a project's go.mod asks for.
+///
+/// This is the pre-lock answer, and the callers left are the ones with no
+/// selection in hand: `tog doctor` and `tog status`, which report on a
+/// project without syncing it, and `tog deps`. Sync, plan and build take
+/// the version from the [`Selected`] they are given instead, so what they
+/// realize is what the lock says. Note the two do not use the same rule
+/// when a catalog carries several pins: this one answers with the lowest
+/// pin that satisfies the directives, the way the go command treats `go` as
+/// a minimum, while selection answers with the newest release that
+/// satisfies the same request.
 pub fn resolve_project_toolchain(
     platform: Platform,
     project_dir: &Path,
@@ -803,11 +812,17 @@ fn verified_module(
 /// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
 /// by tog-owned verification of every artifact. Cached in
 /// .tog/go-plan.json keyed by go.mod+go.sum content.
+///
+/// `go_version` is the selected toolchain, which is also the Go that
+/// realized `go_obj`. The plan never re-reads go.mod's `go` or `toolchain`
+/// directive for it: the lock decides the toolchain, and the tidy gate below
+/// is free to rewrite those directives without moving the plan to a
+/// different compiler than the one it is being planned with.
 pub fn plan_go(
     store: &Store,
-    platform: Platform,
     project_dir: &Path,
     go_obj: &Path,
+    go_version: &str,
 ) -> io::Result<GoPlan> {
     reject_workspaces(project_dir)?;
     let project = ProjectRoot::open(project_dir)?;
@@ -815,7 +830,6 @@ pub fn plan_go(
         .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     let gosum = fs::read_to_string(project_dir.join("go.sum")).unwrap_or_default();
     reject_local_replaces(&gomod)?;
-    let go_version = resolve_toolchain(platform, &gomod)?;
 
     let src_digest = source_digest(project_dir)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &src_digest);
@@ -837,7 +851,6 @@ pub fn plan_go(
     )?;
     reject_local_replaces(&gomod)?;
     // Cache under the FINAL (possibly tidied) inputs so the next sync hits.
-    let go_version = resolve_toolchain(platform, &gomod)?;
     let module = module_path(&gomod)?;
     let input_hash = plan_cache_key(go_version, &gomod, &gosum, &source_digest(project_dir)?);
 
@@ -1086,13 +1099,16 @@ pub fn realize_modcache(
 }
 
 /// Project provenance (closure envelope). Go needs no wrapper or config
-/// projection: enforcement is process env, set by tog run/build.
+/// projection: enforcement is process env, set by tog run/build. `toolchain`
+/// is the selection the run honored: the closure records it so the release
+/// this Go object came from is readable without re-deriving it from go.mod.
 pub fn project_go_env(
     project_dir: &Path,
     go_obj: &Path,
     modcache_obj: &Path,
     plan: &GoPlan,
     gosum_sha256: &str,
+    toolchain: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let go_obj = go_obj.canonicalize()?;
@@ -1117,6 +1133,7 @@ pub fn project_go_env(
             "go_object": object_ref(&go_obj.canonicalize()?)?,
             "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
             "go_sum_sha256": gosum_sha256,
+            "toolchain": toolchain.record(),
             "plan": plan,
         }),
         &store,
@@ -1841,17 +1858,48 @@ mod tests {
         let store = Store {
             root: temp.0.join("absent-store"),
         };
-        let got = plan_go(
-            &store,
-            Platform::host().unwrap(),
-            &project,
-            Path::new("/nonexistent/go"),
-        )
-        .unwrap();
+        let got = plan_go(&store, &project, Path::new("/nonexistent/go"), "1.27.0").unwrap();
         assert_eq!(got.go_version, "1.27.0");
         assert_eq!(got.module, "example.com/m");
         assert_eq!(got.modules, plan.modules);
         assert!(!store.root.exists(), "a cache hit touched the store");
+    }
+
+    /// The plan is made with the toolchain the selection handed in, never
+    /// with the one go.mod's `go`/`toolchain` directives would have picked.
+    /// go.mod here asks for a Go this project is not being planned with, and
+    /// the cache written for the selected version is still the one served;
+    /// change the selection and that cache stops applying, because the
+    /// selected version is part of the plan's input hash.
+    #[test]
+    fn the_plan_follows_the_selection_not_the_go_directive() {
+        let temp = TempDir::new();
+        let project = temp.0.join("proj");
+        let (_, gosum, plan) = plan_fixture(&project);
+        fs::write(
+            project.join("go.mod"),
+            "module example.com/m\n\ngo 1.21\n\ntoolchain go1.22.0\n",
+        )
+        .unwrap();
+        let gomod = fs::read_to_string(project.join("go.mod")).unwrap();
+        assert!(resolve_toolchain(Platform::host().unwrap(), &gomod).unwrap() == "1.27.0");
+        write_plan_cache(
+            &project,
+            &plan_cache_key("1.27.0", &gomod, &gosum, &source_digest(&project).unwrap()),
+            &plan,
+        );
+        // A store root that does not exist and a go binary that does not
+        // exist: the selected toolchain hits the cache and reaches neither.
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let got = plan_go(&store, &project, Path::new("/nonexistent/go"), "1.27.0").unwrap();
+        assert_eq!(got.go_version, "1.27.0");
+        assert!(!store.root.exists(), "a cache hit touched the store");
+
+        // A different selection is a different plan: the cache keyed to the
+        // old one is not served for it.
+        assert!(plan_go(&store, &project, Path::new("/nonexistent/go"), "1.28.0").is_err());
     }
 
     #[test]
@@ -1892,14 +1940,9 @@ mod tests {
         let store = Store {
             root: temp.0.join("absent-store"),
         };
-        let e = plan_go(
-            &store,
-            Platform::host().unwrap(),
-            &project,
-            Path::new("/nonexistent/go"),
-        )
-        .unwrap_err()
-        .to_string();
+        let e = plan_go(&store, &project, Path::new("/nonexistent/go"), "1.27.0")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("not a real directory"), "{e}");
         assert!(!store.root.exists(), "a refused cache touched the store");
     }
@@ -1918,14 +1961,9 @@ mod tests {
         let store = Store {
             root: temp.0.join("absent-store"),
         };
-        let e = plan_go(
-            &store,
-            Platform::host().unwrap(),
-            &project,
-            Path::new("/nonexistent/go"),
-        )
-        .unwrap_err()
-        .to_string();
+        let e = plan_go(&store, &project, Path::new("/nonexistent/go"), "1.27.0")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("invalid sha256 in plan"), "{e}");
         assert!(!store.root.exists(), "a rejected cache touched the store");
     }
@@ -1957,12 +1995,6 @@ mod tests {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
         let store = Store { root: store_root };
-        assert!(plan_go(
-            &store,
-            Platform::host().unwrap(),
-            &project,
-            Path::new("/nonexistent/go"),
-        )
-        .is_err());
+        assert!(plan_go(&store, &project, Path::new("/nonexistent/go"), "1.27.0",).is_err());
     }
 }

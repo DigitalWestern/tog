@@ -36,8 +36,7 @@ impl Tailor for Go {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let _ = toolchain;
-        let inputs = inputs::load_go_inputs(ctx.platform, dir, &ctx.store)?;
+        let inputs = inputs::load_go_inputs(ctx.platform, dir, &ctx.store, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -48,11 +47,10 @@ impl Tailor for Go {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let _ = request.toolchain;
-
+        let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, dir, store)?;
+        let inputs = inputs::load_go_inputs(platform, dir, store, toolchain)?;
         let modcache = go::realize_modcache(store, platform, &inputs.plan, &inputs.go_obj)?;
         go::project_go_env(
             dir,
@@ -60,6 +58,7 @@ impl Tailor for Go {
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            toolchain,
             attribution,
         )?;
         ui::synced("go modcache", &modcache);
@@ -93,10 +92,9 @@ impl Tailor for Go {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
-        let _ = toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, root, store)?;
+        let inputs = inputs::load_go_inputs(platform, root, store, toolchain)?;
         let modcache = go::realize_modcache(store, platform, &inputs.plan, &inputs.go_obj)?;
         go::project_go_env(
             root,
@@ -104,6 +102,7 @@ impl Tailor for Go {
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            toolchain,
             attribution,
         )?;
         go::build_sandboxed(platform, root, &inputs.go_obj, &modcache, args)

@@ -128,6 +128,39 @@ impl Selected {
     pub fn qualified_digest(&self, platform: Platform, component: &str) -> io::Result<String> {
         Ok(qualified(&self.artifact(platform, component)?.digest))
     }
+
+    /// What a closure records about the toolchain it was realized from: the
+    /// release, its immutable id, and every component version in it. This is
+    /// the `toolchain` body key every lock-aware tailor writes, and the one
+    /// `commands::shared` tests for before it offers a closure as legacy
+    /// evidence: a closure that carries it states its own selection, so
+    /// nothing has to be recovered from the versions scattered through its
+    /// plan.
+    ///
+    /// The record is a function of the selection alone. `source` and
+    /// `lock_sha256` are deliberately outside it: the same toolchain read
+    /// from a lock, seeded, or selected fresh must write the same bytes, or
+    /// every comparison against a record would turn on how the run got
+    /// there rather than on what it used.
+    pub fn record(&self) -> serde_json::Value {
+        let components: serde_json::Map<String, serde_json::Value> = self
+            .bundle
+            .components
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    serde_json::Value::String(entry.version.clone()),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "ecosystem": self.ecosystem,
+            "release": self.bundle.release,
+            "bundle_id": self.bundle_id(),
+            "components": components,
+        })
+    }
 }
 
 /// The shipped default: the newest complete release in `catalog`, for work
@@ -204,5 +237,36 @@ mod tests {
         assert_eq!(selected.primary_version(), "27.3.4+1.18.4");
         assert_eq!(selected.runtime(), "otp");
         assert_eq!(selected.describe(), "otp 27.3.4+1.18.4 (release beam-1)");
+    }
+
+    #[test]
+    fn the_closure_record_names_the_release_and_every_component_version() {
+        let catalog = Catalog::new(
+            "go",
+            vec![bundle("go-1.27.0", "go", "1.27.0", Platform::ALL)],
+        )
+        .unwrap();
+        let selected = shipped(&catalog).unwrap();
+        let record = selected.record();
+        assert_eq!(record["ecosystem"], "go");
+        assert_eq!(record["release"], "go-1.27.0");
+        assert_eq!(record["bundle_id"], selected.bundle_id());
+        assert_eq!(record["components"]["go"], "1.27.0");
+
+        // The same selection records the same bytes however it was reached:
+        // a record is about the toolchain, not about the run.
+        let mut from_lock = selected.clone();
+        from_lock.source = Source::Lock;
+        from_lock.lock_sha256 = Some("c".repeat(64));
+        assert_eq!(from_lock.record(), record);
+
+        // Embedded components are versions too: they are what the closure
+        // was built with, even though they have no artifact row.
+        let mut with_embedded = selected;
+        with_embedded
+            .bundle
+            .components
+            .push(Component::embedded("stdlib", "1.27.0", "go"));
+        assert_eq!(with_embedded.record()["components"]["stdlib"], "1.27.0");
     }
 }
