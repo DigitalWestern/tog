@@ -398,17 +398,6 @@ pub(crate) fn realize_env_at_depth(
     Ok(object)
 }
 
-/// Project an env into a project directory: `.venv` symlink (atomic swap)
-/// plus closure-envelope provenance (.tog/closures/python.json).
-pub fn project_env(
-    project_dir: &Path,
-    env_obj: &Path,
-    plan: &Plan,
-    attribution: &mut crate::kernel::policy::Attribution,
-) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, None, &[], attribution)
-}
-
 /// `project_env_with_selection` plus the input files recorded for status.
 pub fn project_env_with_inputs(
     project_dir: &Path,
@@ -428,9 +417,10 @@ pub fn project_env_with_inputs(
     )
 }
 
-/// Project a Python env and retain the exact interpreter constraint that led
-/// to the selected pin. This is separate from `project_env` to keep the
-/// existing kernel-facing helper compatible with hand-built Plans.
+/// Project an env into a project directory (`.venv` symlink, atomic swap,
+/// plus closure-envelope provenance in `.tog/closures/python.json`) and
+/// retain the exact interpreter constraint that led to the selected pin.
+/// `tog x` uses this: it has a selection but no recorded input files.
 pub fn project_env_with_selection(
     project_dir: &Path,
     env_obj: &Path,
@@ -528,7 +518,6 @@ mod tests {
     use super::*;
     use crate::kernel::types::LockedPackage;
     use sha2::Digest as _;
-    use std::os::unix::fs::PermissionsExt as _;
 
     fn test_store(label: &str) -> Store {
         let root = std::env::temp_dir().join(format!(
@@ -636,49 +625,6 @@ mod tests {
         };
         fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
         key
-    }
-
-    fn write_closure(dir: &Path, platform: Option<&str>) {
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
-        let mut v = serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "body": {"ok": true}
-        });
-        if let Some(platform) = platform {
-            v["platform"] = serde_json::Value::String(platform.to_string());
-        }
-        fs::write(dir.join(".tog/closures/python.json"), v.to_string()).unwrap();
-    }
-
-    fn closure_test_body(store: &Store) -> serde_json::Value {
-        serde_json::json!({"store_object": store.object_path("closure-test")})
-    }
-
-    fn complete_object(store: &Store, name: &str) -> String {
-        crate::kernel::objmeta::register_test_kinds();
-        let identity = crate::kernel::types::Identity {
-            kind: "test".into(),
-            name: name.into(),
-            version: "1".into(),
-            inputs: Default::default(),
-        };
-        let id = identity.object_id();
-        let staged = store.stage().unwrap();
-        fs::write(staged.join("payload"), name).unwrap();
-        store
-            .commit_with_deps(
-                &identity,
-                &staged,
-                &[],
-                &crate::kernel::store::ObjectDeps::new(),
-            )
-            .unwrap();
-        let object = store.object_path(&id);
-        let mut perms = fs::metadata(&object).unwrap().permissions();
-        perms.set_mode(perms.mode() & !0o222);
-        fs::set_permissions(&object, perms).unwrap();
-        id
     }
 
     /// `python-env/3` goldens, on both platforms, from fixed inputs: a

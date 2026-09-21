@@ -22,6 +22,11 @@ use std::process::Command;
 
 const RUST_VERSION: &str = "1.96.1";
 
+/// The `store/tmp` scratch name for a `cargo build`. The `stage-` prefix is
+/// the one `gc::collect` sweeps, so a build killed before its cleanup leaks
+/// nothing permanent; see `unique_dir`.
+const BUILD_SCRATCH_PREFIX: &str = "stage-cargo-build";
+
 struct RustComponent {
     platform: Platform,
     component: &'static str,
@@ -1470,7 +1475,7 @@ pub fn build_sandboxed(
         .and_then(Path::parent)
         .map(|path| path.join("tmp"))
         .ok_or_else(|| err("cannot locate store tmp for Cargo build"))?;
-    let scratch = unique_dir(&store_tmp, "cargo-build")?;
+    let scratch = build_scratch(&store_tmp)?;
     // Disposable per-build CARGO_HOME + config inside the scratch dir: the
     // projected cargo-home must never be writable in-sandbox, or a build
     // script could replace the wrapper that later runs UNsandboxed under
@@ -1539,11 +1544,24 @@ fn project_child_dir(project_dir: &Path, relative: &str) -> io::Result<PathBuf> 
     Ok(path)
 }
 
+/// The scratch directory one `cargo build` runs in. Every caller of the
+/// build goes through here, so the prefix cannot drift away from the one the
+/// gc stage sweep reclaims without the sweep test noticing.
+fn build_scratch(store_tmp: &Path) -> io::Result<PathBuf> {
+    unique_dir(store_tmp, BUILD_SCRATCH_PREFIX)
+}
+
+/// A scratch directory under `store/tmp`. Every caller passes a `stage-`
+/// prefix on purpose: `gc::collect` reclaims exactly `store/tmp/stage-*`, so
+/// a run killed by a signal before its cleanup still gets collected.
+/// Sweeping only touches stages older than a day, so a live run's scratch
+/// (created moments ago, and written to throughout) is never swept out from
+/// under it.
 fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(parent)?;
     for attempt in 0..100 {
         let path = parent.join(format!(
-            ".{prefix}.{}.{}.{}",
+            "{prefix}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1557,7 +1575,10 @@ fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
-    Err(err(format!("could not create {prefix} scratch directory")))
+    Err(err(format!(
+        "could not create a {prefix} scratch directory under {}: every candidate name was taken",
+        parent.display()
+    )))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
@@ -2147,6 +2168,50 @@ checksum = "{hash_b}"
         assert!(status.success());
         let hash = hex::encode(Sha256::digest(fs::read(&archive).unwrap()));
         (archive, hash)
+    }
+
+    /// A `cargo build` killed before its own cleanup leaves its scratch under
+    /// `store/tmp`. `gc::collect` reclaims exactly `store/tmp/stage-*`, so the
+    /// build scratch has to be named with that prefix or it leaks forever.
+    #[test]
+    fn a_leftover_cargo_build_scratch_is_swept_by_gc() {
+        with_temp_store(|store, root| {
+            // Through the same helper `build_sandboxed` uses, so a prefix
+            // that drifts back out of the swept namespace fails here.
+            let scratch = build_scratch(&store.root.join("tmp")).unwrap();
+            let name = scratch.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.starts_with("stage-"), "{name}");
+            fs::write(scratch.join("cargo-home"), b"leftover").unwrap();
+            // Only stages older than a day are stale; a live build's scratch
+            // is never swept out from under it.
+            let old = SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(2 * 24 * 60 * 60))
+                .unwrap();
+            fs::File::open(&scratch).unwrap().set_modified(old).unwrap();
+
+            // A registered, resolvable root: the sweep refuses outright when
+            // a recorded project cannot be resolved.
+            let project = root.join("project");
+            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::write(
+                project.join(".tog/closures/cargo.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "closure/1",
+                    "ecosystem": "cargo",
+                    "body": {},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            store.register_root(&project).unwrap();
+            let mut out = Vec::new();
+            let report =
+                crate::kernel::gc::collect(store, crate::kernel::gc::Options::default(), &mut out)
+                    .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(report.stages, 1, "{text}");
+            assert!(!scratch.exists(), "{text}");
+        });
     }
 
     #[test]
