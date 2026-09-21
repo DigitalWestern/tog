@@ -35,9 +35,8 @@ impl Tailor for Ruby {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let _ = toolchain;
-        let ruby_obj = ruby::ensure_ruby_for(&ctx.store, ctx.platform)?;
-        let (plan, _) = ruby::plan_ruby(&ctx.store, dir, &ruby_obj)?;
+        let ruby_obj = ruby::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
+        let (plan, _) = ruby::plan_ruby(&ctx.store, dir, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -48,14 +47,21 @@ impl Tailor for Ruby {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let _ = request.toolchain;
-
+        let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let ruby_obj = ruby::ensure_ruby_for(store, platform)?;
-        let (plan, lock_sha256) = ruby::plan_ruby(store, dir, &ruby_obj)?;
-        let gems = ruby::realize_gems(store, platform, &plan, &ruby_obj)?;
-        ruby::project_ruby_env(dir, &ruby_obj, &gems, &plan, &lock_sha256, attribution)?;
+        let ruby_obj = ruby::realize_runtime(store, platform, toolchain)?;
+        let (plan, lock_sha256) = ruby::plan_ruby(store, dir, &ruby_obj, toolchain)?;
+        let gems = ruby::realize_gems(store, platform, &plan, &ruby_obj, toolchain)?;
+        ruby::project_ruby_env(
+            dir,
+            &ruby_obj,
+            &gems,
+            &plan,
+            &lock_sha256,
+            toolchain,
+            attribution,
+        )?;
         ui::synced("gems", &gems);
         Ok(true)
     }
