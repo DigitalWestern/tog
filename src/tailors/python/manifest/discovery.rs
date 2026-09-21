@@ -97,10 +97,14 @@ pub fn python_inputs(dir: &Path) -> io::Result<PythonInputs> {
     pyselect::collect_project_inputs(dir).map_err(|e| unreadable(&dir.join("pyproject.toml"), e))
 }
 
-pub fn discover(platform: Platform, dir: &Path) -> io::Result<Manifest> {
+/// Discover the project's manifest. `python_version` is the interpreter the
+/// project's toolchain selection names: marker evaluation (Poetry's
+/// environment markers, a `uv.lock` entry's `python_version`) is a function
+/// of the interpreter that will run, so discovery is handed the locked one
+/// rather than choosing its own.
+pub fn discover(platform: Platform, dir: &Path, python_version: &str) -> io::Result<Manifest> {
     let cfg = config(dir)?;
     let collected_python = python_inputs(dir)?;
-    let discovery_selection = pyselect::select_python_with_inputs(platform, &collected_python)?;
     let dynamic_dependencies = if dir.join("pyproject.toml").is_file() {
         let path = dir.join("pyproject.toml");
         project_dependencies_are_dynamic(&parse_toml(&path, &read_text(&path)?)?)
@@ -125,14 +129,7 @@ pub fn discover(platform: Platform, dir: &Path) -> io::Result<Manifest> {
         } else if project {
             project_manifest(dir, &value, &text, &cfg)?
         } else if poetry {
-            poetry_manifest(
-                platform,
-                dir,
-                &value,
-                &text,
-                &cfg,
-                discovery_selection.pin.version,
-            )?
+            poetry_manifest(platform, dir, &value, &text, &cfg, python_version)?
         } else if groups {
             project_manifest(dir, &value, &text, &cfg)?
         } else {
@@ -165,7 +162,7 @@ pub fn discover(platform: Platform, dir: &Path) -> io::Result<Manifest> {
             &packages,
             &manifest.requirements,
             platform,
-            discovery_selection.pin.version,
+            python_version,
             glibc,
         )?;
     }

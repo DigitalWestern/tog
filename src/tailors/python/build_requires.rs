@@ -394,10 +394,11 @@ pub(crate) fn lock_cache_key(
 pub(crate) fn resolve_build_plan(
     store: &Store,
     platform: Platform,
-    python_version: &str,
+    selected: &crate::kernel::toolchain::Selected,
     requires: &[String],
     runtime_plan: Option<&Plan>,
 ) -> io::Result<Plan> {
+    let python_version = selected.version("cpython")?;
     let numpy = numpy_constraint(runtime_plan);
     let key = lock_cache_key(platform, python_version, requires, numpy.as_deref());
     let lock_path = store.cache_path("build-lock", &key);
@@ -412,7 +413,7 @@ pub(crate) fn resolve_build_plan(
                 store,
                 platform,
                 &text,
-                python_version,
+                selected,
                 numpy.as_deref(),
             )?;
             fs::write(&lock_path, &lock)?;

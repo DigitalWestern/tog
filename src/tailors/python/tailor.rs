@@ -28,15 +28,21 @@ impl Tailor for Python {
         inputs::has_python_input(dir)
     }
 
+    /// Host support and a pinned interpreter for the request this project
+    /// states, before the store is opened. Selection proper happens in the
+    /// kernel a moment later, from the same rows; this runs first so an
+    /// unpinnable request is refused in Python's own words (which patch
+    /// releases exist, and what to put in `.python-version`) rather than in
+    /// the catalog's.
     fn preflight(&self, platform: Platform, dir: &Path) -> io::Result<()> {
         let selection =
             pyselect::select_python_with_inputs(platform, &manifest::python_inputs(dir)?)?;
         python::preflight(platform, selection.pin.version)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let _ = toolchain;
-        let (plan, _selection, _inputs) = inputs::read_plan(ctx.platform, dir, &ctx.store)?;
+    fn plan(&self, ctx: &Context, dir: &Path, selected: &Selected) -> io::Result<Option<String>> {
+        let (plan, _selection, _inputs) =
+            inputs::read_plan(ctx.platform, dir, &ctx.store, selected)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -47,13 +53,23 @@ impl Tailor for Python {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let _ = request.toolchain;
-
         let platform = ctx.platform;
         let store = &ctx.store;
-        let (plan, selection, inputs) = inputs::read_plan(platform, dir, store)?;
-        let env = super::env::realize_env(store, platform, &plan)?;
-        super::env::project_env_with_inputs(dir, &env, &plan, &selection, &inputs, attribution)?;
+        // The interpreter and the resolver this sync uses are the rows the
+        // project's toolchain selection names, not the pin table.
+        let selected = request.toolchain;
+        let (plan, selection, inputs) = inputs::read_plan(platform, dir, store, selected)?;
+        let runtime = python::realize_runtime(store, platform, selected)?;
+        let env = super::env::realize_env_for(store, platform, &plan, selected)?;
+        super::env::project_env_with_inputs(
+            dir,
+            &env,
+            &plan,
+            &selection,
+            &inputs,
+            Some((selected, runtime.as_path())),
+            attribution,
+        )?;
         ui::synced(".venv", &env);
         Ok(true)
     }

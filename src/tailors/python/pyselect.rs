@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-const DEFAULT_VERSION: &str = "3.12.14";
+pub(crate) const DEFAULT_VERSION: &str = "3.12.14";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConstraintSource {
@@ -62,8 +62,11 @@ pub struct ExplicitPython {
     version: crate::tailors::python::pep440::Version,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PythonSelection {
+    /// The pinned build this project runs. On a project path it is the row
+    /// for the version the toolchain selection names, not a choice this
+    /// module made.
     pub pin: &'static PinnedPython,
     pub constraint: Option<String>,
     pub constraint_source: Option<String>,
@@ -124,6 +127,104 @@ pub fn select_python(
             constraints: constraints.to_vec(),
         },
     )
+}
+
+/// The joined constraint text and its sources, for the closure record and
+/// the selection message. `None` when the project declares none.
+fn declared(inputs: &PythonInputs) -> (Option<String>, Option<String>) {
+    if inputs.constraints.is_empty() {
+        return (None, None);
+    }
+    let join = |pick: fn(&ConstraintSource) -> &str, sep: &str| {
+        Some(
+            inputs
+                .constraints
+                .iter()
+                .map(pick)
+                .collect::<Vec<_>>()
+                .join(sep),
+        )
+    };
+    (
+        join(|constraint| constraint.text.as_str(), " && "),
+        join(|constraint| constraint.source.as_str(), ", "),
+    )
+}
+
+/// The selection for the interpreter the project's toolchain selection
+/// names, checked against every constraint the project declares.
+///
+/// This chooses nothing: `version` comes from `tog-toolchain.toml` (or the
+/// selection a first sync is about to publish), which already honored
+/// `.python-version` and `requires-python`. What is left here are the
+/// sources the lock deliberately does not read — a `setup.cfg`
+/// `python_requires`, a constraint only `setup.py` metadata states — so a
+/// disagreement is a warning naming the next command, never a reselection.
+/// A version this tog has no build for is refused rather than approximated.
+pub fn locked(
+    platform: Platform,
+    version: &str,
+    inputs: &PythonInputs,
+) -> io::Result<PythonSelection> {
+    let pin = crate::tailors::python::lookup(platform, version).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "tog-toolchain.toml selects cpython {version}, which this tog has no build for on {}; \
+                 upgrade tog or run `tog update --toolchain python`",
+                platform.triple()
+            ),
+        )
+    })?;
+    let selected = pinned_version(pin.version).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pinned CPython {} is not a release version", pin.version),
+        )
+    })?;
+    let (constraint_text, constraint_source) = declared(inputs);
+    let mut warnings = Vec::new();
+    let violated: Vec<String> = inputs
+        .constraints
+        .iter()
+        .map(|constraint| {
+            crate::tailors::python::pep440::SpecifierSet::parse(
+                &constraint.text,
+                &constraint.source,
+            )
+            .map(|set| (constraint, set))
+        })
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, specifier)| !specifier.matches(&selected))
+        .map(|(constraint, _)| format!("\"{}\" from {}", constraint.text, constraint.source))
+        .collect();
+    if !violated.is_empty() {
+        warnings.push(format!(
+            "tog: cpython {} from tog-toolchain.toml does not satisfy {}; honoring the lock \
+             (change the declaration, then run `tog update --toolchain python`)",
+            pin.version,
+            violated.join(", ")
+        ));
+    }
+    Ok(PythonSelection {
+        pin,
+        constraint: inputs
+            .explicit
+            .as_ref()
+            .map(|explicit| explicit.raw.clone())
+            .or(constraint_text),
+        constraint_source: inputs
+            .explicit
+            .as_ref()
+            .map(|explicit| explicit.source.clone())
+            .or(constraint_source),
+        warnings,
+        explicit_request: inputs
+            .explicit
+            .as_ref()
+            .map(|explicit| explicit.raw.clone()),
+    })
 }
 
 pub fn select_python_with_inputs(

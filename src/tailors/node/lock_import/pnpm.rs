@@ -928,17 +928,23 @@ pub(super) fn pnpm_legacy_root(root: &BTreeMap<String, YamlValue>) -> BTreeMap<S
 }
 
 /// Parse pnpm lockfile versions 9 and the compatible importer shape of v6.
-pub fn plan_pnpm(platform: Platform, lock_yaml: &str, project_dir: &Path) -> io::Result<NpmPlan> {
+pub fn plan_pnpm(
+    platform: Platform,
+    lock_yaml: &str,
+    project_dir: &Path,
+    node_version: &str,
+) -> io::Result<NpmPlan> {
     let mut record = |kind: &str, subject: &str, detail: &str| {
         crate::kernel::policy::record(kind, subject, detail)
     };
-    plan_pnpm_with_recorder(platform, lock_yaml, project_dir, &mut record)
+    plan_pnpm_with_recorder(platform, lock_yaml, project_dir, node_version, &mut record)
 }
 
 fn plan_pnpm_with_recorder(
     platform: Platform,
     lock_yaml: &str,
     project_dir: &Path,
+    node_version: &str,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<NpmPlan> {
     // pnpm can append a second document when a lock is merged from a
@@ -1036,6 +1042,7 @@ fn plan_pnpm_with_recorder(
             local_link_deps,
         },
         "pnpm-lock.yaml",
+        node_version,
     )
 }
 
@@ -1044,12 +1051,13 @@ pub(super) fn plan_pnpm_with_policy(
     platform: Platform,
     lock_yaml: &str,
     project_dir: &Path,
+    node_version: &str,
     policy: &crate::kernel::policy::Policy,
 ) -> io::Result<NpmPlan> {
     let mut record = |kind: &str, subject: &str, detail: &str| {
         crate::kernel::policy::record_with(policy, kind, subject, detail)
     };
-    plan_pnpm_with_recorder(platform, lock_yaml, project_dir, &mut record)
+    plan_pnpm_with_recorder(platform, lock_yaml, project_dir, node_version, &mut record)
 }
 
 #[cfg(test)]
