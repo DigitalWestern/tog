@@ -227,13 +227,15 @@ one writer allowed to replace a lock.
 
 Staleness is one rule everywhere — re-derive each consulted row and compare
 presence and value, never the file digest alone — so ordinary sync,
-`--frozen`, `tog status` and `tog audit` all reach the same verdict.
-`status` reports it as `toolchain-lock-stale` or `toolchain-lock-missing`
-ahead of the tailor's own comparison; `audit` reads the same states as a
-stale record. Cached `tog x` environments key on `x/3`: store root,
-ecosystem, package request, platform, the primary runtime version and the
-selected `bundle_id`, so a changed bundle component gives a fresh
-environment and an `x/2` directory is never reused.
+`--frozen` and `tog status` reach the same verdict. `status` reports a
+missing or stale lock, a missing section, and a closure built from another
+bundle as `changed` naming `tog-toolchain.toml`, and a verdict that sync
+would refuse is answered ahead of the tailor's own comparison. `tog audit`
+does not read the lock yet (`FOLLOW-UPS.md`). Cached `tog x` environments
+key on `x/3`: store root, ecosystem, package request, platform, the primary
+runtime version, the selected `bundle_id` and the realized runtime object,
+so a changed bundle component gives a fresh environment and an `x/2`
+directory is never reused.
 
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each tailor's `toolchain_catalog` turns its pin

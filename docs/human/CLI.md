@@ -216,11 +216,11 @@ Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
 mix. It re-reads the declarative toolchain sources, selects the newest
 compatible release for every ecosystem the project has — as discovery finds
 them, which is how a newly added ecosystem gains its section — or only the
-named one (`python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`),
+named one (`python`, `node`, `rust` or `cargo`, `go`, `ruby`, `elixir`, `dotnet`),
 rewrites `tog-toolchain.toml` atomically, and then syncs. It takes no
 package name, never touches a dependency lock, and is the only thing that
-moves a locked runtime. `--no-sync` does not apply: there is no dependency
-edit to review.
+moves a locked runtime. `--no-sync` stops after the lock is written, so the
+diff can be reviewed before anything is realized.
 
 **fmt** runs the pinned rustfmt for a Rust workspace, discovered with the
 store Cargo and `--no-deps`, so a project that has never been synced needs
@@ -301,15 +301,17 @@ unchecked.`) and, when something is not synced, a line explaining each word
 that needs it. The states: `synced`, `changed` (with the files),
 `not synced`, `missing` (the projection is gone), `elsewhere` (the closure
 was written on another platform and says nothing about this host),
-`lock-stale` (a toolchain source disagrees with `tog-toolchain.toml`, or the
-lock has no section for this ecosystem; `--json` reports
-`"toolchain-lock-stale"` with the disagreeing rows), `no lock` (this
-projection was synced against a `tog-toolchain.toml` that is no longer in
-the project; `--json` reports `"toolchain-lock-missing"`), and
-`unchecked` — a closure this binary could not compare, because the record
-predates the input recording the comparison needs. The two lock states are
-answered first, because a projection built from a runtime the committed
-lock no longer names is not current whatever its dependency inputs say. `unchecked` is not a
+and `unchecked` — a closure this binary could not compare, because the
+record predates the input recording the comparison needs. The toolchain lock
+is part of the comparison and reports under `changed`, naming
+`tog-toolchain.toml`: a missing lock (run `tog sync` to create it), a
+source that disagrees with a recorded row or a lock with no section for
+this ecosystem (both name `tog update --toolchain <ecosystem>`), or a
+projection built from a bundle the lock no longer names (run `tog sync`).
+A verdict that `tog sync` would refuse is reported ahead of the closure's
+own changed files, so the row names the verb that moves it; a closure that
+recorded no toolchain at all is `unchecked` until one sync records it.
+`unchecked` is not a
 pass: it is reported under its own word, `--json` reports `"state":
 "unchecked"` with `"synced": false`, and the command exits 1, like every
 other not-synced state. Offline, read-only, exit 0 only when every detected
