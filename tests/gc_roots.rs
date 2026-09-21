@@ -554,6 +554,54 @@ fn a_corrupt_record_never_blocks_forgetting_a_key() {
     );
 }
 
+/// A `roots/` holding only strays has never had a record written to it, so
+/// the sweep must still refuse: the entries that are not records protect
+/// nothing, and running anyway would delete objects the registry has not
+/// been told about yet. The compatibility path is the other half of the
+/// same gate — one real record and no marker is the shape the first
+/// registry implementation left behind, and that store is initialized.
+#[test]
+fn stray_entries_do_not_make_the_registry_look_initialized() {
+    let fixture = Fixture::new("stray-entries");
+    let project = fixture.project("project", true);
+    fs::remove_file(fixture.roots().join(".initialized")).unwrap();
+    // Every shape that is not a record: a stray regular file, a directory
+    // at a key-shaped name, and an interrupted write's temporary.
+    fs::write(fixture.roots().join("README"), b"notes\n").unwrap();
+    fs::create_dir(fixture.roots().join("c".repeat(40))).unwrap();
+    fixture.record_as(".project.tmp.1.0", b"/interrupted\n");
+
+    let refused = fixture.run(&["gc", "--keep-days=0"]);
+    assert!(
+        !refused.status.success(),
+        "the sweep ran with no records: {}",
+        stdout(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("registry is not initialized"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        fixture.object().is_dir(),
+        "the refused sweep deleted the object anyway"
+    );
+
+    // One real record, still no marker: the gate opens and the record
+    // protects the object. The strays go first, because the sweep's own
+    // reader refuses an entry it cannot account for.
+    fs::remove_file(fixture.roots().join("README")).unwrap();
+    fs::remove_dir(fixture.roots().join("c".repeat(40))).unwrap();
+    fs::remove_file(fixture.roots().join(".project.tmp.1.0")).unwrap();
+    fixture.record(&project);
+    let swept = fixture.run(&["gc", "--keep-days=0"]);
+    assert!(swept.status.success(), "{}", stderr(&swept));
+    assert!(
+        fixture.object().is_dir(),
+        "the record did not protect the object"
+    );
+}
+
 /// The register/forget preflight resolves every key before the registry
 /// changes, so an ambiguous or partly wrong request loses no record. The
 /// review found that removing the whole preflight kept the full suite and

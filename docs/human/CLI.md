@@ -96,6 +96,22 @@ with what each one locks, is in 'tog help sync'.
   argument after the command to the tool unchanged; only a *leading*
   `-h`/`--help` is tog's, and `--` forces pass-through (`tog build
   --release` works; use `--` if the first tool argument is itself `-h`).
+- **An option's value follows one rule.** Every option that takes a value
+  refuses an empty one, and refuses a separate word that starts with `-`:
+  `tog sbom -o --json` is a mistyped flag, not a request to write a file
+  named `--json`, and `tog -C ""` is a usage error rather than a directory
+  change that fails later. A path that really does start with a dash is
+  given inline, after an `=`:
+
+      tog sbom --output=-report.json
+      tog --directory=-work plan
+
+  Options whose value is a name rather than a path — `--eco`, `--from`,
+  `--forget`, `--drop-object`, `--keep-days` — refuse a dash-leading value
+  in both forms, because none of those values can start with one. The
+  value is also never searched for a global option, so
+  `tog sbom -o -v` reports the missing file path rather than quietly
+  taking `-v`.
 
 ## Completions
 

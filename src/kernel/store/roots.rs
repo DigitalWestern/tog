@@ -52,10 +52,6 @@ pub struct RootDiagnostic {
 
 pub(super) const ROOTS_INITIALIZED: &str = ".initialized";
 
-/// Generous ceiling on one registry record: four times the longest pathname
-/// Linux or macOS will hand back, plus its newline.
-pub(super) const RECORD_LIMIT: u64 = 16 * 1024;
-
 impl Store {
     /// Serialize registry/closure publication for one canonical project.
     /// Callers acquire the store activity lease first, then this transaction
@@ -531,14 +527,19 @@ impl Store {
         ensure_directory_tree(&self.root, Path::new("roots"))?;
         let roots_dir = open_store_directory(&roots, "roots")?;
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
-            let stat = stat_at(roots_dir.as_raw_fd(), name.as_os_str().as_bytes())?;
             if name.as_os_str().as_bytes() == ROOTS_INITIALIZED.as_bytes() {
                 // A malformed marker is still an initialized-but-corrupt
                 // registry; roots_for_sweep will report the exact defect.
                 return Ok(true);
             }
+            let stat = stat_at(roots_dir.as_raw_fd(), name.as_os_str().as_bytes())?;
             if !is_regular_file(&stat) || !is_sha1(&name.to_string_lossy()) {
-                return Ok(true);
+                // Not a record: a directory, a symlink, an interrupted
+                // write's temporary, or anything else dropped into the
+                // directory. A `roots/` holding only these has never had a
+                // record written to it, and a sweep that trusted it would
+                // delete objects no registry protects yet.
+                continue;
             }
             return Ok(true);
         }
