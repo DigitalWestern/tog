@@ -140,7 +140,11 @@ pub(crate) fn read_cache_verified_digest(store: &Store, digest: &Digest) -> io::
     fs::read(&lease.path)
 }
 
-fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
+/// The hex digest of a file under `algo`. This is the same read every
+/// verification on a cache hit performs, exposed so a caller that holds a
+/// lease across a long phase can re-verify the bytes immediately before it
+/// uses them: the lease stops a sweep, not a same-user replacement.
+pub(crate) fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     let mut f = fs::File::open(path)?;
     let mut buf = [0u8; 65536];
     let mut h256 = Sha256::new();
