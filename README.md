@@ -120,6 +120,7 @@ tog add requests            # add a dependency with the ecosystem's own tool
 tog x ruff check .          # run a tool without adding it (like uvx / npx)
 tog build                   # sandboxed Cargo build (network denied)
 tog status                  # is the projection still current with the lock?
+tog update --toolchain      # re-select the runtimes and rewrite tog-toolchain.toml
 tog gc --dry-run            # preview unreferenced store/cache cleanup
 tog doctor                  # host prerequisites, sandbox, store, free space
 tog --version
@@ -142,7 +143,11 @@ Policy is permissive by default; `.tog/policy.toml` can tighten it
 
 You never install Python or Node yourself: `tog sync` materializes
 pinned, verified toolchains into the store and wires `.venv` /
-`node_modules` to them. A project with both lockfiles gets both
+`node_modules` to them. Your first sync writes `tog-toolchain.toml` next to
+your manifests, naming the exact runtime per ecosystem; commit it, and
+everyone who syncs the repo afterwards gets that runtime. `tog sync
+--frozen` checks the file instead of writing one, and `tog update
+--toolchain` is the only thing that moves a locked runtime. A project with both lockfiles gets both
 ecosystems from one sync. Resolution belongs to the ecosystem's own
 pinned tool; realization, verification, and provenance belong to
 tog.
@@ -181,6 +186,7 @@ repository that ignores all of `.tog/` can never make `tog audit` pass.
 
 | path | commit? | what it is |
 |---|---|---|
+| `tog-toolchain.toml` | **yes** (it is outside `.tog/`) | the exact toolchain per ecosystem, written by your first sync. Everyone who syncs this repo gets that runtime; `tog update --toolchain` is the only thing that moves it |
 | `.tog/closures/*.json` | **yes** | one record per ecosystem: inputs, object ids, exceptions, signature. `tog audit`, `tog ls`, `tog sbom` and `tog status` read it |
 | `.tog/policy.toml` | **yes**, if you use one | the project's deny list, merged with the machine policy. See [docs/human/policy-company.toml](docs/human/policy-company.toml) |
 | `.tog/plan.json`, `.tog/go-plan.json` | no | plan cache, keyed by input hash |

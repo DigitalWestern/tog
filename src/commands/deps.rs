@@ -1715,6 +1715,7 @@ fn node(
     let (tool_root, _x_lock, realized) = xrun::realize_node_tool(
         store,
         platform,
+        &lock_root,
         manager.name(),
         manager.version(),
         manager.corepack_hash(),

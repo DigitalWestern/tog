@@ -3,9 +3,12 @@
 use std::path::PathBuf;
 
 use super::spec::{
-    canonical_name, help, spec, usage, COMMANDS, LS_WORDS, SHELL_WORDS, SYNC_ALIASES,
+    canonical_name, help, spec, toolchain_section, usage, COMMANDS, LS_WORDS, SHELL_WORDS,
+    SYNC_ALIASES, TOOLCHAIN_ALIAS, TOOLCHAIN_WORDS,
 };
-use super::{Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, UsageError, VERSION};
+use super::{
+    Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, ToolchainUpdate, UsageError, VERSION,
+};
 
 const VERSION_WORDS: [&str; 3] = ["-V", "--version", "version"];
 const HELP_WORDS: [&str; 3] = ["-h", "--help", "help"];
@@ -246,10 +249,12 @@ fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
 fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
     let mut fresh = false;
     let mut strict = false;
+    let mut frozen = false;
     for arg in args {
         match arg.as_str() {
             "--fresh" => fresh = true,
             "--strict" => strict = true,
+            "--frozen" => frozen = true,
             "-h" | "--help" => return Ok(None),
             other if !other.starts_with('-') => {
                 return Err(UsageError::new(sync_takes_no_package(other), Some("sync")))
@@ -257,7 +262,11 @@ fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
             other => return Err(reject("sync", other)),
         }
     }
-    Ok(Some(Command::Sync { fresh, strict }))
+    Ok(Some(Command::Sync {
+        fresh,
+        strict,
+        frozen,
+    }))
 }
 
 /// `tog install requests` is the first thing a pip or npm user types, and
@@ -436,6 +445,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     };
     let mut dev = false;
     let mut no_sync = false;
+    let mut toolchain = false;
     let mut positional = Vec::new();
     let mut passthrough = false;
     for arg in args {
@@ -448,14 +458,25 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             "--" => passthrough = true,
             "-h" | "--help" => return Ok(None),
             "--no-sync" => no_sync = true,
+            "--toolchain" if name == "update" => toolchain = true,
             "--dev" | "-D" if matches!(name, "add" | "remove") => dev = true,
             other if other.starts_with('-') && other.len() > 1 => return Err(reject(name, other)),
             other => {
+                // A word after --toolchain names an ecosystem, not a
+                // package, so the dependency-spec grammar must not judge it.
+                if toolchain {
+                    positional.push(other.to_string());
+                    continue;
+                }
                 validate_dependency_arg(name, other)?;
                 positional.push(other.to_string());
             }
         }
     }
+    if toolchain {
+        return parse_update_toolchain(&positional, no_sync).map(Some);
+    }
+
     match name {
         "add" if positional.is_empty() => Err(UsageError::new(
             "add: no package given (e.g. 'tog add requests', 'tog add npm:react@18')",
@@ -477,8 +498,48 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
         _ => Ok(Some(Command::Update {
             names: positional,
             no_sync,
+            toolchain: None,
         })),
     }
+}
+
+/// `update --toolchain [<ecosystem>]`. It is a different verb wearing the
+/// same word: it re-selects a toolchain and never edits a dependency lock,
+/// so the one positional it takes is an ecosystem and a package name is
+/// refused by name rather than delegated to a tool that would not know what
+/// to do with it.
+fn parse_update_toolchain(positional: &[String], no_sync: bool) -> Result<Command, UsageError> {
+    let ecosystem = match positional {
+        [] => None,
+        [word] => match toolchain_section(word) {
+            Some(section) => Some(section.to_string()),
+            None => return Err(not_an_ecosystem(word)),
+        },
+        [_, word, ..] => return Err(not_an_ecosystem(word)),
+    };
+    Ok(Command::Update {
+        names: Vec::new(),
+        no_sync,
+        toolchain: Some(ToolchainUpdate { ecosystem }),
+    })
+}
+
+fn not_an_ecosystem(word: &str) -> UsageError {
+    UsageError::new(
+        with_suggestion(
+            format!(
+                "update --toolchain takes an ecosystem name, not a package; '{word}' is not one \
+                 of {}",
+                TOOLCHAIN_WORDS.join(", ")
+            ),
+            word,
+            TOOLCHAIN_WORDS
+                .iter()
+                .copied()
+                .chain(std::iter::once(TOOLCHAIN_ALIAS)),
+        ),
+        Some("update"),
+    )
 }
 
 fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageError> {
@@ -1228,6 +1289,7 @@ mod tests {
         let plain = Command::Sync {
             fresh: false,
             strict: false,
+            frozen: false,
         };
         assert_eq!(command(&["sync"]), plain);
         assert_eq!(command(&["install"]), plain);
@@ -1236,9 +1298,23 @@ mod tests {
             command(&["install", "--strict", "--fresh"]),
             Command::Sync {
                 fresh: true,
-                strict: true
+                strict: true,
+                frozen: false
             }
         );
+        // `--frozen` is the same flag under every alias, because the
+        // alias is resolved before the command's own grammar runs.
+        for word in ["sync", "install", "i"] {
+            assert_eq!(
+                command(&[word, "--frozen"]),
+                Command::Sync {
+                    fresh: false,
+                    strict: false,
+                    frozen: true
+                },
+                "{word}"
+            );
+        }
         assert_eq!(
             message(&["sync", "--fersh"]),
             "sync: unknown option '--fersh'; did you mean '--fresh'?"
@@ -1469,6 +1545,7 @@ mod tests {
             Command::Update {
                 names: vec![],
                 no_sync: false,
+                toolchain: None,
             }
         );
         assert_eq!(
@@ -1476,7 +1553,40 @@ mod tests {
             Command::Update {
                 names: argv(&["serde", "tokio"]),
                 no_sync: false,
+                toolchain: None,
             }
+        );
+        // `--toolchain` is the other update: no package names, and the
+        // ecosystem word is the lock's section key, with `cargo` accepted
+        // as the name every other verb uses for it.
+        assert_eq!(
+            command(&["update", "--toolchain"]),
+            Command::Update {
+                names: vec![],
+                no_sync: false,
+                toolchain: Some(ToolchainUpdate { ecosystem: None }),
+            }
+        );
+        assert_eq!(
+            command(&["update", "--toolchain", "cargo", "--no-sync"]),
+            Command::Update {
+                names: vec![],
+                no_sync: true,
+                toolchain: Some(ToolchainUpdate {
+                    ecosystem: Some("rust".into())
+                }),
+            }
+        );
+        assert!(message(&["update", "--toolchain", "serde"])
+            .contains("takes an ecosystem name, not a package"));
+        assert!(message(&["update", "serde", "--toolchain"])
+            .contains("takes an ecosystem name, not a package"));
+        assert!(message(&["update", "--toolchain", "python", "node"])
+            .contains("takes an ecosystem name, not a package"));
+        // `--toolchain` is not an option of the dependency verbs.
+        assert_eq!(
+            message(&["add", "--toolchain"]),
+            "add: unknown option '--toolchain'"
         );
         for name in ["add", "remove", "update", "x"] {
             assert_eq!(printed(&[name, "--help"]), help(spec(name).unwrap()));
@@ -1900,7 +2010,8 @@ mod tests {
             command(&["sync", "-q", "--fresh"]),
             Command::Sync {
                 fresh: true,
-                strict: false
+                strict: false,
+                frozen: false
             }
         );
         assert!(run(&["ls", "-v"]).options.verbose);

@@ -24,6 +24,7 @@ use std::path::Path;
 pub fn preflight_sync(
     platform: Platform,
     dir: &Path,
+    mode: Mode,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
     // Syncing ends by registering this project as a GC root. Check that the
     // path can be recorded before realizing or projecting anything: a
@@ -43,8 +44,7 @@ pub fn preflight_sync(
         tailor.preflight(platform, dir)?;
     }
     let inputs = ecosystem_inputs(dir, &present)?;
-    let toolchain =
-        project_toolchain::resolve(&root, platform, inputs, Mode::Writable, policy::strict())?;
+    let toolchain = project_toolchain::resolve(&root, platform, inputs, mode, policy::strict())?;
     Ok((present, toolchain))
 }
 
@@ -52,10 +52,28 @@ pub fn preflight_sync(
 /// ecosystem before the store is opened. A refused request (an unpinned
 /// patch, a path no root record can hold) must leave no trace: no store
 /// tree created, no maintenance sweep, no lease taken.
-pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<()> {
+pub fn run_command(platform: Platform, fresh: bool, strict: bool, frozen: bool) -> io::Result<()> {
+    let mode = if frozen { Mode::Frozen } else { Mode::Writable };
+    run_in_mode(platform, fresh, strict, mode, false)
+}
+
+/// The one path from a command line into a sync: preflight before the store
+/// is opened, prove the project directory is still the one preflight
+/// checked, then publish the lock and run the tailors.
+///
+/// `stop_after_lock` is `tog update --toolchain --no-sync`: the lock is the
+/// deliverable, and the diff is meant to be read before anything is
+/// realized from it.
+pub(crate) fn run_in_mode(
+    platform: Platform,
+    fresh: bool,
+    strict: bool,
+    mode: Mode,
+    stop_after_lock: bool,
+) -> io::Result<()> {
     let dir = context::project_dir();
     let checked = directory_identity(&dir)?;
-    let (present, mut toolchain) = preflight(platform, &dir, strict)?;
+    let (present, mut toolchain) = preflight(platform, &dir, strict, mode.clone())?;
     // Opening the store can wait on another process's lease. If the
     // directory was renamed or replaced meanwhile, the pathname no longer
     // names the project preflight checked: refuse rather than sync it. This
@@ -77,7 +95,18 @@ pub fn run_command(platform: Platform, fresh: bool, strict: bool) -> io::Result<
             )))
         }
     }
-    sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh)
+    if stop_after_lock {
+        if present.is_empty() {
+            return Err(no_inputs());
+        }
+        let root = ProjectRoot::open(&dir)?;
+        let _input_lock = project_toolchain::commit(&root, &mut toolchain, &mode)?;
+        crate::kernel::ui::note(
+            "--no-sync: read the tog-toolchain.toml diff, then run 'tog' to sync it",
+        );
+        return Ok(());
+    }
+    sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &mode)
 }
 
 fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
@@ -89,28 +118,30 @@ fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
 /// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
     let dir = ctx.project_dir();
-    let (present, mut toolchain) = preflight(ctx.platform, &dir, strict)?;
-    sync_preflighted(ctx, &dir, &present, &mut toolchain, fresh)
+    let (present, mut toolchain) = preflight(ctx.platform, &dir, strict, Mode::Writable)?;
+    sync_preflighted(ctx, &dir, &present, &mut toolchain, fresh, &Mode::Writable)
 }
 
 fn preflight(
     platform: Platform,
     dir: &Path,
     strict: bool,
+    mode: Mode,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
     policy::init(dir, strict)?;
     // A configured signing key that cannot be loaded fails here, before the
     // store is opened or any closure is written.
     crate::comforter::init_signing()?;
-    preflight_sync(platform, dir)
+    preflight_sync(platform, dir, mode)
 }
 
-fn sync_preflighted(
+pub(crate) fn sync_preflighted(
     ctx: &Context,
     dir: &Path,
     present: &[&'static dyn Tailor],
     toolchain: &mut ProjectToolchain,
     fresh: bool,
+    mode: &Mode,
 ) -> io::Result<()> {
     // Nothing of this project is ours to lock: report the missing manifest
     // before a `.tog` directory appears for it.
@@ -121,15 +152,23 @@ fn sync_preflighted(
     // tailor runs, and held for the whole sync, so `update --toolchain`
     // cannot install a new lock while this sync plans from the old one.
     let root = ProjectRoot::open(dir)?;
-    let _input_lock = project_toolchain::commit(&root, toolchain, &Mode::Writable)?;
+    let _input_lock = project_toolchain::commit(&root, toolchain, mode)?;
+    let frozen = *mode == Mode::Frozen;
     let mut any = false;
     for tailor in present {
         let selected = toolchain.get(tailor.lock_ecosystem())?;
         let mut attribution = policy::Attribution::open(tailor.id())?;
-        tailor.prepare(ctx, dir, selected, &mut attribution)?;
+        // `prepare` is missing-lock generation: it runs the ecosystem's own
+        // tool in the project and writes a dependency lock. Frozen promises
+        // not to modify project inputs, so it never reaches that call at
+        // all; a project with no dependency lock fails inside the tailor,
+        // which is the one place that knows which file is missing.
+        if !frozen {
+            tailor.prepare(ctx, dir, selected, &mut attribution)?;
+        }
         let request = SyncRequest {
             fresh,
-            frozen: false,
+            frozen,
             toolchain: selected,
         };
         let changed = tailor.sync(ctx, dir, &request, &mut attribution)?;
@@ -361,7 +400,7 @@ mod tests {
         let temp = TempDir::new();
         let project = temp.0.join("project ");
         std::fs::create_dir_all(&project).unwrap();
-        let Err(error) = preflight_sync(Platform::host().unwrap(), &project) else {
+        let Err(error) = preflight_sync(Platform::host().unwrap(), &project, Mode::Writable) else {
             panic!("an unregistrable project path was accepted");
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -374,6 +413,14 @@ mod tests {
         // canonical bytes; the next resolve honors the file it wrote.
         use crate::kernel::toolchain::lock::ToolchainLock;
         use crate::kernel::toolchain::{input, Source};
+        // `commit` installs a process-global guard and dropping it clears
+        // that guard, so this test cannot run beside one that is reading
+        // it. The order is the one this file documents: supervision, then
+        // attribution.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
         let temp = TempDir::new();
         let project = temp.0.join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -384,7 +431,7 @@ mod tests {
         .unwrap();
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let platform = Platform::host().unwrap();
-        let (present, mut toolchain) = preflight_sync(platform, &project).unwrap();
+        let (present, mut toolchain) = preflight_sync(platform, &project, Mode::Writable).unwrap();
         assert!(present.iter().any(|tailor| tailor.id() == "python"));
         assert!(!project.join("tog-toolchain.toml").exists());
         let selected = toolchain.get("python").unwrap();
@@ -405,7 +452,7 @@ mod tests {
         );
         drop(guard);
 
-        let (_, again) = preflight_sync(platform, &project).unwrap();
+        let (_, again) = preflight_sync(platform, &project, Mode::Writable).unwrap();
         let honored = again.get("python").unwrap();
         assert_eq!(honored.source, Source::Lock);
         assert_eq!(honored.bundle_id(), chosen);
@@ -436,7 +483,7 @@ mod tests {
         let victim = temp.0.join("victim");
         std::fs::write(&victim, "3.12.14\n").unwrap();
         std::os::unix::fs::symlink(&victim, project.join(".python-version")).unwrap();
-        let Err(error) = preflight_sync(Platform::host().unwrap(), &project) else {
+        let Err(error) = preflight_sync(Platform::host().unwrap(), &project, Mode::Writable) else {
             panic!("a symlinked .python-version was read through");
         };
         assert!(error.to_string().contains("is a symlink"), "{error}");
@@ -445,7 +492,7 @@ mod tests {
         std::fs::remove_file(project.join(".python-version")).unwrap();
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         std::os::unix::fs::symlink(&victim, project.join(".ruby-version")).unwrap();
-        preflight_sync(Platform::host().unwrap(), &project).unwrap();
+        preflight_sync(Platform::host().unwrap(), &project, Mode::Writable).unwrap();
     }
 
     #[test]

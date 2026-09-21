@@ -21,8 +21,10 @@ pub(crate) mod shared;
 pub(crate) mod status;
 pub(crate) mod store;
 pub(crate) mod sync;
+pub(crate) mod toolchain;
 pub(crate) mod x;
 
+pub use crate::commands::x::environment_name as x_environment_name;
 pub use crate::kernel::context::Context;
 
 use crate::cli;
@@ -59,6 +61,7 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
                 return Ok(cli::Command::Sync {
                     fresh: false,
                     strict: false,
+                    frozen: false,
                 });
             }
             eprint!(
@@ -149,8 +152,23 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     }
     // `sync` preflights (policy, pins, root registrability) before opening
     // the store, so a refused request touches nothing.
-    if let Sync { fresh, strict } = command {
-        return sync::run_command(platform, fresh, strict).map(|_| 0);
+    if let Sync {
+        fresh,
+        strict,
+        frozen,
+    } = command
+    {
+        return sync::run_command(platform, fresh, strict, frozen).map(|_| 0);
+    }
+    // `update --toolchain` refuses a stale or unresolvable project the same
+    // way sync does, before the store is opened, and then syncs.
+    if let Update {
+        toolchain: Some(ref update),
+        no_sync,
+        ..
+    } = command
+    {
+        return toolchain::run(platform, update, no_sync).map(|_| 0);
     }
     let needs_maintenance = matches!(
         &command,
@@ -209,7 +227,11 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
             no_sync,
         )
         .map(|_| 0),
-        Update { names, no_sync } => deps::run(
+        Update {
+            names,
+            no_sync,
+            toolchain: _,
+        } => deps::run(
             &ctx,
             deps::Request {
                 verb: deps::Verb::Update,

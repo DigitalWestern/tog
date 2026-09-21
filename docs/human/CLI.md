@@ -17,7 +17,7 @@ EVERYDAY:
   sync         realize and project the environment(s); aliases: install, i
   add          add a dependency, re-lock, sync
   remove       remove a dependency, re-lock, sync
-  update       update dependencies within the manifest's constraints, sync
+  update       update dependencies, or --toolchain, and sync
   run          run a command or package.json script inside the projected env(s)
   x            run a tool without adding it to the project (like npx / uvx)
   build        sandboxed, network-denied build (cargo | go | elixir | dotnet)
@@ -152,7 +152,37 @@ each locked plan into the store, and projects it (`.venv`, `node_modules`,
 `.tog/...`); a manifest with no dependencies syncs an interpreter-only
 environment, and `--fresh` drops project-local caches and rebuilds. It takes
 no package name: `tog install requests` is a usage error that names
-`tog add requests`. Policy exceptions are recorded in `.tog/closures/*.json`
+`tog add requests`.
+
+The first writable sync of a project with no toolchain lock selects a
+runtime per ecosystem, writes `tog-toolchain.toml` at the project root, and
+says so; commit it. Every later sync honors that file and reselects nothing,
+so a catalog or binary upgrade alone cannot move a locked runtime. A
+declarative toolchain source that disagrees with what the lock recorded —
+`.python-version`, `requires-python`, `.node-version`, `engines.node`,
+`rust-toolchain.toml`, `go.mod`, `.ruby-version`, `.tool-versions`,
+`global.json` — stops the sync with both values and names
+`tog update --toolchain`. So does a lock with no section for an ecosystem
+the project just gained: that is stale, not absent. Comparison is by the
+re-derived value, never by the file's digest alone, so a `tog add` that
+rewrites a multi-purpose manifest leaves the lock fresh.
+
+`--frozen` validates the committed lock instead of creating one and refuses
+a missing or stale one.
+
+--frozen never modifies project inputs, tog-toolchain.toml, or the catalog
+cache; it may realize store objects and write the projection after validation
+succeeds; validation failure exits before any write.
+
+Validation reads declarative files only and evaluates no
+project code, which is why a Gemfile's `ruby` directive and `setup.py`
+metadata are not toolchain sources: a project whose only statement of its
+version is computed fails `--frozen` closed, naming the declarative file to
+add. `--frozen` also skips missing-lock generation, so a project with no
+dependency lock is refused by the ecosystem that needs one rather than
+having one written for it.
+
+Policy exceptions are recorded in `.tog/closures/*.json`
 and summarized as a count with where to read them; `--strict`,
 `TOG_STRICT=1`, or a `.tog/policy.toml` deny list refuses them instead —
 note that `--strict` fails the sync, so it is a setting to sync *under*, not
@@ -181,6 +211,16 @@ refused with both roots named. Ecosystem choice, cheapest rung first:
    never guesses from the bare name.
 
 Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
+
+**update --toolchain** `[<ecosystem>]` is the other update, and the two never
+mix. It re-reads the declarative toolchain sources, selects the newest
+compatible release for every ecosystem the project has — as discovery finds
+them, which is how a newly added ecosystem gains its section — or only the
+named one (`python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`),
+rewrites `tog-toolchain.toml` atomically, and then syncs. It takes no
+package name, never touches a dependency lock, and is the only thing that
+moves a locked runtime. `--no-sync` does not apply: there is no dependency
+edit to review.
 
 **fmt** runs the pinned rustfmt for a Rust workspace, discovered with the
 store Cargo and `--no-deps`, so a project that has never been synced needs
@@ -241,6 +281,11 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
   0 whenever cleanup completed, and `nothing to clean` prints only when no
   candidate matched — a root skipped as in use is reported.
 - A running tool is left in place, reported as in use; retry after it exits.
+- An environment is keyed on the runtime it runs on as well as the tool, so
+  a project with a toolchain lock gets the tool on the locked runtime and an
+  `update --toolchain` gives the next run a fresh environment. Environments
+  made by an older tog have a different name and are never reused; they stay
+  until `tog x --clean`.
 
 **build** runs the ecosystem's build tool in the network-denied sandbox with
 the pinned toolchain and realized dependency objects; the ecosystem is
@@ -255,9 +300,16 @@ One row per detected ecosystem, then a summary line (`2 of 3 synced; 1
 unchecked.`) and, when something is not synced, a line explaining each word
 that needs it. The states: `synced`, `changed` (with the files),
 `not synced`, `missing` (the projection is gone), `elsewhere` (the closure
-was written on another platform and says nothing about this host), and
+was written on another platform and says nothing about this host),
+`lock-stale` (a toolchain source disagrees with `tog-toolchain.toml`, or the
+lock has no section for this ecosystem; `--json` reports
+`"toolchain-lock-stale"` with the disagreeing rows), `no lock` (this
+projection was synced against a `tog-toolchain.toml` that is no longer in
+the project; `--json` reports `"toolchain-lock-missing"`), and
 `unchecked` — a closure this binary could not compare, because the record
-predates the input recording the comparison needs. `unchecked` is not a
+predates the input recording the comparison needs. The two lock states are
+answered first, because a projection built from a runtime the committed
+lock no longer names is not current whatever its dependency inputs say. `unchecked` is not a
 pass: it is reported under its own word, `--json` reports `"state":
 "unchecked"` with `"synced": false`, and the command exits 1, like every
 other not-synced state. Offline, read-only, exit 0 only when every detected
@@ -555,7 +607,5 @@ root (`store roots`). **version** prints `tog 0.1.0`.
 ## Open questions
 
 - `tog why <pkg>`: closures record packages, not dependency edges.
-- `sync --frozen` (validate `tog-toolchain.toml` without touching it)
-  and `update --toolchain` are designed but not implemented.
 - `x` for cargo and go; a `tog.toml` `[tasks]` table for cross-language
   scripts — both wait for a real need.

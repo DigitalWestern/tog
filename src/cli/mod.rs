@@ -43,6 +43,10 @@ pub enum Command {
     Sync {
         fresh: bool,
         strict: bool,
+        /// Validate the committed `tog-toolchain.toml` instead of creating
+        /// one, and refuse a missing or stale lock before anything is
+        /// written.
+        frozen: bool,
     },
     Fmt {
         check: bool,
@@ -74,9 +78,14 @@ pub enum Command {
         dev: bool,
         no_sync: bool,
     },
+    /// `update [<package>...]` re-locks dependencies; `update --toolchain
+    /// [<ecosystem>]` re-selects the toolchain instead. The two never mix:
+    /// `toolchain` is `Some` exactly when `names` is empty and the
+    /// dependency locks are left alone.
     Update {
         names: Vec<String>,
         no_sync: bool,
+        toolchain: Option<ToolchainUpdate>,
     },
     /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
     X {
@@ -135,6 +144,15 @@ impl Command {
                 | Command::Plan { json: true }
         )
     }
+}
+
+/// Which toolchains `update --toolchain` re-selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolchainUpdate {
+    /// The `[toolchain.<name>]` section key when one was named; `None`
+    /// updates every ecosystem discovery finds in the project, which is how
+    /// a newly added ecosystem gains its section.
+    pub ecosystem: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
