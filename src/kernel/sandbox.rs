@@ -718,20 +718,36 @@ fn bwrap_unavailable() -> String {
     )
 }
 
-/// A bubblewrap that starts but cannot exec anything inside its own mount
-/// layout. Ubuntu 22.04's bubblewrap does this to tog's merged-/usr bind
-/// list, so the raw `execvp /usr/bin/true: No such file or directory` reads
-/// like a missing file in the user's project rather than a host limitation.
+/// The binary the preflight probe execs. A failure to exec *this* is a
+/// property of the host, because tog chose it and it is in the ro-bound
+/// `/usr`; a failure to exec anything else is a property of that command.
+const PROBE_TARGET: &str = "/usr/bin/true";
+
+/// A bubblewrap that starts but cannot exec. Ubuntu 22.04's bubblewrap
+/// cannot resolve tog's merged-/usr bind layout, so the raw
+/// `execvp /usr/bin/true: No such file or directory` reads like a missing
+/// file in the user's project rather than a host limitation.
+///
+/// Only the probe's own target gets that explanation. bwrap prints the
+/// same line when a build spec names a binary that is not in the closure,
+/// and blaming Ubuntu for that would send the user to the wrong place.
 fn explained_bwrap_stderr(stderr: &str) -> String {
     let raw = stderr.trim_end();
-    if raw.contains("execvp") && raw.contains("No such file or directory") {
+    if !raw.contains("execvp") || !raw.contains("No such file or directory") {
+        return raw.to_string();
+    }
+    if raw.contains(PROBE_TARGET) {
         return format!(
             "the sandbox starts but cannot exec inside it ({raw}): this host's bubblewrap does \
              not resolve tog's /usr bind layout, known on Ubuntu 22.04 and fixed by a newer \
              bubblewrap (Ubuntu 24.04, Debian 13); sandboxed work stays unavailable until then"
         );
     }
-    raw.to_string()
+    format!(
+        "the sandbox started but could not exec the command ({raw}): either that binary is not \
+         in the closure bound into the sandbox, or this host's bubblewrap does not resolve \
+         tog's /usr bind layout (known on Ubuntu 22.04; a newer bubblewrap fixes it)"
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -977,7 +993,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             "/dev",
             "--proc",
             "/proc",
-            "/usr/bin/true",
+            PROBE_TARGET,
         ];
         let mut probe_command = bwrap_command(&path).map_err(|error| error.to_string())?;
         probe_command
@@ -1876,15 +1892,24 @@ mod tests {
     /// keep the raw bwrap line for the bug report, and name the fix.
     #[test]
     fn a_bwrap_that_cannot_exec_is_explained_not_forwarded_raw() {
-        let raw = "bwrap: execvp /usr/bin/true: No such file or directory";
-        let explained = explained_bwrap_stderr(raw);
-        assert!(explained.contains(raw), "{explained}");
+        let raw = format!("bwrap: execvp {PROBE_TARGET}: No such file or directory");
+        let explained = explained_bwrap_stderr(&raw);
+        assert!(explained.contains(&raw), "{explained}");
         assert!(explained.contains("Ubuntu 22.04"), "{explained}");
-        assert!(explained.contains("bubblewrap"), "{explained}");
         assert!(explained.contains("cannot exec inside it"), "{explained}");
+
+        // bwrap prints the same line when a build spec names a binary the
+        // closure does not contain. That is far more often the cause, so
+        // it must not be blamed on the host alone.
+        let missing = "bwrap: execvp /store/objects/env/bin/cc: No such file or directory";
+        let other = explained_bwrap_stderr(missing);
+        assert!(other.contains(missing), "{other}");
+        assert!(other.contains("not in the closure"), "{other}");
+        assert!(!other.contains("cannot exec inside it"), "{other}");
+
         // Every other bwrap diagnostic stays its own words.
-        let other = "bwrap: Can't find source path /missing: No such file";
-        assert_eq!(explained_bwrap_stderr(other), other);
+        let unrelated = "bwrap: Can't find source path /missing: No such file";
+        assert_eq!(explained_bwrap_stderr(unrelated), unrelated);
         assert_eq!(explained_bwrap_stderr("bwrap: oops\n"), "bwrap: oops");
     }
 
@@ -1893,8 +1918,15 @@ mod tests {
     fn missing_bubblewrap_names_an_install_command() {
         let message = bwrap_unavailable();
         assert!(message.starts_with(BWRAP_UNAVAILABLE_PREFIX), "{message}");
-        assert!(message.contains("bubblewrap"), "{message}");
         assert!(message.contains("max_user_namespaces"), "{message}");
+        // An actual install command, not just the word "bubblewrap" from
+        // the prefix: this host's manager, or every one tog knows.
+        assert!(
+            ["apt install", "dnf install", "pacman -S"]
+                .iter()
+                .any(|command| message.contains(command)),
+            "no install command in: {message}"
+        );
     }
 
     #[test]

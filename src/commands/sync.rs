@@ -144,7 +144,14 @@ fn signing_notice(
 /// Claim the once-per-store signing notice. The marker's creation is the
 /// claim (`create_new`), so two concurrent syncs print it once between
 /// them; a store that cannot be written stays quiet rather than nagging.
+///
+/// `--quiet` never claims it: the line would be dropped on the way out and
+/// the user would have spent their one showing on a run that could not
+/// display it.
 fn first_signing_notice(store: &store::Store) -> bool {
+    if crate::kernel::ui::quiet() {
+        return false;
+    }
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

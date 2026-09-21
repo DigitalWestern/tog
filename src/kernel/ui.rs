@@ -63,6 +63,9 @@ pub fn init(quiet: bool, verbose: bool, no_color: bool) -> io::Result<()> {
 fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A download may be holding the cursor's row. Clear it first, or
+        // the panic prints onto the tail of the progress line.
+        erase_progress_line();
         if ERROR_FD.get().is_none() {
             default(info);
             return;
@@ -245,6 +248,10 @@ impl Progress {
     }
 
     /// Account for `bytes` more, redrawing at most once per interval.
+    ///
+    /// Every write is ignored on failure: a closed or full stderr must not
+    /// take down a download that is otherwise fine, and `eprint!` panics
+    /// where `write!` returns.
     pub fn advance(&mut self, bytes: u64) {
         self.done = self.done.saturating_add(bytes);
         if !self.live {
@@ -257,22 +264,41 @@ impl Progress {
         self.next = now + PROGRESS_INTERVAL;
         // \x1b[K clears the rest of the row, so a shorter line never leaves
         // the tail of a longer one behind.
-        eprint!(
+        let mut stderr = io::stderr();
+        let _ = write!(
+            stderr,
             "\rtog: {}\x1b[K",
             progress_line(&self.what, self.done, self.total)
         );
-        let _ = io::stderr().flush();
+        let _ = stderr.flush();
         self.drawn = true;
+        LINE_HELD.store(true, Ordering::Relaxed);
     }
 }
 
 impl Drop for Progress {
     fn drop(&mut self) {
         if self.live && self.drawn {
-            eprint!("\r\x1b[K");
-            let _ = io::stderr().flush();
+            erase_progress_line();
         }
     }
+}
+
+/// Is a progress line currently occupying the cursor's row? The panic hook
+/// reads this so a crash mid-download does not print its message onto the
+/// tail of `downloading cpython-3.12.14.tar.gz  12.0 MiB / 28.3 MiB (42%)`.
+static LINE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+use std::sync::atomic::Ordering;
+
+/// Return the cursor to a clean row if a progress line is holding it.
+/// Idempotent, and a no-op when nothing was drawn.
+fn erase_progress_line() {
+    if !LINE_HELD.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let mut stderr = io::stderr();
+    let _ = write!(stderr, "\r\x1b[K");
+    let _ = stderr.flush();
 }
 
 /// An argv rendered as a shell line the user can paste back.
@@ -355,14 +381,44 @@ mod tests {
         assert_eq!(human_bytes(3 << 30), "3.0 GiB");
     }
 
-    /// Progress is narration on a terminal. A redirected stderr (a log, a
-    /// pipe, CI) and `--quiet` both get nothing, and `advance` still counts.
+    /// Progress is narration on a terminal. Under `cargo test` stderr is a
+    /// pipe, so `live` must be false, nothing may be drawn, and no progress
+    /// line may be left holding the cursor for the panic hook to clear.
+    /// The byte count is kept regardless, because the caller reads it.
     #[test]
     fn progress_is_silent_when_stderr_is_not_a_terminal() {
+        assert!(
+            !io::stderr().is_terminal(),
+            "the test harness is expected to capture stderr"
+        );
+        LINE_HELD.store(false, Ordering::Relaxed);
         let mut progress = Progress::start("artifact.tar.gz", Some(10));
-        assert!(!progress.live || io::stderr().is_terminal());
-        progress.advance(10);
+        assert!(
+            !progress.live,
+            "a piped stderr must not get a progress line"
+        );
+        progress.advance(4);
+        progress.advance(6);
+        assert!(!progress.drawn, "a piped stderr was drawn to");
+        assert!(
+            !LINE_HELD.load(Ordering::Relaxed),
+            "nothing was drawn, so no line is held"
+        );
         assert_eq!(progress.done, 10);
+        drop(progress);
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
+    }
+
+    /// The panic hook clears the row a live download is holding, so a crash
+    /// mid-transfer does not print onto the tail of the progress line.
+    #[test]
+    fn a_held_progress_line_is_erased_once() {
+        LINE_HELD.store(true, Ordering::Relaxed);
+        erase_progress_line();
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
+        // Idempotent: the hook and Drop can both run.
+        erase_progress_line();
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
     }
 
     #[test]

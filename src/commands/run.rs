@@ -19,7 +19,7 @@ fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool
 /// The npm-family subcommands that write into `node_modules`. `npm run`,
 /// `npm test`, `npm ls` and the rest are untouched: only the ones that
 /// install are a problem.
-const INSTALL_VERBS: &[&str] = &[
+const NODE_INSTALL_VERBS: &[&str] = &[
     "install",
     "i",
     "add",
@@ -33,6 +33,46 @@ const INSTALL_VERBS: &[&str] = &[
     "dedupe",
 ];
 
+/// The npm-family verbs that install the lockfile rather than change it.
+/// The advice differs: `tog sync` replaces these, not `tog add`.
+const NODE_REINSTALL_VERBS: &[&str] = &["install", "i", "ci"];
+
+/// The pip subcommands that try to write into the environment. Reading
+/// commands (`pip list`, `pip freeze`, `pip show`, `pip check`) work
+/// against a projected .venv and are none of tog's business.
+const PIP_MUTATING_VERBS: &[&str] = &["install", "uninstall", "wheel"];
+
+/// The first argument that is not an option: `pip -q install x` installs.
+fn first_verb(cmd: &[String], from: usize) -> &str {
+    cmd.iter()
+        .skip(from)
+        .map(String::as_str)
+        .find(|word| !word.starts_with('-'))
+        .unwrap_or_default()
+}
+
+/// `python -m pip install ...` reaches the same pip by another road.
+fn python_module_pip_verb(cmd: &[String]) -> Option<&str> {
+    let program = cmd.first()?.rsplit('/').next()?;
+    if !program.starts_with("python") {
+        return None;
+    }
+    let module = cmd.iter().position(|word| word == "-m")?;
+    if cmd.get(module + 1).map(String::as_str)? != "pip" {
+        return None;
+    }
+    Some(first_verb(cmd, module + 2))
+}
+
+fn pip_refusal(program: &str, verb: &str) -> String {
+    format!(
+        "'{program} {verb}' cannot change a tog environment: .venv is a projection of an \
+         immutable store object, so nothing can be installed into or removed from it. Add the \
+         dependency instead ('tog add <package>', 'tog remove <package>'), then \
+         'tog run python ...'"
+    )
+}
+
 /// The habits a projected environment cannot honour, refused with the verb
 /// that replaces them.
 ///
@@ -40,16 +80,24 @@ const INSTALL_VERBS: &[&str] = &[
 /// no pip and reports a missing file; `npm install` succeeds, silently
 /// replaces the symlink with a real directory, and the next `tog status`
 /// says `missing`. Both are better refused with an explanation than left
-/// to produce their own.
+/// to produce their own. Only the mutating verbs are refused: reading the
+/// environment with `pip list` or `npm ls` is fine.
 pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
     let program = cmd.first()?.rsplit('/').next()?;
     let argument = |index: usize| cmd.get(index).map(String::as_str).unwrap_or_default();
+    if let Some(verb) = python_module_pip_verb(cmd) {
+        if PIP_MUTATING_VERBS.contains(&verb) {
+            return Some(pip_refusal("python -m pip", verb));
+        }
+        return None;
+    }
     match program {
-        "pip" | "pip3" | "easy_install" => Some(format!(
-            "{program} cannot change a tog environment: .venv is a projection of an immutable \
-             store object, so nothing can be installed into it. Add the dependency instead \
-             ('tog add <package>'), then 'tog run python ...'"
-        )),
+        "pip" | "pip3" | "easy_install" => {
+            let verb = first_verb(cmd, 1);
+            // easy_install has no subcommand: installing is all it does.
+            (program == "easy_install" || PIP_MUTATING_VERBS.contains(&verb))
+                .then(|| pip_refusal(program, verb))
+        }
         // `tog run activate` and `tog run source .venv/bin/activate`: there
         // is no activate script to find.
         "activate" | "source" | "."
@@ -63,12 +111,33 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
                     .to_string(),
             )
         }
-        "npm" | "pnpm" | "yarn" | "bun" if INSTALL_VERBS.contains(&argument(1)) => Some(format!(
-            "'{program} {}' would replace the node_modules projection with a real directory and \
-             leave the closure stale. Edit dependencies through tog instead: 'tog add <package>', \
-             'tog remove <package>', 'tog update'; 'tog sync' rebuilds node_modules",
-            argument(1)
-        )),
+        // Bare `yarn` and bare `bun` install; bare `npm` and `pnpm` print
+        // help. Everything else needs an installing subcommand.
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            let verb = argument(1);
+            let bare_install = verb.is_empty() && matches!(program, "yarn" | "bun");
+            if !bare_install && !NODE_INSTALL_VERBS.contains(&verb) {
+                return None;
+            }
+            let invocation = if verb.is_empty() {
+                program.to_string()
+            } else {
+                format!("{program} {verb}")
+            };
+            // `install` and `ci` install what the lockfile already says, so
+            // the verb that replaces them is `tog sync`, not `tog add`.
+            let advice = if bare_install || NODE_REINSTALL_VERBS.contains(&verb) {
+                "'tog sync' rebuilds node_modules from the lockfile; to change what is in it, \
+                 'tog add <package>', 'tog remove <package>', 'tog update'"
+            } else {
+                "edit dependencies through tog instead: 'tog add <package>', \
+                 'tog remove <package>', 'tog update'; 'tog sync' rebuilds node_modules"
+            };
+            Some(format!(
+                "'{invocation}' would replace the node_modules projection with a real directory \
+                 and leave the closure stale. {advice}"
+            ))
+        }
         _ => None,
     }
 }
@@ -245,12 +314,21 @@ mod tests {
     /// with the tog verb that replaces it.
     #[test]
     fn immutable_environments_refuse_pip_activate_and_npm_install() {
-        let pip = refusal(&["pip", "install", "flask"]).expect("pip is refused");
+        let pip = refusal(&["pip", "install", "flask"]).expect("pip install is refused");
         assert!(pip.contains("immutable"), "{pip}");
         assert!(pip.contains("tog add <package>"), "{pip}");
-        assert!(refusal(&["pip3", "install", "flask"]).is_some());
-        // An absolute path is the same program.
-        assert!(refusal(&["/usr/bin/pip", "list"]).is_some());
+        assert!(refusal(&["pip3", "uninstall", "flask"]).is_some());
+        // An absolute path is the same program, and an option before the
+        // verb does not hide it.
+        assert!(refusal(&["/usr/bin/pip", "install", "flask"]).is_some());
+        assert!(refusal(&["pip", "-q", "install", "flask"]).is_some());
+        // easy_install has no subcommand: installing is all it does.
+        assert!(refusal(&["easy_install", "flask"]).is_some());
+        // The same pip by another road.
+        let module = refusal(&["python", "-m", "pip", "install", "flask"])
+            .expect("python -m pip install is refused");
+        assert!(module.contains("python -m pip install"), "{module}");
+        assert!(refusal(&["python3.12", "-m", "pip", "uninstall", "flask"]).is_some());
 
         let activate = refusal(&["activate"]).expect("activate is refused");
         assert!(activate.contains("no activate script"), "{activate}");
@@ -259,29 +337,50 @@ mod tests {
 
         let npm = refusal(&["npm", "install", "is-odd"]).expect("npm install is refused");
         assert!(npm.contains("node_modules"), "{npm}");
-        assert!(npm.contains("tog add <package>"), "{npm}");
-        for words in [
-            ["pnpm", "add", "is-odd"],
-            ["yarn", "remove", "is-odd"],
-            ["npm", "ci", ""],
-        ] {
-            assert!(refusal(&words).is_some(), "{words:?}");
+        // `install` and `ci` install the lockfile: `tog sync` replaces them.
+        assert!(npm.contains("'tog sync' rebuilds node_modules"), "{npm}");
+        assert!(refusal(&["npm", "ci"])
+            .unwrap()
+            .contains("'tog sync' rebuilds node_modules"));
+        // `add`/`remove` change the lockfile: `tog add`/`tog remove` do.
+        let add = refusal(&["pnpm", "add", "is-odd"]).expect("pnpm add is refused");
+        assert!(add.starts_with("'pnpm add' would replace"), "{add}");
+        assert!(add.contains("edit dependencies through tog"), "{add}");
+        // Bare `yarn` and bare `bun` install; bare `npm`/`pnpm` print help.
+        for bare in [["yarn"], ["bun"]] {
+            let message = refusal(&bare).unwrap_or_else(|| panic!("{bare:?} is refused"));
+            assert!(message.contains("node_modules"), "{bare:?}: {message}");
         }
+        assert!(refusal(&["yarn", "remove", "is-odd"]).is_some());
     }
 
-    /// Everything else still runs. A refusal that caught `npm run build` or
-    /// `python -m pip` would be worse than the raw error it replaces.
+    /// Everything else still runs. A refusal that caught `npm run build`,
+    /// `pip list`, or a program merely named after one would be worse than
+    /// the raw error it replaces.
     #[test]
     fn running_a_command_in_the_environment_is_not_refused() {
         for words in [
+            // Reading the environment is not changing it.
+            vec!["pip", "list"],
+            vec!["pip", "freeze"],
+            vec!["pip", "show", "flask"],
+            vec!["pip", "check"],
+            vec!["pip", "--version"],
+            vec!["pip", "download", "flask"],
+            vec!["python", "-m", "pip", "list"],
+            vec!["python", "-m", "pytest"],
+            // npm verbs that do not touch node_modules.
             vec!["npm", "run", "build"],
             vec!["npm", "test"],
+            vec!["npm", "ls"],
             vec!["npm"],
+            vec!["pnpm"],
             vec!["yarn", "why", "is-odd"],
-            vec!["python", "-m", "pytest"],
+            // Not these programs at all.
             vec!["pytest"],
             vec!["source", "./scripts/env.sh"],
             vec!["pip-tools", "compile"],
+            vec!["pipx", "install", "httpie"],
         ] {
             assert!(refusal(&words).is_none(), "{words:?}");
         }

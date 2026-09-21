@@ -618,13 +618,30 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
     let project = TempDir::new("immutable-project");
     let cases: &[(&[&str], &str)] = &[
         (&["run", "pip", "install", "flask"], "tog add <package>"),
+        (
+            &["run", "pip", "uninstall", "flask"],
+            "tog remove <package>",
+        ),
+        // The same pip by another road.
+        (
+            &["run", "python", "-m", "pip", "install", "flask"],
+            "tog add <package>",
+        ),
         (&["run", "activate"], "no activate script"),
         (
             &["run", "source", ".venv/bin/activate"],
             "no activate script",
         ),
-        (&["run", "npm", "install", "is-odd"], "tog add <package>"),
+        // install/ci install the lockfile, so `tog sync` replaces them.
+        (
+            &["run", "npm", "install", "is-odd"],
+            "'tog sync' rebuilds node_modules",
+        ),
+        (&["run", "npm", "ci"], "'tog sync' rebuilds node_modules"),
         (&["run", "yarn", "add", "is-odd"], "node_modules"),
+        // Bare yarn and bare bun install.
+        (&["run", "yarn"], "node_modules"),
+        (&["run", "bun"], "node_modules"),
     ];
     for (args, expected) in cases {
         let out = tog(&project.0, &home.0, args);
@@ -636,13 +653,21 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
             "{args:?} leaked a raw os error: {stderr}"
         );
     }
-    // Running a command is untouched; only the mutating verbs are refused.
-    let out = tog(&project.0, &home.0, &["run", "npm", "run", "build"]);
-    assert!(
-        text(&out.stderr).contains("no environment projected here"),
-        "{}",
-        text(&out.stderr)
-    );
+    // Running or reading the environment is untouched; only the verbs that
+    // would change it are refused.
+    for args in [
+        &["run", "npm", "run", "build"][..],
+        &["run", "npm", "ls"],
+        &["run", "pip", "list"],
+        &["run", "pip", "--version"],
+        &["run", "python", "-m", "pip", "list"],
+    ] {
+        let stderr = text(&tog(&project.0, &home.0, args).stderr);
+        assert!(
+            stderr.contains("no environment projected here"),
+            "{args:?} was refused instead of run: {stderr}"
+        );
+    }
 }
 
 /// `--quiet` points fd 2 at /dev/null. A panic must still reach the user,

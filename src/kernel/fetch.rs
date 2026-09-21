@@ -187,14 +187,60 @@ fn status_cause(code: u16) -> String {
     }
 }
 
+/// Does this transport failure mean "there is no network", as opposed to
+/// "the network is there and something about this connection went wrong"?
+/// Only the unreachable-network errnos and a DNS failure qualify; saying
+/// "offline" about a rejected TLS handshake sends the user to check their
+/// wifi over a bad certificate.
+fn looks_offline(source: &str) -> bool {
+    const OFFLINE: &[&str] = &[
+        "Network is unreachable",
+        "No route to host",
+        "Host is down",
+        "Temporary failure in name resolution",
+        "failed to lookup address",
+        "nodename nor servname provided",
+        "No address associated with hostname",
+    ];
+    OFFLINE.iter().any(|marker| {
+        source
+            .to_ascii_lowercase()
+            .contains(&marker.to_ascii_lowercase())
+    })
+}
+
+/// `kind` alone, for the branches where the source adds nothing.
+#[cfg(test)]
 fn transport_cause(kind: ureq::ErrorKind) -> Option<String> {
+    transport_cause_with(kind, "")
+}
+
+/// The user-facing text for a transport failure. `source` is ureq's own
+/// message: `ErrorKind::Io` is its catch-all (a rejected TLS handshake, a
+/// bad certificate behind a MITM proxy, a mid-stream reset or timeout), so
+/// for the connection branches the source is the only thing that says
+/// which, and it is appended rather than dropped.
+fn transport_cause_with(kind: ureq::ErrorKind, source: &str) -> Option<String> {
+    let detail = |text: &str| {
+        if source.is_empty() {
+            text.to_string()
+        } else {
+            format!("{text} ({source})")
+        }
+    };
     let text = match kind {
         ureq::ErrorKind::Dns => {
-            "the host name did not resolve; tog appears to be offline, or DNS is unreachable"
+            return Some(detail(
+                "the host name did not resolve; tog appears to be offline, or DNS is unreachable",
+            ))
         }
         ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io => {
-            "the connection failed; tog appears to be offline (a cached artifact would have been \
-             used instead)"
+            return Some(detail(if looks_offline(source) {
+                "the connection failed; tog appears to be offline (a cached artifact would have \
+                 been used instead)"
+            } else {
+                "the connection failed"
+            }))
         }
         ureq::ErrorKind::ProxyConnect | ureq::ErrorKind::InvalidProxyUrl => {
             "the proxy could not be reached; check https_proxy and no_proxy"
@@ -214,11 +260,22 @@ fn transport_cause(kind: ureq::ErrorKind) -> Option<String> {
     Some(text.to_string())
 }
 
+/// ureq's Display repeats the URL and the kind; the part worth keeping is
+/// what follows the last ": ".
+fn transport_source(transport: &ureq::Transport) -> String {
+    let text = transport.to_string();
+    match text.rsplit_once(": ") {
+        Some((_, tail)) if !tail.trim().is_empty() => tail.trim().to_string(),
+        _ => text,
+    }
+}
+
 fn network_cause(error: &ureq::Error) -> String {
     match error {
         ureq::Error::Status(code, _) => status_cause(*code),
         ureq::Error::Transport(transport) => {
-            transport_cause(transport.kind()).unwrap_or_else(|| transport.to_string())
+            let source = transport_source(transport);
+            transport_cause_with(transport.kind(), &source).unwrap_or_else(|| transport.to_string())
         }
     }
 }
@@ -227,13 +284,20 @@ fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
     io::Error::other(format!("{verb} {url}: {}", network_cause(&error)))
 }
 
-/// The artifact's name for progress narration: the last path segment of the
-/// URL, without a query string. Falls back to the whole URL.
+/// The artifact's name for progress narration: the last path segment of
+/// the URL, without a query string. A URL with no path segment has no name
+/// to show — printing the host would label the line with the registry
+/// rather than the file — so it falls back to a neutral word.
 fn artifact_name(url: &str) -> &str {
     let path = url.split(['?', '#']).next().unwrap_or(url);
-    match path.rsplit('/').find(|segment| !segment.is_empty()) {
-        Some(name) => name,
-        None => url,
+    let after_scheme = path.split_once("://").map(|(_, rest)| rest).unwrap_or(path);
+    // Skip the authority: everything before the first '/' is the host.
+    match after_scheme.split_once('/') {
+        Some((_, tail)) => tail
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("download"),
+        None => "download",
     }
 }
 
@@ -506,8 +570,13 @@ mod tests {
     /// stranded on a plane looks for.
     #[test]
     fn network_failures_say_what_went_wrong_not_what_ureq_saw() {
-        let offline = transport_cause(ureq::ErrorKind::ConnectionFailed).unwrap();
+        let offline = transport_cause_with(
+            ureq::ErrorKind::ConnectionFailed,
+            "Network is unreachable (os error 101)",
+        )
+        .unwrap();
         assert!(offline.contains("offline"), "{offline}");
+        assert!(offline.contains("os error 101"), "{offline}");
         let dns = transport_cause(ureq::ErrorKind::Dns).unwrap();
         assert!(
             dns.contains("did not resolve") && dns.contains("offline"),
@@ -526,6 +595,37 @@ mod tests {
         assert_eq!(status_cause(418), "the server replied 418");
     }
 
+    /// `ErrorKind::Io` is ureq's catch-all. A rejected certificate behind a
+    /// corporate proxy is not "offline", and the reason it failed is the
+    /// only thing that distinguishes it, so it must survive the wrapping.
+    #[test]
+    fn a_tls_failure_is_not_reported_as_being_offline() {
+        let tls = transport_cause_with(
+            ureq::ErrorKind::Io,
+            "invalid peer certificate: UnknownIssuer",
+        )
+        .unwrap();
+        assert!(!tls.contains("offline"), "{tls}");
+        assert!(tls.starts_with("the connection failed"), "{tls}");
+        assert!(tls.contains("UnknownIssuer"), "cause was dropped: {tls}");
+
+        let reset = transport_cause_with(ureq::ErrorKind::Io, "Connection reset by peer").unwrap();
+        assert!(!reset.contains("offline"), "{reset}");
+        assert!(reset.contains("Connection reset by peer"), "{reset}");
+
+        // The genuinely-offline errnos still say so.
+        for source in [
+            "Network is unreachable (os error 101)",
+            "No route to host (os error 113)",
+            "failed to lookup address information",
+        ] {
+            let message = transport_cause_with(ureq::ErrorKind::Io, source).unwrap();
+            assert!(message.contains("offline"), "{source}: {message}");
+        }
+        assert!(looks_offline("Network is unreachable"));
+        assert!(!looks_offline("invalid peer certificate"));
+    }
+
     #[test]
     fn artifact_names_come_from_the_last_url_segment() {
         assert_eq!(
@@ -536,7 +636,11 @@ mod tests {
             artifact_name("https://example.com/a.tar.gz?token=x"),
             "a.tar.gz"
         );
-        assert_eq!(artifact_name("https://example.com/"), "example.com");
+        // No path segment: the host is the registry, not the artifact, so
+        // labelling the progress line with it would be misleading.
+        assert_eq!(artifact_name("https://example.com/"), "download");
+        assert_eq!(artifact_name("https://example.com"), "download");
+        assert_eq!(artifact_name("file:///tmp/cache/x.whl"), "x.whl");
     }
 
     #[test]

@@ -166,18 +166,26 @@ built-in command, and a built-in always wins (`tog build` is the
 sandboxed build, never a script named build).
 
 A projection is a symlink into an immutable store object, so the commands
-that would mutate one are refused with the verb that replaces them, before
-the projection is even looked up: `pip`/`pip3`/`easy_install` (add the
-dependency with `tog add`), `activate` and `source .../activate` (there is
-no activate script — `tog run <command>` *is* the activation, per command
-rather than per shell), and `npm`/`pnpm`/`yarn`/`bun` with an installing
-subcommand (`install`, `ci`, `add`, `remove`, `update`, `link`, `dedupe`,
-…), which would replace `node_modules` with a real directory and leave the
-closure stale. Everything else runs untouched: `npm run build`, `npm test`,
-`python -m pytest`. A `node_modules` that a tool already replaced is
-reported by `tog status` as a real directory written over the projection,
-and the next `tog sync` moves it aside — saying where it went — and
-re-projects.
+that would *mutate* one are refused with the verb that replaces them, before
+the projection is even looked up:
+
+- `pip install|uninstall|wheel` and `easy_install` — and the same through
+  `python -m pip` — name `tog add` / `tog remove`.
+- `activate`, and `source .../activate`: there is no activate script.
+  `tog run <command>` *is* the activation, per command rather than per
+  shell.
+- `npm`/`pnpm`/`yarn`/`bun` with an installing subcommand (`install`, `ci`,
+  `add`, `remove`, `update`, `link`, `dedupe`, …), plus bare `yarn` and bare
+  `bun`, which install. `install` and `ci` are answered with `tog sync`,
+  which rebuilds `node_modules` from the lockfile; the verbs that change the
+  lockfile are answered with `tog add` / `tog remove` / `tog update`.
+
+Reading an environment is not changing it, so `pip list`, `pip freeze`,
+`pip show`, `pip check`, `pip download` and `npm ls` run normally, as does
+everything else: `npm run build`, `npm test`, `python -m pytest`. A
+`node_modules` that a tool already replaced is reported by `tog status` as a
+real directory written over the projection, and the next `tog sync` moves it
+aside — saying where it went — and re-projects.
 
 **x** resolves a tool from PyPI or npm, realizes it as an ordinary store
 environment (a store hit from the second run on), and executes it. Registry:
