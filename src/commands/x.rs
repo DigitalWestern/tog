@@ -22,12 +22,10 @@ use crate::comforter;
 use crate::commands::inspect;
 use crate::kernel::context::Context;
 use crate::kernel::fetch;
-use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store::{self, RootEntry, Store};
-use crate::kernel::toolchain::lock;
-use crate::kernel::toolchain::runtime::{self, Selected};
+use crate::kernel::toolchain::runtime::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
 use crate::tailors::python;
@@ -98,50 +96,18 @@ fn home() -> io::Result<PathBuf> {
     Ok(home)
 }
 
-/// The toolchain an `x` environment runs on: the committed lock of the
-/// project `x` was invoked inside when there is one, and the shipped
-/// selection otherwise. `x` chooses no version of its own and writes no
-/// lock, so the same tool in the same project is the same environment for
-/// everyone who runs it, and a stale lock refuses here exactly as it would
-/// in a sync.
+/// The toolchain an `x` environment runs on: the project's lock when `x`
+/// runs inside one, the shipped selection otherwise. `x` chooses no
+/// version of its own and writes no lock.
 pub(crate) fn x_toolchain(platform: Platform, cwd: &Path, ecosystem: &str) -> io::Result<Selected> {
-    let tailor = crate::tailors::by_id(ecosystem)
-        .ok_or_else(|| other(format!("x: unsupported ecosystem '{ecosystem}'")))?;
-    for dir in cwd.ancestors() {
-        if dir.join(lock::LOCK_PATH).is_file() {
-            // Reading through the held root descriptor is what refuses a
-            // symlinked lock; the test above only decides where to look.
-            let root = ProjectRoot::open(dir)?;
-            let resolved = comforter::toolchain::resolve(
-                &root,
-                platform,
-                vec![comforter::toolchain::EcosystemInput {
-                    lock_ecosystem: tailor.lock_ecosystem().to_string(),
-                    catalog: tailor.toolchain_catalog()?,
-                    legacy: None,
-                }],
-                comforter::toolchain::Mode::ReadOnly,
-                false,
-            )?;
-            return resolved.get(tailor.lock_ecosystem()).cloned();
-        }
-        // A `.tog` directory is an explicit project boundary, so an outer
-        // checkout's lock never decides an inner project's tool runtime.
-        if dir.join(".tog").is_dir() {
-            break;
-        }
-    }
-    runtime::shipped(&tailor.toolchain_catalog()?)
+    crate::commands::shared::selected_toolchain(platform, cwd, ecosystem)
+        .map_err(|error| other(format!("x: {error}")))
 }
 
-/// The store object id of the runtime a selection names, without realizing
-/// it where the pinned tables can answer directly.
-///
-/// Python answers from the pin table. Node has no identity accessor that
-/// does not realize, and `x` puts the Node runtime on `PATH` for every node
-/// tool anyway, so realizing it here costs nothing that was not already
-/// spent. Switch both arms to `python::realize_runtime` and
-/// `node::realize_runtime` once the tailors realize from a `Selected`.
+/// The store object id of the runtime a selection names. Python answers
+/// from the selected row without realizing; Node has no such accessor, and
+/// `x` puts the Node runtime on `PATH` for every node tool anyway, so
+/// realizing it here costs nothing that was not already spent.
 fn runtime_object_id(
     store: &Store,
     platform: Platform,
@@ -151,22 +117,13 @@ fn runtime_object_id(
         "python" => {
             return python::object_id_for(platform, toolchain.version("cpython")?);
         }
-        _ => node_runtime(store, platform, toolchain)?,
+        _ => node::realize_runtime(store, platform, toolchain)?,
     };
     Ok(path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_string())
-}
-
-/// The realized Node runtime a selection names. Switch to
-/// `node::realize_runtime(store, toolchain)` once the tailor realizes from
-/// a `Selected`; the pinned table it reads today is the table the selection
-/// was minted from, so the object is the same one either way.
-fn node_runtime(store: &Store, platform: Platform, toolchain: &Selected) -> io::Result<PathBuf> {
-    let _ = toolchain;
-    node::ensure_node_for(store, platform)
 }
 
 /// The name of the directory a cached `x` environment lives in under
@@ -2132,7 +2089,7 @@ pub fn launch(
                         "'{package}' installed but provides no '{bin}' executable; name it with --from: 'tog x --from {package} <tool>'"
                     )));
                 }
-                let node_obj = node_runtime(&store, platform, &toolchain)?;
+                let node_obj = node::realize_runtime(&store, platform, &toolchain)?;
                 (
                     executable,
                     vec![node_modules.join(".bin"), node_obj.join("bin")],
@@ -2386,10 +2343,8 @@ fn realize_python(
     let output = root.join("requirements.txt");
     fs::write(&input, &spec)?;
     ui::note(&format!("resolving {} with the store uv...", spec.trim()));
-    // Switch to `python::realize_uv(store, toolchain)` once the tailor
-    // realizes uv from the selection: the bundle names the uv build this
-    // environment is supposed to resolve with.
-    let uv = python::ensure_uv_for(store, platform)?.join("uv");
+    // The bundle names the uv build this environment resolves with.
+    let uv = python::realize_uv(store, platform, toolchain)?.join("uv");
     let mut command = Command::new(uv);
     command
         .args(["pip", "compile"])
@@ -2461,7 +2416,7 @@ fn realize_node(
         "resolving {package}@{} with the store npm...",
         version.unwrap_or("latest")
     ));
-    let node_obj = node_runtime(store, platform, toolchain)?;
+    let node_obj = node::realize_runtime(store, platform, toolchain)?;
     let mut command = Command::new(node_obj.join("bin/npm"));
     command.args(["install", "--package-lock-only", "--ignore-scripts"]);
     if !ui::verbose() {
@@ -2524,7 +2479,7 @@ mod tests {
             .unwrap()
             .toolchain_catalog()
             .unwrap();
-        let selected = runtime::shipped(&catalog).unwrap();
+        let selected = crate::kernel::toolchain::runtime::shipped(&catalog).unwrap();
         let name = |toolchain: &Selected, runtime_object: &str| {
             x_root_name(
                 &store,

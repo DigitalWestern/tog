@@ -42,6 +42,19 @@ by position.
 
 ## Open work, each its own pull request
 
+- **`tog audit` does not read the toolchain lock.** `status` reports a
+  missing or stale `tog-toolchain.toml` and a closure built from another
+  bundle; `audit` reuses only the per-record `closure_state`, so a gate that
+  passes `audit` can still be running a toolchain the lock no longer names.
+  Fold `inspect::toolchain_lock_state` into the audit freshness verdict; the
+  audit fixtures then need a lock beside each closure.
+- **Go's lockless resolver picks the lowest satisfying pin, selection the
+  newest.** `go::resolve_project_toolchain` (used by `doctor` and the Go
+  `status` row) keeps Go's minimum-version rule; the toolchain selector takes
+  the newest complete release satisfying `go.mod`. Identical with one pinned
+  Go; the day a second pin lands, `doctor` and `status` would name a version
+  `sync` does not use. Route both through the lock.
+
 - **npm regressions from the 2026-09-11 hit-rate run.** All four synced on
   2026-09-05 at the same pinned commits. Error text is in
   `docs/agent/HITRATE.md`.

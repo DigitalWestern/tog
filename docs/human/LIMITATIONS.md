@@ -19,7 +19,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
   inputs on disk (and that the `rustfmt` record names the rustfmt this binary pins), and
-  that no recorded exception is denied or unknown. It does not prove the signer's sync was
+  that no recorded exception is denied or unknown. It does not read `tog-toolchain.toml`:
+  a record whose toolchain no longer matches the committed lock, or a project whose lock is
+  stale or missing, passes `audit` and fails only `status`. It does not prove the signer's sync was
   honest or safe to run: it does not cover the doors that run unsandboxed with network
   (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
   missing-lock generation during `sync`/`plan`, where uv, npm, cargo, bundler, mix resolve

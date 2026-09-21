@@ -247,16 +247,20 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             });
             continue;
         };
-        // A closure state that is not `Synced` already names the next step,
-        // so it is reported first. Only when the dependency side is current
-        // does the toolchain lock get to decide the row: a projection built
-        // against a lock the project no longer has, or no longer agrees
-        // with, is not synced however fresh its manifests are.
+        // A lock verdict that a writable sync would refuse (stale rows, no
+        // section) is reported first: the closure may also say a source
+        // changed, but "run 'tog sync'" would only reach the refusal, and
+        // the lock's line names the verb that moves it. Otherwise the
+        // closure state decides, and only a `Synced` closure is downgraded
+        // to what the lock has to add.
         let mut state = closure_state(platform, dir, closure)?;
-        if state == State::Synced {
-            if let Some(verdict) = toolchain_lock_state(dir, ecosystem, &closure.body)? {
-                state = verdict;
-            }
+        match toolchain_lock_state(dir, ecosystem, &closure.body)? {
+            Some(LockVerdict {
+                state: verdict,
+                refuses_sync: true,
+            }) => state = verdict,
+            Some(LockVerdict { state: verdict, .. }) if state == State::Synced => state = verdict,
+            _ => {}
         }
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
@@ -275,27 +279,55 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
 /// every consulted row and compare presence and value, never the source
 /// file's digest alone — so `tog status` predicts the next sync rather than
 /// having a second opinion about staleness.
-fn toolchain_lock_state(dir: &Path, ecosystem: &str, body: &Value) -> io::Result<Option<State>> {
+/// What the toolchain lock adds to a status row, and whether a plain
+/// `tog sync` would stop at it: a missing lock is created by the next
+/// writable sync and a changed bundle is re-projected by it, but stale
+/// rows and a missing section are only moved by `tog update --toolchain`.
+struct LockVerdict {
+    state: State,
+    refuses_sync: bool,
+}
+
+impl LockVerdict {
+    fn changed(rows: Vec<String>, refuses_sync: bool) -> Option<Self> {
+        Some(Self {
+            state: State::Changed(rows),
+            refuses_sync,
+        })
+    }
+}
+
+fn toolchain_lock_state(
+    dir: &Path,
+    ecosystem: &str,
+    body: &Value,
+) -> io::Result<Option<LockVerdict>> {
     let Some(tailor) = tailors::by_id(ecosystem) else {
         return Ok(None);
     };
     let lock_ecosystem = tailor.lock_ecosystem();
     let root = ProjectRoot::open(dir)?;
     let Some(lock) = ToolchainLock::read_via(&root)? else {
-        return Ok(Some(State::Changed(vec![format!(
-            "{LOCK_PATH} (missing; run 'tog sync' to create it)"
-        )])));
+        return Ok(LockVerdict::changed(
+            vec![format!(
+                "{LOCK_PATH} (missing; run 'tog sync' to create it)"
+            )],
+            false,
+        ));
     };
     let Some(section) = lock.ecosystem(lock_ecosystem) else {
-        return Ok(Some(State::Changed(vec![format!(
-            "{LOCK_PATH} (no [toolchain.{lock_ecosystem}] section; \
-             run 'tog update --toolchain {lock_ecosystem}')"
-        )])));
+        return Ok(LockVerdict::changed(
+            vec![format!(
+                "{LOCK_PATH} (no [toolchain.{lock_ecosystem}] section; \
+                 run 'tog update --toolchain {lock_ecosystem}')"
+            )],
+            true,
+        ));
     };
     let stale =
         toolchain_lock::stale_rows(&section.inputs(), &input::discover(&root, lock_ecosystem)?);
     if !stale.is_empty() {
-        return Ok(Some(State::Changed(
+        return Ok(LockVerdict::changed(
             stale
                 .iter()
                 .map(|row| {
@@ -304,20 +336,27 @@ fn toolchain_lock_state(dir: &Path, ecosystem: &str, body: &Value) -> io::Result
                     )
                 })
                 .collect(),
-        )));
+            true,
+        ));
     }
     // Which bundle this projection was actually built from. A closure that
     // never recorded one cannot be compared at all, which is the same
     // answer every other unrecorded field gets.
     let Some(recorded) = body["toolchain"]["bundle_id"].as_str() else {
-        return Ok(Some(State::Unchecked(
-            "toolchain not recorded by this sync; run 'tog sync' once".into(),
-        )));
+        return Ok(Some(LockVerdict {
+            state: State::Unchecked(
+                "toolchain not recorded by this sync; run 'tog sync' once".into(),
+            ),
+            refuses_sync: false,
+        }));
     };
     if recorded != section.bundle_id() {
-        return Ok(Some(State::Changed(vec![format!(
-            "{LOCK_PATH} (toolchain changed since the last sync; run 'tog sync')"
-        )])));
+        return Ok(LockVerdict::changed(
+            vec![format!(
+                "{LOCK_PATH} (toolchain changed since the last sync; run 'tog sync')"
+            )],
+            false,
+        ));
     }
     Ok(None)
 }
@@ -1137,13 +1176,27 @@ mod tests {
         );
 
         // The selected Go version is an input too, even when the projection
-        // and go.sum still exist.
+        // and go.sum still exist. The lock written beside the closure sees
+        // the same move, and its verdict names the verb that resolves it.
         fs::write(dir.join("go.mod"), "module x\n\ngo 1.28\n").unwrap();
+        let rows = status(platform, dir).unwrap();
+        assert_eq!(
+            rows[2].state,
+            State::Changed(vec![
+                "tog-toolchain.toml stale: go.mod go: recorded absent, now 1.28; run 'tog update --toolchain go'"
+                    .into()
+            ])
+        );
+        // Without a lock there is nothing to refuse, and the closure's own
+        // toolchain check is what reports.
+        let lock_bytes = fs::read(dir.join(LOCK_PATH)).unwrap();
+        fs::remove_file(dir.join(LOCK_PATH)).unwrap();
         let rows = status(platform, dir).unwrap();
         assert_eq!(
             rows[2].state,
             State::Changed(vec!["go.mod (Go toolchain selection unavailable)".into()])
         );
+        fs::write(dir.join(LOCK_PATH), lock_bytes).unwrap();
         fs::write(dir.join("go.mod"), "module x\n").unwrap();
 
         // Edit the manifest and the lock: both reported by name.
@@ -1320,6 +1373,55 @@ mod tests {
             value["ecosystems"][0]["detail"][0],
             "tog-toolchain.toml (missing; run 'tog sync' to create it)"
         );
+    }
+
+    #[test]
+    fn a_refusing_lock_verdict_outranks_a_changed_closure_input() {
+        let temp = TempDir::new("status-lock-order");
+        let platform = Platform::host().unwrap();
+        let dir = &temp.0;
+        fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+        fs::write(dir.join(".python-version"), "3.12.14\n").unwrap();
+        let env = dir.join("env-object");
+        fs::create_dir_all(env.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
+        let requirements = sha256_file(&dir.join("requirements.txt")).unwrap();
+        let pin = sha256_file(&dir.join(".python-version")).unwrap();
+        // The closure also records `.python-version` as a dependency input,
+        // so moving it trips both the closure and the lock.
+        write_closure(
+            dir,
+            "python",
+            platform.triple(),
+            json!({"env_object": env, "python": {"version": "3.12.14"},
+                   "plan": {"packages": []},
+                   "inputs": [{"path": "requirements.txt", "sha256": requirements},
+                              {"path": ".python-version", "sha256": pin}]}),
+        );
+        assert_eq!(status(platform, dir).unwrap()[0].state, State::Synced);
+        fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
+        // "run 'tog sync'" would only reach the stale-lock refusal, so the
+        // lock's line, with the verb that moves it, is the one reported.
+        let State::Changed(rows) = &status(platform, dir).unwrap()[0].state else {
+            panic!("a moved toolchain source did not report the lock");
+        };
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].starts_with("tog-toolchain.toml stale: "),
+            "{rows:?}"
+        );
+        assert!(
+            rows[0].ends_with("run 'tog update --toolchain python'"),
+            "{rows:?}"
+        );
+        // With the lock removed, nothing refuses: a plain sync re-reads the
+        // pin and creates the lock, so the closure's own verdict is reported.
+        fs::remove_file(dir.join(LOCK_PATH)).unwrap();
+        let State::Changed(rows) = &status(platform, dir).unwrap()[0].state else {
+            panic!("a moved input did not report the closure");
+        };
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].starts_with(".python-version"), "{rows:?}");
     }
 
     #[test]

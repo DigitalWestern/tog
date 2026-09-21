@@ -345,7 +345,7 @@ pub fn commit(
             let published = match ToolchainLock::read_bytes_via(root)? {
                 None => {
                     candidate.publish_via(root)?;
-                    narrate(toolchain, mode);
+                    narrate(toolchain, false);
                     bytes
                 }
                 // A concurrent writer chose the same bundle: its file is
@@ -354,7 +354,7 @@ pub fn commit(
                 // An update is the one writer allowed to replace a lock.
                 Some(_) if matches!(mode, Mode::Update { .. }) => {
                     candidate.publish_via(root)?;
-                    narrate(toolchain, mode);
+                    narrate(toolchain, true);
                     bytes
                 }
                 Some(existing) => return Err(conflict(&existing, toolchain)),
@@ -381,13 +381,14 @@ pub fn commit(
 
 /// What a created or updated lock says on stderr: the selection first, so
 /// the file name is the last thing read and the next step is obvious.
-fn narrate(toolchain: &ProjectToolchain, mode: &Mode) {
+fn narrate(toolchain: &ProjectToolchain, replaced: bool) {
     for selected in toolchain.entries.values() {
         ui::note(&format!("selected {}", selected.describe()));
     }
-    match mode {
-        Mode::Update { .. } => ui::note("updated tog-toolchain.toml"),
-        _ => ui::note("wrote tog-toolchain.toml; commit it"),
+    if replaced {
+        ui::note("updated tog-toolchain.toml; commit it");
+    } else {
+        ui::note("wrote tog-toolchain.toml; commit it");
     }
 }
 

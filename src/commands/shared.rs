@@ -2,9 +2,11 @@
 //! exit-code plumbing. Ecosystem-specific input loaders stay in their
 //! respective tailors.
 
-use crate::comforter::toolchain::EcosystemInput;
+use crate::comforter::{self, toolchain::EcosystemInput};
 use crate::commands::inspect;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::toolchain::{lock, runtime, Selected};
 use crate::tailors::Tailor;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -50,6 +52,46 @@ pub(crate) fn ecosystem_inputs(
         });
     }
     Ok(out)
+}
+
+/// The toolchain a command that realizes a runtime outside `sync` uses
+/// (`x`, and the delegated `add`/`remove`/`update` edits): the committed
+/// lock of the nearest project at or above `cwd` when there is one, seeded
+/// from a pre-lock closure or the shipped catalog otherwise. Nothing here
+/// chooses a version of its own or writes a lock, and a stale lock refuses
+/// exactly as a sync would.
+pub(crate) fn selected_toolchain(
+    platform: Platform,
+    cwd: &Path,
+    ecosystem: &str,
+) -> io::Result<Selected> {
+    let tailor = crate::tailors::by_id(ecosystem).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported ecosystem '{ecosystem}'"),
+        )
+    })?;
+    for dir in cwd.ancestors() {
+        if dir.join(lock::LOCK_PATH).is_file() {
+            // Reading through the held root descriptor is what refuses a
+            // symlinked lock; the test above only decides where to look.
+            let root = ProjectRoot::open(dir)?;
+            let resolved = comforter::toolchain::resolve(
+                &root,
+                platform,
+                ecosystem_inputs(dir, &[tailor])?,
+                comforter::toolchain::Mode::ReadOnly,
+                false,
+            )?;
+            return resolved.get(tailor.lock_ecosystem()).cloned();
+        }
+        // A `.tog` directory is an explicit project boundary, so an outer
+        // checkout's lock never decides an inner project's runtime.
+        if dir.join(".tog").is_dir() {
+            break;
+        }
+    }
+    runtime::shipped(&tailor.toolchain_catalog()?)
 }
 
 pub(crate) fn child_status_code(status: &std::process::ExitStatus) -> i32 {
