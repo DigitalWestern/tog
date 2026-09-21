@@ -233,3 +233,7 @@ ids include the platform triple, so a shared store never reuses a Mac object
 on Linux — only the artifact cache is common, because artifacts are
 content-addressed. After switching machines, run `tog sync` once; it is a
 cache hit if that host has seen the lock.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

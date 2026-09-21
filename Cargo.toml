@@ -6,12 +6,12 @@ description = "One command for every package manager: pinned toolchains, locked 
 repository = "https://github.com/DigitalWestern/tog"
 homepage = "https://github.com/DigitalWestern/tog"
 readme = "README.md"
+license = "MIT"
 keywords = ["package-manager", "toolchain", "lockfile", "reproducible", "store"]
 categories = ["command-line-utilities", "development-tools"]
 # Not published to crates.io: the `tog` name there belongs to an unrelated
-# process-multiplexer crate, and this repository carries no license file yet. Pick a
-# crate name and a license, then remove this line. `cargo install --git` and
-# `cargo install --path .` work regardless.
+# process-multiplexer crate. Pick a crate name, then remove this line.
+# `cargo install --git` and `cargo install --path .` work regardless.
 publish = false
 
 [dependencies]
