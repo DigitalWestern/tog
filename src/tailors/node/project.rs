@@ -665,6 +665,16 @@ pub fn project_node_env_recorded(
         )?;
     }
     for (source, backup) in pending_backups {
+        // Reaching here means the path was a real directory, not tog's
+        // symlink: either a project tog has never synced, or one where an
+        // `npm install` overwrote the projection. Say so — the user's
+        // packages are not deleted, and they should know where they went.
+        crate::kernel::ui::warning(&format!(
+            "{} was a real directory, not the tog projection (an install tool ran here); \
+             moved to {} and re-projected",
+            source.display(),
+            backup.display()
+        ));
         crate::comforter::move_reserved_backup(&source, &backup)?;
     }
     remove_stale_workspace_links(project_dir, &store, home, &previous_workspaces, &workspaces)?;

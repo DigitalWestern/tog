@@ -16,6 +16,63 @@ fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool
     has_dotnet_closure && script_resolved
 }
 
+/// The npm-family subcommands that write into `node_modules`. `npm run`,
+/// `npm test`, `npm ls` and the rest are untouched: only the ones that
+/// install are a problem.
+const INSTALL_VERBS: &[&str] = &[
+    "install",
+    "i",
+    "add",
+    "ci",
+    "uninstall",
+    "remove",
+    "rm",
+    "update",
+    "upgrade",
+    "link",
+    "dedupe",
+];
+
+/// The habits a projected environment cannot honour, refused with the verb
+/// that replaces them.
+///
+/// A projection is a symlink into the immutable store. `pip install` finds
+/// no pip and reports a missing file; `npm install` succeeds, silently
+/// replaces the symlink with a real directory, and the next `tog status`
+/// says `missing`. Both are better refused with an explanation than left
+/// to produce their own.
+pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
+    let program = cmd.first()?.rsplit('/').next()?;
+    let argument = |index: usize| cmd.get(index).map(String::as_str).unwrap_or_default();
+    match program {
+        "pip" | "pip3" | "easy_install" => Some(format!(
+            "{program} cannot change a tog environment: .venv is a projection of an immutable \
+             store object, so nothing can be installed into it. Add the dependency instead \
+             ('tog add <package>'), then 'tog run python ...'"
+        )),
+        // `tog run activate` and `tog run source .venv/bin/activate`: there
+        // is no activate script to find.
+        "activate" | "source" | "."
+            if program == "activate" || argument(1).contains("activate") =>
+        {
+            Some(
+                "a tog environment has no activate script: 'tog run <command>' is the \
+                 activation, and it applies to one command instead of a shell session. \
+                 'tog run python', 'tog run pytest', 'tog run npm test' all see the \
+                 projected environment"
+                    .to_string(),
+            )
+        }
+        "npm" | "pnpm" | "yarn" | "bun" if INSTALL_VERBS.contains(&argument(1)) => Some(format!(
+            "'{program} {}' would replace the node_modules projection with a real directory and \
+             leave the closure stale. Edit dependencies through tog instead: 'tog add <package>', \
+             'tog remove <package>', 'tog update'; 'tog sync' rebuilds node_modules",
+            argument(1)
+        )),
+        _ => None,
+    }
+}
+
 pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
     let activity = &ctx.activity;
     if cmd.is_empty() {
@@ -23,6 +80,11 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
             io::ErrorKind::InvalidInput,
             "run: no command given",
         ));
+    }
+    // Before the environment is even looked up: these fail the same way in
+    // every project, and the explanation is the point.
+    if let Some(refusal) = refused_command(cmd) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, refusal));
     }
     // Walk up from cwd to the nearest projected root, so `tog run`
     // works from workspace subdirectories like npm run does.
@@ -173,6 +235,56 @@ mod tests {
                 .collect::<Vec<_>>()
         )
         .is_none());
+    }
+
+    fn refusal(words: &[&str]) -> Option<String> {
+        refused_command(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+    }
+
+    /// The three daily-use habits a projection cannot honour, each refused
+    /// with the tog verb that replaces it.
+    #[test]
+    fn immutable_environments_refuse_pip_activate_and_npm_install() {
+        let pip = refusal(&["pip", "install", "flask"]).expect("pip is refused");
+        assert!(pip.contains("immutable"), "{pip}");
+        assert!(pip.contains("tog add <package>"), "{pip}");
+        assert!(refusal(&["pip3", "install", "flask"]).is_some());
+        // An absolute path is the same program.
+        assert!(refusal(&["/usr/bin/pip", "list"]).is_some());
+
+        let activate = refusal(&["activate"]).expect("activate is refused");
+        assert!(activate.contains("no activate script"), "{activate}");
+        assert!(activate.contains("tog run <command>"), "{activate}");
+        assert!(refusal(&["source", ".venv/bin/activate"]).is_some());
+
+        let npm = refusal(&["npm", "install", "is-odd"]).expect("npm install is refused");
+        assert!(npm.contains("node_modules"), "{npm}");
+        assert!(npm.contains("tog add <package>"), "{npm}");
+        for words in [
+            ["pnpm", "add", "is-odd"],
+            ["yarn", "remove", "is-odd"],
+            ["npm", "ci", ""],
+        ] {
+            assert!(refusal(&words).is_some(), "{words:?}");
+        }
+    }
+
+    /// Everything else still runs. A refusal that caught `npm run build` or
+    /// `python -m pip` would be worse than the raw error it replaces.
+    #[test]
+    fn running_a_command_in_the_environment_is_not_refused() {
+        for words in [
+            vec!["npm", "run", "build"],
+            vec!["npm", "test"],
+            vec!["npm"],
+            vec!["yarn", "why", "is-odd"],
+            vec!["python", "-m", "pytest"],
+            vec!["pytest"],
+            vec!["source", "./scripts/env.sh"],
+            vec!["pip-tools", "compile"],
+        ] {
+            assert!(refusal(&words).is_none(), "{words:?}");
+        }
     }
 
     #[test]

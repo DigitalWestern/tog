@@ -164,6 +164,79 @@ fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     })
 }
 
+/// What a ureq failure means to someone waiting on a sync. ureq's own
+/// Display already repeats the URL and reads like a library backtrace, so
+/// every branch replaces it rather than wrapping it.
+fn status_cause(code: u16) -> String {
+    match code {
+        401 | 403 => "the server refused the request (401/403); a private mirror needs \
+                      credentials tog does not carry"
+            .to_string(),
+        404 | 410 => format!(
+            "the server does not have this artifact ({code}); the index may have yanked it, or \
+             the lockfile names a version that is gone"
+        ),
+        407 => "the proxy refused the request (407); set https_proxy with credentials, or unset it"
+            .to_string(),
+        429 => "the server is rate-limiting this host (429); wait and run the command again"
+            .to_string(),
+        code if code >= 500 => {
+            format!("the server failed ({code}); this is the registry's side, try again later")
+        }
+        code => format!("the server replied {code}"),
+    }
+}
+
+fn transport_cause(kind: ureq::ErrorKind) -> Option<String> {
+    let text = match kind {
+        ureq::ErrorKind::Dns => {
+            "the host name did not resolve; tog appears to be offline, or DNS is unreachable"
+        }
+        ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io => {
+            "the connection failed; tog appears to be offline (a cached artifact would have been \
+             used instead)"
+        }
+        ureq::ErrorKind::ProxyConnect | ureq::ErrorKind::InvalidProxyUrl => {
+            "the proxy could not be reached; check https_proxy and no_proxy"
+        }
+        ureq::ErrorKind::ProxyUnauthorized => {
+            "the proxy rejected the credentials; check https_proxy"
+        }
+        ureq::ErrorKind::InsecureRequestHttpsOnly | ureq::ErrorKind::UnknownScheme => {
+            "tog fetches over https only; an http:// mirror is refused rather than downgraded"
+        }
+        ureq::ErrorKind::InvalidUrl => "the url could not be parsed",
+        ureq::ErrorKind::TooManyRedirects => "the server redirected too many times",
+        // BadStatus, BadHeader, HTTP: a malformed reply tog cannot explain
+        // better than the library can.
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+fn network_cause(error: &ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, _) => status_cause(*code),
+        ureq::Error::Transport(transport) => {
+            transport_cause(transport.kind()).unwrap_or_else(|| transport.to_string())
+        }
+    }
+}
+
+fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
+    io::Error::other(format!("{verb} {url}: {}", network_cause(&error)))
+}
+
+/// The artifact's name for progress narration: the last path segment of the
+/// URL, without a query string. Falls back to the whole URL.
+fn artifact_name(url: &str) -> &str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    match path.rsplit('/').find(|segment| !segment.is_empty()) {
+        Some(name) => name,
+        None => url,
+    }
+}
+
 /// Fetch a small text file over HTTPS (a checksum manifest, for example).
 ///
 /// There is no hash to check against — this IS the checksum source — so the
@@ -176,7 +249,7 @@ pub fn fetch_text(url: &str) -> io::Result<String> {
     let resp = agent
         .get(url)
         .call()
-        .map_err(|e| io::Error::other(format!("GET {url}: {e}")))?;
+        .map_err(|e| network_error("fetch", url, e))?;
     let mut text = String::new();
     resp.into_reader()
         .take(MAX_TEXT)
@@ -301,6 +374,7 @@ pub(crate) fn download_verified_digest_held(
         digest.hex()
     ));
 
+    let mut declared: Option<u64> = None;
     let mut reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
         Box::new(
             fs::File::open(path)
@@ -312,9 +386,16 @@ pub(crate) fn download_verified_digest_held(
         let resp = agent
             .get(url)
             .call()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}")))?;
+            .map_err(|e| network_error("download", url, e))?;
+        declared = resp
+            .header("Content-Length")
+            .and_then(|value| value.trim().parse::<u64>().ok());
         Box::new(resp.into_reader())
     };
+    // A first sync moves hundreds of MB. Narrate it, so the wait has a
+    // visible cause. Inert off a terminal and under --quiet, and erased
+    // when the download ends.
+    let mut progress = crate::kernel::ui::Progress::start(artifact_name(url), declared);
 
     // Cap the stream so a hostile server can't fill the disk before the
     // hash check fails. 8 GiB covers every real artifact class we handle.
@@ -333,6 +414,7 @@ pub(crate) fn download_verified_digest_held(
             Err(e) => break Err(e),
         };
         total += n as u64;
+        progress.advance(n as u64);
         if total > MAX_ARTIFACT {
             break Err(io::Error::other(format!(
                 "{url}: exceeds the {} GiB artifact cap; refusing",
@@ -348,6 +430,7 @@ pub(crate) fn download_verified_digest_held(
             break Err(e);
         }
     };
+    drop(progress);
     if let Err(e) = stream_result.and_then(|_| file.flush()) {
         drop(file);
         let _ = fs::remove_file(&tmp); // never leave partial downloads
@@ -417,6 +500,43 @@ mod tests {
         assert!(d.hex().starts_with("9b71d224bd62f378"));
         assert!(Digest::from_sri("md5-abc").is_err());
         assert!(Digest::from_sri("nodash").is_err());
+    }
+
+    /// The five user-facing network texts, and the one word a person
+    /// stranded on a plane looks for.
+    #[test]
+    fn network_failures_say_what_went_wrong_not_what_ureq_saw() {
+        let offline = transport_cause(ureq::ErrorKind::ConnectionFailed).unwrap();
+        assert!(offline.contains("offline"), "{offline}");
+        let dns = transport_cause(ureq::ErrorKind::Dns).unwrap();
+        assert!(
+            dns.contains("did not resolve") && dns.contains("offline"),
+            "{dns}"
+        );
+        let https = transport_cause(ureq::ErrorKind::InsecureRequestHttpsOnly).unwrap();
+        assert!(https.contains("https only"), "{https}");
+        let proxy = transport_cause(ureq::ErrorKind::ProxyUnauthorized).unwrap();
+        assert!(proxy.contains("proxy"), "{proxy}");
+        // A reply tog cannot read stays the library's own words.
+        assert!(transport_cause(ureq::ErrorKind::BadHeader).is_none());
+
+        assert!(status_cause(403).contains("credentials"));
+        assert!(status_cause(404).contains("yanked"));
+        assert!(status_cause(503).contains("registry's side"));
+        assert_eq!(status_cause(418), "the server replied 418");
+    }
+
+    #[test]
+    fn artifact_names_come_from_the_last_url_segment() {
+        assert_eq!(
+            artifact_name("https://files.pythonhosted.org/ab/cd/flask-3.0.0.whl"),
+            "flask-3.0.0.whl"
+        );
+        assert_eq!(
+            artifact_name("https://example.com/a.tar.gz?token=x"),
+            "a.tar.gz"
+        );
+        assert_eq!(artifact_name("https://example.com/"), "example.com");
     }
 
     #[test]

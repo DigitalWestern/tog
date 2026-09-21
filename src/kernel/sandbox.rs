@@ -87,7 +87,10 @@ pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Res
     }
     Err(io::Error::new(
         io::ErrorKind::Other,
-        format!("sandboxed command failed ({status}): {:?}", spec.argv),
+        format!(
+            "sandboxed command failed ({status}): {}",
+            crate::kernel::ui::shell_line(&spec.argv)
+        ),
     ))
 }
 
@@ -113,7 +116,10 @@ pub(crate) fn run_build_spec_on_with_activity(
     }
     Err(io::Error::new(
         io::ErrorKind::Other,
-        format!("sandboxed command failed ({status}): {:?}", spec.argv),
+        format!(
+            "sandboxed command failed ({status}): {}",
+            crate::kernel::ui::shell_line(&spec.argv)
+        ),
     ))
 }
 
@@ -257,7 +263,10 @@ impl Sandbox<'_> {
         }
         Err(io::Error::new(
             io::ErrorKind::Other,
-            format!("sandboxed command failed ({status}): {cmd:?}"),
+            format!(
+                "sandboxed command failed ({status}): {}",
+                crate::kernel::ui::shell_line(cmd)
+            ),
         ))
     }
 
@@ -278,7 +287,10 @@ impl Sandbox<'_> {
         }
         Err(io::Error::new(
             io::ErrorKind::Other,
-            format!("sandboxed command failed ({status}): {cmd:?}"),
+            format!(
+                "sandboxed command failed ({status}): {}",
+                crate::kernel::ui::shell_line(cmd)
+            ),
         ))
     }
 
@@ -688,7 +700,39 @@ fn wait_with_stderr_relay(mut child: std::process::Child) -> io::Result<std::pro
     })
 }
 
-const BWRAP_UNAVAILABLE: &str = "bubblewrap unavailable: install it (Fedora: dnf install bubblewrap; Debian: apt install bubblewrap) and ensure unprivileged user namespaces are enabled (/proc/sys/user/max_user_namespaces > 0)";
+/// The opening words of the "not installed" message, so the test and the
+/// formatter agree on one spelling.
+const BWRAP_UNAVAILABLE_PREFIX: &str = "bubblewrap unavailable";
+
+/// Bubblewrap is missing or refused to start. Names this host's install
+/// command rather than one distro's, and the kernel knob a hardened image
+/// turns off.
+fn bwrap_unavailable() -> String {
+    let install = crate::kernel::platform::install_hint(
+        Platform::X86_64UnknownLinuxGnu,
+        crate::kernel::platform::HostPackages::Bubblewrap,
+    );
+    format!(
+        "{BWRAP_UNAVAILABLE_PREFIX}: install it ({install}) and ensure unprivileged user \
+         namespaces are enabled (/proc/sys/user/max_user_namespaces > 0)"
+    )
+}
+
+/// A bubblewrap that starts but cannot exec anything inside its own mount
+/// layout. Ubuntu 22.04's bubblewrap does this to tog's merged-/usr bind
+/// list, so the raw `execvp /usr/bin/true: No such file or directory` reads
+/// like a missing file in the user's project rather than a host limitation.
+fn explained_bwrap_stderr(stderr: &str) -> String {
+    let raw = stderr.trim_end();
+    if raw.contains("execvp") && raw.contains("No such file or directory") {
+        return format!(
+            "the sandbox starts but cannot exec inside it ({raw}): this host's bubblewrap does \
+             not resolve tog's /usr bind layout, known on Ubuntu 22.04 and fixed by a newer \
+             bubblewrap (Ubuntu 24.04, Debian 13); sandboxed work stays unavailable until then"
+        );
+    }
+    raw.to_string()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SandboxFailureKind {
@@ -722,11 +766,14 @@ fn sandbox_failure_error(
     match kind {
         SandboxFailureKind::Setup => io::Error::new(
             io::ErrorKind::Unsupported,
-            String::from_utf8_lossy(stderr).trim_end().to_string(),
+            explained_bwrap_stderr(&String::from_utf8_lossy(stderr)),
         ),
         SandboxFailureKind::Command => io::Error::new(
             io::ErrorKind::Other,
-            format!("sandboxed command failed ({status}): {cmd:?}"),
+            format!(
+                "sandboxed command failed ({status}): {}",
+                crate::kernel::ui::shell_line(cmd)
+            ),
         ),
     }
 }
@@ -888,7 +935,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     match PREFLIGHT.get_or_init(|| {
         let Some(path) = find_bwrap() else {
-            return Err(BWRAP_UNAVAILABLE.to_string());
+            return Err(bwrap_unavailable());
         };
         let mut version_command = bwrap_command(&path).map_err(|error| error.to_string())?;
         version_command
@@ -903,7 +950,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
                 .unwrap_or(false),
         };
         if !version_ok {
-            return Err(BWRAP_UNAVAILABLE.to_string());
+            return Err(bwrap_unavailable());
         }
         let probe_args = [
             "--unshare-user",
@@ -951,11 +998,11 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
         if probe_output.0.success() {
             Ok(path)
         } else if probe_output.1.starts_with(b"bwrap:") {
-            Err(String::from_utf8_lossy(&probe_output.1)
-                .trim_end()
-                .to_string())
+            Err(explained_bwrap_stderr(&String::from_utf8_lossy(
+                &probe_output.1,
+            )))
         } else {
-            Err(BWRAP_UNAVAILABLE.to_string())
+            Err(bwrap_unavailable())
         }
     }) {
         Ok(path) => Ok(path.as_path()),
@@ -1779,7 +1826,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             error.to_string(),
-            "sandboxed command failed (exit status: 7): [\"/usr/bin/sh\", \"-c\", \"exit 7\"]"
+            "sandboxed command failed (exit status: 7): /usr/bin/sh -c 'exit 7'"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1820,8 +1867,34 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             error.to_string(),
-            "sandboxed command failed (exit status: 3): [\"/usr/bin/sh\", \"-c\", \"echo build diagnostic >&2; exit 3\"]"
+            "sandboxed command failed (exit status: 3): /usr/bin/sh -c 'echo build diagnostic >&2; exit 3'"
         );
+    }
+
+    /// The Ubuntu 22.04 failure is a host limitation, not a missing file in
+    /// the user's project. Doctor and every sandboxed build must say which,
+    /// keep the raw bwrap line for the bug report, and name the fix.
+    #[test]
+    fn a_bwrap_that_cannot_exec_is_explained_not_forwarded_raw() {
+        let raw = "bwrap: execvp /usr/bin/true: No such file or directory";
+        let explained = explained_bwrap_stderr(raw);
+        assert!(explained.contains(raw), "{explained}");
+        assert!(explained.contains("Ubuntu 22.04"), "{explained}");
+        assert!(explained.contains("bubblewrap"), "{explained}");
+        assert!(explained.contains("cannot exec inside it"), "{explained}");
+        // Every other bwrap diagnostic stays its own words.
+        let other = "bwrap: Can't find source path /missing: No such file";
+        assert_eq!(explained_bwrap_stderr(other), other);
+        assert_eq!(explained_bwrap_stderr("bwrap: oops\n"), "bwrap: oops");
+    }
+
+    /// The "just install it" case names this host's package manager.
+    #[test]
+    fn missing_bubblewrap_names_an_install_command() {
+        let message = bwrap_unavailable();
+        assert!(message.starts_with(BWRAP_UNAVAILABLE_PREFIX), "{message}");
+        assert!(message.contains("bubblewrap"), "{message}");
+        assert!(message.contains("max_user_namespaces"), "{message}");
     }
 
     #[test]
