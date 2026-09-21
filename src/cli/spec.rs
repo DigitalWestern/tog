@@ -28,7 +28,8 @@ Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
 (.venv, node_modules, .tog/...). A bare 'tog' inside a project does the
 same. A found manifest with no dependencies syncs an interpreter-only
-environment.
+environment. It takes no package name: adding a dependency is
+'tog add <package>'.
 
 PROJECT INPUTS (any combination; each ecosystem found here is synced):
   python   requirements.txt, pyproject.toml, setup.cfg/setup.py,
