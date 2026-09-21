@@ -696,16 +696,16 @@ frozen validation against a project whose Gemfile writes a marker when
 evaluated completes with no marker, and every `src/toolchain_input.rs` reader spawns no
 process; and the project-side `src/kernel/fsroot.rs` refusals all
 fail closed — a symlinked `tog-toolchain.toml`, a symlinked input file, a
-symlinked ancestor directory of either, and an occupied temp name. ACTIVATION
-stays dormant until selection sources and runtime propagation land: the feature
-is off, and the lock is neither written nor required.
+symlinked ancestor directory of either, and an occupied temp name. The shipped behavior of that list is
+described in `docs/human/ARCHITECTURE.md` "Toolchain lock"; what stays here
+is the reasoning behind it.
 
 0. **Exact selection fixes (landed as two PRs)** — #21 `wp2/python-exact-selection` (`src/pyselect.rs`, `src/python.rs`) and #22 `wp2/go-selected-version` (`src/golang.rs`), each with its own unit tests: exact patches, duplicate rows, selected-Go realization, unchanged defaults, Darwin goldens.
 1. **Shipped-table adapter and source selection (landed)** — pin modules, `src/platform.rs`, typed source-policy interface with configurable endpoint defaults, selector tests: complete bundles, matrix intersections, carrying the existing verified digests (including the sha512s .NET/Hex/rebar already use) into catalog rows, and legacy seeding (evidence-based success plus the refusal when evidence is missing). No lock-byte or replay tests before the format exists.
 2. **Secure archive extractor (landed)** — `src/archive.rs` and unit tests for absolute paths, `..`, hard links, special files, symlink escape, and an outside sentinel under GNU tar and (asymmetric until the Mac gate) bsdtar.
-3. **Lock core, dormant** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It extends `src/kernel/fsroot.rs` for lock/input-specific rules (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `tog-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
-4. **Runtime propagation** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
-5. **Activation and update** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: update, two-store replay including the dropped-`release` upgrade replay, no-pin creation, stale/frozen refusal (with `frozen_validation_failure_precedes_all_writes` and the Gemfile-marker regression), added-higher-precedence-source staleness, unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff.
+3. **Lock core (landed 2026-09-21)** — parser/writer plus `src/cli.rs`, `src/main.rs`, and project input handling: canonical bytes as defined above, the consulted-path input list with its absent rows, and the concurrent writer/reader lock. This PR also owns `src/toolchain_input.rs`, the per-ecosystem declarative readers, with a unit test per ecosystem asserting the reader spawns no process. It extends `src/kernel/fsroot.rs` for lock/input-specific rules (`openat`/`O_NOFOLLOW` walk, `O_EXCL` create on an `/dev/urandom` name, file `fsync`, `renameat`, directory `fsync`), and moves `src/sbom.rs`'s `/dev/urandom` read into the shared helper it calls rather than adding a second randomness path. Unit tests refuse a symlinked `tog-toolchain.toml`, a symlinked input file, a symlinked ancestor directory, and an occupied temp name; `fs::read`/`fs::write`/`fs::rename` do not pass them. Activation stays off; stale/frozen/replay/exit-status tests wait for it.
+4. **Runtime propagation (landed 2026-09-21)** — `src/main.rs`, `src/xrun.rs`, `src/inspect.rs`, `src/project.rs`, and closure writers: closure-selected runtimes, refresh isolation, old-`x/2` non-reuse; this permits activation.
+5. **Activation and update (landed 2026-09-21)** — `src/cli.rs`, `src/main.rs`, lock core, integration tests: update, two-store replay including the dropped-`release` upgrade replay, no-pin creation, stale/frozen refusal (with `frozen_validation_failure_precedes_all_writes` and the Gemfile-marker regression), added-higher-precedence-source staleness, unchanged dependency locks, foreign-platform refusal, exact statuses, Linux/Mac diff.
 
 
 ### Implementation status and remaining PRs
@@ -789,7 +789,7 @@ so this file does not drift from it:
   `src/ruby.rs:57`; `dotnet::SDK_VERSION`, `src/dotnet.rs:27`, enforced at
   `src/dotnet.rs:132` and `src/dotnet.rs:338`).
 
-**PR 3 — lock core, dormant.**
+**PR 3 — lock core (landed 2026-09-21).**
 - *Files:* new `src/toolchain_input.rs` (per-ecosystem declarative readers),
   extend `src/kernel/fsroot.rs` (`ProjectRoot`: `openat`/`O_NOFOLLOW`
   walk, `O_EXCL` create on a `/dev/urandom` name, file `fsync`, `renameat`,
@@ -806,9 +806,11 @@ so this file does not drift from it:
   shared input lock as an exclusive publication lock. Pure frozen input
   validation must complete before any store bootstrap or automatic metadata
   maintenance writes; preserve the frozen no-writes regression.
-- *Activation stays off:* the lock is neither written nor required.
+- *As built:* `primary` is written as a bare string when an ecosystem has
+  one primary component and as a TOML array for the BEAM pair, and the
+  parser accepts either.
 
-**PR 4 — runtime propagation.**
+**PR 4 — runtime propagation (landed 2026-09-21).**
 - *Files:* `src/main.rs:1598` (Node `run` takes the global pin via
   `npm::ensure_node_for`; likewise `src/main.rs:1008` and `src/xrun.rs:1546`,
   `src/xrun.rs:1827`), `src/xrun.rs:98` and `src/xrun.rs:1582` (the `x/2`
@@ -819,7 +821,7 @@ so this file does not drift from it:
 - *Security requirement:* a catalog refresh must never pair old dependencies
   with a new runtime silently.
 
-**PR 5 — activation and `update --toolchain`.**
+**PR 5 — activation and `update --toolchain` (landed 2026-09-21).**
 - *Files:* `src/cli.rs`, `src/main.rs`, the lock core, integration tests.
 - *Behaviour:* first writable sync of a project with no pin creates the lock
   visibly and atomically; `--frozen` or strict policy refuses a missing or
@@ -850,19 +852,12 @@ selection `--ignored` tests on the Mac.
 **Independent review.** The design has had 10 rounds; round 10's fixes are
 unreviewed. Every implementation PR needs its own round.
 
-**Completion criteria.** Ordered items 0–5 and the extractor follow-up below merged; the acceptance list at
-the acceptance paragraph at the end of the contract passes on Linux; the two-machine lock diff is
-recorded; `LIMITATIONS.md` loses the "Node/Ruby/Elixir select nothing" and
-"one fixed .NET SDK" rows.
-
-#### Recommended decision
-
-Take **PR 1 next** (after GC safety), not PR 3. It establishes tested selection independently of lock parsing.
-It does not close user-visible runtime-selection limitations until runtime
-propagation and activation also land; update those rows only when behavior
-actually changes. PR 3's `write_closure` neighbourhood is exactly what GC Package C
-rewrites; sequencing PR 1 first keeps the two apart.
-
+**Completion criteria.** Ordered items 0–5 and the extractor follow-up below are merged and
+the acceptance list at the end of the contract passes on Linux, as of 2026-09-21;
+`LIMITATIONS.md` has lost the "Node/Ruby/Elixir select nothing" and "one fixed
+.NET SDK" rows. **The two-machine lock diff is the one item outstanding:** a
+lock written on Linux must sync on an arm64 Mac without rewriting itself, with
+both `tog status` answers identical. It is proven by test, not by two machines.
 
 ---
 

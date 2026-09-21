@@ -205,10 +205,39 @@ must be an exact pin with `rollForward = "disable"`.
 Every ecosystem has a pinned toolchain table with exact selection rules;
 the tables and the selectors realization uses live in the per-ecosystem
 modules, with the platform enumeration in `src/kernel/platform.rs`. A
-committed `tog-toolchain.toml` lock that records the exact toolchain per
-project is designed but not built; the design is in `docs/agent/DESIGNS.md`.
+committed `tog-toolchain.toml` at the project root records the exact
+toolchain per ecosystem: the release it was minted from, the components and
+their versions, and one artifact row per supported platform with a verified
+algorithm-qualified digest. Selection reads a catalog; honoring a lock does
+not, so the same file replays in any store and the `release` key may name a
+bundle the catalog no longer has.
 
-What has shipped is the catalog the lock will be minted from
+`src/comforter/toolchain.rs` is the activation surface. `resolve` answers,
+with no writes at all, which toolchain the project uses and where the answer
+came from, before the store is opened: a refusal under `--frozen`, strict
+policy, or a stale lock therefore leaves no trace. `commit` is the only
+writer — it takes the toolchain-input flock, re-reads the file under it,
+publishes a pending lock through the descriptor-anchored rule in
+`src/kernel/fsroot.rs`, and installs the process-global guard every closure
+writer rechecks before publication. The modes are the grammar: ordinary sync
+creates a lock when there is none and never rewrites one, `--frozen`
+validates and never creates, `plan`/`build`/`fmt` honor a lock and fall back
+to the shipped selection, and `tog update --toolchain [<ecosystem>]` is the
+one writer allowed to replace a lock.
+
+Staleness is one rule everywhere — re-derive each consulted row and compare
+presence and value, never the file digest alone — so ordinary sync,
+`--frozen` and `tog status` reach the same verdict. `status` reports a
+missing or stale lock, a missing section, and a closure built from another
+bundle as `changed` naming `tog-toolchain.toml`, and a verdict that sync
+would refuse is answered ahead of the tailor's own comparison. `tog audit`
+does not read the lock yet (`FOLLOW-UPS.md`). Cached `tog x` environments
+key on `x/3`: store root, ecosystem, package request, platform, the primary
+runtime version, the selected `bundle_id` and the realized runtime object,
+so a changed bundle component gives a fresh environment and an `x/2`
+directory is never reused.
+
+The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each tailor's `toolchain_catalog` turns its pin
 rows into release bundles: components, and per platform one artifact row
 with the provider, build, append-only recipe id, URL and algorithm-qualified
@@ -231,7 +260,7 @@ from a pre-lock closure's recorded platform and exact versions and refuses,
 naming `tog update --toolchain`, when either is missing, when the
 version is not in the catalog, or when the bundle is incomplete on the
 other platform: a closure realized on one platform is not evidence for the
-other. Nothing reads the catalog on the sync path yet.
+other.
 
 ## Permissive by default, strict as a switch
 

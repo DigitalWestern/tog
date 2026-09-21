@@ -163,6 +163,38 @@ impl ProjectRoot {
         self.publish(relative, bytes, &mut random_temp_name)
     }
 
+    /// Open a project-relative file to hold an advisory lock on, creating
+    /// it and any missing parent directory. The name is opened
+    /// descriptor-relative with `O_NOFOLLOW`, so a symlink planted at it
+    /// fails closed rather than making the caller lock a file outside the
+    /// project. The descriptor is read/write because `flock` upgrades are
+    /// refused on a read-only description on some systems.
+    pub fn open_lock_file(&self, relative: &Path) -> io::Result<fs::File> {
+        let (parents, name) = split_relative(relative)?;
+        let mut display = self.path.clone();
+        let held = self.open_creating(&parents, &mut display)?;
+        display.push(name);
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        match open_file_at(
+            parent_fd,
+            name.as_bytes(),
+            libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        ) {
+            Ok(file) => Ok(file),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(refusal(format!(
+                "{} is a symlink; refusing to lock through it",
+                display.display()
+            ))),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("open {}: {error}", display.display()),
+            )),
+        }
+    }
+
     /// What a project-relative path names, seen from the held descriptor
     /// without following a symlink at any component. A caller can refuse a
     /// tampered destination before it does work a later refusal would have
@@ -952,6 +984,44 @@ mod tests {
         let error = root
             .read_file(Path::new("sub/.python-version"))
             .unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn open_lock_file_creates_its_parents_and_refuses_a_symlink() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let root = ProjectRoot::open(&dir).unwrap();
+        let relative = Path::new(".tog/toolchain-input.lock");
+        let file = root.open_lock_file(relative).unwrap();
+        assert!(dir.join(relative).is_file());
+        // The descriptor carries an advisory lock, and reopening the same
+        // name finds the file that is there rather than making a new one.
+        file.lock_shared().unwrap();
+        drop(file);
+        drop(root.open_lock_file(relative).unwrap());
+        assert_eq!(entries(&dir.join(".tog")), vec!["toolchain-input.lock"]);
+
+        // A symlink planted at the name fails closed instead of locking the
+        // file it points at.
+        let victim = temp.0.join("victim-lock");
+        fs::write(&victim, b"").unwrap();
+        fs::remove_file(dir.join(relative)).unwrap();
+        symlink(&victim, dir.join(relative)).unwrap();
+        let error = root.open_lock_file(relative).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+
+        // So does a symlinked ancestor directory.
+        fs::remove_file(dir.join(relative)).unwrap();
+        fs::remove_dir(dir.join(".tog")).unwrap();
+        let elsewhere = temp.0.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        symlink(&elsewhere, dir.join(".tog")).unwrap();
+        let error = root.open_lock_file(relative).unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"

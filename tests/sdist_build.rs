@@ -5,6 +5,7 @@
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
+use tog::tailors::python;
 use tog::tailors::python::build;
 
 #[test]
@@ -20,8 +21,13 @@ fn docopt_sdist_builds_in_sandbox() {
         kind: ArtifactKind::Sdist,
         git: None,
     };
-    let wheel = build::build_sdist_wheel(&store, Platform::host().unwrap(), &pkg, "3.12.14")
-        .expect("sdist build");
+    let wheel = build::build_sdist_wheel(
+        &store,
+        Platform::host().unwrap(),
+        &pkg,
+        &python::shipped_selection("3.12.14").unwrap(),
+    )
+    .expect("sdist build");
     assert!(wheel
         .file_name()
         .unwrap()

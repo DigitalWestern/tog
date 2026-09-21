@@ -11,6 +11,7 @@ use tog::kernel::platform::Platform;
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
+use tog::tailors::python;
 use tog::tailors::python::build;
 
 /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
@@ -44,7 +45,12 @@ fn network_access_during_build_fails() {
         git: None,
     };
 
-    let result = build::build_sdist_wheel(&store, Platform::host().unwrap(), &pkg, "3.12.14");
+    let result = build::build_sdist_wheel(
+        &store,
+        Platform::host().unwrap(),
+        &pkg,
+        &python::shipped_selection("3.12.14").unwrap(),
+    );
     let err = result.expect_err("build reaching the network must fail");
     let msg = err.to_string();
     // A sandbox that failed to set up (Unsupported) is not evidence of

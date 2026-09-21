@@ -25,6 +25,7 @@ use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store::{self, RootEntry, Store};
+use crate::kernel::toolchain::runtime::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
 use crate::tailors::python;
@@ -95,19 +96,82 @@ fn home() -> io::Result<PathBuf> {
     Ok(home)
 }
 
+/// The toolchain an `x` environment runs on: the project's lock when `x`
+/// runs inside one, the shipped selection otherwise. `x` chooses no
+/// version of its own and writes no lock.
+pub(crate) fn x_toolchain(platform: Platform, cwd: &Path, ecosystem: &str) -> io::Result<Selected> {
+    crate::commands::shared::selected_toolchain(platform, cwd, ecosystem)
+        .map_err(|error| other(format!("x: {error}")))
+}
+
+/// The store object id of the runtime a selection names, from the selected
+/// bundle's own row and without touching the store. A shipped pin table
+/// could answer by version alone, but the key has to name the object the
+/// environment will actually run on, which is the one the selection's
+/// digest and recipe identify.
+fn runtime_object_id(platform: Platform, toolchain: &Selected) -> io::Result<String> {
+    match toolchain.ecosystem.as_str() {
+        "python" => python::runtime_object_id(platform, toolchain),
+        _ => node::runtime_object_id(platform, toolchain),
+    }
+}
+
+/// The name of the directory a cached `x` environment lives in under
+/// `~/.tog/x`, for a caller that has to find one without re-deriving the
+/// key by hand.
+pub fn environment_name(
+    store_root: &Path,
+    platform: Platform,
+    cwd: &Path,
+    ecosystem: &str,
+    package: &str,
+    version: Option<&str>,
+) -> io::Result<String> {
+    let store = Store {
+        root: store_root.to_path_buf(),
+    };
+    let toolchain = x_toolchain(platform, cwd, ecosystem)?;
+    let runtime_object = runtime_object_id(platform, &toolchain)?;
+    Ok(x_root_name(
+        &store,
+        platform,
+        ecosystem,
+        package,
+        version,
+        &toolchain,
+        &runtime_object,
+    ))
+}
+
+/// The directory one cached `x` environment lives in.
+///
+/// The key names the store root because everything else in it is
+/// store-independent: two stores must not share one `~/.tog/x/` directory,
+/// or the second store's run would find a projection pointing into the
+/// first and fail in a way rerunning cannot clear.
+///
+/// `bundle_id` covers every component version and every platform artifact
+/// row, so a changed uv, a changed extraction recipe, or any other bundle
+/// component yields a fresh environment; the runtime object id is what the
+/// projection actually points at. A directory an older tog made under the
+/// `x/2` key is never reused, and stays a GC root until `tog x --clean`.
 fn x_root_name(
     store: &Store,
     platform: Platform,
     ecosystem: &str,
     package: &str,
     version: Option<&str>,
+    toolchain: &Selected,
+    runtime_object: &str,
 ) -> String {
     let key = hex::encode(Sha256::digest(
         format!(
-            "x/2\0{}\0{ecosystem}\0{package}\0{}\0{}",
+            "x/3\0{}\0{ecosystem}\0{package}\0{}\0{}\0{}\0{}\0{runtime_object}",
             store.root.display(),
             version.unwrap_or(""),
-            platform.triple()
+            platform.triple(),
+            toolchain.primary_version(),
+            toolchain.bundle_id()
         )
         .as_bytes(),
     ));
@@ -513,7 +577,7 @@ fn write_x_request(
     version: Option<&str>,
     state: &str,
 ) -> io::Result<()> {
-    write_x_request_inner(root, ecosystem, package, version, state, None)
+    write_x_request_inner(root, ecosystem, package, version, state, None, None)
 }
 
 fn write_x_request_for_store(
@@ -523,8 +587,17 @@ fn write_x_request_for_store(
     package: &str,
     version: Option<&str>,
     state: &str,
+    runtime: Option<(&Selected, &str)>,
 ) -> io::Result<()> {
-    write_x_request_inner(root, ecosystem, package, version, state, Some(&store.root))
+    write_x_request_inner(
+        root,
+        ecosystem,
+        package,
+        version,
+        state,
+        Some(&store.root),
+        runtime,
+    )
 }
 
 fn write_x_request_inner(
@@ -534,6 +607,7 @@ fn write_x_request_inner(
     version: Option<&str>,
     state: &str,
     store_root: Option<&Path>,
+    runtime: Option<(&Selected, &str)>,
 ) -> io::Result<()> {
     let path = root.join(X_REQUEST_FILE);
     if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -556,6 +630,13 @@ fn write_x_request_inner(
     });
     if let Some(store_root) = store_root {
         record["store_root"] = serde_json::Value::String(store_root.display().to_string());
+    }
+    // What the directory name was computed from, so a reader of the record
+    // can tell which runtime this environment belongs to without
+    // recomputing the key.
+    if let Some((toolchain, runtime_object)) = runtime {
+        record["bundle_id"] = serde_json::Value::String(toolchain.bundle_id());
+        record["runtime_object"] = serde_json::Value::String(runtime_object.to_string());
     }
     fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
     fs::rename(tmp, path)
@@ -1862,9 +1943,17 @@ pub fn launch(
     let x_home = home()?;
     let store = Store::open()?;
     store.require_activity(activity, "x")?;
-    let root = x_home
-        .join(".tog/x")
-        .join(x_root_name(&store, platform, ecosystem, package, version));
+    let toolchain = x_toolchain(platform, cwd, ecosystem)?;
+    let runtime_object = runtime_object_id(platform, &toolchain)?;
+    let root = x_home.join(".tog/x").join(x_root_name(
+        &store,
+        platform,
+        ecosystem,
+        package,
+        version,
+        &toolchain,
+        &runtime_object,
+    ));
     let _x_lock = acquire_x_root(&root)?;
     let (executable, path_prefix, env): (PathBuf, Vec<PathBuf>, Vec<(String, PathBuf)>) =
         match ecosystem {
@@ -1884,6 +1973,7 @@ pub fn launch(
                         package,
                         version,
                         "realizing",
+                        Some((&toolchain, runtime_object.as_str())),
                     )?;
                     realize_python(
                         &store,
@@ -1892,10 +1982,19 @@ pub fn launch(
                         &root,
                         package,
                         version,
+                        &toolchain,
                         &mut attribution,
                     )?;
                     attribution.finish(true)?;
-                    write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
+                    write_x_request_for_store(
+                        &root,
+                        &store,
+                        ecosystem,
+                        package,
+                        version,
+                        "ready",
+                        Some((&toolchain, runtime_object.as_str())),
+                    )?;
                 } else {
                     // `x_request_is_ready` already validated this projection
                     // against the store and the active policy. Validating it
@@ -1903,7 +2002,13 @@ pub fn launch(
                     // twice.
                     if !x_request_file_exists(&root) {
                         write_x_request_for_store(
-                            &root, &store, ecosystem, package, version, "ready",
+                            &root,
+                            &store,
+                            ecosystem,
+                            package,
+                            version,
+                            "ready",
+                            Some((&toolchain, runtime_object.as_str())),
                         )?;
                     }
                     attribution.discard();
@@ -1932,6 +2037,7 @@ pub fn launch(
                         package,
                         version,
                         "realizing",
+                        Some((&toolchain, runtime_object.as_str())),
                     )?;
                     realize_node(
                         &store,
@@ -1940,15 +2046,30 @@ pub fn launch(
                         &root,
                         package,
                         version,
+                        &toolchain,
                         &mut attribution,
                     )?;
                     attribution.finish(true)?;
-                    write_x_request_for_store(&root, &store, ecosystem, package, version, "ready")?;
+                    write_x_request_for_store(
+                        &root,
+                        &store,
+                        ecosystem,
+                        package,
+                        version,
+                        "ready",
+                        Some((&toolchain, runtime_object.as_str())),
+                    )?;
                 } else {
                     // Already validated by `x_request_is_ready`; see above.
                     if !x_request_file_exists(&root) {
                         write_x_request_for_store(
-                            &root, &store, ecosystem, package, version, "ready",
+                            &root,
+                            &store,
+                            ecosystem,
+                            package,
+                            version,
+                            "ready",
+                            Some((&toolchain, runtime_object.as_str())),
                         )?;
                     }
                     attribution.discard();
@@ -1958,7 +2079,7 @@ pub fn launch(
                         "'{package}' installed but provides no '{bin}' executable; name it with --from: 'tog x --from {package} <tool>'"
                     )));
                 }
-                let node_obj = node::ensure_node_for(&store, platform)?;
+                let node_obj = node::realize_runtime(&store, platform, &toolchain)?;
                 (
                     executable,
                     vec![node_modules.join(".bin"), node_obj.join("bin")],
@@ -1988,24 +2109,26 @@ pub fn launch(
         .unwrap_or(1))
 }
 
+/// Where a delegate's Node tool lives. It is the same directory `tog x`
+/// would use for the same package, so the two share one environment rather
+/// than realizing it twice; both therefore key on the same fields.
 fn node_cache_root(
     store: &Store,
     platform: Platform,
     package: &str,
     version: Option<&str>,
+    toolchain: &Selected,
+    runtime_object: &str,
 ) -> io::Result<PathBuf> {
-    let key = hex::encode(Sha256::digest(
-        format!(
-            "x/2\0{}\0node\0{package}\0{}\0{}",
-            store.root.display(),
-            version.unwrap_or(""),
-            platform.triple()
-        )
-        .as_bytes(),
-    ));
-    Ok(home()?
-        .join(".tog/x")
-        .join(format!("npm-{}-{}", safe(package), &key[..16])))
+    Ok(home()?.join(".tog/x").join(x_root_name(
+        store,
+        platform,
+        "node",
+        package,
+        version,
+        toolchain,
+        runtime_object,
+    )))
 }
 
 /// The digest algorithms a Corepack `packageManager` hash suffix may name.
@@ -2070,6 +2193,7 @@ pub(crate) struct CorepackHash {
 pub(crate) fn realize_node_tool(
     store: &Store,
     platform: Platform,
+    project: &Path,
     package: &str,
     version: &str,
     corepack_hash: Option<&CorepackHash>,
@@ -2077,7 +2201,16 @@ pub(crate) fn realize_node_tool(
 ) -> io::Result<(PathBuf, fs::File, bool)> {
     validate_exact_version(version)?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let root = node_cache_root(store, platform, package, Some(version))?;
+    let toolchain = x_toolchain(platform, project, "node")?;
+    let runtime_object = runtime_object_id(platform, &toolchain)?;
+    let root = node_cache_root(
+        store,
+        platform,
+        package,
+        Some(version),
+        &toolchain,
+        &runtime_object,
+    )?;
     // Take the same shared lifecycle lock `tog x` takes, and hand it back
     // to the caller. `tog x --clean` removes a cached root under an
     // exclusive lock, so without this a cleanup running alongside a
@@ -2099,6 +2232,7 @@ pub(crate) fn realize_node_tool(
         &root,
         package,
         Some(version),
+        &toolchain,
         attribution,
     )?;
     if !executable.is_file() {
@@ -2177,10 +2311,19 @@ fn realize_python(
     root: &Path,
     package: &str,
     version: Option<&str>,
+    toolchain: &Selected,
     attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
     fs::create_dir_all(root)?;
-    let selection = pyselect::select_python(platform, &[])?;
+    // The environment runs on the runtime the caller resolved, not on the
+    // global default: inside a project with a lock that is the locked
+    // CPython, and the projection has to match the key the directory was
+    // named for.
+    let selection = pyselect::select_python_for_version(
+        platform,
+        &pyselect::PythonInputs::default(),
+        toolchain.version("cpython")?,
+    )?;
     let pin = selection.pin;
     let spec = match version {
         Some(version) => format!("{package}=={version}\n"),
@@ -2190,7 +2333,8 @@ fn realize_python(
     let output = root.join("requirements.txt");
     fs::write(&input, &spec)?;
     ui::note(&format!("resolving {} with the store uv...", spec.trim()));
-    let uv = python::ensure_uv_for(store, platform)?.join("uv");
+    // The bundle names the uv build this environment resolves with.
+    let uv = python::realize_uv(store, platform, toolchain)?.join("uv");
     let mut command = Command::new(uv);
     command
         .args(["pip", "compile"])
@@ -2222,7 +2366,7 @@ fn realize_python(
     }
     let text = fs::read_to_string(&output)?;
     let plan = pypi::plan_python(platform, &text, pin.version)?;
-    let env = crate::tailors::python::env::realize_env(store, platform, &plan)?;
+    let env = crate::tailors::python::env::realize_env_for(store, platform, &plan, toolchain)?;
     crate::tailors::python::env::project_env_with_selection(
         root,
         &env,
@@ -2241,6 +2385,7 @@ fn realize_node(
     root: &Path,
     package: &str,
     version: Option<&str>,
+    toolchain: &Selected,
     attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
     fs::create_dir_all(root)?;
@@ -2261,7 +2406,7 @@ fn realize_node(
         "resolving {package}@{} with the store npm...",
         version.unwrap_or("latest")
     ));
-    let node_obj = node::ensure_node_for(store, platform)?;
+    let node_obj = node::realize_runtime(store, platform, toolchain)?;
     let mut command = Command::new(node_obj.join("bin/npm"));
     command.args(["install", "--package-lock-only", "--ignore-scripts"]);
     if !ui::verbose() {
@@ -2283,7 +2428,7 @@ fn realize_node(
         )));
     }
     let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
-    let env = node::realize_node_env(store, platform, &plan, &[])?;
+    let env = node::realize_node_env_for(store, platform, &plan, &[], toolchain)?;
     node::project_node_env(root, &env, platform, &plan, &[], false, attribution)?;
     ui::synced(&format!("x {package}"), &env);
     Ok(())
@@ -2308,6 +2453,67 @@ mod tests {
         assert_eq!(default_bin("@angular/cli"), "cli");
         assert_eq!(default_bin("prettier"), "prettier");
         assert_eq!(safe("@angular/cli"), "_angular_cli");
+    }
+
+    /// The cache key follows the runtime. Two environments that differ
+    /// only in the bundle they run on, or only in the object that bundle
+    /// realizes to, are two directories; everything else about the request
+    /// being equal keeps one.
+    #[test]
+    fn the_x_key_follows_the_runtime_and_never_reuses_an_older_one() {
+        let store = Store {
+            root: PathBuf::from("/tmp/tog-x-key-fixture"),
+        };
+        let platform = Platform::host().unwrap();
+        let catalog = crate::tailors::by_id("python")
+            .unwrap()
+            .toolchain_catalog()
+            .unwrap();
+        let selected = crate::kernel::toolchain::runtime::shipped(&catalog).unwrap();
+        let name = |toolchain: &Selected, runtime_object: &str| {
+            x_root_name(
+                &store,
+                platform,
+                "python",
+                "ruff",
+                Some("0.6.1"),
+                toolchain,
+                runtime_object,
+            )
+        };
+        let base = name(&selected, "object-a");
+        assert_eq!(base, name(&selected, "object-a"), "the key is not stable");
+        assert!(base.starts_with("py-ruff-"), "{base}");
+
+        // A different realized runtime for the same bundle.
+        assert_ne!(base, name(&selected, "object-b"));
+
+        // A different bundle: `bundle_id` covers every component and
+        // artifact row, so a changed uv or a changed extraction recipe is a
+        // different environment even when the runtime object is the same.
+        // `release` is provenance and is deliberately not in it.
+        let mut renamed = selected.clone();
+        renamed.bundle.release = format!("{}-rev2", renamed.bundle.release);
+        assert_eq!(selected.bundle_id(), renamed.bundle_id());
+        assert_eq!(base, name(&renamed, "object-a"));
+
+        let mut other = selected.clone();
+        let component = other.bundle.components.last_mut().unwrap();
+        component.version = format!("{}.1", component.version);
+        assert_ne!(selected.bundle_id(), other.bundle_id());
+        assert_ne!(base, name(&other, "object-a"));
+
+        // The name an older tog computed is never the name this one picks,
+        // so an `x/2` directory is a miss rather than a wrong hit.
+        let legacy = hex::encode(Sha256::digest(
+            format!(
+                "x/2\0{}\0python\0ruff\00.6.1\0{}",
+                store.root.display(),
+                platform.triple()
+            )
+            .as_bytes(),
+        ));
+        assert_ne!(base, format!("py-ruff-{}", &legacy[..16]));
     }
 
     #[test]

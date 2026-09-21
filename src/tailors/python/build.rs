@@ -2,9 +2,10 @@
 //! without execution and, when needed, realized as a separate Python env.
 
 use crate::kernel::fetch::{download_verified_held, Digest};
-use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::Sandbox;
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::Selected;
 use crate::kernel::types::{ArtifactKind, Identity, LockedPackage, Plan};
 use crate::tailors::python::build_requires::{self, ArchiveInfo};
 use std::collections::BTreeMap;
@@ -69,11 +70,9 @@ pub fn derivation_fingerprint() -> String {
     format!("sdist-build/2;toolchain:{}", build_toolchain_fingerprint())
 }
 
-fn sdist_identity(
-    platform: Platform,
-    pkg: &LockedPackage,
-    pin: &crate::tailors::python::PinnedPython,
-) -> Identity {
+/// `python` is the `<version>:<artifact sha256>` the selected CPython row
+/// states: the identity names the interpreter's bytes, not its table row.
+fn sdist_identity(platform: Platform, pkg: &LockedPackage, python: &str) -> Identity {
     Identity {
         kind: "sdist-build".into(),
         name: pkg.name.clone(),
@@ -81,7 +80,7 @@ fn sdist_identity(
         inputs: BTreeMap::from([
             ("schema".into(), "sdist-build/2".into()),
             ("sdist_sha256".into(), pkg.sha256.clone()),
-            ("python".into(), format!("{}:{}", pin.version, pin.sha256)),
+            ("python".into(), python.to_string()),
             ("platform".into(), platform.triple().into()),
             ("toolchain".into(), build_toolchain_fingerprint()),
         ]),
@@ -112,7 +111,7 @@ pub(super) const NATIVE_MODE_NONE: &str = "none";
 fn isolated_sdist_identity_from_ids(
     platform: Platform,
     pkg: &LockedPackage,
-    pin: &crate::tailors::python::PinnedPython,
+    python: &str,
     build_env_id: &str,
     rust_id: Option<&str>,
     vendor_id: Option<&str>,
@@ -121,7 +120,7 @@ fn isolated_sdist_identity_from_ids(
     let mut inputs = BTreeMap::from([
         ("schema".into(), "sdist-build/4".into()),
         ("sdist_sha256".into(), pkg.sha256.clone()),
-        ("python".into(), format!("{}:{}", pin.version, pin.sha256)),
+        ("python".into(), python.to_string()),
         ("platform".into(), platform.triple().into()),
         ("build_env".into(), build_env_id.into()),
         (
@@ -403,11 +402,10 @@ pub(crate) fn plan_sdist_identity_input(
     store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
-    python_version: &str,
+    selected: &Selected,
     runtime_plan: Option<&Plan>,
 ) -> io::Result<SdistIdentityPlan> {
-    let pin = crate::tailors::python::lookup(platform, python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform))?;
+    let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(store, &sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
@@ -419,17 +417,17 @@ pub(crate) fn plan_sdist_identity_input(
             input: format!("Sdist:{}:{}", pkg.sha256, derivation_fingerprint()),
             native_libs_id: None,
             #[cfg(test)]
-            identity: sdist_identity(platform, pkg, pin),
+            identity: sdist_identity(platform, pkg, &python),
         });
     }
 
     let build_plan = if fast_requirements {
-        build_toolchain_plan(&pin.version)
+        build_toolchain_plan(selected.version("cpython")?)
     } else {
         build_requires::resolve_build_plan(
             store,
             platform,
-            &pin.version,
+            selected,
             &info.build_requires,
             runtime_plan,
         )?
@@ -437,7 +435,7 @@ pub(crate) fn plan_sdist_identity_input(
     // Planning the nested environment may inspect more sdists and acquire
     // the same GC lock.
     drop(sdist);
-    let build_env_id = super::env::planned_env_object_id(store, platform, &build_plan)?;
+    let build_env_id = super::env::planned_env_object_id(store, platform, &build_plan, selected)?;
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
@@ -451,7 +449,7 @@ pub(crate) fn plan_sdist_identity_input(
             Ok(isolated_sdist_identity_from_ids(
                 platform,
                 pkg,
-                pin,
+                &python,
                 &build_env_id,
                 Some(&rust.rust_id),
                 Some(&rust.vendor_id),
@@ -464,7 +462,7 @@ pub(crate) fn plan_sdist_identity_input(
         isolated_sdist_identity_from_ids(
             platform,
             pkg,
-            pin,
+            &python,
             &build_env_id,
             None,
             None,
@@ -484,10 +482,10 @@ pub(crate) fn sdist_identity_input(
     store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
-    python_version: &str,
+    selected: &Selected,
     runtime_plan: Option<&Plan>,
 ) -> io::Result<String> {
-    Ok(plan_sdist_identity_input(store, platform, pkg, python_version, runtime_plan)?.input)
+    Ok(plan_sdist_identity_input(store, platform, pkg, selected, runtime_plan)?.input)
 }
 
 fn stderr_tail(path: &Path) -> Option<String> {
@@ -753,10 +751,10 @@ pub fn build_sdist_wheel(
     store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
-    python_version: &str,
+    selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(store, platform, pkg, python_version, None, 0)
+    build_sdist_wheel_at_depth(store, platform, pkg, selected, None, 0)
 }
 
 /// Public runtime-aware entry point for callers that are building one sdist
@@ -766,11 +764,11 @@ pub fn build_sdist_wheel_with_runtime_plan(
     store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
-    python_version: &str,
+    selected: &Selected,
     runtime_plan: &Plan,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(store, platform, pkg, python_version, Some(runtime_plan), 0)
+    build_sdist_wheel_at_depth(store, platform, pkg, selected, Some(runtime_plan), 0)
 }
 
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
@@ -836,12 +834,13 @@ pub(crate) fn build_sdist_wheel_at_depth(
     store: &Store,
     platform: Platform,
     pkg: &LockedPackage,
-    python_version: &str,
+    selected: &Selected,
     runtime_plan: Option<&Plan>,
     depth: usize,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    let pin = admit_sdist_build(platform, pkg, python_version, depth)?;
+    admit_sdist_build(platform, pkg, depth)?;
+    let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
 
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(store, &sdist)?;
@@ -851,7 +850,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let fast_sdist = fast_requirements
         && !info.rust_build
         && (!info.native_build || !native_libs_supported(platform));
-    let fast_identity = sdist_identity(platform, pkg, pin);
+    let fast_identity = sdist_identity(platform, pkg, &python);
     if fast_sdist {
         let fast_id = fast_identity.object_id();
         if store.has(&fast_id)? {
@@ -860,12 +859,12 @@ pub(crate) fn build_sdist_wheel_at_depth(
         }
     }
     let build_plan = if fast_requirements {
-        build_toolchain_plan(&pin.version)
+        build_toolchain_plan(selected.version("cpython")?)
     } else {
         build_requires::resolve_build_plan(
             store,
             platform,
-            &pin.version,
+            selected,
             &info.build_requires,
             runtime_plan,
         )?
@@ -873,7 +872,8 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // The nested build environment may fetch its own artifacts. Do not hold
     // this sdist's cache lease while it acquires the same GC lock.
     drop(sdist);
-    let build_env = super::env::realize_env_at_depth(store, platform, &build_plan, depth)?;
+    let build_env =
+        super::env::realize_env_at_depth(store, platform, &build_plan, selected, depth)?;
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
@@ -915,7 +915,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let identity = sdist_build_identity(
         platform,
         pkg,
-        pin,
+        &python,
         &build_env,
         rust_inputs.as_ref(),
         fast_sdist,
@@ -946,7 +946,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         (None, None, None)
     };
 
-    let cpython_obj = crate::tailors::python::ensure_python_for(store, pin, platform)?;
+    let cpython_obj = crate::tailors::python::realize_runtime(store, platform, selected)?;
     let input = source.as_deref().unwrap_or(&sdist_named);
     run_sdist_build(
         store,
@@ -980,12 +980,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
 
 /// Everything that must hold before the build touches the network: the
 /// recursion cap, the host check, and a pinned CPython for this platform.
-fn admit_sdist_build(
-    platform: Platform,
-    pkg: &LockedPackage,
-    python_version: &str,
-    depth: usize,
-) -> io::Result<&'static crate::tailors::python::PinnedPython> {
+fn admit_sdist_build(platform: Platform, pkg: &LockedPackage, depth: usize) -> io::Result<()> {
     if depth > 3 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -995,9 +990,7 @@ fn admit_sdist_build(
             ),
         ));
     }
-    crate::kernel::platform::require_host(platform, "sdist build")?;
-    crate::tailors::python::lookup(platform, python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {python_version}"), platform))
+    crate::kernel::platform::require_host(platform, "sdist build")
 }
 
 /// Copy the verified archive into the work tree under its locked filename.
@@ -1025,7 +1018,7 @@ fn stage_sdist_copy(sdist: &Path, work: &Path, pkg: &LockedPackage) -> io::Resul
 fn sdist_build_identity(
     platform: Platform,
     pkg: &LockedPackage,
-    pin: &crate::tailors::python::PinnedPython,
+    python: &str,
     build_env: &Path,
     rust_inputs: Option<&RustPlanInputs>,
     fast_sdist: bool,
@@ -1036,7 +1029,7 @@ fn sdist_build_identity(
         return Ok(isolated_sdist_identity_from_ids(
             platform,
             pkg,
-            pin,
+            python,
             &object_id(build_env, "build environment")?,
             Some(&rust.rust_id),
             Some(&rust.vendor_id),
@@ -1049,7 +1042,7 @@ fn sdist_build_identity(
     Ok(isolated_sdist_identity_from_ids(
         platform,
         pkg,
-        pin,
+        python,
         &object_id(build_env, "build environment")?,
         None,
         None,
@@ -1070,11 +1063,14 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         kind: ArtifactKind::Sdist,
         git: None,
     };
-    let schema_two = sdist_identity(platform, &pkg, pin);
+    let python = format!("{}:{}", pin.version, pin.sha256);
+    let selected = crate::tailors::python::shipped_selection(pin.version)
+        .expect("shipped release for the pinned CPython");
+    let schema_two = sdist_identity(platform, &pkg, &python);
     let isolated = sdist_build_identity(
         platform,
         &pkg,
-        pin,
+        &python,
         Path::new("build-env-object"),
         None,
         false,
@@ -1092,7 +1088,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let isolated_rust = sdist_build_identity(
         platform,
         &pkg,
-        pin,
+        &python,
         Path::new("build-env-object"),
         Some(&rust_inputs),
         false,
@@ -1104,14 +1100,14 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     if platform == Platform::X86_64UnknownLinuxGnu {
         let store = test_store("matrix-native");
         let native_pkg = local_native_sdist_for_test(&store, "matrix-native");
-        let planned = plan_sdist_identity_input(&store, platform, &native_pkg, pin.version, None)
+        let planned = plan_sdist_identity_input(&store, platform, &native_pkg, &selected, None)
             .expect("native sdist identity plan");
         cases.push(planned.identity);
         let _ = crate::kernel::store::remove_tree(&store.root);
     } else if platform.is_macos() {
         let store = test_store("matrix-rust-darwin");
         let rust_pkg = local_rust_sdist_for_test(&store, "matrix-rust-darwin");
-        let planned = plan_sdist_identity_input(&store, platform, &rust_pkg, pin.version, None)
+        let planned = plan_sdist_identity_input(&store, platform, &rust_pkg, &selected, None)
             .expect("Darwin Rust sdist identity plan");
         // Cargo.toml makes info.rust_build true, so plan_sdist_identity_input
         // takes the isolated-build path even though Darwin has no native-libs pin.
@@ -1245,26 +1241,22 @@ mod tests {
         if let Ok(platform @ crate::kernel::platform::Platform::X86_64UnknownLinuxGnu) =
             crate::kernel::platform::Platform::host()
         {
-            let pin = crate::tailors::python::lookup(platform, "3.12.14").expect("pinned CPython");
+            let selected = crate::tailors::python::shipped_selection("3.12.14")
+                .expect("shipped CPython release");
             let planned_first =
-                super::plan_sdist_identity_input(&first_store, platform, &first, pin.version, None)
+                super::plan_sdist_identity_input(&first_store, platform, &first, &selected, None)
                     .expect("first native sdist plan");
             let planned_again =
-                super::plan_sdist_identity_input(&first_store, platform, &first, pin.version, None)
+                super::plan_sdist_identity_input(&first_store, platform, &first, &selected, None)
                     .expect("repeated native sdist plan");
             assert_eq!(planned_first.identity.inputs, planned_again.identity.inputs);
             assert_eq!(planned_first.input, planned_again.input);
             // The build-env and native-libs object ids are store-root
             // addressed, so only the archive-derived input is expected to
             // agree across two different stores.
-            let planned_elsewhere = super::plan_sdist_identity_input(
-                &second_store,
-                platform,
-                &second,
-                pin.version,
-                None,
-            )
-            .expect("second-store native sdist plan");
+            let planned_elsewhere =
+                super::plan_sdist_identity_input(&second_store, platform, &second, &selected, None)
+                    .expect("second-store native sdist plan");
             assert_eq!(
                 planned_first.identity.inputs["sdist_sha256"],
                 planned_elsewhere.identity.inputs["sdist_sha256"]
@@ -1299,7 +1291,11 @@ mod tests {
                 git: None,
         };
         let pin = crate::tailors::python::lookup(Platform::Aarch64AppleDarwin, "3.12.14").unwrap();
-        let identity = sdist_identity(Platform::Aarch64AppleDarwin, &pkg, pin);
+        let identity = sdist_identity(
+            Platform::Aarch64AppleDarwin,
+            &pkg,
+            &format!("{}:{}", pin.version, pin.sha256),
+        );
         assert_eq!(
             identity.object_id(),
             "a26c6aa7246296eac77249f89a9faed77175eb16-docopt-0.6.2"
@@ -1313,12 +1309,23 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("darwin-native");
         let pkg = local_native_sdist_for_test(&store, "darwin-native");
-        let planned =
-            plan_sdist_identity_input(&store, Platform::Aarch64AppleDarwin, &pkg, "3.12.14", None)
-                .unwrap();
+        let planned = plan_sdist_identity_input(
+            &store,
+            Platform::Aarch64AppleDarwin,
+            &pkg,
+            &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
+            None,
+        )
+        .unwrap();
         assert_eq!(
-            sdist_identity_input(&store, Platform::Aarch64AppleDarwin, &pkg, "3.12.14", None,)
-                .unwrap(),
+            sdist_identity_input(
+                &store,
+                Platform::Aarch64AppleDarwin,
+                &pkg,
+                &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
+                None,
+            )
+            .unwrap(),
             planned.input
         );
         assert!(planned.native_libs_id.is_none());
@@ -1347,7 +1354,7 @@ mod tests {
         let identity = isolated_sdist_identity_from_ids(
             Platform::Aarch64AppleDarwin,
             &pkg,
-            pin,
+            &format!("{}:{}", pin.version, pin.sha256),
             "build-env-id",
             None,
             None,
@@ -1400,7 +1407,7 @@ mod tests {
             let identity = isolated_sdist_identity_from_ids(
                 platform,
                 &pkg,
-                pin,
+                &format!("{}:{}", pin.version, pin.sha256),
                 "build-env-object",
                 Some("rust-object"),
                 Some("vendor-object"),
@@ -1465,7 +1472,7 @@ mod tests {
         let identity = isolated_sdist_identity_from_ids(
             Platform::X86_64UnknownLinuxGnu,
             &pkg,
-            pin,
+            &format!("{}:{}", pin.version, pin.sha256),
             "build-env-id",
             Some("rust-id"),
             Some("vendor-id"),
@@ -1495,7 +1502,7 @@ mod tests {
             },
             Platform::Aarch64AppleDarwin,
             &pkg,
-            "3.12.14",
+            &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
             None,
             4,
         )
@@ -1531,7 +1538,7 @@ mod tests {
             },
             foreign,
             &pkg,
-            "3.12.14",
+            &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
             None,
             0,
         )
@@ -1587,8 +1594,13 @@ mod tests {
 pub fn ensure_build_environment(
     store: &Store,
     platform: Platform,
-    python_version: &str,
+    selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    super::env::realize_env(store, platform, &build_toolchain_plan(python_version))
+    super::env::realize_env_for(
+        store,
+        platform,
+        &build_toolchain_plan(selected.version("cpython")?),
+        selected,
+    )
 }

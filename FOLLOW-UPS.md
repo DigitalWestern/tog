@@ -9,11 +9,17 @@ by position.
 
 ## Next up, in order
 
-1. **Toolchain lock (WP2).** The next large feature: a committed lock
-   naming the exact toolchain per project. PR 1 (the shipped-table adapter
-   and selector, `src/kernel/toolchain/`) is merged; the dormant lock core
-   (3), runtime propagation (4) and activation (5) remain, in that order, in
-   `docs/agent/DESIGNS.md` §1.
+1. **The two-machine toolchain-lock diff.** The toolchain lock shipped on
+   Linux on 2026-09-21; everything but this is done. A lock carries a row per
+   platform and is written from the releases complete on both, so a lock
+   written on Linux must sync on an arm64 Mac without rewriting itself and
+   `tog status` must answer identically on both. Sync the same project on
+   each machine and diff `tog-toolchain.toml` byte for byte. It is proven by
+   test today, not by two machines, and it is part of the macOS gate at the
+   bottom of this file. The same run should sync one locked project into two
+   fresh stores on one machine and compare the realized object ids: the
+   offline replay test (`tests/toolchain_lock.rs`) proves the lock answers
+   without the catalog, not that two stores realize the same objects.
 
 ## Decisions waiting on the owner
 
@@ -38,6 +44,19 @@ by position.
   §2 and §4.
 
 ## Open work, each its own pull request
+
+- **`tog audit` does not read the toolchain lock.** `status` reports a
+  missing or stale `tog-toolchain.toml` and a closure built from another
+  bundle; `audit` reuses only the per-record `closure_state`, so a gate that
+  passes `audit` can still be running a toolchain the lock no longer names.
+  Fold `inspect::toolchain_lock_state` into the audit freshness verdict; the
+  audit fixtures then need a lock beside each closure.
+- **Go's lockless resolver picks the lowest satisfying pin, selection the
+  newest.** `go::resolve_project_toolchain` (used by `doctor` and the Go
+  `status` row) keeps Go's minimum-version rule; the toolchain selector takes
+  the newest complete release satisfying `go.mod`. Identical with one pinned
+  Go; the day a second pin lands, `doctor` and `status` would name a version
+  `sync` does not use. Route both through the lock.
 
 - **npm regressions from the 2026-09-11 hit-rate run.** All four synced on
   2026-09-05 at the same pinned commits. Error text is in
@@ -81,7 +100,12 @@ by position.
   directory mid-sync can make tog sync the replacement
   (`docs/human/LIMITATIONS.md`). Raised by review on 2026-09-16 and declined
   there as pre-existing. Closing it means every tailor reads through a held
-  directory descriptor. Builds on `src/kernel/fsroot.rs`.
+  directory descriptor. Builds on `src/kernel/fsroot.rs`. The toolchain
+  lock has the same shape: `sync` preflight opens a `ProjectRoot`, drops it,
+  and `commit` and the publication recheck reopen the pathname
+  (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
+  directory the path names at recheck time. Carry one held root from
+  preflight through publication when the rest of sync does.
 - **Missing GC tests.** 18 of the 26 tests the GC design named do not exist
   by name. List in `docs/agent/DESIGNS.md` §5.
 - **GC mutation survivor: redundant root marking.** Removing the marking set
@@ -100,7 +124,12 @@ by position.
   CPython pin, `artifacts`, and `nativelibs` for node-gyp install scripts.
   A kernel-level toolchain/artifact provider would remove both. Each move is
   its own PR: relocate the module, keep object ids byte-identical, then
-  delete the allow-list row.
+  delete the allow-list row. Both edges sit outside the toolchain lock: the
+  node-gyp CPython and the sdist Rust are the shipped pins, not the
+  project's selection, and neither object id is part of the `node-env` or
+  sdist identity, so a shipped-pin change can alter a native build under an
+  unchanged id. Threading the selection through both and adding the helper
+  object to the identity is the same PR as the move.
 - **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The Python source
@@ -122,7 +151,9 @@ by position.
   records are routed into the sweep's refusal. It was never reviewed by an
   agent that did not write it.
 - **macOS arm64 gate. Last, by the owner's choice.** Run on the Mac:
-  `cargo test`, `cargo test --test gc -- --ignored`, and
-  `cargo test --test cli audit`, including the case-insensitive-filesystem
-  paths the root-key code relies on. Darwin identity goldens must stay
-  byte-identical. Nothing Linux-side clears this.
+  `cargo test`, `cargo test --test gc -- --ignored`,
+  `cargo test --test cli audit`, and
+  `cargo test --test toolchain_lock -- --ignored`, including the
+  case-insensitive-filesystem paths the root-key code relies on. Darwin
+  identity goldens must stay byte-identical, and the two-machine lock diff
+  above is run here. Nothing Linux-side clears this.

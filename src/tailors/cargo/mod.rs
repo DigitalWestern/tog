@@ -5,11 +5,12 @@ pub mod objects;
 pub mod rustfmt;
 pub mod tailor;
 
-use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{
-    ArtifactRow, Bundle, Catalog, Component as BundleComponent, LegacyEvidence,
+    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component as BundleComponent, LegacyEvidence,
+    Selected,
 };
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 const RUST_VERSION: &str = "1.96.1";
+
+/// The extraction/layout recipe this binary knows for a Rust toolchain: the
+/// catalog emits it, the object identity commits to it, and a locked row
+/// naming anything else is refused rather than guessed at.
+pub(crate) const RUST_RECIPE: &str = "rust-toolchain/1";
 
 /// The `store/tmp` scratch name for a `cargo build`. The `stage-` prefix is
 /// the one `gc::collect` sweeps, so a build killed before its cleanup leaks
@@ -122,7 +128,7 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
                 row.component,
                 "static.rust-lang.org",
                 version,
-                "rust-toolchain/1",
+                RUST_RECIPE,
                 row.url,
                 Digest::sha256(row.sha256)?,
             ));
@@ -190,29 +196,99 @@ fn rust_component<'a>(components: &'a [&'static RustComponent], name: &str) -> &
 }
 
 fn rust_identity(platform: Platform, components: &[&'static RustComponent]) -> Identity {
+    runtime_identity(
+        platform,
+        RUST_VERSION,
+        rust_component(components, "rustc").sha256,
+        rust_component(components, "rust-std").sha256,
+        rust_component(components, "cargo").sha256,
+    )
+}
+
+/// The Rust object's identity, from the three component digests that went
+/// into it. The pin table and a locked bundle row reach this with the same
+/// bytes, so a toolchain realized from a lock lands on the object the pin
+/// already built.
+fn runtime_identity(
+    platform: Platform,
+    version: &str,
+    rustc_sha256: &str,
+    rust_std_sha256: &str,
+    cargo_sha256: &str,
+) -> Identity {
     Identity {
         kind: "rust".into(),
         name: "rust".into(),
-        version: RUST_VERSION.into(),
+        version: version.into(),
         inputs: BTreeMap::from([
             // Schema commits the extraction/layout recipe, not just the
             // bytes: changing how components merge must change the id.
-            ("schema".to_string(), "rust-toolchain/1".to_string()),
-            (
-                "cargo_sha256".to_string(),
-                rust_component(components, "cargo").sha256.to_string(),
-            ),
+            ("schema".to_string(), RUST_RECIPE.to_string()),
+            ("cargo_sha256".to_string(), cargo_sha256.to_string()),
             ("platform".to_string(), platform.triple().to_string()),
-            (
-                "rust_std_sha256".to_string(),
-                rust_component(components, "rust-std").sha256.to_string(),
-            ),
-            (
-                "rustc_sha256".to_string(),
-                rust_component(components, "rustc").sha256.to_string(),
-            ),
+            ("rust_std_sha256".to_string(), rust_std_sha256.to_string()),
+            ("rustc_sha256".to_string(), rustc_sha256.to_string()),
         ]),
     }
+}
+
+/// The components the Rust object is built from, in the order the extractor
+/// applies them.
+const RUNTIME_COMPONENTS: [&str; 3] = ["rustc", "rust-std", "cargo"];
+
+/// The rows of `selected` this tailor realizes from, checked before any of
+/// them is fetched: the selection must be a Rust one, every component must
+/// be present for this platform, and every recipe must be one this binary
+/// knows how to lay out.
+fn runtime_rows(platform: Platform, selected: &Selected) -> io::Result<Vec<ArtifactSpec>> {
+    if selected.runtime() != "rustc" {
+        return Err(err(format!(
+            "internal: a {} selection (runtime {}) reached the Rust tailor",
+            selected.ecosystem,
+            selected.runtime()
+        )));
+    }
+    let mut rows = Vec::new();
+    for component in RUNTIME_COMPONENTS {
+        let row = selected.artifact(platform, component)?;
+        if row.recipe != RUST_RECIPE {
+            return Err(err(format!(
+                "cargo: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                row.recipe
+            )));
+        }
+        if row.digest.algo() != "sha256" {
+            return Err(err(format!(
+                "cargo: {} artifact is a {} digest; this tog realizes Rust from sha256 artifacts",
+                row.component,
+                row.digest.algo()
+            )));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn row_of<'a>(rows: &'a [ArtifactSpec], component: &str) -> &'a ArtifactSpec {
+    rows.iter()
+        .find(|row| row.component == component)
+        .expect("checked Rust component set")
+}
+
+/// The identity of the Rust object `selected` names, without realizing it.
+pub(crate) fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<String> {
+    let rows = runtime_rows(platform, selected)?;
+    Ok(identity_of(platform, &rows).object_id())
+}
+
+fn identity_of(platform: Platform, rows: &[ArtifactSpec]) -> Identity {
+    runtime_identity(
+        platform,
+        &row_of(rows, "rustc").version,
+        row_of(rows, "rustc").digest.hex(),
+        row_of(rows, "rust-std").digest.hex(),
+        row_of(rows, "cargo").digest.hex(),
+    )
 }
 
 pub(crate) fn rust_object_id(platform: Platform, version: &str) -> io::Result<String> {
@@ -228,25 +304,20 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-/// Ensure the pinned Rust toolchain is realized in the store. Takes the
-/// resolved version so a future second pin can't silently realize the
-/// wrong toolchain (only RUST_VERSION is realizable today).
-pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    ensure_rust_for(store, Platform::host()?, version)
-}
-
-pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
+/// Realize the Rust toolchain `selected` names: its bytes, its layout
+/// recipe and its version all come from the selection's rows, so a catalog
+/// refresh cannot move a project's compiler under it. Inside a project this
+/// is the only way a Rust object is built.
+pub fn realize_runtime(
+    store: &Store,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Rust toolchain")?;
+    let rows = runtime_rows(platform, selected)?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let components = rust_components(platform)?;
-    if version != RUST_VERSION {
-        return Err(err(format!(
-            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
-        )));
-    }
-    let identity = rust_identity(platform, &components);
+    let identity = identity_of(platform, &rows);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
         crate::kernel::policy::check_cached(store, &id)?;
@@ -254,22 +325,19 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
     }
 
     let mut tarballs = Vec::new();
-    for component in &components {
-        tarballs.push(download_verified_held(
-            store,
-            component.url,
-            component.sha256,
-        )?);
+    for row in &rows {
+        tarballs.push(download_verified_digest_held(store, &row.url, &row.digest)?);
     }
 
+    let names: Vec<&str> = rows.iter().map(|row| row.component.as_str()).collect();
     let staged = store.stage_with_activity(&activity)?;
-    extract_rust_components_for(store, &staged, platform, &components, &tarballs)?;
+    extract_rust_components_for(store, &staged, platform, &names, &tarballs)?;
 
     store
         .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            for component in &components {
-                deps.cache_digest(Digest::sha256(component.sha256)?);
+            for row in &rows {
+                deps.cache_digest(row.digest.clone());
             }
             deps
         })
@@ -277,11 +345,51 @@ pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::
         .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
 }
 
+/// The shipped catalog's release for one exact Rust version, as a selection.
+/// This is what a caller outside any project gets: there is no lock to
+/// honor, so the compiled pin table is both the catalog and the answer.
+fn shipped_selection(version: &str) -> io::Result<Selected> {
+    if version != RUST_VERSION {
+        return Err(err(format!(
+            "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
+        )));
+    }
+    let catalog = toolchain_catalog()?;
+    let bundle = catalog
+        .bundles()
+        .iter()
+        .find(|bundle| {
+            bundle
+                .component("rustc")
+                .is_some_and(|component| component.version == version)
+        })
+        .ok_or_else(|| err(format!("internal: no shipped Rust release for {version}")))?
+        .clone();
+    Ok(Selected {
+        ecosystem: catalog.ecosystem().to_string(),
+        bundle,
+        lock_sha256: None,
+        source: crate::kernel::toolchain::Source::Shipped,
+    })
+}
+
+/// Ensure the shipped Rust toolchain is realized in the store, for callers
+/// with no project selection to honor: the Python sdist build environment,
+/// `tog deps`, and tests. A run inside a project realizes through
+/// [`realize_runtime`] with the toolchain its lock selected.
+pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
+    ensure_rust_for(store, Platform::host()?, version)
+}
+
+pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection(version)?)
+}
+
 fn extract_rust_components_for(
     store: &Store,
     staged: &Path,
     platform: Platform,
-    components: &[&RustComponent],
+    components: &[&str],
     tarballs: &[impl AsRef<Path>],
 ) -> io::Result<()> {
     if components.len() != tarballs.len() {
@@ -296,17 +404,10 @@ fn extract_rust_components_for(
             .args(["-C"])
             .arg(staged)
             .args(["--strip-components", "2"]);
-        let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("spawn tar for {}: {e}", component.component),
-            )
-        })?;
+        let status = crate::kernel::supervise::status_owned(&mut command, store)
+            .map_err(|e| io::Error::new(e.kind(), format!("spawn tar for {component}: {e}")))?;
         if !status.success() {
-            return Err(err(format!(
-                "{} tarball extraction failed",
-                component.component
-            )));
+            return Err(err(format!("{component} tarball extraction failed")));
         }
     }
     validate_rust_layout(staged, platform)
@@ -316,7 +417,7 @@ fn extract_rust_components_for(
 fn extract_rust_components(
     staged: &Path,
     platform: Platform,
-    components: &[&RustComponent],
+    components: &[&str],
     tarballs: &[impl AsRef<Path>],
 ) -> io::Result<()> {
     if components.len() != tarballs.len() {
@@ -331,17 +432,9 @@ fn extract_rust_components(
             .arg(staged)
             .args(["--strip-components", "2"])
             .status()
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("spawn tar for {}: {e}", component.component),
-                )
-            })?;
+            .map_err(|e| io::Error::new(e.kind(), format!("spawn tar for {component}: {e}")))?;
         if !status.success() {
-            return Err(err(format!(
-                "{} tarball extraction failed",
-                component.component
-            )));
+            return Err(err(format!("{component} tarball extraction failed")));
         }
     }
     validate_rust_layout(staged, platform)
@@ -374,8 +467,42 @@ struct ToolchainSpec {
 }
 
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
+///
+/// This is the pre-lock answer, and the only callers left are the ones that
+/// have no project selection to honor: the Python sdist build, which builds
+/// a vendored Rust crate out of a store scratch directory that is nobody's
+/// tog project, and `tog deps`, which reports on a project it never syncs.
+/// Every entry point that is handed a [`Selected`] takes the version from it
+/// instead (`toolchain.version("rustc")`), so the lock decides the toolchain
+/// and the file only contributes the components below.
 pub fn resolve_toolchain(platform: Platform, project_dir: &Path) -> io::Result<&'static str> {
     resolve_toolchain_choice(platform, project_dir).map(|choice| choice.version)
+}
+
+/// What the nearest rustup-style toolchain file still says once a
+/// [`Selected`] has decided the version: which targets it demands, which is
+/// refused when it is not this host, and which components it asks for that
+/// tog does not provide, recorded as the run's
+/// `toolchain-component-unavailable` exception. Returns those components so
+/// a caller that records them in a closure (`tog fmt`) writes the same list
+/// the exception names.
+///
+/// The channel is deliberately not read here. Selection already lowered it
+/// to a request and refused an unsupported one by name
+/// (`kernel::toolchain::resolve`), so reading it a second time could only
+/// disagree with the lock this run is honoring.
+pub fn toolchain_file_components(
+    platform: Platform,
+    project_dir: &Path,
+) -> io::Result<Vec<String>> {
+    let Some((path, legacy)) = nearest_toolchain_file(project_dir) else {
+        return Ok(Vec::new());
+    };
+    match read_toolchain_file(&path, legacy)? {
+        // A bare channel line states a version and nothing else.
+        FileSpec::Bare(_) => Ok(Vec::new()),
+        FileSpec::Table(spec) => unavailable_components(platform, &path, &spec, true),
+    }
 }
 
 /// What the nearest toolchain file asks for, as far as tog answers it.
@@ -412,61 +539,88 @@ fn resolve_toolchain_with(
     effects: bool,
 ) -> io::Result<ToolchainChoice> {
     let _ = rust_pins(platform)?;
+    let Some((path, legacy)) = nearest_toolchain_file(project_dir) else {
+        return Ok(ToolchainChoice {
+            version: newest_pin(platform)?,
+            unavailable: Vec::new(),
+        });
+    };
+    match read_toolchain_file(&path, legacy)? {
+        FileSpec::Bare(channel) => Ok(ToolchainChoice {
+            version: resolve_channel(platform, &path, channel.trim(), effects)?,
+            unavailable: Vec::new(),
+        }),
+        FileSpec::Table(spec) => {
+            let unavailable = unavailable_components(platform, &path, &spec, effects)?;
+            let channel = spec
+                .channel
+                .as_deref()
+                .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
+            Ok(ToolchainChoice {
+                version: resolve_channel(platform, &path, channel.trim(), effects)?,
+                unavailable,
+            })
+        }
+    }
+}
+
+/// The nearest rustup-style toolchain file at or above `project_dir`, and
+/// whether it is the legacy `rust-toolchain` spelling.
+fn nearest_toolchain_file(project_dir: &Path) -> Option<(PathBuf, bool)> {
     let mut dir = project_dir;
     loop {
         let legacy = dir.join("rust-toolchain");
         if legacy.exists() {
-            return resolve_toolchain_file(platform, &legacy, true, effects);
+            return Some((legacy, true));
         }
         let toml = dir.join("rust-toolchain.toml");
         if toml.exists() {
-            return resolve_toolchain_file(platform, &toml, false, effects);
+            return Some((toml, false));
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent,
-            _ => break,
+            _ => return None,
         }
     }
-    Ok(ToolchainChoice {
-        version: newest_pin(platform)?,
-        unavailable: Vec::new(),
-    })
 }
 
-fn resolve_toolchain_file(
-    platform: Platform,
-    path: &Path,
-    legacy: bool,
-    effects: bool,
-) -> io::Result<ToolchainChoice> {
+/// What a toolchain file holds: the legacy bare channel line, or the
+/// `[toolchain]` table both spellings accept.
+enum FileSpec {
+    Bare(String),
+    Table(ToolchainSpec),
+}
+
+fn read_toolchain_file(path: &Path, legacy: bool) -> io::Result<FileSpec> {
     let text = fs::read_to_string(path)
         .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
     if legacy {
         if let Ok(document) = toml::from_str::<ToolchainDocument>(&text) {
             if let Some(spec) = document.toolchain {
-                return resolve_toolchain_spec(platform, path, spec, effects);
+                return Ok(FileSpec::Table(spec));
             }
         }
-        return Ok(ToolchainChoice {
-            version: resolve_channel(platform, path, text.trim(), effects)?,
-            unavailable: Vec::new(),
-        });
+        return Ok(FileSpec::Bare(text.trim().to_string()));
     }
     let document = toml::from_str::<ToolchainDocument>(&text)
         .map_err(|e| err(format!("parse {}: {e}", path.display())))?;
-    let spec = document
+    document
         .toolchain
-        .ok_or_else(|| err(format!("{} has no [toolchain] table", path.display())))?;
-    resolve_toolchain_spec(platform, path, spec, effects)
+        .map(FileSpec::Table)
+        .ok_or_else(|| err(format!("{} has no [toolchain] table", path.display())))
 }
 
-fn resolve_toolchain_spec(
+/// The components a `[toolchain]` table asks for that tog does not provide,
+/// after refusing a target that is not this host. With `effects`, the list
+/// is also recorded as the run's `toolchain-component-unavailable`
+/// exception, which is what makes it visible to `tog audit`.
+fn unavailable_components(
     platform: Platform,
     path: &Path,
-    spec: ToolchainSpec,
+    spec: &ToolchainSpec,
     effects: bool,
-) -> io::Result<ToolchainChoice> {
-    if let Some(targets) = spec.targets {
+) -> io::Result<Vec<String>> {
+    if let Some(targets) = &spec.targets {
         for target in targets {
             if target != platform.triple() {
                 return Err(err(format!(
@@ -479,6 +633,7 @@ fn resolve_toolchain_spec(
     }
     let unavailable: Vec<String> = spec
         .components
+        .clone()
         .unwrap_or_default()
         .into_iter()
         .filter(|component| !matches!(component.as_str(), "rustc" | "cargo" | "rust-std"))
@@ -490,13 +645,7 @@ fn resolve_toolchain_spec(
             &format!("components unavailable: {}", unavailable.join(", ")),
         )?;
     }
-    let channel = spec
-        .channel
-        .ok_or_else(|| err(format!("{}: [toolchain] has no channel", path.display())))?;
-    Ok(ToolchainChoice {
-        version: resolve_channel(platform, path, channel.trim(), effects)?,
-        unavailable,
-    })
+    Ok(unavailable)
 }
 
 fn resolve_channel(
@@ -1344,14 +1493,26 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+/// Fold the two toolchain entries into a closure body being built.
+pub(crate) fn merge_record(body: &mut serde_json::Value, record: serde_json::Value) {
+    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
+        for (key, value) in record {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 /// Project Cargo with a writable home, forced directory-source replacement,
-/// and provenance for the exact toolchain/vendor closure.
+/// and provenance for the exact toolchain/vendor closure. `toolchain` is the
+/// selection the run honored: the closure records it so the release this
+/// Rust object came from is readable without re-deriving it from the plan.
 pub fn project_cargo_env(
     project_dir: &Path,
     rust_obj: &Path,
     vendor_obj: &Path,
     plan: &CargoPlan,
     lock_digest: &str,
+    toolchain: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let project_dir = project_dir.canonicalize()?;
@@ -1407,12 +1568,19 @@ pub fn project_cargo_env(
             "id": id,
         }))
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "rust_object": object_ref(&rust_obj)?,
         "vendor_object": object_ref(&vendor_obj)?,
         "cargo_lock_sha256": lock_digest,
         "plan": plan,
     });
+    // The Rust object is this ecosystem's runtime: the record names the
+    // bundle it came from and refers to it directly, so a later catalog
+    // refresh cannot re-pair these dependencies with another compiler.
+    merge_record(
+        &mut body,
+        crate::comforter::toolchain::closure_record(toolchain, &rust_obj),
+    );
     let valid_objects = [rust_obj.as_path(), vendor_obj.as_path()]
         .iter()
         .all(|path| {
@@ -1438,6 +1606,8 @@ pub fn project_cargo_env(
         }
     }
     let mut refs = crate::comforter::ClosureRefs::new();
+    // The runtime object and `rust_object` are the same object; the direct
+    // reference is what keeps it alive across a GC.
     refs.object_path(&store, &activity, &rust_obj)?;
     refs.object_path(&store, &activity, &vendor_obj)?;
     crate::comforter::write_closure(
@@ -1660,6 +1830,12 @@ mod tests {
     }
     use super::*;
     use std::collections::BTreeSet;
+
+    /// The shipped Rust selection: what a run with no lock to honor is
+    /// handed, and the only thing these tests need a `Selected` for.
+    fn selection() -> Selected {
+        crate::kernel::toolchain::shipped(&toolchain_catalog().unwrap()).unwrap()
+    }
 
     #[test]
     fn darwin_identity_unchanged() {
@@ -1962,6 +2138,212 @@ checksum = "{hash_b}"
         let _ = crate::kernel::policy::drain();
     }
 
+    /// A selection built from another ecosystem's bundle, or one whose rows
+    /// name a layout this binary has never heard of, is refused before
+    /// anything is fetched. A lock is an input like any other: it can name a
+    /// recipe a newer tog invented, and the honest answer is to say so.
+    #[test]
+    fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
+        use crate::kernel::toolchain::fixtures;
+        let temp = TempDir::new("tog-rust-refusals");
+        let store = Store {
+            root: temp.path().join("absent-store"),
+        };
+        let platform = Platform::host().unwrap();
+
+        let foreign = Selected {
+            ecosystem: "python".into(),
+            bundle: fixtures::bundle("cpython-3.13.15", "cpython", "3.13.15", Platform::ALL),
+            lock_sha256: None,
+            source: crate::kernel::toolchain::Source::Lock,
+        };
+        let error = realize_runtime(&store, platform, &foreign)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("python selection"), "{error}");
+        assert!(error.contains("Rust tailor"), "{error}");
+
+        // The right ecosystem, laid out by a recipe this binary does not know.
+        let mut bundle = fixtures::bundle("rust-9.9.9", "rustc", "9.9.9", Platform::ALL);
+        for component in ["rust-std", "cargo"] {
+            bundle
+                .components
+                .push(BundleComponent::new(component, "9.9.9"));
+            bundle.artifacts.extend(
+                Platform::ALL
+                    .iter()
+                    .map(|p| fixtures::row(*p, component, 'd')),
+            );
+        }
+        let unknown = Selected {
+            ecosystem: "rust".into(),
+            bundle,
+            lock_sha256: None,
+            source: crate::kernel::toolchain::Source::Lock,
+        };
+        let error = realize_runtime(&store, platform, &unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recipe example/1"), "{error}");
+        assert!(error.contains("upgrade tog"), "{error}");
+
+        // A row with no artifact for this platform is refused by name too.
+        let one_platform = Selected {
+            ecosystem: "rust".into(),
+            bundle: fixtures::bundle("rust-1.96.1", "rustc", "1.96.1", &[]),
+            lock_sha256: None,
+            source: crate::kernel::toolchain::Source::Lock,
+        };
+        let error = realize_runtime(&store, platform, &one_platform)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rustc"), "{error}");
+        assert!(error.contains(platform.triple()), "{error}");
+
+        assert!(
+            !store.root.exists(),
+            "a refused selection touched the store"
+        );
+    }
+
+    /// Realization from a locked bundle row and realization from the
+    /// compiled pin are two spellings of one object. If they ever disagree,
+    /// a project that adopts a lock silently rebuilds its toolchain under a
+    /// new id and every record naming the old one goes stale.
+    #[test]
+    fn a_selected_row_and_the_pin_build_the_same_object_id() {
+        let selected = selection();
+        for platform in Platform::ALL {
+            let components = rust_components(*platform).unwrap();
+            let rows = runtime_rows(*platform, &selected).unwrap();
+            assert_eq!(
+                identity_of(*platform, &rows).object_id(),
+                rust_identity(*platform, &components).object_id(),
+                "{}",
+                platform.triple()
+            );
+            assert_eq!(
+                runtime_object_id(*platform, &selected).unwrap(),
+                rust_object_id(*platform, RUST_VERSION).unwrap()
+            );
+            // Same for the formatter, which is paired with that object.
+            let rust_object =
+                Path::new("/objects").join(rust_object_id(*platform, RUST_VERSION).unwrap());
+            assert_eq!(
+                rustfmt::identity_for_test(*platform, &selected, &rust_object)
+                    .unwrap()
+                    .object_id(),
+                rustfmt::live_identity_for_test(
+                    *platform,
+                    &rust_object_id(*platform, RUST_VERSION).unwrap()
+                )
+                .unwrap()
+                .object_id(),
+                "{}",
+                platform.triple()
+            );
+        }
+    }
+
+    /// The one resolver left that reads a version off a project path serves
+    /// callers with no selection to honor (the Python sdist build, `tog
+    /// deps`). With no toolchain file to narrow it, it must land on exactly
+    /// the shipped selection — the same release a lockless run of the Rust
+    /// tailor is handed — or those two paths would realize different Rust
+    /// toolchains for one machine.
+    #[test]
+    fn the_lockless_resolver_agrees_with_the_shipped_selection() {
+        let temp = TempDir::new("tog-cargo-lockless");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let shipped = selection();
+        for platform in Platform::ALL {
+            assert_eq!(
+                resolve_toolchain(*platform, &project).unwrap(),
+                shipped.version("rustc").unwrap(),
+                "{}",
+                platform.triple()
+            );
+        }
+    }
+
+    /// Once a lock decides the version, the toolchain file is read for one
+    /// thing only: the components it asks for that tog does not provide. The
+    /// channel is selection's business, so a channel this binary could never
+    /// resolve on its own is no longer this path's error — the run that got
+    /// here was already handed a selection that answered it.
+    #[test]
+    fn a_toolchain_file_contributes_components_not_a_version() {
+        let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("cargo").unwrap();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let temp = TempDir::new("tog-cargo-file-components");
+        let project = temp.path().join("project/child");
+        fs::create_dir_all(&project).unwrap();
+        let root = project.parent().unwrap();
+
+        // No file at all, and a bare channel line: nothing to contribute.
+        assert!(toolchain_file_components(platform, &project)
+            .unwrap()
+            .is_empty());
+        fs::write(root.join("rust-toolchain"), "1.96.1\n").unwrap();
+        assert!(toolchain_file_components(platform, &project)
+            .unwrap()
+            .is_empty());
+        assert!(crate::kernel::policy::pending().is_empty());
+
+        // The components tog provides are not unavailable; the rest are,
+        // in file order, and they are the run's exception.
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"rustc\", \"clippy\", \"cargo\", \"miri\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            toolchain_file_components(platform, &project).unwrap(),
+            ["clippy", "miri"]
+        );
+        let recorded = crate::kernel::policy::drain();
+        let exception = recorded
+            .iter()
+            .find(|exception| {
+                exception.kind == crate::kernel::policy::TOOLCHAIN_COMPONENT_UNAVAILABLE
+            })
+            .expect("unavailable components are an exception");
+        assert!(
+            exception.subject.ends_with("rust-toolchain"),
+            "{exception:?}"
+        );
+        assert!(exception.detail.contains("clippy, miri"), "{exception:?}");
+
+        // A channel no pin table could answer still yields its components:
+        // the version came from the lock, and this path never re-decides it.
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"nightly-2026-01-01\"\ncomponents = [\"clippy\"]\n",
+        )
+        .unwrap();
+        assert!(resolve_toolchain(platform, &project).is_err());
+        assert_eq!(
+            toolchain_file_components(platform, &project).unwrap(),
+            ["clippy"]
+        );
+        let _ = crate::kernel::policy::drain();
+
+        // A target that is not this host is still refused: tog realizes one
+        // platform's toolchain and cannot honor a cross-compilation request.
+        fs::write(
+            root.join("rust-toolchain"),
+            "[toolchain]\nchannel = \"1.96.1\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+        )
+        .unwrap();
+        let error = toolchain_file_components(platform, &project)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("wasm32-unknown-unknown"), "{error}");
+        let _ = crate::kernel::policy::drain();
+    }
+
     #[test]
     fn resolves_linux_toolchain_files_targets_and_policy() {
         let _exception_guard = exception_guard();
@@ -2108,6 +2490,13 @@ checksum = "{hash_b}"
             .collect()
     }
 
+    fn component_names(components: &[&'static RustComponent]) -> Vec<&'static str> {
+        components
+            .iter()
+            .map(|component| component.component)
+            .collect()
+    }
+
     #[test]
     fn component_layout_is_validated_before_publication() {
         let platform = Platform::X86_64UnknownLinuxGnu;
@@ -2122,7 +2511,8 @@ checksum = "{hash_b}"
         );
         let staged = correct.path().join("staged");
         fs::create_dir(&staged).unwrap();
-        extract_rust_components(&staged, platform, &components, &archives).unwrap();
+        extract_rust_components(&staged, platform, &component_names(&components), &archives)
+            .unwrap();
         assert!(staged.join("bin/rustc").is_file());
         assert!(staged.join("bin/cargo").is_file());
         assert!(staged
@@ -2133,7 +2523,13 @@ checksum = "{hash_b}"
         let archives = make_component_archives(missing.path(), &components, platform, None);
         let staged = missing.path().join("staged");
         fs::create_dir(&staged).unwrap();
-        assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
+        assert!(extract_rust_components(
+            &staged,
+            platform,
+            &component_names(&components),
+            &archives
+        )
+        .is_err());
 
         let wrong = TempDir::new("tog-rust-layout-wrong");
         let archives = make_component_archives(
@@ -2144,7 +2540,13 @@ checksum = "{hash_b}"
         );
         let staged = wrong.path().join("staged");
         fs::create_dir(&staged).unwrap();
-        assert!(extract_rust_components(&staged, platform, &components, &archives).is_err());
+        assert!(extract_rust_components(
+            &staged,
+            platform,
+            &component_names(&components),
+            &archives
+        )
+        .is_err());
     }
 
     fn make_crate(dir: &Path, name: &str, version: &str, symlink: bool) -> (PathBuf, String) {
@@ -2300,6 +2702,7 @@ checksum = "{hash_b}"
             &temp.path().join("absent-vendor"),
             &plan,
             &lock_digest("version = 4\n"),
+            &selection(),
             &mut attribution,
         )
         .unwrap_err();
@@ -2329,7 +2732,16 @@ checksum = "{hash_b}"
             members: vec!["app".into()],
         };
         let digest = lock_digest("version = 4\n");
-        project_cargo_env(&project, &rust, &vendor, &plan, &digest, &mut attribution).unwrap();
+        project_cargo_env(
+            &project,
+            &rust,
+            &vendor,
+            &plan,
+            &digest,
+            &selection(),
+            &mut attribution,
+        )
+        .unwrap();
         attribution.finish(true).unwrap();
 
         let home = project.join(".tog/cargo-home").canonicalize().unwrap();
@@ -2361,6 +2773,20 @@ checksum = "{hash_b}"
         assert_eq!(closure["vendor_object"]["id"], "vendor-id");
         assert_eq!(closure["cargo_lock_sha256"], digest);
         assert_eq!(closure["plan"]["members"][0], "app");
+        // The closure states the selection it was realized from and refers
+        // to the runtime object directly, so it needs no seeding from its
+        // plan the next time this project is resolved, and a GC keeps the
+        // toolchain alive by that reference.
+        let selected = selection();
+        assert_eq!(closure["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(closure["toolchain"]["ecosystem"], "cargo");
+        assert_eq!(closure["toolchain"]["release"], selected.bundle.release);
+        assert_eq!(closure["toolchain"]["versions"]["rustc"], RUST_VERSION);
+        assert_eq!(closure["runtime_object"]["id"], "rust-id");
+        assert_eq!(
+            closure["runtime_object"]["id"],
+            closure["rust_object"]["id"]
+        );
         // Wrapper enforces the pinned compiler and refuses --config takeover.
         assert!(wrapper.contains(&format!(
             "export RUSTC=\"{}\"",
@@ -2388,7 +2814,15 @@ checksum = "{hash_b}"
             crates: vec![],
             members: vec![],
         };
-        let result = project_cargo_env(&project, &rust, &vendor, &plan, "digest", &mut attribution);
+        let result = project_cargo_env(
+            &project,
+            &rust,
+            &vendor,
+            &plan,
+            "digest",
+            &selection(),
+            &mut attribution,
+        );
         assert!(
             result.is_err(),
             "symlinked bin must not carry writes outside the project"

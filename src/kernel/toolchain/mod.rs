@@ -12,10 +12,14 @@
 pub mod input;
 pub mod legacy;
 pub mod lock;
+pub mod resolve;
+pub mod runtime;
 pub mod select;
 pub mod source;
 
 pub use legacy::{seed, LegacyEvidence, ProvedArtifact};
+pub use resolve::{request_for, select_for};
+pub use runtime::{shipped, ArtifactSpec, Selected, Source};
 pub use select::{Op, Request, Specifier, Version, VersionRequest};
 pub use source::{CredentialRef, Endpoint, Publisher, SourcePolicy};
 
@@ -287,6 +291,10 @@ impl Bundle {
 pub struct Catalog {
     ecosystem: String,
     bundles: Vec<Bundle>,
+    /// The release a range or an empty request prefers when it satisfies
+    /// that request: an ecosystem's shipped default (Python's unconstrained
+    /// CPython), so activating the lock changes no default version.
+    preference: Option<Request>,
 }
 
 impl Catalog {
@@ -329,7 +337,20 @@ impl Catalog {
         Ok(Catalog {
             ecosystem: ecosystem.into(),
             bundles,
+            preference: None,
         })
+    }
+
+    /// Prefer the releases matching `request` whenever they also satisfy
+    /// the caller's request; an exact or prefix request that excludes them
+    /// is still honored.
+    pub fn with_preference(mut self, request: Request) -> Catalog {
+        self.preference = Some(request);
+        self
+    }
+
+    pub fn preference(&self) -> Option<&Request> {
+        self.preference.as_ref()
     }
 
     pub fn ecosystem(&self) -> &str {

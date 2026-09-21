@@ -11,10 +11,10 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,13 @@ impl Tailor for Cargo {
         "cargo"
     }
 
+    /// The lock names the language, not the package manager: a project's
+    /// `rust-toolchain.toml` and the `[toolchain.rust]` section are the
+    /// same statement.
+    fn lock_ecosystem(&self) -> &'static str {
+        "rust"
+    }
+
     fn owns_closure(&self, name: &str) -> bool {
         name == "cargo" || name == "rustfmt"
     }
@@ -48,8 +55,8 @@ impl Tailor for Cargo {
         cargo::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
-        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, &ctx.store)?;
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, &ctx.store, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -57,11 +64,14 @@ impl Tailor for Cargo {
         &self,
         ctx: &Context,
         dir: &Path,
-        fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let toolchain = request.toolchain;
+        let fresh = request.fresh;
+
         let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store)?;
+        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store, toolchain)?;
         let rust_obj = &inputs.rust_obj;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
         if fresh {
@@ -76,6 +86,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            toolchain,
             attribution,
         )?;
         ui::synced("cargo env", &vendor_obj);
@@ -109,10 +120,11 @@ impl Tailor for Cargo {
         _root: &Path,
         cwd: &Path,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store)?;
+        let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store, toolchain)?;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
         cargo::project_cargo_env(
             &inputs.root,
@@ -120,6 +132,7 @@ impl Tailor for Cargo {
             &vendor_obj,
             &inputs.plan,
             &inputs.lock_digest,
+            toolchain,
             attribution,
         )?;
         cargo::build_sandboxed(
@@ -294,15 +307,18 @@ impl Tailor for Cargo {
         cwd: &Path,
         check: bool,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<i32> {
         let platform = ctx.platform;
         let store = &ctx.store;
         let activity = &ctx.activity;
-        let choice = cargo::resolve_toolchain_choice(platform, cwd)?;
-        let rust_version = choice.version.to_string();
-        let rust_object = cargo::ensure_rust_for(store, platform, &rust_version)?;
-        let rustfmt_object = rustfmt::ensure_rustfmt(store, platform, &rust_version, &rust_object)?;
+        // The formatter rides in the same release bundle as the compiler, so
+        // one selection names both, and both are realized from its rows.
+        let rust_version = toolchain.version("rustc")?.to_string();
+        let unavailable = cargo::toolchain_file_components(platform, cwd)?;
+        let rust_object = cargo::realize_runtime(store, platform, toolchain)?;
+        let rustfmt_object = rustfmt::ensure_rustfmt(store, platform, toolchain, &rust_object)?;
         let workspace_root = inputs::locate_cargo_root(&rust_object, cwd, store)?.canonicalize()?;
         let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
             let id = path
@@ -331,21 +347,26 @@ impl Tailor for Cargo {
         let inputs = rustfmt::record_inputs(
             rustfmt_ref["id"].as_str().unwrap_or_default(),
             &resolved_from,
-            &choice.unavailable,
+            &unavailable,
         );
         let mut refs = comforter::ClosureRefs::new();
         refs.object_path(store, activity, &rust_object)?;
         refs.object_path(store, activity, &rustfmt_object)?;
+        let mut body = serde_json::json!({
+            "rust_object": object_ref(&rust_object)?,
+            "rustfmt_object": rustfmt_ref,
+            "rust_version": rust_version,
+            "workspace_root": workspace_root.display().to_string(),
+            "inputs": inputs,
+        });
+        cargo::merge_record(
+            &mut body,
+            comforter::toolchain::closure_record(toolchain, &rust_object),
+        );
         comforter::write_closure(
             &workspace_root,
             "rustfmt",
-            serde_json::json!({
-                "rust_object": object_ref(&rust_object)?,
-                "rustfmt_object": rustfmt_ref,
-                "rust_version": rust_version,
-                "workspace_root": workspace_root.display().to_string(),
-                "inputs": inputs,
-            }),
+            body,
             store,
             activity,
             refs,

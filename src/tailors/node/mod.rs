@@ -33,7 +33,9 @@ pub use realize::*;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
+use crate::kernel::toolchain::{
+    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component, LegacyEvidence, Selected,
+};
 use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
@@ -209,6 +211,65 @@ pub fn preflight(platform: Platform) -> io::Result<()> {
     node_pin(platform).map(|_| ())
 }
 
+/// The recipe id this tailor knows how to lay out. A lock row naming
+/// anything else was written by a tog that extracts or relocates the Node
+/// archive differently.
+const NODE_RECIPE: &str = "nodejs/legacy";
+
+/// The Node row from the selection, checked against the layout this tailor
+/// implements.
+fn node_row(selected: &Selected, platform: Platform) -> io::Result<ArtifactSpec> {
+    if selected.ecosystem != "node" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("node: asked to realize a {} toolchain", selected.ecosystem),
+        ));
+    }
+    let spec = selected.artifact(platform, "node")?;
+    if spec.recipe != NODE_RECIPE {
+        return Err(err(format!(
+            "node: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+            spec.recipe
+        )));
+    }
+    if spec.digest.algo() != "sha256" {
+        return Err(err(format!(
+            "node {}: tog realizes Node from a sha256 digest, not {}",
+            spec.version,
+            spec.digest.algo()
+        )));
+    }
+    Ok(spec)
+}
+
+/// The shipped catalog's newest complete Node release, for work with no
+/// project selection to honor.
+pub fn shipped_selection() -> io::Result<Selected> {
+    crate::kernel::toolchain::shipped(&toolchain_catalog()?)
+}
+
+/// The store object id of the Node a selection names, from the selection's
+/// own row and without realizing it: the same id `realize_runtime` commits.
+pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<String> {
+    let spec = node_row(selected, platform)?;
+    Ok(node_identity_of(&spec, platform).object_id())
+}
+
+/// The Node object identity, from the row the selection names. It is
+/// byte-identical to the one the pin table produced: the row carries the
+/// same version and the same artifact digest.
+fn node_identity_of(spec: &ArtifactSpec, platform: Platform) -> Identity {
+    Identity {
+        kind: "nodejs".into(),
+        name: "nodejs".into(),
+        version: spec.version.clone(),
+        inputs: BTreeMap::from([
+            ("artifact_sha256".to_string(), spec.digest.hex().to_string()),
+            ("platform".to_string(), platform.triple().to_string()),
+        ]),
+    }
+}
+
 fn node_identity(node: &PinnedNode) -> Identity {
     Identity {
         kind: "nodejs".into(),
@@ -252,24 +313,33 @@ fn validate_node_layout(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Ensure Node.js is realized in the store (interpreter at <obj>/bin/node).
-pub fn ensure_node(store: &Store) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    ensure_node_for(store, Platform::host()?)
+/// Realize the shipped Node, for work with no project selection to honor
+/// (`x` outside a project, `add`/`update`'s delegated npm, tests).
+pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection()?)
 }
 
-pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+/// Realize the Node this selection names (interpreter at <obj>/bin/node).
+///
+/// npm and node-gyp ship inside this archive, so this one row is the whole
+/// independently fetched set: the lock's digest covers all three.
+pub fn realize_runtime(
+    store: &Store,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Node.js")?;
-    let node = node_pin(platform)?;
-    let identity = node_identity(node);
+    let spec = node_row(selected, platform)?;
+    let identity = node_identity_of(&spec, platform);
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         validate_node_layout(&store.object_path(&id))?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_held(store, node.url, node.sha256)?;
+    let sha256 = spec.digest.hex();
+    let tarball = download_verified_held(store, &spec.url, sha256)?;
     let staged = store
         .stage()
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
@@ -289,7 +359,7 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     store
         .commit_with_deps(&identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            deps.cache_digest(Digest::sha256(node.sha256)?);
+            deps.cache_digest(Digest::sha256(sha256)?);
             deps
         })
         .map(|(path, _)| path)
@@ -1835,6 +1905,7 @@ mod tests {
             &[],
             false,
             &inputs,
+            None,
             &mut attribution,
         )
         .unwrap();
@@ -1903,6 +1974,68 @@ mod tests {
             closure["forest_path"].as_str().unwrap(),
             forest.to_string_lossy()
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// What sync records beside the projection: the bundle it planned from
+    /// and the Node object it realized, so a later run resolves the same
+    /// bytes and a catalog refresh cannot reach this project.
+    #[test]
+    fn project_node_env_recorded_writes_the_toolchain_record() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tog-npm-toolchain-record-{nonce}"));
+        let project = root.join("project");
+        let env = root.join("home/store/objects/env");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(env.join("node_modules")).unwrap();
+
+        let selected = shipped_selection().unwrap();
+        let runtime = root.join("home/store/objects/node-object");
+        let plan = NpmPlan {
+            node_version: selected.version("node").unwrap().to_string(),
+            packages: Vec::new(),
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        project_node_env_recorded(
+            &project,
+            &env,
+            Platform::host().unwrap(),
+            &plan,
+            &[],
+            false,
+            &[],
+            Some((&selected, runtime.as_path())),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let envelope: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+        )
+        .unwrap();
+        let closure = &envelope["body"];
+        assert_eq!(closure["toolchain"]["ecosystem"], "node");
+        assert_eq!(closure["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(
+            closure["toolchain"]["versions"]["node"],
+            plan.node_version.as_str()
+        );
+        assert_eq!(closure["runtime_object"]["id"], "node-object");
+        assert_eq!(
+            closure["runtime_object"]["path"],
+            runtime.to_string_lossy().into_owned()
+        );
+        // The keys ls, status and sbom already read are untouched.
+        assert_eq!(closure["node_version"], plan.node_version.as_str());
+        assert_eq!(closure["projection_schema"], "node-forest/2");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2462,5 +2595,70 @@ mod git_url_tests {
             );
         }
         assert!(super::git_source_from_url("https://registry.npmjs.org/a/-/a-1.0.0.tgz").is_none());
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+
+    /// A selection whose Node row names a layout this tog does not
+    /// implement: the bytes it locked are not the bytes this code would
+    /// produce, so realization refuses instead of guessing.
+    fn with_recipe(platform: Platform, recipe: &str) -> Selected {
+        let mut selected = shipped_selection().expect("shipped Node release");
+        for row in &mut selected.bundle.artifacts {
+            if row.platform == platform {
+                row.recipe = recipe.to_string();
+            }
+        }
+        selected
+    }
+
+    #[test]
+    fn realization_refuses_an_unknown_recipe_and_another_ecosystem() {
+        let store = Store {
+            root: std::env::temp_dir().join("tog-node-recipe-refusal"),
+        };
+        // The row check is per platform; realization can only run for the
+        // host, which `require_host` refuses first for the other one.
+        for platform in Platform::ALL {
+            let error = node_row(&with_recipe(*platform, "nodejs/2"), *platform)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("recipe nodejs/2"), "{error}");
+            assert!(error.contains("upgrade tog"), "{error}");
+        }
+        let platform = Platform::host().unwrap();
+        let error = realize_runtime(&store, platform, &with_recipe(platform, "nodejs/2"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recipe nodejs/2"), "{error}");
+
+        let mut python = shipped_selection().unwrap();
+        python.ecosystem = "python".into();
+        let error = realize_runtime(&store, platform, &python)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a python toolchain"), "{error}");
+        assert!(!store.root.exists(), "a refusal touched the store");
+    }
+
+    /// The row and the pin describe the same bytes, so the object a locked
+    /// project realizes is the object every existing store already holds.
+    #[test]
+    fn an_identity_from_a_selected_row_equals_the_identity_from_the_pin() {
+        let selected = shipped_selection().unwrap();
+        for platform in Platform::ALL {
+            let pin = node_pin(*platform).unwrap();
+            let spec = node_row(&selected, *platform).unwrap();
+            assert_eq!(spec.version, pin.version);
+            assert_eq!(
+                node_identity_of(&spec, *platform).object_id(),
+                node_identity(pin).object_id(),
+                "node on {}",
+                platform.triple()
+            );
+        }
     }
 }

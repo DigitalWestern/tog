@@ -140,8 +140,9 @@ impl Manifest {
         dir: &Path,
         project: &ProjectRoot,
         store: &Store,
-        python_version: &str,
+        selected: &crate::kernel::toolchain::Selected,
     ) -> io::Result<()> {
+        let python_version = selected.version("cpython")?;
         if !self.setup || self.setup_cfg {
             return Ok(());
         }
@@ -174,15 +175,9 @@ impl Manifest {
             }
         }
 
-        let build_env = build::ensure_build_environment(store, platform, python_version)
+        let build_env = build::ensure_build_environment(store, platform, selected)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
-        let pin = crate::tailors::python::lookup(platform, python_version).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("no pinned CPython {python_version} for setup.py egg_info"),
-            )
-        })?;
-        let cpython = crate::tailors::python::ensure_python_for(store, pin, platform)
+        let cpython = crate::tailors::python::realize_runtime(store, platform, selected)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
         let scratch = store.stage()?;
         let egg_base = scratch.join("egg-info");
@@ -417,14 +412,20 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&outside, dir.join(".tog")).unwrap();
 
-        let mut manifest = discover(platform, &dir).unwrap();
+        let mut manifest = discover(platform, &dir, python_version).unwrap();
         assert!(manifest.requires_setup(), "fixture is not a setup.py tree");
         let project = ProjectRoot::open(&dir).unwrap();
         let store = Store {
             root: root.join("absent-store"),
         };
         let error = manifest
-            .prepare_setup(platform, &dir, &project, &store, python_version)
+            .prepare_setup(
+                platform,
+                &dir,
+                &project,
+                &store,
+                &crate::tailors::python::shipped_selection(python_version).unwrap(),
+            )
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(
@@ -869,7 +870,12 @@ files = []
         let dir = temp_project("constraints");
         fs::write(dir.join("requirements.txt"), "-c constraints.txt\nsix>=1\n").unwrap();
         fs::write(dir.join("constraints.txt"), "six<2\n").unwrap();
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six>=1\n");
         assert_eq!(manifest.constraints_text(), "six<2\n");
         let _ = fs::remove_dir_all(dir);
@@ -958,7 +964,12 @@ files = []
             "--index-url https://private.invalid/simple\nsix>=1\n",
         )
         .unwrap();
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.requirements, ["six>=1"]);
         assert_eq!(manifest.resolver_text(), "six>=1\n");
         let _ = crate::kernel::policy::drain();
@@ -1014,7 +1025,12 @@ files = []
                 fs::create_dir_all(dir.join("requirements")).unwrap();
                 fs::write(dir.join("requirements/common.txt"), "six>=1\n").unwrap();
             }
-            let got = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+            let got = discover(
+                Platform::X86_64UnknownLinuxGnu,
+                &dir,
+                crate::tailors::python::pyselect::DEFAULT_VERSION,
+            )
+            .unwrap();
             assert_eq!(got.provenance, expected, "{name}");
             let _ = fs::remove_dir_all(dir);
             let _ = crate::kernel::policy::drain();
@@ -1033,7 +1049,12 @@ files = []
         fs::create_dir_all(dir.join(".tog")).unwrap();
         fs::write(dir.join(".tog/lock-source.hash"), "stale\n").unwrap();
 
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.provenance, "pyproject.toml [project]");
         assert_eq!(manifest.requirements, ["idna==3.10"]);
         let _ = fs::remove_dir_all(dir);
@@ -1050,7 +1071,12 @@ files = []
         fs::create_dir_all(dir.join("requirements")).unwrap();
         fs::write(dir.join("requirements/common.txt"), "six==1.17.0\n").unwrap();
 
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.input, "requirements/common.txt");
         assert_eq!(manifest.requirements, ["six==1.17.0"]);
         assert!(!manifest.provenance.contains("empty manifest"));
@@ -1065,7 +1091,12 @@ files = []
             "[project]\nname = \"dynamic-demo\"\ndynamic = [\"dependencies\"]\n",
         )
         .unwrap();
-        let error = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap_err();
+        let error = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("dynamic"));
         assert!(!error.to_string().contains("empty manifest"));
         let _ = fs::remove_dir_all(dir);
@@ -1714,7 +1745,12 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("requirements/common.txt"), "six\n").unwrap();
         fs::write(dir.join("requirements/extra.txt"), "idna\n").unwrap();
         fs::write(dir.join("constraints.txt"), "six<2\n").unwrap();
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six\nidna\n");
         assert_eq!(manifest.constraints_text(), "six<2\n");
         let old = requirements_tree_hash(&top).unwrap();
@@ -1728,7 +1764,12 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         let dir = temp_project("include-context");
         fs::write(dir.join("requirements.txt"), "-c deps.txt\n-r deps.txt\n").unwrap();
         fs::write(dir.join("deps.txt"), "six\n").unwrap();
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.normalized_requirements_text(), "six\n");
         assert_eq!(manifest.constraints_text(), "six\n");
         let _ = fs::remove_dir_all(dir);
@@ -1790,7 +1831,12 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             "from setuptools import setup as s\ns(install_requires=['six'])\n",
         )
         .unwrap();
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.input, "setup.py");
         assert!(manifest.requires_setup());
         assert!(!is_trivial_setup_py(
@@ -1807,7 +1853,12 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             "[options]\n  install_requires =\n    six\n",
         )
         .unwrap();
-        let manifest = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
         assert_eq!(manifest.input, "setup.cfg");
         assert_eq!(manifest.requirements, ["six"]);
         assert!(!manifest.is_empty());
@@ -1819,7 +1870,12 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         let dir = temp_project("cycle");
         fs::write(dir.join("requirements.txt"), "-r other.txt\n").unwrap();
         fs::write(dir.join("other.txt"), "-r requirements.txt\n").unwrap();
-        let error = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap_err();
+        let error = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("cannot read"));
         assert!(error.to_string().contains("the manifest is broken"));
         assert!(error.to_string().contains("cycle"));
@@ -1829,7 +1885,12 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
     #[test]
     fn no_manifest_error_names_the_search() {
         let dir = temp_project("none");
-        let error = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap_err();
+        let error = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &dir,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap_err();
         // The classifier prefix is gone: this is the text a user reads.
         assert!(!error.to_string().contains("no_manifest"));
         assert!(error.to_string().contains("nothing to sync here"));

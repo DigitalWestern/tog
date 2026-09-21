@@ -7,6 +7,7 @@
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod status;
+pub mod toolchain;
 
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
@@ -286,6 +287,10 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     project_lock: &fs::File,
 ) -> io::Result<()> {
     store.require_activity(activity, "root publication")?;
+    // The first durable step of a projection switch: a toolchain source
+    // that moved during planning is caught here, before a user directory
+    // is moved or a visible link replaced, and again by the closure writer.
+    toolchain::recheck_before_publication()?;
     let (objects, projections) = refs.clone().into_record_parts();
     store
         .register_root_parts_with_project_lock(
@@ -336,6 +341,10 @@ fn write_closure_inner(
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
+    // The one place every project write passes through: prove the lock and
+    // the toolchain source inputs still read the way this command resolved
+    // them before anything of this sync becomes visible.
+    toolchain::recheck_before_publication()?;
     if !body.is_object() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

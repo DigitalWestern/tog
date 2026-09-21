@@ -2,7 +2,10 @@
 //! build-capable ecosystem present, or the named one, through the tailor
 //! registry.
 
+use crate::comforter::toolchain::{self as project_toolchain, Mode};
+use crate::commands::shared::ecosystem_inputs;
 use crate::kernel::context::Context;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy;
 use crate::tailors::{self, Tailor};
 use std::io;
@@ -50,7 +53,17 @@ pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
     };
     let root = tailor.build_root(&cwd)?;
     policy::init(&root, false)?;
+    // A build honors the committed lock and never creates one.
+    let held = ProjectRoot::open(&root)?;
+    let toolchain = project_toolchain::resolve(
+        &held,
+        ctx.platform,
+        ecosystem_inputs(&root, &[tailor])?,
+        Mode::ReadOnly,
+        false,
+    )?;
+    let selected = toolchain.get(tailor.lock_ecosystem())?;
     let mut attribution = policy::Attribution::open(tailor.id())?;
-    tailor.build(ctx, &root, &cwd, rest, &mut attribution)?;
+    tailor.build(ctx, &root, &cwd, rest, selected, &mut attribution)?;
     attribution.finish(true)
 }

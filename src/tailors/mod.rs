@@ -19,7 +19,7 @@ use crate::comforter::status::State;
 use crate::kernel::context::Context;
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,15 @@ pub struct PackageRow {
 pub struct ClosureListing {
     pub toolchain: Vec<(String, String)>,
     pub packages: Vec<PackageRow>,
+}
+
+/// What `tog sync` asks of one tailor: the flags that change how it works
+/// and the toolchain it must use. `frozen` never reaches a tailor that is
+/// allowed to write project inputs; the caller skips `prepare` entirely.
+pub struct SyncRequest<'a> {
+    pub fresh: bool,
+    pub frozen: bool,
+    pub toolchain: &'a Selected,
 }
 
 /// One `tog doctor` line contributed by a tailor.
@@ -67,6 +76,13 @@ pub trait Tailor: Sync {
     /// The ecosystem name: closure file stem, `ls` vocabulary, plan JSON.
     fn id(&self) -> &'static str;
 
+    /// The `[toolchain.<name>]` section key and the name toolchain input
+    /// discovery knows this ecosystem by. Only the Rust tailor differs from
+    /// its own id, because it is named after its package manager.
+    fn lock_ecosystem(&self) -> &'static str {
+        self.id()
+    }
+
     /// Does this tailor own the closure file `.tog/closures/<name>.json`?
     /// A tailor that writes a second closure kind (cargo's `rustfmt`)
     /// overrides this.
@@ -88,6 +104,7 @@ pub trait Tailor: Sync {
         &self,
         _ctx: &Context,
         _dir: &Path,
+        _toolchain: &Selected,
         _attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         Ok(())
@@ -97,7 +114,7 @@ pub trait Tailor: Sync {
     /// realizing anything. `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>>;
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>>;
 
     /// `tog sync`: plan, realize, project, and narrate with
     /// `ui::synced`. Returns whether anything was synced.
@@ -105,7 +122,7 @@ pub trait Tailor: Sync {
         &self,
         ctx: &Context,
         dir: &Path,
-        fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool>;
 
@@ -132,6 +149,7 @@ pub trait Tailor: Sync {
         _root: &Path,
         _cwd: &Path,
         _args: &[String],
+        _toolchain: &Selected,
         _attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         Err(unsupported(self.id(), "build"))
@@ -228,6 +246,7 @@ pub trait Tailor: Sync {
         _cwd: &Path,
         _check: bool,
         _args: &[String],
+        _toolchain: &Selected,
         _attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<i32> {
         Err(unsupported(self.id(), "fmt"))
@@ -511,5 +530,45 @@ mod tests {
                 .contains("no catalog release has rustc 1.0.0"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn an_unconstrained_python_project_keeps_the_shipped_default() {
+        use crate::kernel::toolchain::input::InputRow;
+        use crate::kernel::toolchain::select_for;
+        let catalog = by_id("python").unwrap().toolchain_catalog().unwrap();
+        let row = |path: &str, field: &str, value: Option<&str>| InputRow {
+            path: std::path::PathBuf::from(path),
+            field: field.into(),
+            value: value.map(str::to_string),
+            absent: value.is_none(),
+            sha256: value.map(|_| "a".repeat(64)),
+        };
+        let rows = |version: Option<&str>, requires: Option<&str>| {
+            vec![
+                row(".python-version", "version", version),
+                row("pyproject.toml", "project.requires-python", requires),
+                row("pyproject.toml", "tool.poetry.dependencies.python", None),
+            ]
+        };
+        let version = |rows: &[InputRow]| {
+            select_for(&catalog, "python", rows)
+                .unwrap()
+                .component("cpython")
+                .unwrap()
+                .version
+                .clone()
+        };
+        assert_eq!(
+            version(&rows(None, None)),
+            crate::tailors::python::pyselect::DEFAULT_VERSION
+        );
+        assert_eq!(
+            version(&rows(None, Some(">=3.9"))),
+            crate::tailors::python::pyselect::DEFAULT_VERSION
+        );
+        assert_eq!(version(&rows(None, Some(">=3.13"))), "3.14.7");
+        assert_eq!(version(&rows(Some("3.13"), None)), "3.13.15");
+        assert_eq!(version(&rows(Some("3.11.16"), Some(">=3.9"))), "3.11.16");
     }
 }

@@ -109,7 +109,24 @@ fn help_goes_to_stdout_and_exits_0() {
         let stdout = text(&out.stdout);
         assert!(stdout.starts_with("tog sync — "), "{args:?}: {stdout}");
         assert!(stdout.contains("--fresh"), "{args:?}: {stdout}");
+        assert!(stdout.contains("--frozen"), "{args:?}: {stdout}");
+        assert!(
+            stdout.contains("tog sync [--fresh] [--strict] [--frozen]"),
+            "{args:?}: {stdout}"
+        );
     }
+    // `update` is two verbs and the help screen is the specification of the
+    // surface, so both grammars are printed.
+    let update = text(&tog(&home.0, &home.0, &["help", "update"]).stdout);
+    assert!(
+        update.contains("tog update [<package>...] [--no-sync]"),
+        "{update}"
+    );
+    assert!(
+        update.contains("tog update --toolchain [<ecosystem>] [--no-sync]"),
+        "{update}"
+    );
+    assert!(update.contains("--toolchain [<ecosystem>]"), "{update}");
     let out = tog(&home.0, &home.0, &["help", "snyc"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("did you mean 'sync'?"));
@@ -151,6 +168,10 @@ fn usage_errors_exit_2_with_a_next_step() {
         (&["add", "--", "--index-url"], "add: dependency spec '--index-url' looks like a tool option; package options are not allowed", "tog help add"),
         (&["add", "requests\n--index-url evil"], "add: dependency spec contains CR, LF, or NUL", "tog help add"),
         (&["x", "--from", "six", "/absolute/executable"], "x: --from requires a single safe executable name", "tog help x"),
+        (&["sync", "--frzoen"], "sync: unknown option '--frzoen'; did you mean '--frozen'?", "tog help sync"),
+        (&["update", "--toolchain", "serde"], "update --toolchain takes an ecosystem name, not a package; 'serde' is not one of python, node, rust, go, ruby, elixir, dotnet", "tog help update"),
+        (&["update", "--toolchain", "pyhton"], "update --toolchain takes an ecosystem name, not a package; 'pyhton' is not one of python, node, rust, go, ruby, elixir, dotnet; did you mean 'python'?", "tog help update"),
+        (&["add", "--toolchain"], "add: unknown option '--toolchain'", "tog help add"),
     ];
     for (args, message, hint) in cases {
         let out = tog(&home.0, &home.0, args);
@@ -505,8 +526,9 @@ fn fmt_script_precedence_does_not_try_rustfmt_without_a_projection() {
 /// `--eco` is tog's own selector: in a polyglot root whose package.json
 /// has a `fmt` script, `--eco rust` must reach the Rust path instead of
 /// running the script with a meaningless trailing `--eco rust`. The fixture
-/// pins an unrealizable toolchain so the Rust path fails offline, before any
-/// download, with a diagnostic that could only come from that path.
+/// pins a channel no catalog release carries, so the Rust path fails
+/// offline, before any download, on a diagnostic that names the channel and
+/// could only come from that path.
 #[test]
 fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     let home = TempDir::new("fmt-eco-home");
@@ -531,7 +553,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("unsupported Rust toolchain \"1.70.0\""),
+        stderr.contains("rust toolchain") && stderr.contains("1.70.0"),
         "--eco rust did not reach the Rust path: {stderr}"
     );
     assert!(
@@ -559,7 +581,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
         stderr.contains("command 'fmt'"),
         "script no longer wins: {stderr}"
     );
-    assert!(!stderr.contains("unsupported Rust toolchain"), "{stderr}");
+    assert!(!stderr.contains("rust toolchain"), "{stderr}");
     // Opening the store creates its directories; nothing was realized in it.
     let objects = home.0.join("store/objects");
     assert!(
@@ -1446,15 +1468,21 @@ fn cached_x_root_with_exception(home: &Path) -> PathBuf {
     )
     .unwrap();
 
-    let key = hex::encode(Sha256::digest(
-        format!(
-            "x/2\0{}\0python\0fake\0\0{}",
-            store.display(),
-            tog::kernel::platform::Platform::host().unwrap().triple()
+    // Exactly the directory `tog x` will look in. The key covers the store
+    // root, the request, and the runtime the environment runs on, so a
+    // fixture built at any other name is a miss rather than the cache hit
+    // these tests are about.
+    let root = home.join(".tog/x").join(
+        tog::commands::x_environment_name(
+            &store,
+            tog::kernel::platform::Platform::host().unwrap(),
+            home,
+            "python",
+            "fake",
+            None,
         )
-        .as_bytes(),
-    ));
-    let root = home.join(".tog/x").join(format!("py-fake-{}", &key[..16]));
+        .unwrap(),
+    );
     std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
     std::os::unix::fs::symlink(&object, root.join(".venv")).unwrap();
     let body = serde_json::json!({

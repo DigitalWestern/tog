@@ -5,6 +5,7 @@
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
 use crate::kernel::supervise;
+use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::cargo;
 use std::io;
@@ -57,13 +58,20 @@ pub fn locate_cargo_root(rust_obj: &Path, cwd: &Path, store: &store::Store) -> i
         .ok_or_else(|| io::Error::other("cargo locate-project returned no manifest path"))
 }
 
+/// `toolchain` is the project's selection, and it is the only thing that
+/// decides which Rust this call realizes. The toolchain file is still read,
+/// but only for the components it asks for that tog does not provide: that
+/// list is this run's `toolchain-component-unavailable` exception, and it is
+/// recorded before anything is downloaded.
 pub fn load_cargo_inputs(
     platform: Platform,
     cwd: &Path,
     store: &store::Store,
+    toolchain: &Selected,
 ) -> io::Result<CargoInputs> {
-    let rust_version = cargo::resolve_toolchain(platform, cwd)?;
-    let rust_obj = cargo::ensure_rust_for(store, platform, rust_version)?;
+    let rust_version = toolchain.version("rustc")?;
+    cargo::toolchain_file_components(platform, cwd)?;
+    let rust_obj = cargo::realize_runtime(store, platform, toolchain)?;
     let root = locate_cargo_root(&rust_obj, cwd, store)?;
     // Cargo is the one tailor whose registered root is not the directory
     // sync was run in: a member of a workspace sends its closure and its

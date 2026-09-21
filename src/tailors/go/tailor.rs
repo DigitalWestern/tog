@@ -10,10 +10,10 @@ use crate::kernel::cyclonedx::{
 };
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
-use crate::tailors::{ClosureListing, DoctorCheck, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, DoctorCheck, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::fs;
 use std::io;
@@ -35,8 +35,8 @@ impl Tailor for Go {
         go::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
-        let inputs = inputs::load_go_inputs(ctx.platform, dir, &ctx.store)?;
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let inputs = inputs::load_go_inputs(ctx.platform, dir, &ctx.store, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -44,19 +44,22 @@ impl Tailor for Go {
         &self,
         ctx: &Context,
         dir: &Path,
-        _fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, dir, store)?;
-        let modcache = go::realize_modcache(store, platform, &inputs.plan, &inputs.go_obj)?;
+        let inputs = inputs::load_go_inputs(platform, dir, store, toolchain)?;
+        let modcache =
+            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
         go::project_go_env(
             dir,
             &inputs.go_obj,
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            toolchain,
             attribution,
         )?;
         ui::synced("go modcache", &modcache);
@@ -87,18 +90,21 @@ impl Tailor for Go {
         root: &Path,
         _cwd: &Path,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, root, store)?;
-        let modcache = go::realize_modcache(store, platform, &inputs.plan, &inputs.go_obj)?;
+        let inputs = inputs::load_go_inputs(platform, root, store, toolchain)?;
+        let modcache =
+            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
         go::project_go_env(
             root,
             &inputs.go_obj,
             &modcache,
             &inputs.plan,
             &inputs.gosum_sha256,
+            toolchain,
             attribution,
         )?;
         go::build_sandboxed(platform, root, &inputs.go_obj, &modcache, args)

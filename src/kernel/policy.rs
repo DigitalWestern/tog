@@ -492,6 +492,13 @@ fn current() -> &'static Policy {
     POLICY.get_or_init(Policy::default)
 }
 
+/// Is the policy chain in force strict? Strictness refuses every exception
+/// kind, and it also refuses to create a file a reviewer has not seen: the
+/// toolchain lock is written by an ordinary sync, never by a strict one.
+pub fn strict() -> bool {
+    current().strict
+}
+
 /// Does the policy chain in force declare a `[signing]` table? That table
 /// is the only evidence that anyone here cares whether closures are
 /// signed, so it is what decides whether an unsigned sync is worth saying

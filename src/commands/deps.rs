@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::inspect;
-use crate::commands::shared::project_dir;
+use crate::commands::shared::{project_dir, selected_toolchain};
 use crate::commands::sync;
 use crate::commands::x as xrun;
 use crate::kernel::context::Context;
@@ -37,9 +37,7 @@ use crate::tailors::elixir;
 use crate::tailors::go;
 use crate::tailors::node;
 use crate::tailors::python;
-use crate::tailors::python::manifest;
 use crate::tailors::python::pypi;
-use crate::tailors::python::pyselect;
 use crate::tailors::ruby;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1095,15 +1093,11 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn uv_command(
-    store: &Store,
-    platform: Platform,
-    project: &Path,
-) -> io::Result<(Command, &'static str)> {
-    let uv = python::ensure_uv_for(store, platform)?.join("uv");
-    let selection =
-        pyselect::select_python_with_inputs(platform, &manifest::python_inputs(project)?)?;
-    let interpreter = python::ensure_python_for(store, selection.pin, platform)?;
+fn uv_command(store: &Store, platform: Platform, project: &Path) -> io::Result<(Command, String)> {
+    let toolchain = selected_toolchain(platform, project, "python")?;
+    let version = toolchain.version("cpython")?.to_string();
+    let uv = python::realize_uv(store, platform, &toolchain)?.join("uv");
+    let interpreter = python::realize_runtime(store, platform, &toolchain)?;
     let mut command = Command::new(uv);
     command
         .current_dir(project)
@@ -1116,7 +1110,7 @@ fn uv_command(
         .env_remove("PIP_EXTRA_INDEX_URL")
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
-    Ok((command, selection.pin.version))
+    Ok((command, version))
 }
 
 fn run_inherited(store: &Store, mut command: Command, what: &str) -> io::Result<()> {
@@ -1149,7 +1143,7 @@ fn uv_compile(
         command.arg("--quiet");
     }
     command
-        .args(["--python-version", version])
+        .args(["--python-version", &version])
         .args(["--index-url", "https://pypi.org/simple"])
         .arg("-o")
         .arg(output)
@@ -1664,7 +1658,11 @@ fn node(
         }
     };
     if lock_name == "package-lock.json" {
-        let node_obj = node::ensure_node_for(store, platform)?;
+        let node_obj = node::realize_runtime(
+            store,
+            platform,
+            &selected_toolchain(platform, project, "node")?,
+        )?;
         let mut command = Command::new(node_obj.join("bin/npm"));
         if !ui::verbose() {
             command.arg("--silent");
@@ -1715,6 +1713,7 @@ fn node(
     let (tool_root, _x_lock, realized) = xrun::realize_node_tool(
         store,
         platform,
+        &lock_root,
         manager.name(),
         manager.version(),
         manager.corepack_hash(),
@@ -1725,7 +1724,11 @@ fn node(
     } else {
         node_attribution.discard();
     }
-    let node_obj = node::ensure_node_for(store, platform)?;
+    let node_obj = node::realize_runtime(
+        store,
+        platform,
+        &selected_toolchain(platform, project, "node")?,
+    )?;
     let executable = tool_root
         .join("node_modules/.bin")
         .join(manager.executable());
@@ -1822,8 +1825,15 @@ fn cargo_delegate(
     _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
-    let version = cargo::resolve_toolchain(platform, project)?;
-    let rust_obj = cargo::ensure_rust_for(store, platform, version)?;
+    // The toolchain file still contributes its component requests (the
+    // `toolchain-component-unavailable` exception); the version is the
+    // project's selection.
+    cargo::toolchain_file_components(platform, project)?;
+    let rust_obj = cargo::realize_runtime(
+        store,
+        platform,
+        &selected_toolchain(platform, project, "cargo")?,
+    )?;
     let mut command = Command::new(rust_obj.join("bin/cargo"));
     match verb {
         Verb::Add => {
@@ -1878,8 +1888,11 @@ fn go_delegate(
             "--dev has no meaning in Go (one dependency set per module)",
         ));
     }
-    let go_version = go::resolve_project_toolchain(platform, project)?;
-    let go_obj = go::ensure_go_for(store, platform, go_version)?;
+    let go_obj = go::realize_runtime(
+        store,
+        platform,
+        &selected_toolchain(platform, project, "go")?,
+    )?;
     let scratch = store.stage()?;
     let args: Vec<String> = match verb {
         Verb::Add => std::iter::once("get".to_string())
@@ -1917,7 +1930,11 @@ fn ruby_delegate(
     _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
-    let ruby_obj = ruby::ensure_ruby_for(store, platform)?;
+    let ruby_obj = ruby::realize_runtime(
+        store,
+        platform,
+        &selected_toolchain(platform, project, "ruby")?,
+    )?;
     let scratch = store.stage()?;
     let result = (|| -> io::Result<()> {
         match verb {
@@ -1990,7 +2007,11 @@ fn elixir_delegate(
                 .join(", ")
         ))),
         Verb::Update => {
-            let beam = elixir::ensure_beam_for(store, platform)?;
+            let beam = elixir::realize_runtime(
+                store,
+                platform,
+                &selected_toolchain(platform, project, "elixir")?,
+            )?;
             let scratch = store.stage()?;
             let mut args = vec!["mix", "deps.update"];
             if texts.is_empty() {
@@ -2057,7 +2078,7 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
 ///
 /// `edit` records exceptions of its own, outside any ecosystem's closure: a
 /// `rust-toolchain.toml` naming `clippy` makes `cargo_delegate`'s
-/// `cargo::resolve_toolchain` record `toolchain-component-unavailable`, and
+/// `cargo::toolchain_file_components` record `toolchain-component-unavailable`, and
 /// on a warm store every `ensure_*_for` replays cached-object exceptions
 /// through `policy::check_cached`. Those belong to the edit, not to whichever
 /// ecosystem `sync` happens to realize first. `discard` clears them before

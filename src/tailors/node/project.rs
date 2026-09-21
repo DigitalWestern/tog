@@ -203,6 +203,7 @@ pub fn project_node_env(
         mutable,
         fresh,
         &[],
+        None,
         attribution,
     )
 }
@@ -581,6 +582,7 @@ fn node_closure_body(
 
 /// `project_node_env` plus the input files recorded for `tog status`
 /// (package.json and the lockfile the plan came from).
+#[allow(clippy::too_many_arguments)]
 pub fn project_node_env_recorded(
     project_dir: &Path,
     env_obj: &Path,
@@ -589,6 +591,10 @@ pub fn project_node_env_recorded(
     mutable: &[String],
     fresh: bool,
     inputs: &[crate::comforter::InputRecord],
+    // On a project path: the bundle this projection was built from and the
+    // Node object realized from it, recorded so a later run resolves the
+    // same bytes through the closure instead of the pin table.
+    toolchain: Option<(&crate::kernel::toolchain::Selected, &Path)>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     if !mutable.is_empty() {
@@ -639,9 +645,16 @@ pub fn project_node_env_recorded(
     } = &paths;
     store.ensure_namespace(Path::new("forests"))?;
     store.ensure_namespace(Path::new("backups"))?;
+    // The record names the bundle and the object; the direct reference is
+    // what keeps that object alive, so it is taken wherever references are.
+    let runtime_record = toolchain
+        .map(|(selected, runtime)| crate::comforter::toolchain::closure_record(selected, runtime));
     let mut refs = crate::comforter::ClosureRefs::new();
     if strict_refs {
         refs.object_path(&store, &activity, &env_obj)?;
+        if let Some((_, runtime)) = toolchain {
+            refs.object_path(&store, &activity, runtime)?;
+        }
         if let Some(native_id) = native_id {
             refs.object_id(&store, &activity, native_id)?;
         }
@@ -707,7 +720,7 @@ pub fn project_node_env_recorded(
 
     let meta_dir = project_dir.join(".tog");
     fs::create_dir_all(&meta_dir)?;
-    let body = node_closure_body(
+    let mut body = node_closure_body(
         &env_obj,
         &native_reference,
         &paths,
@@ -717,6 +730,11 @@ pub fn project_node_env_recorded(
         mutable,
         inputs,
     );
+    if let Some(record) = runtime_record {
+        for (key, value) in record.as_object().into_iter().flatten() {
+            body[key] = value.clone();
+        }
+    }
     #[cfg(test)]
     if !strict_refs {
         return crate::comforter::write_closure_legacy(project_dir, "node", body, attribution);

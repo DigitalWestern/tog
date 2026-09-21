@@ -10,10 +10,10 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::dotnet;
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,12 +34,12 @@ impl Tailor for Dotnet {
         dotnet::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
         // Preflight before SDK realization: a broken layout should fail
         // loudly here, not after a toolchain download.
-        dotnet::preflight(dir)?;
-        let sdk = dotnet::ensure_sdk_for(&ctx.store, ctx.platform)?;
-        let (plan, _) = dotnet::plan_dotnet(&ctx.store, dir, &sdk)?;
+        dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
+        let sdk = dotnet::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
+        let (plan, _) = dotnet::plan_dotnet(&ctx.store, dir, &sdk, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -47,16 +47,25 @@ impl Tailor for Dotnet {
         &self,
         ctx: &Context,
         dir: &Path,
-        _fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        dotnet::preflight(dir)?;
-        let sdk = dotnet::ensure_sdk_for(store, platform)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, dir, &sdk)?;
-        let packages = dotnet::realize_packages(store, platform, &plan, &sdk, dir)?;
-        dotnet::project_dotnet_env(dir, &sdk, &packages, &plan, &lock_sha256, attribution)?;
+        dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
+        let sdk = dotnet::realize_runtime(store, platform, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(store, dir, &sdk, toolchain)?;
+        let packages = dotnet::realize_packages(store, platform, &plan, &sdk, dir, toolchain)?;
+        dotnet::project_dotnet_env(
+            dir,
+            &sdk,
+            &packages,
+            &plan,
+            &lock_sha256,
+            toolchain,
+            attribution,
+        )?;
         ui::synced("nuget packages", &packages);
         Ok(true)
     }
@@ -79,15 +88,24 @@ impl Tailor for Dotnet {
         _root: &Path,
         cwd: &Path,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         let platform = ctx.platform;
         let store = &ctx.store;
-        let sdk = dotnet::ensure_sdk_for(store, platform)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, cwd, &sdk)?;
-        let packages = dotnet::realize_packages(store, platform, &plan, &sdk, cwd)?;
-        dotnet::project_dotnet_env(cwd, &sdk, &packages, &plan, &lock_sha256, attribution)?;
-        dotnet::build_sandboxed(platform, cwd, &sdk, &packages, args)
+        let sdk = dotnet::realize_runtime(store, platform, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(store, cwd, &sdk, toolchain)?;
+        let packages = dotnet::realize_packages(store, platform, &plan, &sdk, cwd, toolchain)?;
+        dotnet::project_dotnet_env(
+            cwd,
+            &sdk,
+            &packages,
+            &plan,
+            &lock_sha256,
+            toolchain,
+            attribution,
+        )?;
+        dotnet::build_sandboxed(platform, cwd, &sdk, &packages, args, toolchain)
     }
 
     fn run_env(

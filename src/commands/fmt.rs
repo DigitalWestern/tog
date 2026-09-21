@@ -2,10 +2,12 @@
 //! (Rust today), or a delegated package.json `fmt` script. The formatter
 //! itself is `Tailor::fmt`; this file only decides which of the two runs.
 
+use crate::comforter::toolchain::{self as project_toolchain, Mode};
 use crate::commands::inspect;
 use crate::commands::run;
-use crate::commands::shared::{project_dir, projected_root};
+use crate::commands::shared::{ecosystem_inputs, project_dir, projected_root};
 use crate::kernel::context::Context;
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::ui;
@@ -110,8 +112,19 @@ pub fn run(
     // is the only thing that needs the handle, and the toolchain
     // provisioning and formatter children below all run outside it.
     let ctx = Context::open(platform, true)?;
+    // The formatter rides in the same bundle as the toolchain, so it is
+    // chosen by the same committed lock and never by a fresh selection.
+    let held = ProjectRoot::open(&cwd)?;
+    let toolchain = project_toolchain::resolve(
+        &held,
+        platform,
+        ecosystem_inputs(&cwd, &[formatter])?,
+        Mode::ReadOnly,
+        false,
+    )?;
+    let selected = toolchain.get(formatter.lock_ecosystem())?;
     let mut attribution = policy::Attribution::open("rustfmt")?;
-    let status = formatter.fmt(&ctx, &cwd, check, args, &mut attribution)?;
+    let status = formatter.fmt(&ctx, &cwd, check, args, selected, &mut attribution)?;
     attribution.finish(true)?;
     if crate::comforter::signing_key().is_none() {
         ui::note("fmt: rustfmt record unsigned; tog audit reports it outdated (set TOG_SIGNING_KEY to sign)");

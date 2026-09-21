@@ -19,7 +19,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
   inputs on disk (and that the `rustfmt` record names the rustfmt this binary pins), and
-  that no recorded exception is denied or unknown. It does not prove the signer's sync was
+  that no recorded exception is denied or unknown. It does not read `tog-toolchain.toml`:
+  a record whose toolchain no longer matches the committed lock, or a project whose lock is
+  stale or missing, passes `audit` and fails only `status`. It does not prove the signer's sync was
   honest or safe to run: it does not cover the doors that run unsandboxed with network
   (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
   missing-lock generation during `sync`/`plan`, where uv, npm, cargo, bundler, mix resolve
@@ -67,15 +69,26 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   hash only; Go catches `require`/`replace` only via `go.sum`; a closure written before those
   fields were recorded is reported `unchecked` and fails the command, since nothing about it
   can be compared.
-- **There is no committed toolchain lock yet (designed, not built).**
-  `.node-version`/`.ruby-version`/`.tool-versions` are not consulted; Node, Ruby and Elixir
-  are single-pin. The lock and catalog/digest machinery are design-only
-  (`docs/agent/DESIGNS.md`), and the
-  generic fetch helper still accepts `file://` — the dormant lock cannot authorize that path.
-- **When the lock ships, one toolchain per lock root**: discovery is anchored at the lock root, so
-  `web/.node-version` is invisible to tog. A committed lock can aim at any allowlisted
-  provider host; a hostile lock can cause an HTTPS request to a different allowlisted host.
-  Reviewing a lock diff is reviewing its URLs.
+- **One toolchain per lock root.** Toolchain discovery is anchored at the project root
+  where `tog-toolchain.toml` sits, not at the current directory, so every developer, CI
+  job and subdirectory produces the same consulted-path list and the same staleness
+  verdict. The cost is that a toolchain source in a subdirectory — `web/.node-version`
+  under a root-level lock — is not a toolchain source for tog, though uv or `nvm` would
+  honor it. Per-subproject toolchains would need per-subproject sections and are not
+  designed.
+- **The two-machine lock diff has not been run.** A lock carries a row per platform and is
+  written from the intersection of releases complete on both, so a Linux-written lock should
+  sync unchanged on an arm64 Mac and produce byte-identical `tog status`. That has been
+  proven by test, not by two machines; the Mac gate is the open item.
+- **A committed lock is a set of URLs to review.** A lock can aim at any allowlisted
+  provider host, and a hostile lock can cause an HTTPS request to a different allowlisted
+  host. Reviewing a lock diff is reviewing its URLs. The generic fetch helper still
+  accepts `file://`; the lock does not authorize that path, and does not close it either.
+- **Frozen validation reads declarative files only.** A project whose only statement of
+  its runtime version is computed — `setup.py` metadata, `mix.exs` compatibility, a
+  Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the
+  declarative file to add. Reading those sources means running project code, which is
+  exactly what frozen promises not to do.
 - **`add` / `remove` / `update` delegate to store tools with network, unsandboxed** (uv, npm,
   pnpm, cargo, go, bundler, mix) — the same trust boundary as missing-lockfile generation.
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.
@@ -229,12 +242,17 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   yet**: the pinned otp-28 escript runs on the 29 VM — a version-skew impurity until upstream
   ships otp-29 builds. **Mix's compilation lock is disabled in-sandbox**, so concurrent
   unsandboxed `mix compile` against one build root is unprotected; `tog build` runs
-  MIX_ENV=dev only. **The Hex/OTP/Elixir matrix is single-pin** (`.tool-versions` and mix.exs
-  elixir requirements are not consulted). **The deps projection is whole-tree writable**: one
+  MIX_ENV=dev only. **mix.exs elixir requirements are not consulted**: the OTP and Elixir
+  entries in `.tool-versions` are the declarative sources the toolchain lock reads, because
+  reading mix.exs means evaluating an Elixir program. **The deps projection is whole-tree
+  writable**: one
   dep's build can modify a sibling dep, recorded unattested in the closure.
 
 ## .NET
 
+- **Only an exact `global.json` selects the SDK.** `sdk.rollForward` must be `"disable"`;
+  there is no second source and no roll-forward, so a mismatch is a hard error rather than a
+  quiet upgrade.
 - **Strictest v0 boundary of any tailor** (all loud): one SDK-style .csproj only — no .sln, no
   ProjectReference lock entries, no Central Package Management, no
   packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.

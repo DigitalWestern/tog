@@ -148,7 +148,7 @@ fn hex_deps(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     Ok(deps)
 }
 
-/// Recompute `elixir::beam_fingerprint` from a candidate BEAM record's own
+/// Recompute `elixir::beam_fingerprint_for` from a candidate BEAM record's own
 /// identity inputs. Darwin and Linux use different formulas, and the Linux
 /// one includes the relocation schema, so both are reproduced exactly.
 pub fn beam_fingerprint_of(record: &Record) -> Option<String> {
