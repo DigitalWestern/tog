@@ -9,11 +9,14 @@ by position.
 
 ## Next up, in order
 
-1. **Toolchain lock (WP2).** The next large feature: a committed lock
-   naming the exact toolchain per project. PR 1 (the shipped-table adapter
-   and selector, `src/kernel/toolchain/`) is merged; the dormant lock core
-   (3), runtime propagation (4) and activation (5) remain, in that order, in
-   `docs/agent/DESIGNS.md` §1.
+1. **The two-machine toolchain-lock diff.** The toolchain lock shipped on
+   Linux on 2026-09-21; everything but this is done. A lock carries a row per
+   platform and is written from the releases complete on both, so a lock
+   written on Linux must sync on an arm64 Mac without rewriting itself and
+   `tog status` must answer identically on both. Sync the same project on
+   each machine and diff `tog-toolchain.toml` byte for byte. It is proven by
+   test today, not by two machines, and it is part of the macOS gate at the
+   bottom of this file.
 
 ## Decisions waiting on the owner
 
@@ -122,7 +125,9 @@ by position.
   records are routed into the sweep's refusal. It was never reviewed by an
   agent that did not write it.
 - **macOS arm64 gate. Last, by the owner's choice.** Run on the Mac:
-  `cargo test`, `cargo test --test gc -- --ignored`, and
-  `cargo test --test cli audit`, including the case-insensitive-filesystem
-  paths the root-key code relies on. Darwin identity goldens must stay
-  byte-identical. Nothing Linux-side clears this.
+  `cargo test`, `cargo test --test gc -- --ignored`,
+  `cargo test --test cli audit`, and
+  `cargo test --test toolchain_lock -- --ignored`, including the
+  case-insensitive-filesystem paths the root-key code relies on. Darwin
+  identity goldens must stay byte-identical, and the two-machine lock diff
+  above is run here. Nothing Linux-side clears this.

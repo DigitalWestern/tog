@@ -15,6 +15,31 @@ pub const LS_WORDS: &[&str] = &[
 ];
 pub const BUILD_WORDS: &[&str] = &["cargo", "go", "elixir", "dotnet"];
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
+
+/// What `tog update --toolchain` accepts as an ecosystem. These are the
+/// `[toolchain.<name>]` section keys of `tog-toolchain.toml`, which is why
+/// Rust appears under its own name rather than `cargo`; `cargo` is accepted
+/// as a spelling of it, because every other verb calls that ecosystem
+/// `cargo`.
+pub const TOOLCHAIN_WORDS: &[&str] = &["python", "node", "rust", "go", "ruby", "elixir", "dotnet"];
+
+/// The accepted spelling that is not a section key, offered for
+/// suggestions but not listed as one of the names.
+pub const TOOLCHAIN_ALIAS: &str = "cargo";
+
+/// The `[toolchain.<name>]` section key an accepted word names.
+pub fn toolchain_section(word: &str) -> Option<&'static str> {
+    match word {
+        "cargo" | "rust" => Some("rust"),
+        "python" => Some("python"),
+        "node" => Some("node"),
+        "go" => Some("go"),
+        "ruby" => Some("ruby"),
+        "elixir" => Some("elixir"),
+        "dotnet" => Some("dotnet"),
+        _ => None,
+    }
+}
 pub const SYNC_ALIASES: &[&str] = &["install", "i"];
 
 pub const COMMANDS: &[Spec] = &[
@@ -22,7 +47,7 @@ pub const COMMANDS: &[Spec] = &[
         name: "sync",
         group: Group::Everyday,
         summary: "realize and project the environment(s); aliases: install, i",
-        usage: "tog sync [--fresh] [--strict]        (aliases: install, i)",
+        usage: "tog sync [--fresh] [--strict] [--frozen]   (aliases: install, i)",
         description: "\
 Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
@@ -37,7 +62,8 @@ PROJECT INPUTS (any combination; each ecosystem found here is synced):
            requirements.lock.txt, and a Poetry/uv lockfile is imported
            when compatible. .python-version selects the interpreter: X.Y
            takes the newest pinned patch, X.Y.Z must be an exact pinned
-           build (default: CPython 3.12.14).
+           build, and with neither the newest pinned build is taken once
+           and then recorded in tog-toolchain.toml.
   node     package-lock.json (v2/v3), pnpm-lock.yaml (v9, v6 importer
            shape also accepted), yarn.lock (Yarn classic v1)
   cargo    Cargo.toml, Cargo.lock; a missing lock is written by the
@@ -48,6 +74,17 @@ PROJECT INPUTS (any combination; each ecosystem found here is synced):
   elixir   mix.exs, mix.lock; a missing lock is resolved by store mix
   dotnet   *.csproj with packages.lock.json (the lock is mandatory)
 
+TOOLCHAIN: the first writable sync writes tog-toolchain.toml at the project
+root, naming the exact runtime per ecosystem; commit it. Later syncs honor
+it and never reselect. A source file that disagrees with the lock
+(.python-version, .node-version, go.mod, rust-toolchain.toml, .ruby-version,
+.tool-versions, global.json) stops the sync and names
+'tog update --toolchain', which is the only way to move a locked runtime.
+
+--frozen never modifies project inputs, tog-toolchain.toml, or the catalog
+cache; it may realize store objects and write the projection after validation
+succeeds; validation failure exits before any write.
+
 Policy exceptions (unattested inputs, failed install scripts, ...) are
 recorded in .tog/closures/*.json and summarized at the end; --strict, a
 TOG_STRICT=1 environment, or a .tog/policy.toml deny list refuses
@@ -55,6 +92,10 @@ them instead.",
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
             ("--strict", "refuse every policy exception (same as TOG_STRICT=1)"),
+            (
+                "--frozen",
+                "validate tog-toolchain.toml and the dependency locks without writing either; fail if missing or stale",
+            ),
             HELP_OPTION,
         ],
         words: &[],
@@ -104,16 +145,30 @@ choice. For a plain requirements file tog deletes the line itself.",
     Spec {
         name: "update",
         group: Group::Everyday,
-        summary: "update dependencies within the manifest's constraints, sync",
-        usage: "tog update [<package>...] [--no-sync]",
+        summary: "update dependencies, or --toolchain, and sync",
+        usage: "tog update [<package>...] [--no-sync]\n  tog update --toolchain [<ecosystem>] [--no-sync]",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
 bundle update, mix deps.update, and pnpm update --lockfile-only. Poetry, PDM,
 Yarn classic, and .NET projects are told which command to run with their own
-tool.",
+tool.
+
+--toolchain is the other update, and the two never mix: it re-reads the
+project's declarative toolchain sources, selects the newest compatible
+release for every ecosystem the project has, or only <ecosystem> — python,
+node, rust (spelled cargo too), go, ruby, elixir, dotnet — rewrites
+tog-toolchain.toml, and syncs. It takes no package name and leaves every
+dependency lock alone. It is also how an ecosystem the project just gained
+gets its section, and the next step every stale-lock refusal names.
+--no-sync stops after the lock is written, so the diff can be reviewed
+before anything is realized.",
         options: &[
             ("--no-sync", "stop after the lock edit; review, then run 'tog'"),
+            (
+                "--toolchain [<ecosystem>]",
+                "re-select the toolchain from the project's version files and rewrite tog-toolchain.toml, then sync",
+            ),
             HELP_OPTION,
         ],
         words: &[],
