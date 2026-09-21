@@ -3,6 +3,11 @@
 # Install as ~/.tog/policy.toml (or point TOG_POLICY at it) on build
 # machines, commit it as .tog/policy.toml at a repository root, or hand
 # it to the admission gate: `tog audit --policy policy-company.toml`.
+# Committing it means it has to be tracked: `.tog/` is half record and half
+# cache, so ignore `**/.tog/*` and un-ignore `**/.tog/policy.toml` and
+# `**/.tog/closures/` (the `**/` catches a monorepo's per-subproject
+# directories). The stanza and the reasoning are in the README, under
+# "What .tog/ holds, and what to commit".
 # Policies union: this file can only add denials to whatever the machine and
 # project already deny. Every kind named here is one of policy::KINDS; a typo
 # is refused at parse time, never ignored.

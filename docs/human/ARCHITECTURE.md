@@ -35,7 +35,8 @@ Stolen from Nix, minus the interface.
   locks coexist as different objects.
 - **Projection**: a project's `.venv` is one symlink into the store, swapped
   atomically. Rollback = swapping back (instant cache hit). Provenance lives
-  in `.tog/closure.json`.
+  in `.tog/closures/<ecosystem>.json`, one file per ecosystem, and that file
+  is committed: `tog audit` reads it.
 - **Node projection is a forest** (`node-forest/2`): the root `node_modules`
   is a symlink into `<TOG_STORE>/forests/<project-key>/<projection-id>/`,
   each workspace importer gets its own symlink, and the immutable env holds
@@ -50,8 +51,9 @@ Per design review: **Plan → Realize → Project**. The tailor (adapter) turns
 manifests and lockfiles into a typed `Plan`. The kernel realizes it: verify
 downloads into the cache, provision pinned toolchains, commit objects
 atomically. Projection writes the symlink and the closure JSON. Plans are
-cached in `.tog/plan.json` keyed by input hash, so unchanged locks never
-touch the network again.
+cached in `.tog/plan.json` (`.tog/go-plan.json` for Go) keyed by input hash,
+so unchanged locks never touch the network again. The plan cache is
+machine-local and is not committed; the closure JSON is.
 
 Six writes under `.tog/` go through `kernel::fsroot::ProjectRoot`, which
 walks every component from a held project descriptor with `O_NOFOLLOW`, so a
@@ -68,9 +70,10 @@ shim behind its own canonicalized containment check. Closing those is
 
 ## Vocabulary
 
-The blanket theme (a tog is a duvet's warmth rating), used in docs and
-conversation (code keeps boring
-identifiers):
+The bedding theme (a tog is a duvet's warmth rating), used in docs and
+conversation; code keeps boring identifiers, and the CLI never prints any of
+these words. The words it does print — store, realize, project, closure,
+exception, permissive — are defined in the README:
 
 | word | meaning | in code |
 |---|---|---|

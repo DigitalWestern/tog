@@ -576,12 +576,17 @@ fn failures_exit_1_and_survive_quiet() {
     let out = tog(&project.0, &home.0, &["plan"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
-    assert!(stderr.starts_with("tog: error: no_manifest"), "{stderr}");
+    assert!(
+        stderr.starts_with("tog: error: nothing to sync here"),
+        "{stderr}"
+    );
+    // The machine prefix never reaches the user (#100).
+    assert!(!stderr.contains("no_manifest"), "{stderr}");
 
     // --quiet silences narration but never the error.
     let out = tog(&project.0, &home.0, &["--quiet", "plan"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).starts_with("tog: error: no_manifest"));
+    assert!(text(&out.stderr).starts_with("tog: error: nothing to sync here"));
     let out = tog(&project.0, &home.0, &["-q", "--no-color", "-v", "plan"]);
     assert_eq!(out.status.code(), Some(1));
 }
@@ -598,7 +603,7 @@ fn directory_option_changes_where_the_command_runs() {
         &["-C", project.0.to_str().unwrap(), "plan"],
     );
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("no_manifest"));
+    assert!(text(&out.stderr).contains("nothing to sync here"));
     let out = tog(
         &home.0,
         &home.0,
@@ -660,7 +665,10 @@ fn install_alias_reaches_sync() {
     for args in [&["install"][..], &["i"], &["sync"]] {
         let out = tog(&project.0, &home.0, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
-        assert!(text(&out.stderr).contains("no_manifest"), "{args:?}");
+        assert!(
+            text(&out.stderr).contains("nothing to sync here"),
+            "{args:?}"
+        );
     }
 }
 

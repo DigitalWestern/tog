@@ -108,6 +108,183 @@ H="$WORK/h6"
 run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" --no-completions >/dev/null 2>&1 || bad "installer exited non-zero"
 check "no completion files"               test ! -e "$H/.tog/completions/_tog" -a ! -e "$H/.local/share/bash-completion/completions/tog"
 
+echo "== 7. the store is named and sized before the PATH hint"
+H="$WORK/h7"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
+check "names the store path"              grep -Fq "store: $H/.tog/store" <<<"$out"
+check "says what will fill it"            grep -Eq 'created by the first sync|so far' <<<"$out"
+check "names the uninstall command"       grep -Fq 'install.sh --uninstall' <<<"$out"
+check "a written completion is never empty" sh -c "[ -s '$H/.tog/completions/_tog' ] && [ -s '$H/.local/share/bash-completion/completions/tog' ]"
+
+echo "== 8. replacing an existing tog reports old -> new"
+H="$WORK/h8"
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "tog 0.0.1-old"\n' > "$H/.local/bin/tog"
+chmod 755 "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
+check "names both versions"               grep -Fq 'upgraded tog 0.0.1-old -> ' <<<"$out"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
+check "a same-version rerun says so"      grep -Fq '(same version)' <<<"$out"
+
+echo "== 9. --uninstall removes what it installed and keeps the store"
+H="$WORK/h9"; mkdir -p "$H"; echo '# mine' > "$H/.bashrc"; echo '# mine' > "$H/.profile"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+mkdir -p "$H/.tog/store/objects"; echo keep > "$H/.tog/store/objects/an-object"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "binary removed"                    test ! -e "$H/.local/bin/tog"
+check "env file removed"                  test ! -e "$H/.tog/env"
+check "zsh completion removed"            test ! -e "$H/.tog/completions/_tog"
+check "bash completion removed"           test ! -e "$H/.local/share/bash-completion/completions/tog"
+check ".bashrc block removed"             test "$(count_marks "$H/.bashrc")" = 0
+check ".bashrc user content preserved"    grep -q '^# mine' "$H/.bashrc"
+check ".profile block removed"            test "$(count_marks "$H/.profile")" = 0
+check ".profile user content preserved"   grep -q '^# mine' "$H/.profile"
+check "store kept"                        test -f "$H/.tog/store/objects/an-object"
+check "names the store it kept"           grep -Fq "$H/.tog/store" <<<"$out"
+check "prints how to remove the store"    grep -Fq "rm -rf '$H/.tog/store'" <<<"$out"
+check "a second uninstall is harmless" run_installer "$H" /bin/bash "$BASE_PATH" --uninstall
+
+echo "== 10. --uninstall with nothing installed"
+H="$WORK/h10"; mkdir -p "$H"
+out="$(run_installer "$H" /bin/zsh "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "says there is no binary"           grep -Fq 'no tog binary at' <<<"$out"
+if grep -Fq downloading <<<"$out"; then bad "--uninstall downloaded something"; else ok "--uninstall never downloads"; fi
+
+echo "== 11. --uninstall refuses a startup file whose markers do not pair"
+H="$WORK/h12"; mkdir -p "$H"; echo '# mine' > "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+# Somebody edited the block out by hand and left the opening marker behind.
+grep -v '^# <<< tog <<<$' "$H/.bashrc" > "$H/.bashrc.tmp" && mv "$H/.bashrc.tmp" "$H/.bashrc"
+echo '# after the unclosed block' >> "$H/.bashrc"
+before="$(cat "$H/.bashrc")"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "refuses the unbalanced file"       grep -Fq 'refusing to edit it' <<<"$out"
+check "leaves the unbalanced file byte-identical" test "$before" = "$(cat "$H/.bashrc")"
+check "content after the marker survives" grep -Fq '# after the unclosed block' "$H/.bashrc"
+check "no backup written for a refusal"   test ! -e "$H/.bashrc.tog.bak"
+check "the binary still went"             test ! -e "$H/.local/bin/tog"
+
+echo "== 12. a balanced strip keeps a backup and the file's mode"
+H="$WORK/h13"; mkdir -p "$H"; echo '# mine' > "$H/.bashrc"; chmod 600 "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+mode_before="$(ls -l "$H/.bashrc" | cut -c1-10)"
+run_installer "$H" /bin/bash "$BASE_PATH" --uninstall >/dev/null 2>&1 || bad "--uninstall exited non-zero"
+check "backup kept"                       grep -Fq '# >>> tog >>>' "$H/.bashrc.tog.bak"
+check "block gone from the live file"     test "$(count_marks "$H/.bashrc")" = 0
+check "mode preserved across the rewrite" test "$mode_before" = "$(ls -l "$H/.bashrc" | cut -c1-10)"
+
+echo "== 13. --uninstall does not delete something that is not tog"
+H="$WORK/h14"; mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "someone-elses-tool 2.0"\n' > "$H/.local/bin/tog"
+chmod 755 "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "imposter left in place"            test -x "$H/.local/bin/tog"
+check "says why it left it"               grep -Fq 'does not identify itself as tog' <<<"$out"
+# A symlink out of the install directory is a package manager's, not ours.
+H="$WORK/h15"; mkdir -p "$H/.local/bin" "$H/opt"
+cp "$BIN" "$H/opt/tog"
+ln -s "$H/opt/tog" "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "outside symlink left in place"     test -L "$H/.local/bin/tog"
+check "says it is a symlink elsewhere"    grep -Fq 'outside' <<<"$out"
+
+echo "== 14. empty --dir and missing HOME are usage errors, not surprises"
+if run_installer "$WORK/h16" /bin/bash "$BASE_PATH" --dir= >/dev/null 2>&1; then
+    bad "--dir= was accepted"
+else ok "--dir= is refused"; fi
+if env -i PATH="$BASE_PATH" TERM=dumb TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
+    sh "$ROOT/install.sh" >/dev/null 2>&1; then
+    bad "installer ran with no HOME"
+else ok "no HOME is refused"; fi
+out="$(env -i PATH="$BASE_PATH" TERM=dumb sh "$ROOT/install.sh" 2>&1 || true)"
+check "the no-HOME message names HOME"    grep -Fq 'HOME is not set' <<<"$out"
+
+echo "== 15. the printed 'rm -rf' survives an apostrophe in the store path"
+H="$WORK/h17"; mkdir -p "$H"
+STORE_ODD="$H/it's a \"weird\" store"
+mkdir -p "$STORE_ODD"
+out="$(env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
+    TOG_STORE="$STORE_ODD" TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
+    sh "$ROOT/install.sh" --uninstall 2>&1)"
+# Take the argument the script told the user to run and feed it back to a
+# shell: it has to name the directory it started from, byte for byte.
+printed="$(sed -n 's/^tog-install: to reclaim that space:  rm -rf //p' <<<"$out")"
+back="$(eval "printf '%s' $printed" 2>/dev/null || echo '<eval failed>')"
+check "the rm line round-trips through a shell" test "$back" = "$STORE_ODD"
+
+echo "== 16. a broken symlink at the install path is reported, not ignored"
+H="$WORK/h18"; mkdir -p "$H/.local/bin"
+ln -s "$H/nowhere/tog" "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "broken symlink left in place"      test -L "$H/.local/bin/tog"
+check "says the target does not exist"    grep -Fq 'which does not exist' <<<"$out"
+check "does not claim there is no tog"    sh -c "! grep -Fq 'no tog binary at' <<<\"\$(cat)\"" <<<"$out"
+
+echo "== 17. a relative symlink that escapes the install dir is refused"
+H="$WORK/h19"; mkdir -p "$H/.local/bin" "$H/elsewhere"
+cp "$BIN" "$H/elsewhere/tog"
+# Spelled inside the install directory, resolving outside it.
+ln -s "../../elsewhere/tog" "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "escaping relative symlink kept"    test -L "$H/.local/bin/tog"
+check "its target kept"                   test -f "$H/elsewhere/tog"
+check "says where it really resolves"     grep -Fq "$H/elsewhere/tog, outside" <<<"$out"
+
+echo "== 18. malformed marker blocks are refused, substrings are not markers"
+# (a) an end marker before its begin: counts match, ordering does not.
+H="$WORK/h20"; mkdir -p "$H"
+{ echo '# mine'; echo '# <<< tog <<<'; echo '# stray'; echo '# >>> tog >>>'; } > "$H/.bashrc"
+before="$(cat "$H/.bashrc")"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "end-before-begin refused"          grep -Fq 'malformed tog block' <<<"$out"
+check "end-before-begin file untouched"   test "$before" = "$(cat "$H/.bashrc")"
+check "no backup written for a refusal"   test ! -e "$H/.bashrc.tog.bak"
+# (b) a marker quoted inside a longer line is not a marker.
+H="$WORK/h21"; mkdir -p "$H"
+echo 'echo "# >>> tog >>> is the marker we look for"' > "$H/.bashrc"
+before="$(cat "$H/.bashrc")"
+run_installer "$H" /bin/bash "$BASE_PATH" --uninstall >/dev/null 2>&1 || bad "--uninstall exited non-zero"
+check "substring line is not a marker"    test "$before" = "$(cat "$H/.bashrc")"
+check "no backup written for a non-block" test ! -e "$H/.bashrc.tog.bak"
+
+echo "== 19. a symlinked rc file is edited through, not replaced"
+H="$WORK/h22"; mkdir -p "$H/dotfiles"
+echo '# mine' > "$H/dotfiles/bashrc"
+ln -s "$H/dotfiles/bashrc" "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+check "the block landed in the real file" grep -Fq '# >>> tog >>>' "$H/dotfiles/bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" --uninstall >/dev/null 2>&1 || bad "--uninstall exited non-zero"
+check ".bashrc is still a symlink"        test -L "$H/.bashrc"
+check "it still points at the dotfile"    test "$(readlink "$H/.bashrc")" = "$H/dotfiles/bashrc"
+check "the real file lost the block"      test "$(count_marks "$H/dotfiles/bashrc")" = 0
+check "the real file kept its content"    grep -q '^# mine' "$H/dotfiles/bashrc"
+check "the backup sits next to the real file" test -f "$H/dotfiles/bashrc.tog.bak"
+
+echo "== 20. a symlinked backup path is refused"
+H="$WORK/h23"; mkdir -p "$H" "$H/bait"
+echo '# mine' > "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+echo 'do not clobber me' > "$H/bait/precious"
+ln -s "$H/bait/precious" "$H/.bashrc.tog.bak"
+before="$(cat "$H/.bashrc")"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "symlinked backup refused"          grep -Fq 'refusing to write a backup through it' <<<"$out"
+check "the rc file is untouched"          test "$before" = "$(cat "$H/.bashrc")"
+check "the bait file is untouched"        grep -Fqx 'do not clobber me' "$H/bait/precious"
+
+echo "== 21. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
+for value in 0 1; do
+    H="$WORK/h11-$value"; mkdir -p "$H"
+    env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
+        TOG_NO_MODIFY_PATH="$value" TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
+        sh "$ROOT/install.sh" >/dev/null 2>&1 || bad "installer exited non-zero"
+    if [ "$value" = 0 ]; then
+        check "TOG_NO_MODIFY_PATH=0 still edits .bashrc" test "$(count_marks "$H/.bashrc")" = 1
+    else
+        check "TOG_NO_MODIFY_PATH=1 edits nothing"       test ! -e "$H/.bashrc"
+    fi
+done
+
 echo
 echo "install.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

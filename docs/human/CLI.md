@@ -162,7 +162,7 @@ sync only where the policy chain declares a `[signing]` table.
 
 **add / remove / update** edit the manifest and lock with the ecosystem's own
 pinned tool (uv, npm, pnpm, cargo, go, bundler, mix), then sync. `--no-sync`
-stops after the edit so the diff can be reviewed; `--dev` selects
+stops after the edit so the diff can be reviewed; `--dev` (`-D`) selects
 development dependencies (`remove --dev` only for uv and Cargo). Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
 print the exact line and file to run yourself, exit 1, no writes. Every
@@ -195,7 +195,14 @@ package.json script of the same name wins over an executable on PATH and
 runs with the npm lifecycle environment; the exit code passes through.
 `tog <script>` is the short form for any first word that is not a
 built-in command, and a built-in always wins (`tog build` is the
-sandboxed build, never a script named build).
+sandboxed build, never a script named build; `tog run build` reaches the
+script). Arguments after the script name go to the script unchanged, so
+there is no npm-style `--` separator: `tog test --watch` passes `--watch`,
+and `tog test -- --watch` passes a literal `--` as well. Completion offers
+the package.json script names as first words whenever a package.json is
+present, which is where most people find the shorthand. There is no
+`tog env` and no direnv integration: everything still runs through a tog
+process (issue #108).
 
 A projection is a symlink into an immutable store object, so the commands
 that would *mutate* one are refused with the verb that replaces them, before
@@ -221,9 +228,9 @@ aside — saying where it went — and re-projects.
 
 **x** resolves a tool from PyPI or npm, realizes it as an ordinary store
 environment (a store hit from the second run on), and executes it. Registry:
-a `py:`/`npm:` prefix on the tool, `--py`/`--npm`, or the current project's
-ecosystem (Python first, then Node); outside a project the prefix is
-required. `--from` names the package when the executable is called
+a `py:`/`npm:` prefix on the tool, `--py` (`--python`) or `--npm`
+(`--node`), or the current project's ecosystem (Python first, then Node);
+outside a project the prefix is required. `--from` names the package when the executable is called
 something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 
 - It removes cached environments under `~/.tog/x/`, or only the selected
@@ -272,6 +279,32 @@ primary closure, each record is current for the inputs on disk, and no
 recorded exception is denied or unknown. It does not prove the signer's
 sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 
+**What has to be in the repository for this to work.** `audit` reads
+`.tog/closures/*.json`, and the policy chain includes `.tog/policy.toml` at
+every ancestor. Both are records of a decision, so both are committed; the
+rest of `.tog/` (`plan.json`, `go-plan.json`, the Python manifest snapshots
+and stamps, `cargo-home/`) is a machine-local cache and is ignored. A
+repository that ignores all of `.tog/` has nothing for `ls`, `sbom` or
+`status` to read, and no closure diff for a reviewer to look at. The
+`.gitignore` stanza and the full table are in
+[the README](../../README.md#what-tog-holds-and-what-to-commit).
+
+Be clear about what committing them does and does not buy. `ls` and `sbom`
+read a committed closure with no store and no projection, and a closure diff
+is how a reviewer sees that a pull request added a `git-dependency` or a
+`weak-integrity` exception. But `status` and `audit` both check the *local*
+projection, so on a fresh checkout with no `.venv` or `node_modules` they
+report `missing` / `stale` and exit 1. Neither is a records-only verifier:
+a gate has to sync first, in the checkout it is judging.
+
+A closure is one file per ecosystem, not one per platform, and it records
+the platform it was synced on. Two people on different platforms therefore
+overwrite each other's record, and the one the gate did not run on is
+`stale` ("synced on <platform>, not this host"). A sync also rewrites
+`projected_at` every time, so a local sync dirties the committed file even
+when the environment is unchanged. Have one protected job, on one platform,
+write the closures that are committed.
+
 Signing: `tog keygen <path>` writes an Ed25519 key file (mode 0600,
 never overwriting an existing file or symlink) and prints the `[signing]`
 table that trusts it; the private seed is never printed. With
@@ -292,8 +325,9 @@ add the new public key to the machine policy, re-sync under the new private
 key, then remove the old key; removal is revocation, and the records it
 signed become `untrusted` with the re-sync fix in the message. Expected
 deployment: a protected CI job holds the key, runs a trusted binary against
-an approved checkout, and commits the closures; pull-request jobs run
-`audit` with public keys only. A job that runs untrusted project code must
+an approved checkout, and commits the closures; a fork's pull request gets a
+sync-only job with no key and no `audit` (see "Gating a pull request with
+sync and audit"). A job that runs untrusted project code must
 not hold a signing key: `sync` can execute project code during planning and
 `fmt` can delegate a package script, and mode 0600 does not stop same-user
 code from reading the key. Keep it outside the checkout, the store, and any
@@ -390,6 +424,85 @@ either position); the filter word is one of
 platform, store, sandbox, host C toolchain, and realized toolchains, each
 line `ok`/`warn`/`fail` (lowercase, in text and in JSON) with the fix;
 exit 1 on any fail.
+
+### Gating a pull request with sync and audit
+
+`audit` judges the closure in the checkout it is run in, against the
+projection in that checkout, so the job has to sync before it audits. That
+also makes the gate stronger than a file check: the sync itself fails on a
+denied exception, so the policy is enforced while the environment is built
+rather than inspected afterwards.
+
+```yaml
+name: tog
+on: [pull_request]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tog
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
+            | sh -s -- --no-modify-path --no-completions
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The machine policy: the deny list, and the public keys audit trusts.
+      # Nothing secret — a public key is a public key — but audit exits 2
+      # without a [signing] table, so the gate is never silently unconfigured.
+      - name: Machine policy
+        run: |
+          mkdir -p ~/.tog
+          cp ci/tog-policy.toml ~/.tog/policy.toml
+
+      # Build the environment under that policy. A denied exception fails
+      # here, before anything is judged. The key signs the closure this sync
+      # writes; see the caveat below for which jobs may hold one.
+      - name: Sync
+        env:
+          TOG_SIGNING_KEY: ${{ runner.temp }}/tog.key
+        run: |
+          # printf, not a herestring: no bash dependency, and no newline
+          # appended to the key. umask before the write, so the file is
+          # never briefly world-readable.
+          (umask 077; printf '%s' '${{ secrets.TOG_SIGNING_KEY }}' > "$TOG_SIGNING_KEY")
+          tog sync
+          rm -f "$TOG_SIGNING_KEY"
+
+      # Every closure signed by a trusted key, current for the inputs on
+      # disk, no denied or unknown exception. Exit 1 is a denied build,
+      # exit 2 an operator mistake (missing or malformed policy).
+      - run: tog audit
+
+      - run: tog sbom -o sbom.json
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom.json }
+```
+
+**Which jobs may hold the key.** `sync` executes project code while
+planning, and mode 0600 does not stop same-user code from reading a key, so
+the job above is only safe on a ref you control — a protected branch, or a
+`pull_request_target`-style job you have deliberately reviewed. For pull
+requests from forks, drop the key and the `audit` step and run the sync
+alone:
+
+```yaml
+      - run: tog sync --strict    # or: tog sync, under ci/tog-policy.toml
+      - run: tog sbom -o sbom.json
+```
+
+That still refuses every exception the policy denies, which is the part that
+matters for an untrusted branch; it just does not produce a signed record.
+The closures a reviewer reads in the diff come from the protected job, or
+from a developer running a signing sync locally.
+
+On a runner without unprivileged user namespaces the build sandbox is
+unavailable, so a project that needs `tog build` or sdist compilation needs
+a runner that has them; `sync` of a wheel-only or lock-only project does
+not.
+
 
 ## Maintain verbs
 

@@ -90,7 +90,7 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
         name: "remove",
         group: Group::Everyday,
         summary: "remove a dependency, re-lock, sync",
-        usage: "tog remove <package>... [--no-sync]",
+        usage: "tog remove <package>... [--dev] [--no-sync]",
         description: "\
 The inverse of add, through the same pinned tools with the same ecosystem
 choice. For a plain requirements file tog deletes the line itself.",
@@ -635,6 +635,50 @@ mod tests {
             "help lines over 80 columns:\n{}",
             over.join("\n")
         );
+    }
+
+    /// The extra spellings the parser accepts but the option table used to
+    /// hide are on the help screen, and no USAGE line omits the primary long
+    /// spelling of an option its own OPTIONS block lists (#100). The second
+    /// half checks one spelling per option on purpose: `tog x` lists
+    /// `--python` and `--node` in OPTIONS but keeps its usage line to
+    /// `[--py | --npm]` to stay inside eighty columns.
+    #[test]
+    fn help_lists_the_extra_spellings_and_usage_matches_options() {
+        for (command, spellings) in [
+            ("add", &["-D", "--dev"][..]),
+            ("remove", &["-D", "--dev"]),
+            ("x", &["--py", "--python", "--npm", "--node"]),
+        ] {
+            let text = help(spec(command).expect(command));
+            for spelling in spellings {
+                assert!(
+                    text.contains(spelling),
+                    "tog help {command} hides '{spelling}'"
+                );
+            }
+        }
+        // `remove --dev` is real, so the usage line has to show it.
+        assert!(spec("remove").unwrap().usage.contains("[--dev]"));
+        for command in COMMANDS {
+            let usage = command.usage;
+            for (flag, _) in command.options {
+                let long = super::super::parse::option_spellings(flag)
+                    .find(|spelling| spelling.starts_with("--"));
+                let Some(long) = long else { continue };
+                // `-h` is never spelled in a usage line, and a command that
+                // re-lists a global flag (`ls -v`) documents it in OPTIONS
+                // only, because the global block already covers where it goes.
+                if long == "--help" || super::super::parse::GLOBAL_FLAGS.contains(&long) {
+                    continue;
+                }
+                assert!(
+                    usage.contains(long),
+                    "tog {} usage omits {long}: {usage}",
+                    command.name
+                );
+            }
+        }
     }
 
     /// The everyday verbs come first in their group, and the aliases are
