@@ -47,7 +47,7 @@ sandbox and native builds need them; the
 $ tog doctor
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
-ok    disk         11.2 GiB free under the store
+ok    disk         12.6 GiB free under the store
 ok    toolchains   none realized yet; the first 'tog sync' downloads what the project needs
 ok    sandbox      bubblewrap at /usr/bin/bwrap
 ok    c-toolchain  cc, c++, make, pkg-config, patch on PATH
@@ -70,14 +70,18 @@ $ cd api
 $ tog sync
 tog: python inputs: requirements.txt
 synced: .venv -> /tmp/tog-demo/store/objects/4002574e4e21aab52a9e4abe4ff2b2c6e9158b48-env-3.12.14
-tog: closures unsigned; tog audit reports them outdated (set TOG_SIGNING_KEY=<key file> to sign; 'tog keygen' makes one)
+tog: warning: closures are written unsigned, which is fine until you want 'tog audit' to vouch for them (set TOG_SIGNING_KEY=<key file>; 'tog keygen' makes one). Said once per store
 ```
 
-5.4 seconds from an empty store, most of it downloading CPython. You did not
-install Python: tog fetched a pinned, hash-verified 3.12.14 into the store
-and built the venv out of it. The third line is about CI, not about this
-sync — records are written unsigned until you hand tog a key, and `tog
-audit` is the only command that minds. Ignore it until you set up a gate.
+7.9 seconds from an empty store, most of it downloading CPython. On a
+terminal the download draws a progress line; this transcript was piped to a
+file, so it has none. You did not install Python: tog fetched a pinned,
+hash-verified 3.12.14 into the store and built the venv out of it.
+
+The warning is about CI, not about this sync. Records are written unsigned
+until you hand tog a key, `tog audit` is the only command that minds, and
+the line is said once per store rather than on every sync — you will not see
+it again below.
 
 Inside a project, a bare `tog` means `tog sync`, so from here on it is one
 word.
@@ -114,7 +118,7 @@ $ tog sync
 synced: node_modules -> /tmp/tog-demo/store/objects/9d0333722d78ff1fa9a845b3693f9794be556d7c-env-24.20.0
 ```
 
-3.8 seconds, including downloading Node 24.20.0. A directory holding both a
+4.3 seconds, including downloading Node 24.20.0. A directory holding both a
 `requirements.txt` and a `package-lock.json` gets both ecosystems out of one
 `tog sync`, with no flags and no ordering.
 
@@ -181,7 +185,7 @@ $ du -sh /tmp/tog-demo/store
 
 That is two toolchains plus the verified download cache they came from. It
 does not grow per project: a second project on the same lock is a store hit
-on the same object id, in a seventh of a second.
+on the same object id, in an eighth of a second.
 
 ```
 $ cd ../api2 && tog
