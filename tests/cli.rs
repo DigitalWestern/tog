@@ -505,8 +505,9 @@ fn fmt_script_precedence_does_not_try_rustfmt_without_a_projection() {
 /// `--eco` is tog's own selector: in a polyglot root whose package.json
 /// has a `fmt` script, `--eco rust` must reach the Rust path instead of
 /// running the script with a meaningless trailing `--eco rust`. The fixture
-/// pins an unrealizable toolchain so the Rust path fails offline, before any
-/// download, with a diagnostic that could only come from that path.
+/// pins a channel no catalog release carries, so the Rust path fails
+/// offline, before any download, on a diagnostic that names the channel and
+/// could only come from that path.
 #[test]
 fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     let home = TempDir::new("fmt-eco-home");
@@ -531,7 +532,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("unsupported Rust toolchain \"1.70.0\""),
+        stderr.contains("rust toolchain") && stderr.contains("1.70.0"),
         "--eco rust did not reach the Rust path: {stderr}"
     );
     assert!(
@@ -559,7 +560,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
         stderr.contains("command 'fmt'"),
         "script no longer wins: {stderr}"
     );
-    assert!(!stderr.contains("unsupported Rust toolchain"), "{stderr}");
+    assert!(!stderr.contains("rust toolchain"), "{stderr}");
     // Opening the store creates its directories; nothing was realized in it.
     let objects = home.0.join("store/objects");
     assert!(

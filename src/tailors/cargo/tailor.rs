@@ -11,10 +11,10 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,13 @@ impl Tailor for Cargo {
         "cargo"
     }
 
+    /// The lock names the language, not the package manager: a project's
+    /// `rust-toolchain.toml` and the `[toolchain.rust]` section are the
+    /// same statement.
+    fn lock_ecosystem(&self) -> &'static str {
+        "rust"
+    }
+
     fn owns_closure(&self, name: &str) -> bool {
         name == "cargo" || name == "rustfmt"
     }
@@ -48,7 +55,8 @@ impl Tailor for Cargo {
         cargo::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let _ = toolchain;
         let inputs = inputs::load_cargo_inputs(ctx.platform, dir, &ctx.store)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
@@ -57,9 +65,12 @@ impl Tailor for Cargo {
         &self,
         ctx: &Context,
         dir: &Path,
-        fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let _ = request.toolchain;
+        let fresh = request.fresh;
+
         let store = &ctx.store;
         let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store)?;
         let rust_obj = &inputs.rust_obj;
@@ -109,8 +120,10 @@ impl Tailor for Cargo {
         _root: &Path,
         cwd: &Path,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let _ = toolchain;
         let store = &ctx.store;
         let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store)?;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
@@ -294,8 +307,10 @@ impl Tailor for Cargo {
         cwd: &Path,
         check: bool,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<i32> {
+        let _ = toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
         let activity = &ctx.activity;

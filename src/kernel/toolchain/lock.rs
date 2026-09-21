@@ -11,10 +11,15 @@
 //! enforcement arrive with activation; this PR only reads inputs and proves
 //! the file round-trips byte-identically.
 
+use super::input::InputRow;
+use super::{qualified, ArtifactRow, Bundle, Component};
+use crate::kernel::digest::Digest;
 use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::platform::Platform;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Project-relative path of the lock file.
 pub const LOCK_PATH: &str = "tog-toolchain.toml";
@@ -64,13 +69,50 @@ struct PlatformLock {
     artifacts: BTreeMap<String, ArtifactLock>,
 }
 
+/// `primary` is one component name or a list of them. One entry is written
+/// and read as a bare string (`primary = "node"`), more as an array
+/// (`primary = ["otp", "elixir"]`), so the two spellings are one value.
+mod primary_serde {
+    use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(match OneOrMany::deserialize(deserializer)? {
+            OneOrMany::One(name) => vec![name],
+            OneOrMany::Many(names) => names,
+        })
+    }
+
+    pub fn serialize<S>(names: &[String], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match names {
+            [one] => one.serialize(serializer),
+            many => many.serialize(serializer),
+        }
+    }
+}
+
+/// One ecosystem's row. The fields are private: a reader reconstructs the
+/// kernel [`Bundle`] and the recorded [`InputRow`]s through the accessors
+/// below, so no caller depends on the TOML shape.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct EcoLock {
+pub struct EcoLock {
     runtime: String,
     release: String,
     bundle_id: String,
-    primary: String,
+    #[serde(with = "primary_serde")]
+    primary: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     revision: Option<u64>,
     components: Vec<String>,
@@ -142,11 +184,10 @@ impl ToolchainLock {
             if entry.components.is_empty() {
                 return Err(bad("empty components".into()));
             }
-            if !entry.components.contains(&entry.primary) {
-                return Err(bad(format!(
-                    "primary {} is not a listed component",
-                    entry.primary
-                )));
+            for primary in &entry.primary {
+                if !entry.components.contains(primary) {
+                    return Err(bad(format!("primary {primary} is not a listed component")));
+                }
             }
             if entry.inputs.is_empty() {
                 return Err(bad("no inputs".into()));
@@ -298,7 +339,19 @@ impl ToolchainLock {
             out.push_str(&format!("runtime = {}\n", quoted(&entry.runtime)));
             out.push_str(&format!("release = {}\n", quoted(&entry.release)));
             out.push_str(&format!("bundle_id = {}\n", quoted(&entry.bundle_id)));
-            out.push_str(&format!("primary = {}\n", quoted(&entry.primary)));
+            match entry.primary.as_slice() {
+                [one] => out.push_str(&format!("primary = {}\n", quoted(one))),
+                many => {
+                    out.push_str("primary = [");
+                    for (i, name) in many.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(&quoted(name));
+                    }
+                    out.push_str("]\n");
+                }
+            }
             if let Some(revision) = entry.revision {
                 out.push_str(&format!("revision = {revision}\n"));
             }
@@ -359,10 +412,289 @@ impl ToolchainLock {
         }
     }
 
+    /// The raw lock bytes, or `None` when the file is absent. The bytes a
+    /// caller compares before publishing come from here, never from a
+    /// re-serialized parse tree.
+    pub fn read_bytes_via(root: &ProjectRoot) -> io::Result<Option<Vec<u8>>> {
+        root.read_file(Path::new(LOCK_PATH))
+    }
+
     /// Ecosystems named in the lock.
     pub fn ecosystems(&self) -> Vec<&str> {
         self.inner.toolchain.keys().map(String::as_str).collect()
     }
+
+    /// One ecosystem's row, or `None` when the lock has no section for it.
+    pub fn ecosystem(&self, name: &str) -> Option<&EcoLock> {
+        self.inner.toolchain.get(name)
+    }
+
+    /// An empty lock for `tog_version`. It is not valid until at least one
+    /// ecosystem has been set: a lock with no toolchain entry states nothing.
+    pub fn new(tog_version: &str) -> ToolchainLock {
+        ToolchainLock {
+            inner: LockFile {
+                schema_version: SCHEMA_VERSION,
+                tog_version: tog_version.to_string(),
+                toolchain: BTreeMap::new(),
+            },
+        }
+    }
+
+    /// Record `bundle` and the consulted `inputs` as this ecosystem's
+    /// section, replacing one that is already there, then validate the whole
+    /// lock. That replacement is what an update writes.
+    pub fn set_ecosystem(
+        &mut self,
+        ecosystem: &str,
+        bundle: &Bundle,
+        inputs: &[InputRow],
+    ) -> io::Result<()> {
+        let runtime = bundle
+            .primary
+            .first()
+            .ok_or_else(|| invalid(format!("release {}: no primary component", bundle.release)))?
+            .clone();
+        let mut components = Vec::new();
+        let mut component = BTreeMap::new();
+        for entry in &bundle.components {
+            components.push(entry.name.clone());
+            component.insert(
+                entry.name.clone(),
+                ComponentLock {
+                    version: entry.version.clone(),
+                    embedded_in: entry.embedded_in.clone(),
+                },
+            );
+        }
+        let mut platforms: BTreeMap<String, PlatformLock> = BTreeMap::new();
+        for row in &bundle.artifacts {
+            platforms
+                .entry(row.platform.triple().to_string())
+                .or_insert_with(|| PlatformLock {
+                    artifacts: BTreeMap::new(),
+                })
+                .artifacts
+                .insert(
+                    row.component.clone(),
+                    ArtifactLock {
+                        provider: row.provider.clone(),
+                        build: row.build.clone(),
+                        recipe: row.recipe.clone(),
+                        url: row.url.clone(),
+                        digest: qualified(&row.digest),
+                    },
+                );
+        }
+        let mut rows = Vec::new();
+        for row in inputs {
+            let path = row.path.to_str().ok_or_else(|| {
+                invalid(format!("input path {:?} is not UTF-8", row.path.display()))
+            })?;
+            rows.push(InputToml {
+                path: path.to_string(),
+                field: row.field.clone(),
+                value: row.value.clone(),
+                absent: row.absent.then_some(true),
+                sha256: row.sha256.clone(),
+            });
+        }
+        self.inner.toolchain.insert(
+            ecosystem.to_string(),
+            EcoLock {
+                runtime,
+                release: bundle.release.clone(),
+                bundle_id: bundle.bundle_id(),
+                primary: bundle.primary.clone(),
+                revision: bundle.revision.map(u64::from),
+                components,
+                component,
+                inputs: rows,
+                platforms,
+            },
+        );
+        self.validate()
+    }
+
+    /// Publish the canonical bytes at `tog-toolchain.toml` through the held
+    /// project root: an `O_EXCL` temporary on a random name, the file
+    /// fsynced, renamed descriptor-relative, and the directory fsynced.
+    pub fn publish_via(&self, root: &ProjectRoot) -> io::Result<()> {
+        root.write_file(Path::new(LOCK_PATH), &self.canonical_bytes())
+    }
+}
+
+impl EcoLock {
+    /// The component whose version names the runtime: the first primary.
+    pub fn runtime(&self) -> &str {
+        &self.runtime
+    }
+
+    /// The catalog release key this section was minted from. Provenance,
+    /// never a key honoring the lock looks up.
+    pub fn release(&self) -> &str {
+        &self.release
+    }
+
+    pub fn bundle_id(&self) -> &str {
+        &self.bundle_id
+    }
+
+    /// The primary component(s), in comparison order.
+    pub fn primary(&self) -> &[String] {
+        &self.primary
+    }
+
+    /// The kernel [`Bundle`] this section records: the locked rows, not a
+    /// catalog lookup. An unknown platform triple or digest algorithm is an
+    /// error rather than a row honoring replay would skip.
+    pub fn bundle(&self) -> io::Result<Bundle> {
+        let revision = match self.revision {
+            None => None,
+            Some(value) => Some(u32::try_from(value).map_err(|_| {
+                invalid(format!(
+                    "tog-toolchain.toml [{}]: revision {value} is out of range",
+                    self.release
+                ))
+            })?),
+        };
+        let components = self
+            .components
+            .iter()
+            .map(|name| {
+                let table = self.component.get(name.as_str()).ok_or_else(|| {
+                    invalid(format!("tog-toolchain.toml: component {name} has no table"))
+                })?;
+                Ok(Component {
+                    name: name.clone(),
+                    version: table.version.clone(),
+                    embedded_in: table.embedded_in.clone(),
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut artifacts = Vec::new();
+        for (triple, platform) in &self.platforms {
+            let host = Platform::from_triple(triple).ok_or_else(|| {
+                invalid(format!(
+                    "tog-toolchain.toml: unsupported platform triple {triple:?}"
+                ))
+            })?;
+            for (component, row) in &platform.artifacts {
+                artifacts.push(ArtifactRow {
+                    platform: host,
+                    component: component.clone(),
+                    provider: row.provider.clone(),
+                    build: row.build.clone(),
+                    recipe: row.recipe.clone(),
+                    url: row.url.clone(),
+                    digest: parse_digest(&row.digest)?,
+                });
+            }
+        }
+        Ok(Bundle {
+            release: self.release.clone(),
+            revision,
+            primary: self.primary.clone(),
+            components,
+            artifacts,
+        })
+    }
+
+    /// The consulted sources as recorded, in lock order: what staleness
+    /// compares today's discovery against.
+    pub fn inputs(&self) -> Vec<InputRow> {
+        self.inputs
+            .iter()
+            .map(|row| InputRow {
+                path: PathBuf::from(&row.path),
+                field: row.field.clone(),
+                value: row.value.clone(),
+                absent: row.absent.unwrap_or(false),
+                sha256: row.sha256.clone(),
+            })
+            .collect()
+    }
+}
+
+/// `<algorithm>:<hex>` back to a [`Digest`]. Validation already refused any
+/// other spelling, so an error here means the row was built, not parsed.
+fn parse_digest(text: &str) -> io::Result<Digest> {
+    match text.split_once(':') {
+        Some(("sha256", hex)) => Digest::sha256(hex),
+        Some(("sha512", hex)) => Digest::sha512(hex),
+        _ => Err(invalid(format!("unsupported digest {text:?}"))),
+    }
+}
+
+/// One recorded source row that no longer matches the project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleRow {
+    pub path: String,
+    pub field: String,
+    pub recorded: Option<String>,
+    pub current: Option<String>,
+}
+
+impl fmt::Display for StaleRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let spell = |value: &Option<String>| match value {
+            Some(text) => text.clone(),
+            None => "absent".to_string(),
+        };
+        write!(
+            f,
+            "{} {}: recorded {}, now {}",
+            self.path,
+            self.field,
+            spell(&self.recorded),
+            spell(&self.current)
+        )
+    }
+}
+
+/// Every row on which the record and today's discovery disagree. Rows pair
+/// by (path, field); a row only one side has is stale on its own, because
+/// the consulted list is a complete statement about the project.
+pub fn stale_rows(recorded: &[InputRow], current: &[InputRow]) -> Vec<StaleRow> {
+    let key = |row: &InputRow| (row.path.to_string_lossy().into_owned(), row.field.clone());
+    let mut out = Vec::new();
+    for row in recorded {
+        let (path, field) = key(row);
+        match current
+            .iter()
+            .find(|other| key(other) == (path.clone(), field.clone()))
+        {
+            None => out.push(StaleRow {
+                path,
+                field,
+                recorded: row.value.clone(),
+                current: None,
+            }),
+            Some(other) if input_is_stale(row.value.as_deref(), other.value.as_deref()) => out
+                .push(StaleRow {
+                    path,
+                    field,
+                    recorded: row.value.clone(),
+                    current: other.value.clone(),
+                }),
+            Some(_) => {}
+        }
+    }
+    for row in current {
+        let (path, field) = key(row);
+        if !recorded
+            .iter()
+            .any(|other| key(other) == (path.clone(), field.clone()))
+        {
+            out.push(StaleRow {
+                path,
+                field,
+                recorded: None,
+                current: row.value.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// A TOML bare key: the writer emits ecosystem and component names unquoted
@@ -594,6 +926,248 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         assert!(input_is_stale(Some("24.20.0"), None));
         assert!(!input_is_stale(Some("24.20.0"), Some("24.20.0")));
         assert!(input_is_stale(Some("24.20.0"), Some("24.22.0")));
+    }
+
+    fn input(path: &str, field: &str, value: Option<&str>, sha256: Option<&str>) -> InputRow {
+        InputRow {
+            path: PathBuf::from(path),
+            field: field.to_string(),
+            value: value.map(str::to_string),
+            absent: value.is_none(),
+            sha256: sha256.map(str::to_string),
+        }
+    }
+
+    /// The design's Node release, exactly as the example lock records it.
+    fn node_bundle() -> Bundle {
+        Bundle {
+            release: "node-24.20.0-r1".into(),
+            revision: Some(1),
+            primary: vec!["node".into()],
+            components: vec![
+                Component::new("node", "24.20.0"),
+                Component::embedded("bundled-npm", "11.19.0", "node"),
+                Component::embedded("node-gyp", "12.4.0", "bundled-npm"),
+            ],
+            artifacts: vec![
+                ArtifactRow::new(
+                    Platform::Aarch64AppleDarwin,
+                    "node",
+                    "nodejs.org",
+                    "24.20.0",
+                    "nodejs/legacy",
+                    "https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz",
+                    Digest::sha256(
+                        "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8",
+                    )
+                    .unwrap(),
+                ),
+                ArtifactRow::new(
+                    Platform::X86_64UnknownLinuxGnu,
+                    "node",
+                    "nodejs.org",
+                    "24.20.0",
+                    "nodejs/legacy",
+                    "https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.gz",
+                    Digest::sha256(
+                        "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec",
+                    )
+                    .unwrap(),
+                ),
+            ],
+        }
+    }
+
+    fn node_inputs() -> Vec<InputRow> {
+        vec![
+            input(
+                ".node-version",
+                "version",
+                Some("24.20.0"),
+                Some("5b9d0e73029969ae9000117cb877f17bb9841c1279bfe8024e294acfcf017800"),
+            ),
+            input(
+                "package.json",
+                "engines.node",
+                None,
+                Some("9f2c1a7c8b0a5f4e6d3b2718c9a04e5f1d6b83c27a4e90f5b1c8d3a672e4f0b9"),
+            ),
+        ]
+    }
+
+    /// A bundle whose two primary components make the BEAM pair, with one
+    /// artifact row per platform and component.
+    fn beam_bundle() -> Bundle {
+        let row = |platform: Platform, component: &str, fill: char| {
+            ArtifactRow::new(
+                platform,
+                component,
+                "example.org",
+                "build",
+                "beam/1",
+                &format!("https://example.org/{}/{component}", platform.triple()),
+                Digest::sha256(&fill.to_string().repeat(64)).unwrap(),
+            )
+        };
+        Bundle {
+            release: "beam-27.3.4-1.18.4".into(),
+            revision: None,
+            primary: vec!["otp".into(), "elixir".into()],
+            components: vec![
+                Component::new("otp", "27.3.4"),
+                Component::new("elixir", "1.18.4"),
+            ],
+            artifacts: vec![
+                row(Platform::Aarch64AppleDarwin, "elixir", 'a'),
+                row(Platform::Aarch64AppleDarwin, "otp", 'b'),
+                row(Platform::X86_64UnknownLinuxGnu, "elixir", 'c'),
+                row(Platform::X86_64UnknownLinuxGnu, "otp", 'd'),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_builder_reproduces_the_design_example_bytes() {
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(lock.canonical_bytes()).unwrap(),
+            NODE_LOCK
+        );
+    }
+
+    #[test]
+    fn a_built_lock_round_trips_back_to_its_bundle() {
+        for bundle in [node_bundle(), beam_bundle()] {
+            let mut lock = ToolchainLock::new("0.1.0");
+            lock.set_ecosystem("eco", &bundle, &node_inputs()).unwrap();
+            let again = ToolchainLock::parse(&lock.canonical_bytes()).unwrap();
+            assert_eq!(again.canonical_bytes(), lock.canonical_bytes());
+            let section = again.ecosystem("eco").unwrap();
+            assert_eq!(section.bundle().unwrap(), bundle);
+            assert_eq!(section.bundle().unwrap().bundle_id(), bundle.bundle_id());
+            assert_eq!(section.bundle_id(), bundle.bundle_id());
+            assert_eq!(section.runtime(), bundle.primary[0]);
+            assert_eq!(section.release(), bundle.release);
+            assert_eq!(section.primary(), bundle.primary.as_slice());
+            assert_eq!(section.inputs(), node_inputs());
+        }
+    }
+
+    #[test]
+    fn a_primary_pair_is_written_and_read_as_an_array() {
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("elixir", &beam_bundle(), &node_inputs())
+            .unwrap();
+        let text = String::from_utf8(lock.canonical_bytes()).unwrap();
+        assert!(text.contains("primary = [\"otp\", \"elixir\"]\n"), "{text}");
+        let again = ToolchainLock::parse(text.as_bytes()).unwrap();
+        assert_eq!(
+            again.ecosystem("elixir").unwrap().primary(),
+            ["otp", "elixir"]
+        );
+        assert_eq!(again.canonical_bytes(), text.as_bytes());
+        // One primary keeps the bare-string spelling the design golden uses.
+        let mut single = ToolchainLock::new("0.1.0");
+        single
+            .set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        let text = String::from_utf8(single.canonical_bytes()).unwrap();
+        assert!(text.contains("primary = \"node\"\n"), "{text}");
+    }
+
+    #[test]
+    fn setting_an_ecosystem_twice_replaces_its_section() {
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        let mut newer = node_bundle();
+        newer.release = "node-24.21.0-r1".into();
+        newer.components[0].version = "24.21.0".into();
+        lock.set_ecosystem("node", &newer, &node_inputs()).unwrap();
+        assert_eq!(lock.ecosystems(), ["node"]);
+        assert_eq!(lock.ecosystem("node").unwrap().bundle().unwrap(), newer);
+        // A primary that is not a listed component is refused by the same
+        // validation a parsed file goes through.
+        let mut broken = node_bundle();
+        broken.primary = vec!["npm".into()];
+        let error = lock
+            .set_ecosystem("node", &broken, &node_inputs())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not a listed component"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stale_rows_pair_by_path_and_field_and_spell_absence() {
+        let recorded = vec![
+            input(
+                ".python-version",
+                "version",
+                Some("3.12.14"),
+                Some(&"a".repeat(64)),
+            ),
+            input("pyproject.toml", "project.requires-python", None, None),
+            input("gone.toml", "field", Some("1"), Some(&"b".repeat(64))),
+        ];
+        let current = vec![
+            input(
+                ".python-version",
+                "version",
+                Some("3.13.15"),
+                Some(&"c".repeat(64)),
+            ),
+            input(
+                "pyproject.toml",
+                "project.requires-python",
+                Some(">=3.13"),
+                Some(&"d".repeat(64)),
+            ),
+            input("new.toml", "field", Some("2"), Some(&"e".repeat(64))),
+        ];
+        let rows = stale_rows(&recorded, &current);
+        let spelled: Vec<String> = rows.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            spelled,
+            [
+                ".python-version version: recorded 3.12.14, now 3.13.15",
+                "pyproject.toml project.requires-python: recorded absent, now >=3.13",
+                "gone.toml field: recorded 1, now absent",
+                "new.toml field: recorded absent, now 2",
+            ]
+        );
+        // A row whose value is unchanged is not stale, whatever its digest.
+        let same = vec![input(
+            ".python-version",
+            "version",
+            Some("3.12.14"),
+            Some(&"z".repeat(64)),
+        )];
+        assert!(stale_rows(&same[..1], &recorded[..1]).is_empty());
+    }
+
+    #[test]
+    fn publication_writes_the_canonical_bytes_through_the_held_root() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let dir = temp.0.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        assert!(ToolchainLock::read_bytes_via(&root).unwrap().is_none());
+        let mut lock = ToolchainLock::new("0.1.0");
+        lock.set_ecosystem("node", &node_bundle(), &node_inputs())
+            .unwrap();
+        lock.publish_via(&root).unwrap();
+        assert_eq!(
+            ToolchainLock::read_bytes_via(&root).unwrap().unwrap(),
+            lock.canonical_bytes()
+        );
+        assert_eq!(
+            std::fs::read(dir.join(LOCK_PATH)).unwrap(),
+            NODE_LOCK.as_bytes()
+        );
     }
 
     #[test]

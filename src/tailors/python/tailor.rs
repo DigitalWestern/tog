@@ -8,10 +8,10 @@ use crate::kernel::cyclonedx::{
 };
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::Path;
@@ -34,7 +34,8 @@ impl Tailor for Python {
         python::preflight(platform, selection.pin.version)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let _ = toolchain;
         let (plan, _selection, _inputs) = inputs::read_plan(ctx.platform, dir, &ctx.store)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
@@ -43,9 +44,11 @@ impl Tailor for Python {
         &self,
         ctx: &Context,
         dir: &Path,
-        _fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let _ = request.toolchain;
+
         let platform = ctx.platform;
         let store = &ctx.store;
         let (plan, selection, inputs) = inputs::read_plan(platform, dir, store)?;

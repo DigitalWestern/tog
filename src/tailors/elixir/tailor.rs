@@ -11,10 +11,10 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::elixir;
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,8 @@ impl Tailor for Elixir {
         elixir::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let _ = toolchain;
         let beam = elixir::ensure_beam_for(&ctx.store, ctx.platform)?;
         let (plan, _) = elixir::plan_elixir(&ctx.store, dir, &beam)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
@@ -45,9 +46,12 @@ impl Tailor for Elixir {
         &self,
         ctx: &Context,
         dir: &Path,
-        fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let _ = request.toolchain;
+        let fresh = request.fresh;
+
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::ensure_beam_for(store, platform)?;
@@ -91,8 +95,10 @@ impl Tailor for Elixir {
         root: &Path,
         _cwd: &Path,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let _ = toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::ensure_beam_for(store, platform)?;

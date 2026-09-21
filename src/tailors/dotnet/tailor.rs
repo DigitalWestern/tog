@@ -10,10 +10,10 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::dotnet;
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,8 @@ impl Tailor for Dotnet {
         dotnet::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let _ = toolchain;
         // Preflight before SDK realization: a broken layout should fail
         // loudly here, not after a toolchain download.
         dotnet::preflight(dir)?;
@@ -47,9 +48,11 @@ impl Tailor for Dotnet {
         &self,
         ctx: &Context,
         dir: &Path,
-        _fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let _ = request.toolchain;
+
         let platform = ctx.platform;
         let store = &ctx.store;
         dotnet::preflight(dir)?;
@@ -79,8 +82,10 @@ impl Tailor for Dotnet {
         _root: &Path,
         cwd: &Path,
         args: &[String],
+        toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let _ = toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
         let sdk = dotnet::ensure_sdk_for(store, platform)?;

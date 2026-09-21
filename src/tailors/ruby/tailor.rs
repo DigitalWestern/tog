@@ -10,10 +10,10 @@ use crate::kernel::cyclonedx::{
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::ruby;
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::Path;
@@ -34,7 +34,8 @@ impl Tailor for Ruby {
         ruby::preflight_platform(platform)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let _ = toolchain;
         let ruby_obj = ruby::ensure_ruby_for(&ctx.store, ctx.platform)?;
         let (plan, _) = ruby::plan_ruby(&ctx.store, dir, &ruby_obj)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
@@ -44,9 +45,11 @@ impl Tailor for Ruby {
         &self,
         ctx: &Context,
         dir: &Path,
-        _fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let _ = request.toolchain;
+
         let platform = ctx.platform;
         let store = &ctx.store;
         let ruby_obj = ruby::ensure_ruby_for(store, platform)?;

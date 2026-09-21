@@ -80,9 +80,22 @@ fn toml_document(bytes: &[u8]) -> Option<toml::Value> {
     toml::from_str(text).ok()
 }
 
-/// `.python-version`: a version like `3.12.1`.
+/// `.python-version`: a version like `3.12.1`. An explicit CPython prefix
+/// (`python3.12`, `cpython-3.12`, `cpython@3.12`, in any casing) is a
+/// spelling of the same request, so the recorded value is the canonical
+/// `X.Y[.Z]`. Anything else is kept verbatim for the caller to refuse.
 pub fn read_python_version(bytes: &[u8]) -> Option<String> {
-    first_line(bytes)
+    let line = first_line(bytes)?;
+    let lower = line.to_ascii_lowercase();
+    for prefix in ["cpython-", "cpython@", "python"] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        if rest.starts_with(|c: char| c.is_ascii_digit()) {
+            return Some(line[prefix.len()..].to_string());
+        }
+    }
+    Some(line)
 }
 
 /// `pyproject.toml`: `[project] requires-python = ">=3.12"`.
@@ -391,6 +404,24 @@ mod tests {
             Some("3.12".into())
         );
         assert_eq!(read_python_version(b""), None);
+        for spelling in [
+            "python3.12",
+            "Python3.12",
+            "cpython-3.12",
+            "CPython-3.12",
+            "cpython@3.12",
+            "CPYTHON@3.12",
+        ] {
+            assert_eq!(
+                read_python_version(format!("{spelling}\n").as_bytes()),
+                Some("3.12".into()),
+                "{spelling}"
+            );
+        }
+        // Anything that is not a CPython prefix is kept verbatim so the
+        // caller can refuse it by name.
+        assert_eq!(read_python_version(b"pypy3.10\n"), Some("pypy3.10".into()));
+        assert_eq!(read_python_version(b"python\n"), Some("python".into()));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod status;
+pub mod toolchain;
 
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
@@ -336,6 +337,10 @@ fn write_closure_inner(
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     store.require_activity(activity, "closure publication")?;
+    // The one place every project write passes through: prove the lock and
+    // the toolchain source inputs still read the way this command resolved
+    // them before anything of this sync becomes visible.
+    toolchain::recheck_before_publication()?;
     if !body.is_object() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

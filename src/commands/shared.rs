@@ -2,6 +2,10 @@
 //! exit-code plumbing. Ecosystem-specific input loaders stay in their
 //! respective tailors.
 
+use crate::comforter::toolchain::EcosystemInput;
+use crate::commands::inspect;
+use crate::kernel::platform::Platform;
+use crate::tailors::Tailor;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +20,36 @@ pub(crate) fn projected_root(cwd: &Path) -> PathBuf {
         .find(|d| d.join(".tog/closures").is_dir())
         .unwrap_or(cwd)
         .to_path_buf()
+}
+
+/// What toolchain resolution needs to know about each detected ecosystem:
+/// its shipped catalog, and what a closure written before the lock existed
+/// proves. A closure that already records a `toolchain` body key was
+/// written by a lock-aware sync and needs no seeding; one for a foreign
+/// platform still yields evidence, carrying its own platform, because the
+/// seed refuses on that platform rather than guessing from the host.
+pub(crate) fn ecosystem_inputs(
+    dir: &Path,
+    present: &[&dyn Tailor],
+) -> io::Result<Vec<EcosystemInput>> {
+    let closures = inspect::closures(dir)?;
+    let mut out = Vec::new();
+    for tailor in present {
+        let legacy = closures
+            .iter()
+            .find(|closure| closure.ecosystem == tailor.id())
+            .filter(|closure| closure.body.get("toolchain").is_none())
+            .map(|closure| {
+                let platform = closure.platform.as_deref().and_then(Platform::from_triple);
+                tailor.legacy_toolchain_evidence(tailor.id(), platform, &closure.body)
+            });
+        out.push(EcosystemInput {
+            lock_ecosystem: tailor.lock_ecosystem().to_string(),
+            catalog: tailor.toolchain_catalog()?,
+            legacy,
+        });
+    }
+    Ok(out)
 }
 
 pub(crate) fn child_status_code(status: &std::process::ExitStatus) -> i32 {

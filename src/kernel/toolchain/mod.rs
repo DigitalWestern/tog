@@ -12,10 +12,14 @@
 pub mod input;
 pub mod legacy;
 pub mod lock;
+pub mod resolve;
+pub mod runtime;
 pub mod select;
 pub mod source;
 
 pub use legacy::{seed, LegacyEvidence, ProvedArtifact};
+pub use resolve::{request_for, select_for};
+pub use runtime::{shipped, ArtifactSpec, Selected, Source};
 pub use select::{Op, Request, Specifier, Version, VersionRequest};
 pub use source::{CredentialRef, Endpoint, Publisher, SourcePolicy};
 

@@ -9,10 +9,10 @@ use crate::kernel::cyclonedx::{
 };
 use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
-use crate::kernel::toolchain::{Catalog, LegacyEvidence};
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
-use crate::tailors::{ClosureListing, PackageRow, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io;
@@ -82,12 +82,15 @@ impl Tailor for Node {
         &self,
         ctx: &Context,
         dir: &Path,
+        toolchain: &Selected,
         _attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let _ = toolchain;
         inputs::ensure_npm_lock(ctx.platform, dir, &ctx.store)
     }
 
-    fn plan(&self, ctx: &Context, dir: &Path) -> io::Result<Option<String>> {
+    fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let _ = toolchain;
         let Some(plan) = inputs::load_npm_plan(ctx.platform, dir)? else {
             return Ok(None);
         };
@@ -109,9 +112,12 @@ impl Tailor for Node {
         &self,
         ctx: &Context,
         dir: &Path,
-        fresh: bool,
+        request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let _ = request.toolchain;
+        let fresh = request.fresh;
+
         let platform = ctx.platform;
         let store = &ctx.store;
         let Some(plan) = inputs::load_npm_plan(platform, dir)? else {
