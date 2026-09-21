@@ -175,6 +175,8 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     }
     let ctx = Context::open(platform, needs_maintenance)?;
     match command {
+        // `json` is not read here: plan's output is JSON either way, and
+        // the flag only tells `main` which error renderer to use.
         Plan { .. } => plan::run(&ctx).map(|_| 0),
         Build { args } => build::run(&ctx, &args).map(|_| 0),
         Run { command } => run::run(&ctx, &command),

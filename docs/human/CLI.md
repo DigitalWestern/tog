@@ -75,10 +75,15 @@ with what each one locks, is in 'tog help sync'.
   stderr and `--quiet` silences all of it.
 - **`--json` is a promise about both streams.** With `--json`, stdout
   carries the JSON document and nothing else, narration stays on stderr,
-  and a failure is one JSON object on stderr: `{"error":"<message>"}`,
-  exit 1. A usage error (exit 2) is still prose: argv was wrong before any
-  contract about output applied. `status`, `ls`, `audit`, `doctor` and
-  `plan` take `--json`; `plan` prints JSON either way.
+  and a failure is one JSON object on stderr: `{"error":"<message>"}`.
+  That holds for every failure the command itself reports, whatever its
+  exit status: `audit --json` still exits 2 for a misconfigured gate (an
+  unreadable `--policy` file, no trusted set at machine scope), so CI can
+  tell an operator mistake from a denied build, and still writes the JSON
+  object rather than prose. Only an argv error is exempt — it is prose at
+  exit 2, because argv was wrong before the command that promised JSON
+  ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
+  `--json`; `plan` prints JSON either way.
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`sync: unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
@@ -90,12 +95,17 @@ with what each one locks, is in 'tog help sync'.
   `-v` and `--no-color` mean the same thing in either position (`tog ls -v`
   and `tog -v ls` are the same command), except where the rest of the line
   belongs to something else: `run` and `build` pass every argument after
-  the verb to the program, and `fmt` and `x` accept them only ahead of the
-  tool's own arguments.
+  the verb to the program, `fmt` and `x` accept them only ahead of the
+  tool's own arguments, and the value slot of a command's own option is
+  never searched (`tog sbom -o -v` writes a file named `-v`; the command
+  table says which options take a value).
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
-  argument after the command to the tool unchanged; only a *leading*
-  `-h`/`--help` is tog's, and `--` forces pass-through (`tog build
-  --release` works; use `--` if the first tool argument is itself `-h`).
+  argument after the command to the tool unchanged, and `--` forces
+  pass-through (`tog build --release` works). What tog keeps for itself is
+  a *leading* `-h`/`--help` in all four, plus, for `fmt` and `x` only, the
+  global options while they still precede the tool's first non-option word:
+  `tog x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
+  a tool argument is spelled like one of those (`tog fmt -- -v`).
 
 ## Completions
 

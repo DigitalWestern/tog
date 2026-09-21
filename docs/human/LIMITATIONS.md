@@ -58,7 +58,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   detected ecosystems. Every command that reads the project behaves this way; closing it
   needs descriptor-relative project access in every tailor. Silent.
 - **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
-  `fmt` pass the program's status through. A literal `-h` tool argument needs `--` first.
+  `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
+  own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the
+  global options (`-C`, `-q`, `-v`, `--no-color`) while they precede the tool's first
+  non-option word. `run` and `build` never take one, so they need no `--` for those.
 - **`tog status` compares recorded inputs only.** `-r` includes, `requirements/` members,
   and workspace-member package.json are not recorded. Cargo/Ruby/Elixir/.NET compare the lock
   hash only; Go catches `require`/`replace` only via `go.sum`; a closure written before those
@@ -133,7 +136,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   with dynamic build requirements** (PEP 517 `get_requires_for_build_wheel`) are unsupported —
   inspection is non-executing. Static backends are supported; `setup_requires` in legacy
   setup.py is unhandled — declare it in `pyproject.toml`. Rust sdists without a shipped
-  `Cargo.lock` get a store-Cargo lock recorded `unattested_cargo_lock`.
+  `Cargo.lock` get a store-Cargo lock recorded `unattested-cargo-lock`.
 - **Immutable venvs are not drop-in venvs**: no activate scripts, and pip cannot mutate them.
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
@@ -152,7 +155,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
   cargo, not tog.
 - **Skipped install-time downloads are not in the closure**: puppeteer- and cypress-class
-  packages record `artifact_not_provisioned`, fetched unverified only when the user runs that
+  packages record `artifact-not-provisioned`, fetched unverified only when the user runs that
   command.
 - **Prebuilt binaries are compiled instead of downloaded; the result can differ from what npm
   would install. Wheel file-path collisions (`file-collision`), SHA-1 npm integrity, and pnpm 9
