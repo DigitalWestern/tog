@@ -700,6 +700,18 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
             &["run", "python", "-m", "pip", "install", "flask"],
             "tog add <package>",
         ),
+        // A value-taking option puts a bare word before the subcommand.
+        (
+            &[
+                "run",
+                "pip",
+                "--index-url",
+                "https://m/simple",
+                "install",
+                "flask",
+            ],
+            "tog add <package>",
+        ),
         (&["run", "activate"], "no activate script"),
         (
             &["run", "source", ".venv/bin/activate"],
@@ -734,6 +746,8 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
         &["run", "pip", "list"],
         &["run", "pip", "--version"],
         &["run", "python", "-m", "pip", "list"],
+        // `-m` after the script belongs to the script, not to python.
+        &["run", "python", "script.py", "-m", "pip", "install", "x"],
     ] {
         let stderr = text(&tog(&project.0, &home.0, args).stderr);
         assert!(

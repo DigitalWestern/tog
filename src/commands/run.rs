@@ -42,26 +42,74 @@ const NODE_REINSTALL_VERBS: &[&str] = &["install", "i", "ci"];
 /// against a projected .venv and are none of tog's business.
 const PIP_MUTATING_VERBS: &[&str] = &["install", "uninstall", "wheel"];
 
-/// The first argument that is not an option: `pip -q install x` installs.
-fn first_verb(cmd: &[String], from: usize) -> &str {
+/// Every pip subcommand, so an option's *value* is never mistaken for one.
+/// `pip --index-url x install y` has two bare words before the package;
+/// taking the first would read the URL as the subcommand and let an
+/// install through.
+const PIP_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "uninstall",
+    "wheel",
+    "download",
+    "freeze",
+    "inspect",
+    "list",
+    "show",
+    "check",
+    "config",
+    "search",
+    "cache",
+    "index",
+    "hash",
+    "completion",
+    "debug",
+    "help",
+];
+
+/// pip's subcommand: the first word that is one, wherever it sits among
+/// the global options.
+fn pip_subcommand(cmd: &[String], from: usize) -> &str {
     cmd.iter()
         .skip(from)
         .map(String::as_str)
-        .find(|word| !word.starts_with('-'))
+        .find(|word| PIP_SUBCOMMANDS.contains(word))
         .unwrap_or_default()
 }
 
+/// Python options that take a separate value, so the value is not mistaken
+/// for the script name when looking for `-m`.
+const PYTHON_VALUE_OPTIONS: &[&str] = &["-X", "-W", "-Q", "--check-hash-based-pycs"];
+
 /// `python -m pip install ...` reaches the same pip by another road.
+///
+/// `-m` is only python's while it is still an option: in
+/// `python script.py -m pip install x` the `-m` belongs to the script, and
+/// refusing that would refuse a program tog knows nothing about.
 fn python_module_pip_verb(cmd: &[String]) -> Option<&str> {
     let program = cmd.first()?.rsplit('/').next()?;
     if !program.starts_with("python") {
         return None;
     }
-    let module = cmd.iter().position(|word| word == "-m")?;
-    if cmd.get(module + 1).map(String::as_str)? != "pip" {
-        return None;
+    let mut index = 1;
+    while let Some(word) = cmd.get(index).map(String::as_str) {
+        if word == "-m" {
+            // `-m <module>` ends python's own options.
+            if cmd.get(index + 1).map(String::as_str)? != "pip" {
+                return None;
+            }
+            return Some(pip_subcommand(cmd, index + 2));
+        }
+        if !word.starts_with('-') {
+            // The script or the `-c` program: everything after is its own.
+            return None;
+        }
+        index += if PYTHON_VALUE_OPTIONS.contains(&word) {
+            2
+        } else {
+            1
+        };
     }
-    Some(first_verb(cmd, module + 2))
+    None
 }
 
 fn pip_refusal(program: &str, verb: &str) -> String {
@@ -93,7 +141,7 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
     }
     match program {
         "pip" | "pip3" | "easy_install" => {
-            let verb = first_verb(cmd, 1);
+            let verb = pip_subcommand(cmd, 1);
             // easy_install has no subcommand: installing is all it does.
             (program == "easy_install" || PIP_MUTATING_VERBS.contains(&verb))
                 .then(|| pip_refusal(program, verb))
@@ -322,6 +370,19 @@ mod tests {
         // verb does not hide it.
         assert!(refusal(&["/usr/bin/pip", "install", "flask"]).is_some());
         assert!(refusal(&["pip", "-q", "install", "flask"]).is_some());
+        // A value-taking option puts a bare word before the subcommand;
+        // reading that word as the subcommand would let the install run.
+        assert!(refusal(&["pip", "--index-url", "https://m/simple", "install", "flask"]).is_some());
+        assert!(refusal(&[
+            "python",
+            "-m",
+            "pip",
+            "--index-url",
+            "https://m/simple",
+            "install",
+            "flask"
+        ])
+        .is_some());
         // easy_install has no subcommand: installing is all it does.
         assert!(refusal(&["easy_install", "flask"]).is_some());
         // The same pip by another road.
@@ -329,6 +390,8 @@ mod tests {
             .expect("python -m pip install is refused");
         assert!(module.contains("python -m pip install"), "{module}");
         assert!(refusal(&["python3.12", "-m", "pip", "uninstall", "flask"]).is_some());
+        // A value-taking python option before -m does not hide it.
+        assert!(refusal(&["python", "-X", "utf8", "-m", "pip", "install", "flask"]).is_some());
 
         let activate = refusal(&["activate"]).expect("activate is refused");
         assert!(activate.contains("no activate script"), "{activate}");
@@ -369,6 +432,11 @@ mod tests {
             vec!["pip", "download", "flask"],
             vec!["python", "-m", "pip", "list"],
             vec!["python", "-m", "pytest"],
+            // `-m` after the script belongs to the script, not to python.
+            vec!["python", "script.py", "-m", "pip", "install", "flask"],
+            vec!["python", "-c", "print(1)", "-m", "pip", "install", "x"],
+            // A value-taking python option does not end its option list.
+            vec!["python", "-X", "utf8", "-m", "pip", "list"],
             // npm verbs that do not touch node_modules.
             vec!["npm", "run", "build"],
             vec!["npm", "test"],

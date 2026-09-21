@@ -202,11 +202,10 @@ fn looks_offline(source: &str) -> bool {
         "nodename nor servname provided",
         "No address associated with hostname",
     ];
-    OFFLINE.iter().any(|marker| {
-        source
-            .to_ascii_lowercase()
-            .contains(&marker.to_ascii_lowercase())
-    })
+    let source = source.to_ascii_lowercase();
+    OFFLINE
+        .iter()
+        .any(|marker| source.contains(&marker.to_ascii_lowercase()))
 }
 
 /// `kind` alone, for the branches where the source adds nothing.
@@ -260,14 +259,25 @@ fn transport_cause_with(kind: ureq::ErrorKind, source: &str) -> Option<String> {
     Some(text.to_string())
 }
 
-/// ureq's Display repeats the URL and the kind; the part worth keeping is
-/// what follows the last ": ".
-fn transport_source(transport: &ureq::Transport) -> String {
-    let text = transport.to_string();
-    match text.rsplit_once(": ") {
-        Some((_, tail)) if !tail.trim().is_empty() => tail.trim().to_string(),
-        _ => text,
+/// What a `ureq::Transport` says beyond its URL and its kind.
+///
+/// ureq renders a transport failure as `{url}: {kind}: {message}: {source}`
+/// with everything but the kind optional. tog names the URL itself and
+/// translates the kind, so both are dropped; the rest is the only part that
+/// distinguishes a rejected certificate from a reset connection, and it is
+/// kept whole — splitting on the last `": "` would reduce
+/// `invalid peer certificate: UnknownIssuer` to `UnknownIssuer`.
+fn source_after_kind(text: &str, kind: &str) -> String {
+    let marker = format!("{kind}: ");
+    match text.find(&marker) {
+        Some(at) => text[at + marker.len()..].trim().to_string(),
+        // Only a URL and a kind: nothing further to say.
+        None => String::new(),
     }
+}
+
+fn transport_source(transport: &ureq::Transport) -> String {
+    source_after_kind(&transport.to_string(), &transport.kind().to_string())
 }
 
 fn network_cause(error: &ureq::Error) -> String {
@@ -624,6 +634,53 @@ mod tests {
         }
         assert!(looks_offline("Network is unreachable"));
         assert!(!looks_offline("invalid peer certificate"));
+    }
+
+    /// ureq renders `{url}: {kind}: {message}: {source}`. tog names the URL
+    /// and translates the kind, so both come off; the remainder is kept
+    /// whole, because it is often itself colon-separated and the tail alone
+    /// ("UnknownIssuer") does not say what failed.
+    #[test]
+    fn a_transport_source_keeps_everything_past_the_kind() {
+        assert_eq!(
+            source_after_kind(
+                "https://files.pythonhosted.org/a.whl: Network Error: \
+                 invalid peer certificate: UnknownIssuer",
+                "Network Error",
+            ),
+            "invalid peer certificate: UnknownIssuer"
+        );
+        assert_eq!(
+            source_after_kind(
+                "https://example.com/a.whl: Dns Failed: failed to lookup address information",
+                "Dns Failed",
+            ),
+            "failed to lookup address information"
+        );
+        // No message and no source: the url and the kind are all there is,
+        // and tog already says both in its own words.
+        assert_eq!(
+            source_after_kind(
+                "https://example.com/a.whl: Connection Failed",
+                "Connection Failed"
+            ),
+            ""
+        );
+        // That empty source must not produce a dangling "()".
+        let bare = transport_cause_with(ureq::ErrorKind::ConnectionFailed, "").unwrap();
+        assert!(!bare.contains('('), "{bare}");
+
+        // The whole chain, as the user sees it.
+        let full = source_after_kind(
+            "https://files.pythonhosted.org/a.whl: Network Error: \
+             invalid peer certificate: UnknownIssuer",
+            "Network Error",
+        );
+        let message = transport_cause_with(ureq::ErrorKind::Io, &full).unwrap();
+        assert_eq!(
+            message,
+            "the connection failed (invalid peer certificate: UnknownIssuer)"
+        );
     }
 
     #[test]
