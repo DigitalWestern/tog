@@ -75,10 +75,15 @@ with what each one locks, is in 'tog help sync'.
   stderr and `--quiet` silences all of it.
 - **`--json` is a promise about both streams.** With `--json`, stdout
   carries the JSON document and nothing else, narration stays on stderr,
-  and a failure is one JSON object on stderr: `{"error":"<message>"}`,
-  exit 1. A usage error (exit 2) is still prose: argv was wrong before any
-  contract about output applied. `status`, `ls`, `audit`, `doctor` and
-  `plan` take `--json`; `plan` prints JSON either way.
+  and a failure is one JSON object on stderr: `{"error":"<message>"}`.
+  That holds for every failure the command itself reports, whatever its
+  exit status: `audit --json` still exits 2 for a misconfigured gate (an
+  unreadable `--policy` file, no trusted set at machine scope), so CI can
+  tell an operator mistake from a denied build, and still writes the JSON
+  object rather than prose. Only an argv error is exempt — it is prose at
+  exit 2, because argv was wrong before the command that promised JSON
+  ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
+  `--json`; `plan` prints JSON either way.
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`sync: unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
@@ -90,28 +95,35 @@ with what each one locks, is in 'tog help sync'.
   `-v` and `--no-color` mean the same thing in either position (`tog ls -v`
   and `tog -v ls` are the same command), except where the rest of the line
   belongs to something else: `run` and `build` pass every argument after
-  the verb to the program, and `fmt` and `x` accept them only ahead of the
-  tool's own arguments.
+  the verb to the program, `fmt` and `x` accept them only ahead of the
+  tool's own arguments, and the value slot of a command's own option is
+  never searched (`tog gc --register -v` registers a directory called
+  `-v`; the command table says which options take a value). What reaches
+  that slot is then the option's own business — see the next rule.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
-  argument after the command to the tool unchanged; only a *leading*
-  `-h`/`--help` is tog's, and `--` forces pass-through (`tog build
-  --release` works; use `--` if the first tool argument is itself `-h`).
-- **An option's value follows one rule.** Every option that takes a value
-  refuses an empty one, and refuses a separate word that starts with `-`:
-  `tog sbom -o --json` is a mistyped flag, not a request to write a file
-  named `--json`, and `tog -C ""` is a usage error rather than a directory
-  change that fails later. A path that really does start with a dash is
-  given inline, after an `=`:
+  argument after the command to the tool unchanged, and `--` forces
+  pass-through (`tog build --release` works). What tog keeps for itself is
+  a *leading* `-h`/`--help` in all four, plus, for `fmt` and `x` only, the
+  global options while they still precede the tool's first non-option word:
+  `tog x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
+  a tool argument is spelled like one of those (`tog fmt -- -v`).
+- **An option's single value follows one rule.** An option that takes one
+  value refuses an empty one, and refuses a separate word that starts with
+  `-`: `tog sbom -o --json` is a mistyped flag, not a request to write a
+  file named `--json`, and `tog -C ""` is a usage error rather than a
+  directory change that fails later. A value that really does start with a
+  dash is given inline, after an `=`:
 
       tog sbom --output=-report.json
       tog --directory=-work plan
 
-  Options whose value is a name rather than a path — `--eco`, `--from`,
-  `--forget`, `--drop-object`, `--keep-days` — refuse a dash-leading value
-  in both forms, because none of those values can start with one. The
-  value is also never searched for a global option, so
-  `tog sbom -o -v` reports the missing file path rather than quietly
-  taking `-v`.
+  The rule stops at the option's own grammar, so a value tog will not use
+  as a path is refused in both forms: `--eco` and `--from` name an
+  ecosystem and a package, `--forget` and `--drop-object` a key and an
+  object id, `--keep-days` a number, and none of those can start with a
+  dash. A list option (`--register <dir>...`) is the exception in the
+  other direction: it holds every word up to the next long option, so a
+  directory really called `-v` is registered rather than refused.
 
 ## Completions
 

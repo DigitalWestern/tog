@@ -79,7 +79,7 @@ it you are asked at the terminal. Tog never guesses from the bare name.
 Constraints pass through to the tool: 'requests>=2', 'react@18',
 'serde@1', 'rails@~> 7.1'.",
         options: &[
-            ("--dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
+            ("-D, --dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
@@ -94,7 +94,7 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
 The inverse of add, through the same pinned tools with the same ecosystem
 choice. For a plain requirements file tog deletes the line itself.",
         options: &[
-            ("--dev", "remove from development dependencies (uv --dev, cargo --dev)"),
+            ("-D, --dev", "remove from development dependencies (uv --dev, cargo --dev)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
@@ -152,8 +152,8 @@ until the next `tog gc`. A running tool is left in place and reported as
 in use; retry after it exits.",
         options: &[
             ("--clean", "remove cached x environments instead of running a tool"),
-            ("--py", "resolve from PyPI"),
-            ("--npm", "resolve from npm"),
+            ("--py, --python", "resolve from PyPI"),
+            ("--npm, --node", "resolve from npm"),
             ("--from <package>", "the package that provides <tool>"),
             HELP_OPTION,
         ],

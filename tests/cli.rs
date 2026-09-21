@@ -258,12 +258,33 @@ fn global_options_work_after_the_command() {
     )
     .unwrap();
 
+    std::fs::write(
+        project.0.join(".tog/closures/python.json"),
+        r#"{"schema":"closure/1","ecosystem":"python","projected_at":0,
+            "body":{"python":{"version":"3.12.14"},
+                    "plan":{"packages":[{"name":"six","version":"1.17.0",
+                                         "filename":"six-1.17.0-py2.py3-none-any.whl"}]}}}"#,
+    )
+    .unwrap();
+
+    // -v after the verb is the same -v: it adds the artifact column that
+    // `tog help ls` promises, and the plain form still omits it.
     let out = tog(&project.0, &home.0, &["ls", "-v"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let verbose = text(&out.stdout);
+    assert!(verbose.contains("rustfmt"), "{verbose}");
     assert!(
-        text(&out.stdout).contains("rustfmt"),
-        "{}",
-        text(&out.stdout)
+        verbose.contains("six  1.17.0  six-1.17.0-py2.py3-none-any.whl"),
+        "{verbose}"
+    );
+    let plain = text(&tog(&project.0, &home.0, &["ls"]).stdout);
+    assert!(
+        plain.contains("six  1.17.0") && !plain.contains(".whl"),
+        "{plain}"
+    );
+    assert_eq!(
+        verbose,
+        text(&tog(&project.0, &home.0, &["-v", "ls"]).stdout)
     );
 
     // The help for ls documents -v, and now the parser accepts it.
@@ -282,10 +303,14 @@ fn global_options_work_after_the_command() {
         }
     }
 
-    // -q after the command silences narration the same way it does before.
+    // -q after the command silences narration the same way it does before,
+    // and leaves the one thing quiet must never hide: the error.
     let empty = TempDir::new("globals-empty");
     let out = tog(&empty.0, &home.0, &["status", "-q"]);
     assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.starts_with("tog: error: no project in"), "{stderr}");
     // Pass-through is untouched: `run` hands -v to the program.
     let out = tog(&empty.0, &home.0, &["run", "-v"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
@@ -331,6 +356,54 @@ fn json_commands_report_failure_as_json_on_stderr() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert!(value["error"].as_str().is_some(), "{value}");
+
+    // `audit` reports a misconfigured gate itself, and keeps exit 2 so CI
+    // can tell an operator mistake from a denied build; under --json that
+    // report is a JSON object like any other failure.
+    std::fs::create_dir_all(project.0.join(".tog/closures")).unwrap();
+    let out = tog(&project.0, &home.0, &["audit", "--json"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|error| panic!("stderr is not JSON ({error}): {}", text(&out.stderr)));
+    assert!(
+        value["error"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("audit: ")),
+        "{value}"
+    );
+    // The same failure without --json is still the prose usage error.
+    let out = tog(&project.0, &home.0, &["audit"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).starts_with("tog: error: audit: "),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog(
+        &project.0,
+        &home.0,
+        &["audit", "--json", "--policy", "absent.toml"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(serde_json::from_slice::<serde_json::Value>(&out.stderr).is_ok());
+
+    // A failure `main` reports for a --json command is JSON too.
+    let out = tog(
+        &project.0,
+        &home.0,
+        &["doctor", "--json", "-C", "absent-dir"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|error| panic!("stderr is not JSON ({error}): {}", text(&out.stderr)));
+    assert!(
+        value["error"]
+            .as_str()
+            .is_some_and(|text| text.contains("cannot change directory")),
+        "{value}"
+    );
 }
 
 /// `gc` narrates; CLI.md reserves stdout for documents, so its lines go to

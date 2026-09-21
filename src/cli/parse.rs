@@ -24,7 +24,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         if VERSION_WORDS.contains(&arg) {
             return Ok(Parsed::Print(version_text()));
         }
-        if let Some(used) = global_flag(args, index, &mut options)? {
+        if let Some(used) = global_flag(args, index, &mut options, None)? {
             index += used;
             continue;
         }
@@ -59,15 +59,10 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     // `fmt` and `x` own only the options that precede the tool's own
     // arguments; an unknown first word is a package.json script, and its
     // arguments are the script's.
-    let rest = match name {
-        "run" | "build" => rest,
-        _ if spec(name).is_some() => take_global_flags(
-            &rest,
-            spec(name).expect("known command"),
-            &mut options,
-            matches!(name, "fmt" | "x"),
-        )?,
-        _ => rest,
+    let rest = match spec(name) {
+        _ if matches!(name, "run" | "build") => rest,
+        Some(spec) => take_global_flags(&rest, &mut options, spec)?,
+        None => rest,
     };
     let rest = &rest[..];
     let command = match name {
@@ -112,15 +107,18 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
 
 /// Read one global option at `args[index]`. `Ok(Some(n))` consumed `n`
 /// arguments; `Ok(None)` when this argument is not a global option.
+/// `command` is the verb whose help a complaint should point at, `None`
+/// before the verb has been read.
 fn global_flag(
     args: &[String],
     index: usize,
     options: &mut Options,
+    command: Option<&'static str>,
 ) -> Result<Option<usize>, UsageError> {
     let arg = args[index].as_str();
     match arg {
         "-C" | "--directory" => {
-            let value = separate_value(args, index, arg, None, "a directory")?;
+            let value = separate_value(args, index, arg, command, "a directory")?;
             options.directory = Some(PathBuf::from(value));
             Ok(Some(2))
         }
@@ -140,7 +138,7 @@ fn global_flag(
             options.directory = Some(non_empty(
                 &arg["--directory=".len()..],
                 "--directory",
-                None,
+                command,
             )?);
             Ok(Some(1))
         }
@@ -152,15 +150,40 @@ fn global_flag(
     }
 }
 
+/// Does this command's option take a value in the following argument(s)?
+/// `Some(true)` for a list (`--register <dir>...`), `Some(false)` for a
+/// single value (`--policy <file>`), `None` for a plain switch. Read from
+/// the command table, so the answer cannot drift from the help text.
+fn value_slot(spec: &Spec, arg: &str) -> Option<bool> {
+    spec.options.iter().find_map(|(flag, _)| {
+        (flag.contains('<') && option_spellings(flag).any(|spelling| spelling == arg))
+            .then(|| flag.ends_with("..."))
+    })
+}
+
+/// Is `arg` one of this command's own options? What ends a list of values.
+fn is_command_option(spec: &Spec, arg: &str) -> bool {
+    spec.options
+        .iter()
+        .any(|(flag, _)| option_spellings(flag).any(|spelling| spelling == flag_name(arg)))
+}
+
 /// Take every global option out of one command's arguments, leaving the
-/// command's own grammar untouched. `leading` stops at `--` or at the first
-/// argument that is not an option, so nothing a tool owns is ever consumed.
+/// command's own grammar untouched. Three things are never looked inside:
+/// everything after `--`; for a command that ends in a tool's own arguments
+/// (`fmt`, `x`), everything from its first non-option word on; and the value
+/// slot of one of the command's own value-taking options, so `-v` in a slot
+/// reaches that option's own grammar rather than becoming `--verbose`. What
+/// the option then makes of it is its own business: a list option
+/// (`--register <dir>...`) holds its slot until the next long option and
+/// takes `-v` as a directory name, while an option taking a single value
+/// refuses it under `separate_value`.
 fn take_global_flags(
     args: &[String],
-    spec: &Spec,
     options: &mut Options,
-    leading: bool,
+    spec: &'static Spec,
 ) -> Result<Vec<String>, UsageError> {
+    let leading = matches!(spec.name, "fmt" | "x");
     let mut rest = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -169,15 +192,28 @@ fn take_global_flags(
             rest.extend_from_slice(&args[index..]);
             break;
         }
-        // A value belongs to the flag that takes it. Scanning into it would
-        // lift a global out of the value position and leave the flag looking
-        // as if its value were missing.
-        if let Some(used) = value_tokens(spec, args, index) {
-            rest.extend_from_slice(&args[index..index + used]);
-            index += used;
+        if let Some(list) = value_slot(spec, arg) {
+            rest.push(args[index].clone());
+            index += 1;
+            let mut taken = 0;
+            while index < args.len() && (list || taken == 0) {
+                let value = args[index].as_str();
+                // A list ends where the command's own parser ends it: at
+                // the next long option, so `gc --register /p --no-color`
+                // still reads the global rather than refusing it.
+                let ends = value == "--"
+                    || (list && value.starts_with("--"))
+                    || (taken > 0 && is_command_option(spec, value));
+                if ends {
+                    break;
+                }
+                rest.push(args[index].clone());
+                index += 1;
+                taken += 1;
+            }
             continue;
         }
-        match global_flag(args, index, options)? {
+        match global_flag(args, index, options, Some(spec.name))? {
             Some(used) => index += used,
             None => {
                 rest.push(args[index].clone());
@@ -186,31 +222,6 @@ fn take_global_flags(
         }
     }
     Ok(rest)
-}
-
-/// How many arguments a command flag that takes its value as a separate word
-/// occupies at `args[index]`, the flag itself included; `None` when this
-/// argument is not such a flag. The spec is the source: a value-taking flag
-/// is spelled with a `<placeholder>`, and a trailing `...` means it takes a
-/// list, which runs to the next option.
-fn value_tokens(spec: &Spec, args: &[String], index: usize) -> Option<usize> {
-    let arg = args[index].as_str();
-    let flag = spec
-        .options
-        .iter()
-        .map(|(flag, _)| *flag)
-        .find(|flag| flag.contains('<') && option_spellings(flag).any(|name| name == arg))?;
-    if !flag.ends_with("...") {
-        return Some(2.min(args.len() - index));
-    }
-    let mut used = 1;
-    while args
-        .get(index + used)
-        .is_some_and(|value| !value.starts_with('-'))
-    {
-        used += 1;
-    }
-    Some(used)
 }
 
 fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
@@ -690,6 +701,9 @@ fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
     while let Some(arg) = args.get(index).map(String::as_str) {
         match arg {
             "-h" | "--help" => return Ok(None),
+            // Both spellings take the same value through the same rule, so
+            // neither an empty path nor an option-shaped one can slip in by
+            // being written as two words.
             "-o" | "--output" => {
                 let value = separate_value(args, index, arg, Some("sbom"), "a file path")?;
                 output = Some(PathBuf::from(value));
@@ -722,7 +736,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--register" => {
                 index += 1;
                 let first = index;
-                while index < args.len() && !args[index].starts_with('-') {
+                while index < args.len() && !args[index].starts_with("--") {
                     gc.register.push(PathBuf::from(&args[index]));
                     index += 1;
                 }
@@ -744,7 +758,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--forget" => {
                 index += 1;
                 let first = index;
-                while index < args.len() && !args[index].starts_with('-') {
+                while index < args.len() && !args[index].starts_with("--") {
                     gc.forget.push(valid_root_key(&args[index])?);
                     index += 1;
                 }
@@ -762,7 +776,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--drop-object" => {
                 index += 1;
                 let first = index;
-                while index < args.len() && !args[index].starts_with('-') {
+                while index < args.len() && !args[index].starts_with("--") {
                     gc.drop_objects.push(valid_object_id(&args[index])?);
                     index += 1;
                 }
@@ -1555,9 +1569,9 @@ mod tests {
         }
         assert_eq!(message(&["sbom", "--output"]), "--output needs a file path");
         assert_eq!(message(&["sbom", "--output="]), "--output= needs a value");
-        // The one rule: a separate value is never empty and never starts
-        // with a dash, and the inline form is how a dash-leading path is
-        // given.
+        // The one rule, through either spelling: a value written as a
+        // separate word is never empty and never starts with a dash, so
+        // neither an empty path nor a mistyped flag becomes a file name.
         for words in [
             &["sbom", "-o", "--json"][..],
             &["sbom", "-o", ""],
@@ -1565,10 +1579,14 @@ mod tests {
         ] {
             assert_eq!(message(words), "-o needs a file path", "{words:?}");
         }
-        assert_eq!(
-            message(&["sbom", "--output", "--json"]),
-            "--output needs a file path"
-        );
+        for words in [
+            &["sbom", "--output", "--json"][..],
+            &["sbom", "--output", ""],
+        ] {
+            assert_eq!(message(words), "--output needs a file path", "{words:?}");
+        }
+        // The inline form is how a path that really starts with a dash is
+        // given.
         assert_eq!(
             command(&["sbom", "--output=-report.json"]),
             Command::Sbom {
@@ -1818,8 +1836,6 @@ mod tests {
             message(&["x", "--from", "-q", "ruff"]),
             "--from needs a package name"
         );
-        assert!(!run(&["sbom", "-o", "bom.json"]).options.verbose);
-        assert_eq!(message(&["sbom", "-o", "-v"]), "-o needs a file path");
         assert_eq!(
             message(&["fmt", "--eco", "-q"]),
             "fmt: --eco needs an ecosystem"
@@ -1844,15 +1860,6 @@ mod tests {
                 tool: "black".into(),
                 args: Vec::new()
             }
-        );
-        // A list flag keeps every value it was given.
-        assert!(run(&["gc", "--register", "/a", "/b", "-q"]).options.quiet);
-        assert_eq!(
-            command(&["gc", "--register", "/a", "/b", "-q"]),
-            Command::Gc(GcArgs {
-                register: vec!["/a".into(), "/b".into()],
-                ..GcArgs::default()
-            })
         );
     }
 
@@ -1901,6 +1908,76 @@ mod tests {
         assert!(run(&["fmt", "-v", "--check"]).options.verbose);
         // An unknown option is still an unknown option.
         assert_eq!(message(&["sync", "-j"]), "sync: unknown option '-j'");
+
+        // The value slot of the command's own option is not searched, so
+        // `-v` reaches sbom's own grammar. There it is refused: a value
+        // written as a separate word never starts with a dash, and
+        // `--output=-v` is how a file really called that is named.
+        assert_eq!(message(&["sbom", "-o", "-v"]), "-o needs a file path");
+        assert_eq!(
+            command(&["sbom", "--output=-v"]),
+            Command::Sbom {
+                output: Some(PathBuf::from("-v"))
+            }
+        );
+        // `audit` refuses an option-shaped policy name itself, and still
+        // does: the value slot reaches its own grammar, not the global one.
+        assert_eq!(
+            message(&["audit", "--policy", "-q"]),
+            "--policy needs a file path"
+        );
+        assert!(!run(&["sbom", "-o", "bom.json"]).options.verbose);
+        assert_eq!(
+            message(&["gc", "--keep-days", "-v"]),
+            "--keep-days needs <n>"
+        );
+        // A list option holds its slot for every value, the same boundary
+        // gc's own parser uses: a directory may be called '-v' too.
+        let parsed = run(&["gc", "--register", "a", "-v", "b"]);
+        assert!(!parsed.options.verbose);
+        assert_eq!(
+            parsed.command,
+            Command::Gc(GcArgs {
+                register: vec![PathBuf::from("a"), PathBuf::from("-v"), PathBuf::from("b")],
+                ..GcArgs::default()
+            })
+        );
+        // A long option ends the list, the same boundary parse_gc uses,
+        // so a global after a list of values is still read as a global.
+        let parsed = run(&["gc", "--register", "/p", "--no-color"]);
+        assert!(parsed.options.no_color);
+        assert_eq!(
+            parsed.command,
+            Command::Gc(GcArgs {
+                register: vec![PathBuf::from("/p")],
+                ..GcArgs::default()
+            })
+        );
+        assert_eq!(
+            run(&["gc", "--register", "/p", "--directory", "/tmp"])
+                .options
+                .directory,
+            Some(PathBuf::from("/tmp"))
+        );
+        // The next option this command knows still ends the list.
+        let parsed = run(&["gc", "--register", "a", "--dry-run", "-v"]);
+        assert!(parsed.options.verbose);
+        assert_eq!(
+            parsed.command,
+            Command::Gc(GcArgs {
+                register: vec![PathBuf::from("a")],
+                dry_run: true,
+                ..GcArgs::default()
+            })
+        );
+
+        // A global option that is wrong after the verb points at that
+        // command's help, not at the top-level usage.
+        let error = parse(&argv(&["status", "-C"])).unwrap_err();
+        assert_eq!(error.message, "-C needs a directory");
+        assert_eq!(error.command, Some("status"));
+        let error = parse(&argv(&["-C"])).unwrap_err();
+        assert_eq!(error.command, None);
     }
 
     #[test]
