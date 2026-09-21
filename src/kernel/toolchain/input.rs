@@ -155,12 +155,18 @@ pub fn read_tool_versions(bytes: &[u8], tool: &str) -> Option<String> {
 
 /// `global.json`: `{"sdk": {"version": "8.0.100"}}`.
 pub fn read_global_json(bytes: &[u8]) -> Option<String> {
+    global_json_sdk_field(bytes, "version")
+}
+
+/// `global.json`: `{"sdk": {"rollForward": "disable"}}`. Recorded beside
+/// the version because it decides whether that version is exact.
+pub fn read_global_json_roll_forward(bytes: &[u8]) -> Option<String> {
+    global_json_sdk_field(bytes, "rollForward")
+}
+
+fn global_json_sdk_field(bytes: &[u8], field: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    value
-        .get("sdk")?
-        .get("version")?
-        .as_str()
-        .map(str::to_string)
+    value.get("sdk")?.get(field)?.as_str().map(str::to_string)
 }
 
 /// `rust-toolchain.toml`: `[toolchain] channel = "1.96.1"`.
@@ -173,9 +179,18 @@ pub fn read_rust_toolchain(bytes: &[u8]) -> Option<String> {
 }
 
 /// Legacy `rust-toolchain`: a bare channel on the first line, or the same
-/// TOML document rustup accepts at that name.
+/// TOML document rustup accepts at that name. A document with a
+/// `[toolchain]` table is read as TOML only, so a table without a channel
+/// yields no value instead of the literal header line.
 pub fn read_rust_toolchain_legacy(bytes: &[u8]) -> Option<String> {
-    read_rust_toolchain(bytes).or_else(|| first_line(bytes))
+    match toml_document(bytes) {
+        Some(document) if document.get("toolchain").is_some() => document
+            .get("toolchain")?
+            .get("channel")?
+            .as_str()
+            .map(str::to_string),
+        _ => first_line(bytes),
+    }
 }
 
 /// `go.mod`: the `go 1.22.0` directive, the module's minimum.
@@ -302,12 +317,15 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
                 read_tool_versions(bytes, "elixir")
             })?,
         ],
-        "dotnet" => vec![row_for(
-            root,
-            "global.json",
-            "sdk.version",
-            read_global_json,
-        )?],
+        "dotnet" => vec![
+            row_for(root, "global.json", "sdk.version", read_global_json)?,
+            row_for(
+                root,
+                "global.json",
+                "sdk.rollForward",
+                read_global_json_roll_forward,
+            )?,
+        ],
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -318,14 +336,24 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
     Ok(rows)
 }
 
-/// All seven ecosystems, each with its consulted rows.
-pub fn discover_all(root: &ProjectRoot) -> io::Result<Vec<(String, Vec<InputRow>)>> {
-    let ecosystems = ["python", "node", "ruby", "go", "rust", "elixir", "dotnet"];
-    let mut out = Vec::with_capacity(ecosystems.len());
+/// Every ecosystem this module knows, in lock order.
+pub const ECOSYSTEMS: [&str; 7] = ["python", "node", "ruby", "go", "rust", "elixir", "dotnet"];
+
+/// The named ecosystems, each with its consulted rows.
+pub fn discover_many<'a>(
+    root: &ProjectRoot,
+    ecosystems: impl IntoIterator<Item = &'a str>,
+) -> io::Result<Vec<(String, Vec<InputRow>)>> {
+    let mut out = Vec::new();
     for ecosystem in ecosystems {
         out.push((ecosystem.to_string(), discover(root, ecosystem)?));
     }
     Ok(out)
+}
+
+/// All seven ecosystems, each with its consulted rows.
+pub fn discover_all(root: &ProjectRoot) -> io::Result<Vec<(String, Vec<InputRow>)>> {
+    discover_many(root, ECOSYSTEMS)
 }
 
 #[cfg(test)]
@@ -422,9 +450,11 @@ mod tests {
 
     #[test]
     fn global_json_reader_finds_sdk_version() {
-        let bytes = br#"{"sdk": {"version": "8.0.100"}}"#;
+        let bytes = br#"{"sdk": {"version": "8.0.100", "rollForward": "disable"}}"#;
         assert_eq!(read_global_json(bytes), Some("8.0.100".into()));
+        assert_eq!(read_global_json_roll_forward(bytes), Some("disable".into()));
         assert_eq!(read_global_json(b"{}"), None);
+        assert_eq!(read_global_json_roll_forward(b"{\"sdk\": {}}"), None);
         assert_eq!(read_global_json(b"not json"), None);
     }
 
@@ -440,6 +470,11 @@ mod tests {
             Some("1.96.1".into())
         );
         assert_eq!(read_rust_toolchain_legacy(b""), None);
+        // A TOML document without a channel is not a bare channel line.
+        assert_eq!(
+            read_rust_toolchain_legacy(b"[toolchain]\ncomponents = [\"rustfmt\"]\n"),
+            None
+        );
     }
 
     #[test]
@@ -567,8 +602,21 @@ mod tests {
         );
         assert_eq!(
             consulted("dotnet"),
-            pairs(&[("global.json", "sdk.version")])
+            pairs(&[
+                ("global.json", "sdk.version"),
+                ("global.json", "sdk.rollForward"),
+            ])
         );
+    }
+
+    #[test]
+    fn discovery_refuses_a_symlinked_input() {
+        let (temp, root) = project();
+        let victim = temp.0.join("victim");
+        std::fs::write(&victim, b"3.12.1\n").unwrap();
+        std::os::unix::fs::symlink(&victim, temp.0.join("proj/.python-version")).unwrap();
+        let error = discover(&root, "python").unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
     }
 
     #[test]

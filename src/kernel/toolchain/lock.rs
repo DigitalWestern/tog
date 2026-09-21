@@ -142,6 +142,18 @@ impl ToolchainLock {
             if entry.components.is_empty() {
                 return Err(bad("empty components".into()));
             }
+            if !entry.components.contains(&entry.primary) {
+                return Err(bad(format!(
+                    "primary {} is not a listed component",
+                    entry.primary
+                )));
+            }
+            if entry.inputs.is_empty() {
+                return Err(bad("no inputs".into()));
+            }
+            if entry.platforms.is_empty() {
+                return Err(bad("no platforms".into()));
+            }
             let names: std::collections::BTreeSet<&str> =
                 entry.components.iter().map(String::as_str).collect();
             if names.len() != entry.components.len() {
@@ -171,12 +183,49 @@ impl ToolchainLock {
                         )));
                     }
                 }
+                // The embedding chain must reach an independently fetched
+                // ancestor within the component count, or it is a cycle.
+                let mut hops = 0;
+                let mut cursor = table.embedded_in.as_deref();
+                while let Some(parent) = cursor {
+                    hops += 1;
+                    if hops > entry.components.len() {
+                        return Err(bad(format!("component {name} embedding is cyclic")));
+                    }
+                    cursor = entry
+                        .component
+                        .get(parent)
+                        .and_then(|t| t.embedded_in.as_deref());
+                }
             }
             for input in &entry.inputs {
                 if input.path.is_empty() || input.field.is_empty() {
                     return Err(bad("input lacks a path or field".into()));
                 }
+                if !is_project_relative(&input.path) {
+                    return Err(bad(format!(
+                        "input path {:?} is not a normalized project-relative path",
+                        input.path
+                    )));
+                }
+                if input.absent == Some(false) {
+                    return Err(bad(format!(
+                        "input {} spells absent = false; omit the key instead",
+                        input.path
+                    )));
+                }
+                if let Some(sha) = input.sha256.as_deref() {
+                    if !is_hex_of_length(sha, 64) {
+                        return Err(bad(format!("input {} has a bad sha256", input.path)));
+                    }
+                }
                 let has_value = input.value.is_some();
+                if has_value && input.sha256.is_none() {
+                    return Err(bad(format!(
+                        "input {} has a value but no sha256",
+                        input.path
+                    )));
+                }
                 let absent = input.absent.unwrap_or(false);
                 if has_value && absent {
                     return Err(bad(format!(
@@ -194,6 +243,14 @@ impl ToolchainLock {
             for (triple, platform) in &entry.platforms {
                 if platform.artifacts.is_empty() {
                     return Err(bad(format!("platform {triple} has no artifacts")));
+                }
+                for name in &entry.components {
+                    let embedded = entry.component[name.as_str()].embedded_in.is_some();
+                    if !embedded && !platform.artifacts.contains_key(name.as_str()) {
+                        return Err(bad(format!(
+                            "platform {triple} lacks an artifact row for component {name}"
+                        )));
+                    }
                 }
                 for (component, row) in &platform.artifacts {
                     if !names.contains(component.as_str()) {
@@ -317,16 +374,30 @@ fn is_bare_key(text: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn is_hex_of_length(text: &str, len: usize) -> bool {
+    text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn is_digest(text: &str) -> bool {
     let (algo, hex) = match text.split_once(':') {
         Some(pair) => pair,
         None => return false,
     };
-    if algo != "sha256" && algo != "sha512" {
-        return false;
+    match algo {
+        "sha256" => is_hex_of_length(hex, 64),
+        "sha512" => is_hex_of_length(hex, 128),
+        _ => false,
     }
-    let len = if algo == "sha256" { 64 } else { 128 };
-    hex.len() == len && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A normalized project-relative path: no leading slash, no `.` or `..`
+/// component, no empty component, no backslash.
+fn is_project_relative(text: &str) -> bool {
+    !text.is_empty()
+        && !text.contains('\\')
+        && text
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// Basic double-quoted string with no unnecessary escapes.
@@ -338,7 +409,9 @@ fn quoted(text: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c if (c as u32) < 0x20 || c == '\u{7F}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -447,6 +520,74 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
     }
 
     #[test]
+    fn control_characters_round_trip_through_quoting() {
+        // Every TOML-forbidden literal, including U+007F, must be escaped,
+        // or the canonical bytes would not parse again.
+        for code in (0u32..0x20).chain([0x7F]) {
+            let c = char::from_u32(code).unwrap();
+            let text = format!("a{c}b");
+            let quoted = quoted(&text);
+            let parsed: toml::Value = toml::from_str(&format!("v = {quoted}")).unwrap();
+            assert_eq!(parsed["v"].as_str(), Some(text.as_str()), "U+{code:04X}");
+        }
+        let with_del = NODE_LOCK.replace("tog_version = \"0.1.0\"", "tog_version = \"0.1\\u007F\"");
+        let lock = ToolchainLock::parse(with_del.as_bytes()).unwrap();
+        let again = ToolchainLock::parse(&lock.canonical_bytes()).unwrap();
+        assert_eq!(again, lock);
+    }
+
+    #[test]
+    fn structural_gaps_are_refused() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "primary = \"node\"",
+                "primary = \"npm\"",
+                "not a listed component",
+            ),
+            (
+                "embedded_in = \"bundled-npm\"",
+                "embedded_in = \"node-gyp\"",
+                "cyclic",
+            ),
+            (
+                "path = \"package.json\"",
+                "path = \"../package.json\"",
+                "project-relative",
+            ),
+            ("absent = true\n", "absent = false\n", "absent = false"),
+            (
+                "sha256 = \"5b9d0e73029969ae9000117cb877f17bb9841c1279bfe8024e294acfcf017800\"\n",
+                "",
+                "value but no sha256",
+            ),
+            (
+                "[toolchain.node.platforms.\"x86_64-unknown-linux-gnu\".artifacts.node]",
+                "[toolchain.node.platforms.\"x86_64-unknown-linux-gnu\".artifacts.npm]",
+                "lacks an artifact row",
+            ),
+        ];
+        for (from, to, expect) in cases {
+            let text = NODE_LOCK.replace(from, to);
+            assert_ne!(text, NODE_LOCK, "{from} not found");
+            let error = ToolchainLock::parse(text.as_bytes()).unwrap_err();
+            assert!(error.to_string().contains(expect), "{from}: {error}");
+        }
+        let extra_row = |component: &str| {
+            NODE_LOCK.trim_end().to_string()
+                + &format!(
+                    "\n[toolchain.node.platforms.\"x86_64-unknown-linux-gnu\".artifacts.{component}]\n"
+                )
+                + "provider = \"x\"\nbuild = \"x\"\nrecipe = \"x\"\nurl = \"x\"\n"
+                + "digest = \"sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec\"\n"
+        };
+        let embedded_row = extra_row("bundled-npm");
+        let error = ToolchainLock::parse(embedded_row.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("embedded component"), "{error}");
+        let error = ToolchainLock::parse(extra_row("npm").as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("unknown component"), "{error}");
+    }
+
+    #[test]
     fn staleness_compares_values_not_digests() {
         assert!(!input_is_stale(None, None));
         assert!(input_is_stale(None, Some("24.20.0")));
@@ -465,5 +606,18 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         std::fs::write(dir.join(LOCK_PATH), NODE_LOCK).unwrap();
         let lock = ToolchainLock::read_via(&root).unwrap().unwrap();
         assert_eq!(lock.ecosystems(), ["node"]);
+    }
+
+    #[test]
+    fn lock_read_refuses_a_symlinked_file() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let dir = temp.0.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = temp.0.join("victim");
+        std::fs::write(&victim, NODE_LOCK).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join(LOCK_PATH)).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let error = ToolchainLock::read_via(&root).unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
     }
 }
