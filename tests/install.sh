@@ -220,7 +220,59 @@ check "broken symlink left in place"      test -L "$H/.local/bin/tog"
 check "says the target does not exist"    grep -Fq 'which does not exist' <<<"$out"
 check "does not claim there is no tog"    sh -c "! grep -Fq 'no tog binary at' <<<\"\$(cat)\"" <<<"$out"
 
-echo "== 17. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
+echo "== 17. a relative symlink that escapes the install dir is refused"
+H="$WORK/h19"; mkdir -p "$H/.local/bin" "$H/elsewhere"
+cp "$BIN" "$H/elsewhere/tog"
+# Spelled inside the install directory, resolving outside it.
+ln -s "../../elsewhere/tog" "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "escaping relative symlink kept"    test -L "$H/.local/bin/tog"
+check "its target kept"                   test -f "$H/elsewhere/tog"
+check "says where it really resolves"     grep -Fq "$H/elsewhere/tog, outside" <<<"$out"
+
+echo "== 18. malformed marker blocks are refused, substrings are not markers"
+# (a) an end marker before its begin: counts match, ordering does not.
+H="$WORK/h20"; mkdir -p "$H"
+{ echo '# mine'; echo '# <<< tog <<<'; echo '# stray'; echo '# >>> tog >>>'; } > "$H/.bashrc"
+before="$(cat "$H/.bashrc")"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "end-before-begin refused"          grep -Fq 'malformed tog block' <<<"$out"
+check "end-before-begin file untouched"   test "$before" = "$(cat "$H/.bashrc")"
+check "no backup written for a refusal"   test ! -e "$H/.bashrc.tog.bak"
+# (b) a marker quoted inside a longer line is not a marker.
+H="$WORK/h21"; mkdir -p "$H"
+echo 'echo "# >>> tog >>> is the marker we look for"' > "$H/.bashrc"
+before="$(cat "$H/.bashrc")"
+run_installer "$H" /bin/bash "$BASE_PATH" --uninstall >/dev/null 2>&1 || bad "--uninstall exited non-zero"
+check "substring line is not a marker"    test "$before" = "$(cat "$H/.bashrc")"
+check "no backup written for a non-block" test ! -e "$H/.bashrc.tog.bak"
+
+echo "== 19. a symlinked rc file is edited through, not replaced"
+H="$WORK/h22"; mkdir -p "$H/dotfiles"
+echo '# mine' > "$H/dotfiles/bashrc"
+ln -s "$H/dotfiles/bashrc" "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+check "the block landed in the real file" grep -Fq '# >>> tog >>>' "$H/dotfiles/bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" --uninstall >/dev/null 2>&1 || bad "--uninstall exited non-zero"
+check ".bashrc is still a symlink"        test -L "$H/.bashrc"
+check "it still points at the dotfile"    test "$(readlink "$H/.bashrc")" = "$H/dotfiles/bashrc"
+check "the real file lost the block"      test "$(count_marks "$H/dotfiles/bashrc")" = 0
+check "the real file kept its content"    grep -q '^# mine' "$H/dotfiles/bashrc"
+check "the backup sits next to the real file" test -f "$H/dotfiles/bashrc.tog.bak"
+
+echo "== 20. a symlinked backup path is refused"
+H="$WORK/h23"; mkdir -p "$H" "$H/bait"
+echo '# mine' > "$H/.bashrc"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+echo 'do not clobber me' > "$H/bait/precious"
+ln -s "$H/bait/precious" "$H/.bashrc.tog.bak"
+before="$(cat "$H/.bashrc")"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "symlinked backup refused"          grep -Fq 'refusing to write a backup through it' <<<"$out"
+check "the rc file is untouched"          test "$before" = "$(cat "$H/.bashrc")"
+check "the bait file is untouched"        grep -Fqx 'do not clobber me' "$H/bait/precious"
+
+echo "== 21. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
 for value in 0 1; do
     H="$WORK/h11-$value"; mkdir -p "$H"
     env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \

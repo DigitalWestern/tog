@@ -117,6 +117,40 @@ done
 # TOG_INSTALL_DIR= (set but empty) reaches here the same way --dir= does.
 [ -n "$INSTALL_DIR" ] || fail "install directory is empty; set TOG_INSTALL_DIR or pass --dir=<path>"
 
+# --- paths and probes -------------------------------------------------------
+# The real path of $1: follow the leaf's symlink chain (bounded, so a loop
+# cannot hang the script), then resolve the directory with `cd -P` so a
+# symlinked parent collapses too. Lexical comparison is not enough:
+# `bin/tog -> ../elsewhere/tog` is inside the directory only on paper.
+resolve_path() {
+    _rs_path="$1"
+    _rs_hops=0
+    while [ -L "$_rs_path" ] && [ "$_rs_hops" -lt 40 ]; do
+        _rs_target="$(readlink "$_rs_path")" || return 1
+        case "$_rs_target" in
+            /*) _rs_path="$_rs_target" ;;
+            *) _rs_path="$(dirname "$_rs_path")/$_rs_target" ;;
+        esac
+        _rs_hops=$((_rs_hops + 1))
+    done
+    [ "$_rs_hops" -lt 40 ] || return 1
+    _rs_dir="$(cd -P "$(dirname "$_rs_path")" 2>/dev/null && pwd -P)" || return 1
+    printf '%s/%s' "$_rs_dir" "$(basename "$_rs_path")"
+}
+
+# `<path> --version`, bounded. Whatever sits at that path is an unknown
+# program: it may block on a tty, a socket, or a lock. `timeout` is not in
+# POSIX and stock macOS does not ship it, so where it is missing the probe
+# runs unbounded -- which is what every version of this script did before.
+# Empty output, or a non-zero exit, is reported as no version at all.
+probe_version() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 "$1" --version 2>/dev/null || true
+    else
+        "$1" --version 2>/dev/null || true
+    fi
+}
+
 # --- uninstall --------------------------------------------------------------
 # Removes exactly what the header says this script writes, and nothing else.
 # The store is data, not an installation: it is named, sized, and left behind.
@@ -131,60 +165,86 @@ drop_file() {
     return 0
 }
 
-# Delete the marked block. A startup file is somebody's shell, so: refuse
-# unless the markers pair (an edited or truncated file would otherwise lose
-# everything after the begin marker), keep a .tog.bak, and swap the rewritten
-# copy in by rename so an interrupted uninstall cannot leave a half-file.
+# Is there exactly one well-formed tog block in $1? Whole-line comparison,
+# so a marker quoted inside a longer line is not a marker; and the state
+# machine catches what counting cannot: an end before its begin, a begin
+# inside an open block, or a block still open at EOF.
+#   0 = one or more well-formed blocks   1 = no marker at all   2 = malformed
+scan_markers() {
+    awk -v begin="$MARK_BEGIN" -v end="$MARK_END" '
+        $0 == begin { if (open) { bad = 1; exit } open = 1; seen = 1; next }
+        $0 == end   { if (!open) { bad = 1; exit } open = 0; next }
+        END { if (bad || open) exit 2; if (!seen) exit 1; exit 0 }
+    ' "$1" 2>/dev/null
+}
+
+# Delete the marked block. A startup file is somebody's shell, so: refuse on
+# anything that is not a clean begin/end pair, edit the file the path really
+# resolves to rather than a symlink standing in for it, keep a .tog.bak, and
+# swap the rewrite in by rename so an interrupted uninstall leaves no
+# half-file.
 strip_block() {
     file="$1"
     [ -f "$file" ] || return 0
-    begins="$(grep -Fc "$MARK_BEGIN" "$file" 2>/dev/null || true)"
-    ends="$(grep -Fc "$MARK_END" "$file" 2>/dev/null || true)"
-    [ "${begins:-0}" = 0 ] && return 0
-    if [ "${begins:-0}" != "${ends:-0}" ]; then
-        say "$file has $begins '$MARK_BEGIN' and $ends '$MARK_END' markers; refusing to edit it. Remove the block by hand."
+
+    # A dotfile is often a symlink into a dotfiles repo (stow, chezmoi). Edit
+    # the file it points at: renaming over the link would replace the link
+    # with a regular file and leave the real rc untouched.
+    target="$(resolve_path "$file")" \
+        || { say "could not resolve $file (left as it is)"; return 0; }
+    [ -f "$target" ] || return 0
+
+    status=0
+    scan_markers "$target" || status=$?
+    [ "$status" = 1 ] && return 0
+    if [ "$status" != 0 ]; then
+        say "$target has a malformed tog block (an end marker before its begin, a nested begin, or no end at all); refusing to edit it. Remove the block by hand."
         return 0
     fi
-    scratch="$file.tog-uninstall.$$"
-    # cp first so the scratch file carries the original's mode, then truncate
-    # it with the rewritten content: the rename cannot change the file's bits.
-    cp "$file" "$file.tog.bak" 2>/dev/null \
-        || { say "could not back up $file (left as it is)"; return 0; }
-    cp "$file" "$scratch" 2>/dev/null \
-        || { say "could not rewrite $file (left as it is)"; return 0; }
+
+    backup="$target.tog.bak"
+    if [ -L "$backup" ]; then
+        say "$backup is a symlink; refusing to write a backup through it. Remove it and run --uninstall again."
+        return 0
+    fi
+    # mktemp reserves an unpredictable name next to the file; cp then
+    # recreates it so the scratch carries the rc file's mode and the rename
+    # cannot change the file's bits.
+    scratch="$(mktemp "$target.tog-uninstall.XXXXXX" 2>/dev/null)" \
+        || { say "could not create a scratch file next to $target (left as it is)"; return 0; }
+    rm -f "$scratch"
+    cp "$target" "$backup" 2>/dev/null \
+        || { say "could not back up $target (left as it is)"; return 0; }
+    cp "$target" "$scratch" 2>/dev/null \
+        || { say "could not rewrite $target (left as it is)"; return 0; }
     if awk -v begin="$MARK_BEGIN" -v end="$MARK_END" '
         $0 == begin { skip = 1; next }
         $0 == end   { skip = 0; next }
         skip { next }
         { print }
-    ' "$file" >"$scratch" 2>/dev/null && mv -f "$scratch" "$file"; then
-        say "removed the tog block from $file (previous copy: $file.tog.bak)"
+    ' "$target" >"$scratch" 2>/dev/null && mv -f "$scratch" "$target"; then
+        say "removed the tog block from $target (previous copy: $backup)"
     else
-        say "could not rewrite $file (left as it is)"
+        say "could not rewrite $target (left as it is)"
         rm -f "$scratch"
     fi
 }
 
-# Is <path> a file this script would have installed? A symlink out of the
-# install directory belongs to a package manager or to the user, and anything
-# whose --version does not say "tog " is somebody else's program.
+# Is <path> a file this script would have installed? Two questions, both
+# answered before anything is deleted: does it really live in the install
+# directory -- resolved, not spelled, so `bin/tog -> ../elsewhere/tog` is
+# refused -- and does running it say "tog "?
 removable() {
     [ -f "$1" ] || return 1
-    if [ -L "$1" ]; then
-        target="$(readlink "$1")"
-        case "$target" in
-            /*) resolved="$target" ;;
-            *) resolved="$INSTALL_DIR/$target" ;;
-        esac
-        case "$resolved" in
-            "$INSTALL_DIR"/*) ;;
-            *)
-                say "$1 is a symlink to $resolved, outside $INSTALL_DIR; leaving it alone"
-                return 1
-                ;;
-        esac
+    real="$(resolve_path "$1")" \
+        || { say "could not resolve $1; leaving it alone"; return 1; }
+    real_dir="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd -P)" \
+        || { say "could not resolve $INSTALL_DIR; leaving $1 alone"; return 1; }
+    if [ "${real%/*}" != "$real_dir" ]; then
+        say "$1 resolves to $real, outside $real_dir; leaving it alone"
+        return 1
     fi
-    version="$("$1" --version 2>/dev/null || true)"
+    version="$(probe_version "$1")"
     case "$version" in
         "tog "*) return 0 ;;
         *)
@@ -304,7 +364,12 @@ tar -xzf "$tmp/$asset" -C "$tmp" || fail "cannot extract $asset"
 # What is being replaced, if anything: read it before the file is overwritten.
 previous=""
 if [ -x "$INSTALL_DIR/tog" ]; then
-    previous="$("$INSTALL_DIR/tog" --version 2>/dev/null || true)"
+    previous="$(probe_version "$INSTALL_DIR/tog")"
+    # Only a tog version belongs in an "upgraded X -> Y" line.
+    case "$previous" in
+        "tog "*) ;;
+        *) previous="" ;;
+    esac
 fi
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
 # Copy to a sibling and rename so a running `tog` never sees a half-written file.
