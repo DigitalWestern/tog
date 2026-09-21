@@ -24,7 +24,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         if VERSION_WORDS.contains(&arg) {
             return Ok(Parsed::Print(version_text()));
         }
-        if let Some(used) = global_flag(args, index, &mut options)? {
+        if let Some(used) = global_flag(args, index, &mut options, None)? {
             index += used;
             continue;
         }
@@ -59,12 +59,10 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     // `fmt` and `x` own only the options that precede the tool's own
     // arguments; an unknown first word is a package.json script, and its
     // arguments are the script's.
-    let rest = match name {
-        "run" | "build" => rest,
-        _ if spec(name).is_some() => {
-            take_global_flags(&rest, &mut options, matches!(name, "fmt" | "x"))?
-        }
-        _ => rest,
+    let rest = match spec(name) {
+        _ if matches!(name, "run" | "build") => rest,
+        Some(spec) => take_global_flags(&rest, &mut options, spec)?,
+        None => rest,
     };
     let rest = &rest[..];
     let command = match name {
@@ -109,17 +107,20 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
 
 /// Read one global option at `args[index]`. `Ok(Some(n))` consumed `n`
 /// arguments; `Ok(None)` when this argument is not a global option.
+/// `command` is the verb whose help a complaint should point at, `None`
+/// before the verb has been read.
 fn global_flag(
     args: &[String],
     index: usize,
     options: &mut Options,
+    command: Option<&'static str>,
 ) -> Result<Option<usize>, UsageError> {
     let arg = args[index].as_str();
     match arg {
         "-C" | "--directory" => {
             let value = args
                 .get(index + 1)
-                .ok_or_else(|| UsageError::new(format!("{arg} needs a directory"), None))?;
+                .ok_or_else(|| UsageError::new(format!("{arg} needs a directory"), command))?;
             options.directory = Some(PathBuf::from(value));
             Ok(Some(2))
         }
@@ -139,7 +140,7 @@ fn global_flag(
             options.directory = Some(non_empty(
                 &arg["--directory=".len()..],
                 "--directory",
-                None,
+                command,
             )?);
             Ok(Some(1))
         }
@@ -151,14 +152,27 @@ fn global_flag(
     }
 }
 
+/// Does this command's option take a value in the next argument? Read from
+/// the command table (`--eco <ecosystem>`, `--policy <file>`, ...), so the
+/// answer cannot drift from the help text.
+fn takes_a_value(spec: &Spec, arg: &str) -> bool {
+    spec.options.iter().any(|(flag, _)| {
+        flag.contains('<') && option_spellings(flag).any(|spelling| spelling == arg)
+    })
+}
+
 /// Take every global option out of one command's arguments, leaving the
-/// command's own grammar untouched. `leading` stops at `--` or at the first
-/// argument that is not an option, so nothing a tool owns is ever consumed.
+/// command's own grammar untouched. Three things are never looked inside:
+/// everything after `--`; for a command that ends in a tool's own arguments
+/// (`fmt`, `x`), everything from its first non-option word on; and the value
+/// slot of one of the command's own value-taking options, so `tog sbom -o -v`
+/// still writes a file named `-v` rather than turning it into `--verbose`.
 fn take_global_flags(
     args: &[String],
     options: &mut Options,
-    leading: bool,
+    spec: &'static Spec,
 ) -> Result<Vec<String>, UsageError> {
+    let leading = matches!(spec.name, "fmt" | "x");
     let mut rest = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -167,7 +181,13 @@ fn take_global_flags(
             rest.extend_from_slice(&args[index..]);
             break;
         }
-        match global_flag(args, index, options)? {
+        if takes_a_value(spec, arg) {
+            let end = (index + 2).min(args.len());
+            rest.extend_from_slice(&args[index..end]);
+            index = end;
+            continue;
+        }
+        match global_flag(args, index, options, Some(spec.name))? {
             Some(used) => index += used,
             None => {
                 rest.push(args[index].clone());
@@ -1773,6 +1793,34 @@ mod tests {
         assert!(run(&["fmt", "-v", "--check"]).options.verbose);
         // An unknown option is still an unknown option.
         assert_eq!(message(&["sync", "-j"]), "sync: unknown option '-j'");
+
+        // The value slot of the command's own option is not searched: a
+        // file or a policy really can be called '-v'.
+        assert_eq!(
+            command(&["sbom", "-o", "-v"]),
+            Command::Sbom {
+                output: Some(PathBuf::from("-v"))
+            }
+        );
+        // `audit` refuses an option-shaped policy name itself, and still
+        // does: the value slot reaches its own grammar, not the global one.
+        assert_eq!(
+            message(&["audit", "--policy", "-q"]),
+            "--policy needs a file path"
+        );
+        assert!(!run(&["sbom", "-o", "-v"]).options.verbose);
+        assert_eq!(
+            message(&["gc", "--keep-days", "-v"]),
+            "--keep-days expects a whole number of days, got '-v'"
+        );
+
+        // A global option that is wrong after the verb points at that
+        // command's help, not at the top-level usage.
+        let error = parse(&argv(&["status", "-C"])).unwrap_err();
+        assert_eq!(error.message, "-C needs a directory");
+        assert_eq!(error.command, Some("status"));
+        let error = parse(&argv(&["-C"])).unwrap_err();
+        assert_eq!(error.command, None);
     }
 
     #[test]

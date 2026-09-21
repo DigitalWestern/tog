@@ -839,6 +839,19 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     Ok(out)
 }
 
+/// The gate is misconfigured: an unreadable `--policy` file, or no trusted
+/// set at machine scope. The command has already started and, under
+/// `--json`, already promised that stdout is the document and a failure is
+/// a JSON object, so the promise holds here too; only the exit status says
+/// "operator mistake" (2) rather than "denied" (1).
+fn misconfigured(message: &str, json: bool) {
+    if json {
+        ui::error_json(message);
+    } else {
+        eprint!("{}", cli::render_usage_error(message, Some("audit")));
+    }
+}
+
 /// The command: judge the recorded closures against the policy chain plus
 /// an optional `--policy` file. Needs the host platform only to tell a
 /// foreign-platform closure from a current one, as `status` does.
@@ -851,10 +864,7 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
         Some(path) => match read_policy_file(path) {
             Ok(extra) => Some((path, extra)),
             Err(error) => {
-                eprint!(
-                    "{}",
-                    cli::render_usage_error(&format!("audit: {error}"), Some("audit"))
-                );
+                misconfigured(&format!("audit: {error}"), json);
                 return Ok(cli::EXIT_USAGE);
             }
         },
@@ -867,10 +877,7 @@ pub fn run(policy: Option<&Path>, json: bool) -> io::Result<i32> {
     let trusted = match trusted_keys(&policy) {
         Ok(trusted) => trusted.clone(),
         Err(error) => {
-            eprint!(
-                "{}",
-                cli::render_usage_error(&format!("audit: {error}"), Some("audit"))
-            );
+            misconfigured(&format!("audit: {error}"), json);
             return Ok(cli::EXIT_USAGE);
         }
     };
