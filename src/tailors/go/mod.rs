@@ -13,12 +13,16 @@ pub mod tailor;
 
 use crate::kernel::archive::Compression;
 use crate::kernel::dirhash;
-use crate::kernel::fetch::{cache_insert, cache_verified_held, download_verified_held, Digest};
+use crate::kernel::fetch::{
+    cache_insert, cache_verified_held, download_verified_digest_held, Digest,
+};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
+use crate::kernel::toolchain::{
+    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component, LegacyEvidence, Selected, Source,
+};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -29,6 +33,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GO_VERSION: &str = "1.27.0";
+
+/// The extraction/layout recipe this binary knows for a Go toolchain: the
+/// catalog emits it, the object identity commits to it, and a locked row
+/// naming anything else is refused rather than guessed at.
+const GO_RECIPE: &str = "go-toolchain/1";
 struct GoPin {
     platform: Platform,
     version: &'static str,
@@ -93,7 +102,7 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
                     "go",
                     "go.dev",
                     version,
-                    "go-toolchain/1",
+                    GO_RECIPE,
                     pin.url,
                     Digest::sha256(pin.sha256)?,
                 ))
@@ -123,17 +132,55 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     go_pins(platform).map(|_| ())
 }
 
+/// The identity the compiled pin row produces. Realization builds its
+/// identity from the selected bundle row instead; this is how the tests hold
+/// the two spellings to the same object id.
+#[cfg(test)]
 fn go_identity(pin: &GoPin) -> Identity {
+    runtime_identity(pin.platform, pin.version, pin.sha256)
+}
+
+/// The Go object's identity, from the archive that went into it. The pin
+/// table and a locked bundle row reach this with the same bytes, so a
+/// toolchain realized from a lock lands on the object the pin already built.
+fn runtime_identity(platform: Platform, version: &str, artifact_sha256: &str) -> Identity {
     Identity {
         kind: "go".into(),
         name: "go".into(),
-        version: pin.version.into(),
+        version: version.into(),
         inputs: BTreeMap::from([
-            ("schema".to_string(), "go-toolchain/1".to_string()),
-            ("artifact_sha256".to_string(), pin.sha256.to_string()),
-            ("platform".to_string(), pin.platform.triple().to_string()),
+            ("schema".to_string(), GO_RECIPE.to_string()),
+            ("artifact_sha256".to_string(), artifact_sha256.to_string()),
+            ("platform".to_string(), platform.triple().to_string()),
         ]),
     }
+}
+
+/// The row of `selected` this tailor realizes from, checked before it is
+/// fetched: the selection must be a Go one, the platform must have a row,
+/// and the recipe must be one this binary knows how to lay out.
+fn runtime_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
+    if selected.runtime() != "go" {
+        return Err(err(format!(
+            "internal: a {} selection (runtime {}) reached the Go tailor",
+            selected.ecosystem,
+            selected.runtime()
+        )));
+    }
+    let row = selected.artifact(platform, "go")?;
+    if row.recipe != GO_RECIPE {
+        return Err(err(format!(
+            "go: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+            row.recipe
+        )));
+    }
+    if row.digest.algo() != "sha256" {
+        return Err(err(format!(
+            "go: artifact is a {} digest; this tog realizes Go from sha256 artifacts",
+            row.digest.algo()
+        )));
+    }
+    Ok(row)
 }
 
 fn go_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
@@ -223,35 +270,74 @@ fn extract_go_toolchain_inner(
     Ok(())
 }
 
-/// Ensure the pinned Go toolchain is realized in the store.
-pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    ensure_go_for(store, Platform::host()?, version)
-}
-
-pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
+/// Realize the Go toolchain `selected` names: its bytes, its layout recipe
+/// and its version all come from the selection's row, so a catalog refresh
+/// cannot move a project's compiler under it. Inside a project this is the
+/// only way a Go object is built.
+pub fn realize_runtime(
+    store: &Store,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Go toolchain")?;
-    // Resolve the exact row before touching the store or downloading. A
-    // future catalog may carry several versions for one platform; falling
-    // back to GO_VERSION here would pair the plan with the wrong toolchain.
-    let pin = go_pin(platform, version)?;
-    let identity = go_identity(pin);
+    // Resolve the exact row before touching the store or downloading: what
+    // is realized must be what the selection names, never a default.
+    let row = runtime_row(platform, selected)?;
+    let identity = runtime_identity(platform, &row.version, row.digest.hex());
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
+    let tarball = download_verified_digest_held(store, &row.url, &row.digest)?;
     let staged = store.stage()?;
     extract_go_toolchain_for(store, &tarball, &staged)?;
     store
         .commit_with_deps(&identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps.cache_digest(row.digest.clone());
             deps
         })
         .map(|(path, _)| path)
+}
+
+/// The shipped catalog's release for one exact Go version, as a selection.
+/// This is what a caller outside any project gets: there is no lock to
+/// honor, so the compiled pin table is both the catalog and the answer. The
+/// refusal for a version this binary cannot realize is raised here, before
+/// the store is touched.
+fn shipped_selection(platform: Platform, version: &str) -> io::Result<Selected> {
+    let _ = go_pin(platform, version)?;
+    let catalog = toolchain_catalog()?;
+    let bundle = catalog
+        .bundles()
+        .iter()
+        .find(|bundle| {
+            bundle
+                .component("go")
+                .is_some_and(|component| component.version == version)
+        })
+        .ok_or_else(|| err(format!("internal: no shipped Go release for {version}")))?
+        .clone();
+    Ok(Selected {
+        ecosystem: catalog.ecosystem().to_string(),
+        bundle,
+        lock_sha256: None,
+        source: Source::Shipped,
+    })
+}
+
+/// Ensure the shipped Go toolchain is realized in the store, for callers
+/// with no project selection to honor (`tog deps`, tests). A run inside a
+/// project realizes through [`realize_runtime`] with the toolchain its lock
+/// selected.
+pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
+    ensure_go_for(store, Platform::host()?, version)
+}
+
+pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection(platform, version)?)
 }
 
 /// The forced environment for EVERY tog-controlled go invocation.
@@ -992,12 +1078,12 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
 
 /// Identity of the immutable GOMODCACHE object. Shared by production and the
 /// darwin golden test so the extractor input cannot drift unobserved.
-fn modcache_identity(pin: &GoPin, plan: &GoPlan) -> Identity {
+fn modcache_identity(extractor_version: &str, extractor_sha256: &str, plan: &GoPlan) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "go-modcache/1".to_string()),
         (
             "extractor".to_string(),
-            format!("go{}:{}", pin.version, pin.sha256),
+            format!("go{extractor_version}:{extractor_sha256}"),
         ),
     ]);
     for m in &plan.modules {
@@ -1029,13 +1115,23 @@ fn modcache_identity(pin: &GoPin, plan: &GoPlan) -> Identity {
 pub fn realize_modcache(
     store: &Store,
     platform: Platform,
+    selected: &Selected,
     plan: &GoPlan,
     go_obj: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Go module cache")?;
-    let pin = go_pin(platform, &plan.go_version)?;
-    let identity = modcache_identity(pin, plan);
+    // The extractor is the toolchain this plan was made with, and it is part
+    // of the cache object's identity: take it from the same row the runtime
+    // was realized from, never from the pin table.
+    let row = runtime_row(platform, selected)?;
+    if row.version != plan.go_version {
+        return Err(err(format!(
+            "internal: plan names Go {} but the selection realizes {}",
+            plan.go_version, row.version
+        )));
+    }
+    let identity = modcache_identity(&row.version, row.digest.hex(), plan);
 
     let id = identity.object_id();
     if store.has(&id)? {
@@ -1124,18 +1220,31 @@ pub fn project_go_env(
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
     let mut refs = crate::comforter::ClosureRefs::new();
+    // The runtime object and `go_object` are the same object; the direct
+    // reference is what keeps it alive across a GC.
     refs.object_path(&store, &activity, &go_obj)?;
     refs.object_path(&store, &activity, &modcache_obj)?;
+    let mut body = serde_json::json!({
+        "go_object": object_ref(&go_obj.canonicalize()?)?,
+        "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
+        "go_sum_sha256": gosum_sha256,
+        "plan": plan,
+    });
+    // The Go object is this ecosystem's runtime: the record names the bundle
+    // it came from and refers to it directly, so a later catalog refresh
+    // cannot re-pair these modules with another toolchain.
+    if let (Some(body), Some(record)) = (
+        body.as_object_mut(),
+        crate::comforter::toolchain::closure_record(toolchain, &go_obj).as_object(),
+    ) {
+        for (key, value) in record {
+            body.insert(key.clone(), value.clone());
+        }
+    }
     crate::comforter::write_closure(
         project_dir,
         "go",
-        serde_json::json!({
-            "go_object": object_ref(&go_obj.canonicalize()?)?,
-            "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
-            "go_sum_sha256": gosum_sha256,
-            "toolchain": toolchain.record(),
-            "plan": plan,
-        }),
+        body,
         &store,
         &activity,
         refs,
@@ -1270,8 +1379,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     };
     vec![
         go,
-        modcache_identity(pin, &empty_plan),
-        modcache_identity(pin, &module_plan),
+        modcache_identity(pin.version, pin.sha256, &empty_plan),
+        modcache_identity(pin.version, pin.sha256, &module_plan),
     ]
 }
 
@@ -1383,6 +1492,170 @@ mod tests {
         );
     }
 
+    /// The shipped selection: what a run with no lock to honor is handed.
+    fn selection() -> Selected {
+        crate::kernel::toolchain::shipped(&toolchain_catalog().unwrap()).unwrap()
+    }
+
+    /// A selection built from another ecosystem's bundle, or one whose row
+    /// names a layout this binary has never heard of, is refused before
+    /// anything is fetched. A lock is an input like any other: it can name a
+    /// recipe a newer tog invented, and the honest answer is to say so.
+    #[test]
+    fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
+        use crate::kernel::toolchain::fixtures;
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.join("absent-store"),
+        };
+        let platform = Platform::host().unwrap();
+
+        let foreign = Selected {
+            ecosystem: "node".into(),
+            bundle: fixtures::bundle("node-24.20.0", "node", "24.20.0", Platform::ALL),
+            lock_sha256: None,
+            source: Source::Lock,
+        };
+        let error = realize_runtime(&store, platform, &foreign)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("node selection"), "{error}");
+        assert!(error.contains("Go tailor"), "{error}");
+
+        let unknown = Selected {
+            ecosystem: "go".into(),
+            bundle: fixtures::bundle("go-9.9.9", "go", "9.9.9", Platform::ALL),
+            lock_sha256: None,
+            source: Source::Lock,
+        };
+        let error = realize_runtime(&store, platform, &unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recipe example/1"), "{error}");
+        assert!(error.contains("upgrade tog"), "{error}");
+
+        // A bundle with no row for this platform is refused by name.
+        let elsewhere = Selected {
+            ecosystem: "go".into(),
+            bundle: fixtures::bundle("go-1.27.0", "go", "1.27.0", &[]),
+            lock_sha256: None,
+            source: Source::Lock,
+        };
+        let error = realize_runtime(&store, platform, &elsewhere)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("go artifact"), "{error}");
+        assert!(error.contains(platform.triple()), "{error}");
+
+        assert!(
+            !store.root.exists(),
+            "a refused selection touched the store"
+        );
+    }
+
+    /// Realization from a locked bundle row and realization from the
+    /// compiled pin are two spellings of one object. If they ever disagree,
+    /// a project that adopts a lock silently rebuilds its toolchain under a
+    /// new id and every record naming the old one goes stale. The module
+    /// cache hangs off the same row, so its extractor input is held here too.
+    #[test]
+    fn a_selected_row_and_the_pin_build_the_same_object_id() {
+        let selected = selection();
+        let plan = GoPlan {
+            go_version: GO_VERSION.into(),
+            module: "example.com/m".into(),
+            modules: Vec::new(),
+        };
+        for platform in Platform::ALL {
+            let pin = go_pin(*platform, GO_VERSION).unwrap();
+            let row = runtime_row(*platform, &selected).unwrap();
+            assert_eq!(
+                runtime_identity(*platform, &row.version, row.digest.hex()).object_id(),
+                go_identity(pin).object_id(),
+                "{}",
+                platform.triple()
+            );
+            assert_eq!(
+                modcache_identity(&row.version, row.digest.hex(), &plan).object_id(),
+                modcache_identity(pin.version, pin.sha256, &plan).object_id(),
+                "{}",
+                platform.triple()
+            );
+        }
+    }
+
+    /// The closure states which bundle the toolchain came from and refers to
+    /// the runtime object directly, so a GC keeps it alive by that reference
+    /// and a later resolve needs nothing from the plan.
+    #[test]
+    fn the_go_closure_records_the_selection_and_the_runtime_object() {
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("go").unwrap();
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store { root: store_root };
+        let selected = selection();
+        let go_id = {
+            let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
+            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+        };
+        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
+        for id in [&go_id, &modcache_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
+                    "created": 0,
+                    "exceptions": [],
+                    "refs": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let plan = GoPlan {
+            go_version: GO_VERSION.into(),
+            module: "example.com/m".into(),
+            modules: Vec::new(),
+        };
+        project_go_env(
+            &project,
+            &store.object_path(&go_id),
+            &store.object_path(&modcache_id),
+            &plan,
+            "sum",
+            &selected,
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let closure = crate::comforter::read_closure(&project, "go").unwrap();
+        assert_eq!(closure["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(closure["toolchain"]["release"], selected.bundle.release);
+        assert_eq!(closure["toolchain"]["versions"]["go"], GO_VERSION);
+        assert_eq!(closure["runtime_object"]["id"], go_id);
+        assert_eq!(closure["runtime_object"]["id"], closure["go_object"]["id"]);
+        // Every key the readers already depend on is still there.
+        assert_eq!(closure["go_sum_sha256"], "sum");
+        assert_eq!(closure["plan"]["go_version"], GO_VERSION);
+    }
+
     #[test]
     fn ensure_go_for_rejects_unpinned_version_before_store_access() {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
@@ -1465,7 +1738,7 @@ mod tests {
             module: "example.com/x".into(),
             modules: vec![],
         };
-        let modcache = modcache_identity(pin, &empty);
+        let modcache = modcache_identity(pin.version, pin.sha256, &empty);
         assert_eq!(
             modcache.inputs["extractor"],
             "go1.27.0:90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"
@@ -1473,7 +1746,7 @@ mod tests {
         assert_eq!(modcache.inputs["schema"], "go-modcache/1");
         let linux = go_pin(Platform::X86_64UnknownLinuxGnu, GO_VERSION).unwrap();
         assert_ne!(
-            modcache_identity(linux, &empty).object_id(),
+            modcache_identity(linux.version, linux.sha256, &empty).object_id(),
             modcache.object_id()
         );
         assert_eq!(pin.url, "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz");

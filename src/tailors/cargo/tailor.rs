@@ -314,23 +314,11 @@ impl Tailor for Cargo {
         let store = &ctx.store;
         let activity = &ctx.activity;
         // The formatter rides in the same release bundle as the compiler, so
-        // one selection names both. A bundle that carries no rustfmt is
-        // refused here rather than formatted with a rustfmt from elsewhere.
+        // one selection names both, and both are realized from its rows.
         let rust_version = toolchain.version("rustc")?.to_string();
-        let rustfmt_version = toolchain.version("rustfmt")?;
-        if rustfmt_version != rust_version {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "release {} pairs rustfmt {rustfmt_version} with rustc {rust_version}; \
-                     tog formats with the rustfmt of its own toolchain",
-                    toolchain.bundle.release
-                ),
-            ));
-        }
         let unavailable = cargo::toolchain_file_components(platform, cwd)?;
-        let rust_object = cargo::ensure_rust_for(store, platform, &rust_version)?;
-        let rustfmt_object = rustfmt::ensure_rustfmt(store, platform, &rust_version, &rust_object)?;
+        let rust_object = cargo::realize_runtime(store, platform, toolchain)?;
+        let rustfmt_object = rustfmt::ensure_rustfmt(store, platform, toolchain, &rust_object)?;
         let workspace_root = inputs::locate_cargo_root(&rust_object, cwd, store)?.canonicalize()?;
         let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
             let id = path
@@ -364,17 +352,21 @@ impl Tailor for Cargo {
         let mut refs = comforter::ClosureRefs::new();
         refs.object_path(store, activity, &rust_object)?;
         refs.object_path(store, activity, &rustfmt_object)?;
+        let mut body = serde_json::json!({
+            "rust_object": object_ref(&rust_object)?,
+            "rustfmt_object": rustfmt_ref,
+            "rust_version": rust_version,
+            "workspace_root": workspace_root.display().to_string(),
+            "inputs": inputs,
+        });
+        cargo::merge_record(
+            &mut body,
+            comforter::toolchain::closure_record(toolchain, &rust_object),
+        );
         comforter::write_closure(
             &workspace_root,
             "rustfmt",
-            serde_json::json!({
-                "rust_object": object_ref(&rust_object)?,
-                "rustfmt_object": rustfmt_ref,
-                "rust_version": rust_version,
-                "workspace_root": workspace_root.display().to_string(),
-                "toolchain": toolchain.record(),
-                "inputs": inputs,
-            }),
+            body,
             store,
             activity,
             refs,

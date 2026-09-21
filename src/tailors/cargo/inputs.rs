@@ -71,7 +71,7 @@ pub fn load_cargo_inputs(
 ) -> io::Result<CargoInputs> {
     let rust_version = toolchain.version("rustc")?;
     cargo::toolchain_file_components(platform, cwd)?;
-    let rust_obj = cargo::ensure_rust_for(store, platform, rust_version)?;
+    let rust_obj = cargo::realize_runtime(store, platform, toolchain)?;
     let root = locate_cargo_root(&rust_obj, cwd, store)?;
     // Cargo is the one tailor whose registered root is not the directory
     // sync was run in: a member of a workspace sends its closure and its

@@ -26,7 +26,7 @@ pub fn load_go_inputs(
     toolchain: &Selected,
 ) -> io::Result<GoInputs> {
     let go_version = toolchain.version("go")?;
-    let go_obj = go::ensure_go_for(store, platform, go_version)?;
+    let go_obj = go::realize_runtime(store, platform, toolchain)?;
     let plan = go::plan_go(store, dir, &go_obj, go_version)?;
     let gosum = std::fs::read_to_string(dir.join("go.sum")).unwrap_or_default();
     use sha2::{Digest, Sha256};

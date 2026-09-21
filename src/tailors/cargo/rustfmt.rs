@@ -1,10 +1,11 @@
 //! The pinned Rust formatting component used by `tog fmt`.
 
 use crate::comforter::status::State;
-use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::fetch::download_verified_digest_held;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::{ArtifactSpec, Selected};
 use crate::kernel::types::Identity;
 use crate::tailors::cargo;
 use serde_json::{json, Value};
@@ -15,6 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub(super) const RUSTFMT_VERSION: &str = "1.96.1";
+
+/// The layout recipe this binary knows for the rustfmt component. The
+/// catalog emits it and the object identity commits to it; a locked row
+/// naming another one is refused rather than laid out by guess.
+pub(super) const RUSTFMT_RECIPE: &str = "rustfmt/1";
 
 pub(super) struct RustfmtComponent {
     pub(super) platform: Platform,
@@ -60,22 +66,63 @@ fn rustfmt_identity(
             ),
         ));
     }
+    identity_from(
+        platform,
+        RUSTFMT_VERSION,
+        component(platform)?.sha256,
+        rust_object,
+    )
+}
+
+/// The rustfmt object's identity, from the component digest that went into
+/// it and the Rust object it is published beside. A pin row and a locked
+/// bundle row reach this with the same bytes.
+fn identity_from(
+    platform: Platform,
+    version: &str,
+    rustfmt_sha256: &str,
+    rust_object: &Path,
+) -> io::Result<Identity> {
     let rust_object = rust_object
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Rust object has no UTF-8 id"))?;
-    let pin = component(platform)?;
     Ok(Identity {
         kind: "rustfmt".into(),
         name: "rustfmt".into(),
-        version: RUSTFMT_VERSION.into(),
+        version: version.into(),
         inputs: BTreeMap::from([
             ("platform".into(), platform.triple().into()),
             ("rust_object".into(), rust_object.into()),
-            ("rustfmt_sha256".into(), pin.sha256.into()),
-            ("schema".into(), "rustfmt/1".into()),
+            ("rustfmt_sha256".into(), rustfmt_sha256.into()),
+            ("schema".into(), RUSTFMT_RECIPE.into()),
         ]),
     })
+}
+
+/// The formatter row of `selected`, checked before it is fetched: it rides
+/// in the same release bundle as the compiler, under its own recipe.
+fn rustfmt_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
+    let row = selected.artifact(platform, "rustfmt")?;
+    if row.recipe != RUSTFMT_RECIPE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cargo: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                row.recipe
+            ),
+        ));
+    }
+    if row.digest.algo() != "sha256" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cargo: rustfmt artifact is a {} digest; this tog realizes rustfmt from sha256 artifacts",
+                row.digest.algo()
+            ),
+        ));
+    }
+    Ok(row)
 }
 
 /// The `inputs` a `rustfmt` closure records. `rustfmt_object` is the id of
@@ -176,6 +223,18 @@ pub fn closure_state(platform: Platform, dir: &Path, body: &Value) -> io::Result
     })
 }
 
+/// The identity realization builds from a selection's row, for the drift
+/// check that holds it to the identity the pin produces.
+#[cfg(test)]
+pub(super) fn identity_for_test(
+    platform: Platform,
+    selected: &Selected,
+    rust_object: &Path,
+) -> io::Result<Identity> {
+    let row = rustfmt_row(platform, selected)?;
+    identity_from(platform, &row.version, row.digest.hex(), rust_object)
+}
+
 #[cfg(test)]
 pub(crate) fn live_identity_for_test(
     platform: Platform,
@@ -200,12 +259,13 @@ fn object_id_for(
 pub fn ensure_rustfmt(
     store: &Store,
     platform: Platform,
-    rust_version: &str,
+    selected: &Selected,
     rust_object: &Path,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "rustfmt component")?;
-    let expected_rust_id = cargo::rust_object_id(platform, rust_version)?;
+    let row = rustfmt_row(platform, selected)?;
+    let expected_rust_id = cargo::runtime_object_id(platform, selected)?;
     let rust_object = rust_object.canonicalize()?;
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {
         return Err(io::Error::new(
@@ -213,23 +273,33 @@ pub fn ensure_rustfmt(
             "rustfmt was paired with an unexpected Rust object; run `tog sync` first",
         ));
     }
-    let pin = component(platform)?;
-    let identity = rustfmt_identity(platform, rust_version, &rust_object)?;
+    let identity = identity_from(platform, &row.version, row.digest.hex(), &rust_object)?;
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
-    if !store.cache_path("sha256", pin.sha256).is_file() {
+    if !store
+        .cache_path(row.digest.algo(), row.digest.hex())
+        .is_file()
+    {
         crate::kernel::ui::note(&format!(
-            "fetching rustfmt {rust_version} for {}",
+            "fetching rustfmt {} for {}",
+            row.version,
             platform.triple()
         ));
     }
-    let archive = download_verified_held(store, pin.url, pin.sha256)?;
+    let archive = download_verified_digest_held(store, &row.url, &row.digest)?;
     let staged = store.stage()?;
-    if let Err(error) = stage_rustfmt(store, &staged, platform, archive.as_ref(), &rust_object) {
+    if let Err(error) = stage_rustfmt(
+        store,
+        &staged,
+        platform,
+        &row.version,
+        archive.as_ref(),
+        &rust_object,
+    ) {
         let _ = crate::kernel::store::remove_tree(&staged);
         return Err(error);
     }
@@ -287,7 +357,7 @@ pub fn ensure_rustfmt(
                         io::Error::new(io::ErrorKind::InvalidData, "Rust object has no id")
                     })?,
             )?;
-            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps.cache_digest(row.digest.clone());
             deps
         })
         .map(|(path, _)| path)
@@ -354,10 +424,13 @@ fn stage_rustfmt(
     store: &Store,
     staged: &Path,
     platform: Platform,
+    version: &str,
     archive: &Path,
     rust_object: &Path,
 ) -> io::Result<()> {
-    let root = format!("rustfmt-{RUSTFMT_VERSION}-{}", platform.triple());
+    // The archive's single root directory is named after the component the
+    // selection asked for, so the version comes from its row, not the pin.
+    let root = format!("rustfmt-{version}-{}", platform.triple());
     let entries = archive_entries(store, archive)?;
     let allowed: BTreeSet<String> = allowed_entries(&root).into_iter().collect();
     for entry in entries {

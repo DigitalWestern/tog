@@ -51,7 +51,8 @@ impl Tailor for Go {
         let platform = ctx.platform;
         let store = &ctx.store;
         let inputs = inputs::load_go_inputs(platform, dir, store, toolchain)?;
-        let modcache = go::realize_modcache(store, platform, &inputs.plan, &inputs.go_obj)?;
+        let modcache =
+            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
         go::project_go_env(
             dir,
             &inputs.go_obj,
@@ -95,7 +96,8 @@ impl Tailor for Go {
         let platform = ctx.platform;
         let store = &ctx.store;
         let inputs = inputs::load_go_inputs(platform, root, store, toolchain)?;
-        let modcache = go::realize_modcache(store, platform, &inputs.plan, &inputs.go_obj)?;
+        let modcache =
+            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
         go::project_go_env(
             root,
             &inputs.go_obj,
