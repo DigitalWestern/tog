@@ -1,4 +1,9 @@
 /target
-.tog/
+# .tog/ is half record, half cache. The two records `tog audit` reads are
+# committed; everything else in there is machine-local. README.md has the
+# table.
+.tog/*
+!.tog/closures/
+!.tog/policy.toml
 .venv
 __pycache__/

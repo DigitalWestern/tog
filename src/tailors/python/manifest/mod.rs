@@ -263,7 +263,7 @@ fn unreadable(path: &Path, error: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "unreadable_manifest: {}: {error}; this is a broken manifest or a tog bug",
+            "cannot read {}: {error}; the manifest is broken, or this is a tog bug",
             path.display()
         ),
     )
@@ -363,7 +363,7 @@ fn normalize_name(name: &str) -> String {
 }
 
 fn no_manifest() -> io::Error {
-    io::Error::new(io::ErrorKind::NotFound, "no_manifest: nothing found; looked for requirements.lock.txt, requirements.txt, pyproject.toml ([project] or [tool.poetry]), setup.cfg, setup.py, and requirements/{common.txt,base.txt,requirements.in,cpu.txt,cuda.txt,rocm.txt,xpu.txt}")
+    io::Error::new(io::ErrorKind::NotFound, "nothing to sync here: no Python manifest found; looked for requirements.lock.txt, requirements.txt, pyproject.toml ([project] or [tool.poetry]), setup.cfg, setup.py, and requirements/{common.txt,base.txt,requirements.in,cpu.txt,cuda.txt,rocm.txt,xpu.txt}")
 }
 
 #[cfg(test)]
@@ -1820,7 +1820,8 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.join("requirements.txt"), "-r other.txt\n").unwrap();
         fs::write(dir.join("other.txt"), "-r requirements.txt\n").unwrap();
         let error = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap_err();
-        assert!(error.to_string().contains("unreadable_manifest"));
+        assert!(error.to_string().contains("cannot read"));
+        assert!(error.to_string().contains("the manifest is broken"));
         assert!(error.to_string().contains("cycle"));
         let _ = fs::remove_dir_all(dir);
     }
@@ -1829,7 +1830,9 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
     fn no_manifest_error_names_the_search() {
         let dir = temp_project("none");
         let error = discover(Platform::X86_64UnknownLinuxGnu, &dir).unwrap_err();
-        assert!(error.to_string().contains("no_manifest"));
+        // The classifier prefix is gone: this is the text a user reads.
+        assert!(!error.to_string().contains("no_manifest"));
+        assert!(error.to_string().contains("nothing to sync here"));
         assert!(error.to_string().contains("setup.py"));
         let _ = fs::remove_dir_all(dir);
     }

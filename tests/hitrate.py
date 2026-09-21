@@ -40,8 +40,11 @@ CLASSES = [
     ("policy_denied", r"policy denies [a-z_-]+"),
     ("platform_unsupported", r"\(unsupported platform\)|no pinned CPython satisfies"),
     ("rust_toolchain_unpinned", r"unsupported Rust toolchain"),
-    ("no_manifest", r"\bno_manifest\b"),
-    ("unreadable_manifest", r"unreadable_manifest"),
+    # Both manifest rows carry two spellings: tog dropped the `no_manifest:`
+    # and `unreadable_manifest:` prefixes from the text a user reads (#100),
+    # and CSVs recorded before that still have to classify.
+    ("no_manifest", r"\bno_manifest\b|nothing to sync here"),
+    ("unreadable_manifest", r"unreadable_manifest|manifest is broken, or this is a tog bug"),
     ("py_editable", r"editable requirements"),
     ("py_markers", r"environment markers are not supported"),
     ("py_extras", r"extras are not supported"),

@@ -108,6 +108,61 @@ H="$WORK/h6"
 run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" --no-completions >/dev/null 2>&1 || bad "installer exited non-zero"
 check "no completion files"               test ! -e "$H/.tog/completions/_tog" -a ! -e "$H/.local/share/bash-completion/completions/tog"
 
+echo "== 7. the store is named and sized before the PATH hint"
+H="$WORK/h7"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
+check "names the store path"              grep -Fq "store: $H/.tog/store" <<<"$out"
+check "says what will fill it"            grep -Eq 'created by the first sync|so far' <<<"$out"
+check "names the uninstall command"       grep -Fq 'install.sh --uninstall' <<<"$out"
+check "a written completion is never empty" sh -c "[ -s '$H/.tog/completions/_tog' ] && [ -s '$H/.local/share/bash-completion/completions/tog' ]"
+
+echo "== 8. replacing an existing tog reports old -> new"
+H="$WORK/h8"
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "tog 0.0.1-old"\n' > "$H/.local/bin/tog"
+chmod 755 "$H/.local/bin/tog"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
+check "names both versions"               grep -Fq 'upgraded tog 0.0.1-old -> ' <<<"$out"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
+check "a same-version rerun says so"      grep -Fq '(same version)' <<<"$out"
+
+echo "== 9. --uninstall removes what it installed and keeps the store"
+H="$WORK/h9"; mkdir -p "$H"; echo '# mine' > "$H/.bashrc"; echo '# mine' > "$H/.profile"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+mkdir -p "$H/.tog/store/objects"; echo keep > "$H/.tog/store/objects/an-object"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "binary removed"                    test ! -e "$H/.local/bin/tog"
+check "env file removed"                  test ! -e "$H/.tog/env"
+check "zsh completion removed"            test ! -e "$H/.tog/completions/_tog"
+check "bash completion removed"           test ! -e "$H/.local/share/bash-completion/completions/tog"
+check ".bashrc block removed"             test "$(count_marks "$H/.bashrc")" = 0
+check ".bashrc user content preserved"    grep -q '^# mine' "$H/.bashrc"
+check ".profile block removed"            test "$(count_marks "$H/.profile")" = 0
+check ".profile user content preserved"   grep -q '^# mine' "$H/.profile"
+check "store kept"                        test -f "$H/.tog/store/objects/an-object"
+check "names the store it kept"           grep -Fq "$H/.tog/store" <<<"$out"
+check "prints how to remove the store"    grep -Fq "rm -rf '$H/.tog/store'" <<<"$out"
+check "a second uninstall is harmless" run_installer "$H" /bin/bash "$BASE_PATH" --uninstall
+
+echo "== 10. --uninstall with nothing installed"
+H="$WORK/h10"; mkdir -p "$H"
+out="$(run_installer "$H" /bin/zsh "$BASE_PATH" --uninstall 2>&1)" || { echo "$out"; bad "--uninstall exited non-zero"; }
+check "says there is no binary"           grep -Fq 'no tog binary at' <<<"$out"
+if grep -Fq downloading <<<"$out"; then bad "--uninstall downloaded something"; else ok "--uninstall never downloads"; fi
+
+echo "== 11. TOG_NO_MODIFY_PATH only turns PATH editing off when it means it"
+for value in 0 1; do
+    H="$WORK/h11-$value"; mkdir -p "$H"
+    env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
+        TOG_NO_MODIFY_PATH="$value" TOG_DOWNLOAD_BASE="$TOG_DOWNLOAD_BASE" \
+        sh "$ROOT/install.sh" >/dev/null 2>&1 || bad "installer exited non-zero"
+    if [ "$value" = 0 ]; then
+        check "TOG_NO_MODIFY_PATH=0 still edits .bashrc" test "$(count_marks "$H/.bashrc")" = 1
+    else
+        check "TOG_NO_MODIFY_PATH=1 edits nothing"       test ! -e "$H/.bashrc"
+    fi
+done
+
 echo
 echo "install.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

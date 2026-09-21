@@ -70,8 +70,8 @@ pub(super) fn project_dependencies_are_dynamic(value: &toml::Value) -> bool {
 }
 
 /// Read only enough metadata to decide whether Python is present. Parsing is
-/// intentional: a found but broken manifest is `unreadable_manifest`, not a
-/// misleading `no_manifest`.
+/// intentional: a found but broken manifest is reported as unreadable, not as
+/// a misleading "nothing to sync here".
 pub fn has_manifest(dir: &Path) -> io::Result<bool> {
     if dir.join("requirements.lock.txt").is_file() || dir.join("requirements.txt").is_file() {
         return Ok(true);

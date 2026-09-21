@@ -79,7 +79,7 @@ it you are asked at the terminal. Tog never guesses from the bare name.
 Constraints pass through to the tool: 'requests>=2', 'react@18',
 'serde@1', 'rails@~> 7.1'.",
         options: &[
-            ("--dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
+            ("-D, --dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
@@ -89,12 +89,12 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
         name: "remove",
         group: Group::Everyday,
         summary: "remove a dependency, re-lock, sync",
-        usage: "tog remove <package>... [--no-sync]",
+        usage: "tog remove <package>... [--dev] [--no-sync]",
         description: "\
 The inverse of add, through the same pinned tools with the same ecosystem
 choice. For a plain requirements file tog deletes the line itself.",
         options: &[
-            ("--dev", "remove from development dependencies (uv --dev, cargo --dev)"),
+            ("-D, --dev", "remove from development dependencies (uv --dev, cargo --dev)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
             HELP_OPTION,
         ],
@@ -152,8 +152,8 @@ until the next `tog gc`. A running tool is left in place and reported as
 in use; retry after it exits.",
         options: &[
             ("--clean", "remove cached x environments instead of running a tool"),
-            ("--py", "resolve from PyPI"),
-            ("--npm", "resolve from npm"),
+            ("--py, --python", "resolve from PyPI"),
+            ("--npm, --node", "resolve from npm"),
             ("--from <package>", "the package that provides <tool>"),
             HELP_OPTION,
         ],
@@ -634,6 +634,46 @@ mod tests {
             "help lines over 80 columns:\n{}",
             over.join("\n")
         );
+    }
+
+    /// Every spelling the parser accepts is on the help screen, and a USAGE
+    /// line never omits an option its own OPTIONS block lists (#100).
+    #[test]
+    fn help_documents_every_spelling_the_parser_accepts() {
+        for (command, spellings) in [
+            ("add", &["-D", "--dev"][..]),
+            ("remove", &["-D", "--dev"]),
+            ("x", &["--py", "--python", "--npm", "--node"]),
+        ] {
+            let text = help(spec(command).expect(command));
+            for spelling in spellings {
+                assert!(
+                    text.contains(spelling),
+                    "tog help {command} hides '{spelling}'"
+                );
+            }
+        }
+        // `remove --dev` is real, so the usage line has to show it.
+        assert!(spec("remove").unwrap().usage.contains("[--dev]"));
+        for command in COMMANDS {
+            let usage = command.usage;
+            for (flag, _) in command.options {
+                let long = super::super::parse::option_spellings(flag)
+                    .find(|spelling| spelling.starts_with("--"));
+                let Some(long) = long else { continue };
+                // `-h` is never spelled in a usage line, and a command that
+                // re-lists a global flag (`ls -v`) documents it in OPTIONS
+                // only, because the global block already covers where it goes.
+                if long == "--help" || super::super::parse::GLOBAL_FLAGS.contains(&long) {
+                    continue;
+                }
+                assert!(
+                    usage.contains(long),
+                    "tog {} usage omits {long}: {usage}",
+                    command.name
+                );
+            }
+        }
     }
 
     /// The everyday verbs come first in their group, and the aliases are
