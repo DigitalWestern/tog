@@ -791,26 +791,32 @@ pub fn realize_gems(
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
     let mut artifacts: Vec<(&RubyGem, PathBuf)> = Vec::new();
+    // One download per gem: the lease taken to verify the embedded gemspec is
+    // the same lease that keeps the cached `.gem` alive through the sandboxed
+    // installs below. Nothing between here and publication fetches again, so
+    // there is no window in which a sweep could drop the artifact.
+    let mut _cache_leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
         let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let (out, file_path) = {
-            let file = download_verified_held(store, &url, &g.sha256)
-                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
-            let out = run_ruby(
-                store,
-                ruby_obj,
-                &scratch,
-                &scratch,
-                &[
-                    "ruby",
-                    helper.to_str().unwrap(),
-                    "spec",
-                    file.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
-                ],
-            )?;
-            (out, file.to_path_buf())
-        };
+        let lease = download_verified_held(store, &url, &g.sha256)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
+        let file_path = lease.to_path_buf();
+        _cache_leases.push(lease);
+        let out = run_ruby(
+            store,
+            ruby_obj,
+            &scratch,
+            &scratch,
+            &[
+                "ruby",
+                helper.to_str().unwrap(),
+                "spec",
+                file_path
+                    .to_str()
+                    .ok_or_else(|| err("gem path not UTF-8"))?,
+            ],
+        )?;
         if !out.status.success() {
             return Err(err(format!(
                 "{}: gemspec read failed: {}",
@@ -849,16 +855,6 @@ pub fn realize_gems(
             }
         }
         artifacts.push((g, file_path));
-    }
-
-    // The gemspec verification above is complete. Re-verify and retain every
-    // cache lease for the sandboxed installs below.
-    let mut _cache_leases = Vec::new();
-    for (g, file) in &mut artifacts {
-        let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
-        let lease = download_verified_held(store, &url, &g.sha256)?;
-        *file = lease.to_path_buf();
-        _cache_leases.push(lease);
     }
 
     let staged = store.stage()?;

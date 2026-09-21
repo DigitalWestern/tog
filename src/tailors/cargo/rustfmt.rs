@@ -234,7 +234,7 @@ pub fn ensure_rustfmt(
         return Err(error);
     }
 
-    let scratch = unique_dir(&store.root.join("tmp"), "stage-rustfmt-probe")?;
+    let scratch = super::unique_dir(&store.root.join("tmp"), "stage-rustfmt-probe")?;
     // The staged object is under store/tmp, so its committed relative lib
     // link cannot resolve until publication beside the Rust object. The stage
     // carries an absolute link for this probe, so protected macOS binaries do
@@ -304,7 +304,7 @@ pub fn run_sandboxed(
     check: bool,
     args: &[String],
 ) -> io::Result<std::process::ExitStatus> {
-    let scratch = unique_dir(
+    let scratch = super::unique_dir(
         &rustfmt_object
             .parent()
             .and_then(Path::parent)
@@ -470,35 +470,6 @@ fn allowed_entries(root: &str) -> Vec<String> {
     .collect()
 }
 
-/// A scratch directory under `store/tmp`. The name is a `stage-` prefix on
-/// purpose: `gc::collect` only reclaims `store/tmp/stage-*`, so a run killed
-/// by a signal before its `remove_tree` still gets collected. Sweeping only
-/// touches stages older than a day, so a live run's scratch (created moments
-/// ago, and written to throughout) is never swept out from under it.
-fn unique_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
-    fs::create_dir_all(parent)?;
-    for attempt in 0..100 {
-        let path = parent.join(format!(
-            "{prefix}-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            attempt
-        ));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::other(format!(
-        "could not create a {prefix} scratch directory under {}",
-        parent.display()
-    )))
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -599,7 +570,7 @@ mod tests {
                 .as_nanos()
         ));
         for prefix in ["stage-rustfmt-run", "stage-rustfmt-probe"] {
-            let dir = unique_dir(&parent, prefix).unwrap();
+            let dir = super::super::unique_dir(&parent, prefix).unwrap();
             let name = dir.file_name().unwrap().to_str().unwrap().to_string();
             // `gc::collect` reclaims exactly `store/tmp/stage-*`, so a run
             // interrupted before its cleanup is still collectable.

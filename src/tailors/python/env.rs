@@ -398,17 +398,6 @@ pub(crate) fn realize_env_at_depth(
     Ok(object)
 }
 
-/// Project an env into a project directory: `.venv` symlink (atomic swap)
-/// plus closure-envelope provenance (.tog/closures/python.json).
-pub fn project_env(
-    project_dir: &Path,
-    env_obj: &Path,
-    plan: &Plan,
-    attribution: &mut crate::kernel::policy::Attribution,
-) -> io::Result<()> {
-    project_env_inner(project_dir, env_obj, plan, None, &[], attribution)
-}
-
 /// `project_env_with_selection` plus the input files recorded for status.
 pub fn project_env_with_inputs(
     project_dir: &Path,
@@ -428,9 +417,10 @@ pub fn project_env_with_inputs(
     )
 }
 
-/// Project a Python env and retain the exact interpreter constraint that led
-/// to the selected pin. This is separate from `project_env` to keep the
-/// existing kernel-facing helper compatible with hand-built Plans.
+/// Project an env into a project directory (`.venv` symlink, atomic swap,
+/// plus closure-envelope provenance in `.tog/closures/python.json`) and
+/// retain the exact interpreter constraint that led to the selected pin.
+/// `tog x` uses this: it has a selection but no recorded input files.
 pub fn project_env_with_selection(
     project_dir: &Path,
     env_obj: &Path,

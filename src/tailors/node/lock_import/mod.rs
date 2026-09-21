@@ -341,8 +341,11 @@ fn realizable_node<'a>(
         if dependency.optional || node.optional {
             return Ok(None);
         }
+        // Both importers share this path, so name the lockfile that was
+        // actually read: the field is `resolution.integrity` in
+        // pnpm-lock.yaml and `integrity` in yarn.lock.
         return Err(err(format!(
-            "{}@{}: pnpm package has no resolution.integrity",
+            "{}@{}: {lock_source} entry has no integrity",
             node.name, node.version
         )));
     }
@@ -1423,6 +1426,48 @@ is-number@^6.0.0:
             plan_yarn(Platform::X86_64UnknownLinuxGnu, berry, package_json, &dir).unwrap_err();
         assert!(error.to_string().contains("cache-zip checksums"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `realizable_node` is shared by the pnpm and Yarn-classic importers, so
+    /// its missing-integrity refusal must name the lockfile that was read
+    /// rather than pnpm's spelling of the field for every caller.
+    #[test]
+    fn missing_integrity_names_the_lockfile_that_was_read() {
+        let node = Node {
+            key: "is-odd@3.0.1".into(),
+            name: "is-odd".into(),
+            version: "3.0.1".into(),
+            url: "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz".into(),
+            integrity: String::new(),
+            optional: false,
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: Vec::new(),
+            external: None,
+            patch: None,
+            deps: Vec::new(),
+        };
+        let nodes = BTreeMap::from([(node.key.clone(), node)]);
+        let dependency = Dependency {
+            name: "is-odd".into(),
+            target: Target::Node("is-odd@3.0.1".into()),
+            optional: false,
+        };
+        for lock_source in ["pnpm-lock.yaml", "yarn.lock"] {
+            let error = realizable_node(
+                Platform::X86_64UnknownLinuxGnu,
+                &nodes,
+                "is-odd@3.0.1",
+                &dependency,
+                lock_source,
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(
+                error,
+                format!("is-odd@3.0.1: {lock_source} entry has no integrity")
+            );
+        }
     }
 
     #[test]
