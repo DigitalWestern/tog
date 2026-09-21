@@ -164,6 +164,153 @@ fn hash_file(path: &std::path::Path, algo: Algo) -> io::Result<String> {
     })
 }
 
+/// What a ureq failure means to someone waiting on a sync. ureq's own
+/// Display already repeats the URL and reads like a library backtrace, so
+/// every branch replaces it rather than wrapping it.
+fn status_cause(code: u16) -> String {
+    match code {
+        401 | 403 => "the server refused the request (401/403); a private mirror needs \
+                      credentials tog does not carry"
+            .to_string(),
+        404 | 410 => format!(
+            "the server does not have this artifact ({code}); the index may have yanked it, or \
+             the lockfile names a version that is gone"
+        ),
+        407 => "the proxy refused the request (407); set https_proxy with credentials, or unset it"
+            .to_string(),
+        429 => "the server is rate-limiting this host (429); wait and run the command again"
+            .to_string(),
+        code if code >= 500 => {
+            format!("the server failed ({code}); this is the registry's side, try again later")
+        }
+        code => format!("the server replied {code}"),
+    }
+}
+
+/// Does this transport failure mean "there is no network", as opposed to
+/// "the network is there and something about this connection went wrong"?
+/// Only the unreachable-network errnos and a DNS failure qualify; saying
+/// "offline" about a rejected TLS handshake sends the user to check their
+/// wifi over a bad certificate.
+fn looks_offline(source: &str) -> bool {
+    const OFFLINE: &[&str] = &[
+        "Network is unreachable",
+        "No route to host",
+        "Host is down",
+        "Temporary failure in name resolution",
+        "failed to lookup address",
+        "nodename nor servname provided",
+        "No address associated with hostname",
+    ];
+    let source = source.to_ascii_lowercase();
+    OFFLINE
+        .iter()
+        .any(|marker| source.contains(&marker.to_ascii_lowercase()))
+}
+
+/// `kind` alone, for the branches where the source adds nothing.
+#[cfg(test)]
+fn transport_cause(kind: ureq::ErrorKind) -> Option<String> {
+    transport_cause_with(kind, "")
+}
+
+/// The user-facing text for a transport failure. `source` is ureq's own
+/// message: `ErrorKind::Io` is its catch-all (a rejected TLS handshake, a
+/// bad certificate behind a MITM proxy, a mid-stream reset or timeout), so
+/// for the connection branches the source is the only thing that says
+/// which, and it is appended rather than dropped.
+fn transport_cause_with(kind: ureq::ErrorKind, source: &str) -> Option<String> {
+    let detail = |text: &str| {
+        if source.is_empty() {
+            text.to_string()
+        } else {
+            format!("{text} ({source})")
+        }
+    };
+    let text = match kind {
+        ureq::ErrorKind::Dns => {
+            return Some(detail(
+                "the host name did not resolve; tog appears to be offline, or DNS is unreachable",
+            ))
+        }
+        ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io => {
+            return Some(detail(if looks_offline(source) {
+                "the connection failed; tog appears to be offline (a cached artifact would have \
+                 been used instead)"
+            } else {
+                "the connection failed"
+            }))
+        }
+        ureq::ErrorKind::ProxyConnect | ureq::ErrorKind::InvalidProxyUrl => {
+            "the proxy could not be reached; check https_proxy and no_proxy"
+        }
+        ureq::ErrorKind::ProxyUnauthorized => {
+            "the proxy rejected the credentials; check https_proxy"
+        }
+        ureq::ErrorKind::InsecureRequestHttpsOnly | ureq::ErrorKind::UnknownScheme => {
+            "tog fetches over https only; an http:// mirror is refused rather than downgraded"
+        }
+        ureq::ErrorKind::InvalidUrl => "the url could not be parsed",
+        ureq::ErrorKind::TooManyRedirects => "the server redirected too many times",
+        // BadStatus, BadHeader, HTTP: a malformed reply tog cannot explain
+        // better than the library can.
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+/// What a `ureq::Transport` says beyond its URL and its kind.
+///
+/// ureq renders a transport failure as `{url}: {kind}: {message}: {source}`
+/// with everything but the kind optional. tog names the URL itself and
+/// translates the kind, so both are dropped; the rest is the only part that
+/// distinguishes a rejected certificate from a reset connection, and it is
+/// kept whole — splitting on the last `": "` would reduce
+/// `invalid peer certificate: UnknownIssuer` to `UnknownIssuer`.
+fn source_after_kind(text: &str, kind: &str) -> String {
+    let marker = format!("{kind}: ");
+    match text.find(&marker) {
+        Some(at) => text[at + marker.len()..].trim().to_string(),
+        // Only a URL and a kind: nothing further to say.
+        None => String::new(),
+    }
+}
+
+fn transport_source(transport: &ureq::Transport) -> String {
+    source_after_kind(&transport.to_string(), &transport.kind().to_string())
+}
+
+fn network_cause(error: &ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, _) => status_cause(*code),
+        ureq::Error::Transport(transport) => {
+            let source = transport_source(transport);
+            transport_cause_with(transport.kind(), &source).unwrap_or_else(|| transport.to_string())
+        }
+    }
+}
+
+fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
+    io::Error::other(format!("{verb} {url}: {}", network_cause(&error)))
+}
+
+/// The artifact's name for progress narration: the last path segment of
+/// the URL, without a query string. A URL with no path segment has no name
+/// to show — printing the host would label the line with the registry
+/// rather than the file — so it falls back to a neutral word.
+fn artifact_name(url: &str) -> &str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let after_scheme = path.split_once("://").map(|(_, rest)| rest).unwrap_or(path);
+    // Skip the authority: everything before the first '/' is the host.
+    match after_scheme.split_once('/') {
+        Some((_, tail)) => tail
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("download"),
+        None => "download",
+    }
+}
+
 /// Fetch a small text file over HTTPS (a checksum manifest, for example).
 ///
 /// There is no hash to check against — this IS the checksum source — so the
@@ -176,7 +323,7 @@ pub fn fetch_text(url: &str) -> io::Result<String> {
     let resp = agent
         .get(url)
         .call()
-        .map_err(|e| io::Error::other(format!("GET {url}: {e}")))?;
+        .map_err(|e| network_error("fetch", url, e))?;
     let mut text = String::new();
     resp.into_reader()
         .take(MAX_TEXT)
@@ -301,6 +448,7 @@ pub(crate) fn download_verified_digest_held(
         digest.hex()
     ));
 
+    let mut declared: Option<u64> = None;
     let mut reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
         Box::new(
             fs::File::open(path)
@@ -312,9 +460,16 @@ pub(crate) fn download_verified_digest_held(
         let resp = agent
             .get(url)
             .call()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GET {url}: {e}")))?;
+            .map_err(|e| network_error("download", url, e))?;
+        declared = resp
+            .header("Content-Length")
+            .and_then(|value| value.trim().parse::<u64>().ok());
         Box::new(resp.into_reader())
     };
+    // A first sync moves hundreds of MB. Narrate it, so the wait has a
+    // visible cause. Inert off a terminal and under --quiet, and erased
+    // when the download ends.
+    let mut progress = crate::kernel::ui::Progress::start(artifact_name(url), declared);
 
     // Cap the stream so a hostile server can't fill the disk before the
     // hash check fails. 8 GiB covers every real artifact class we handle.
@@ -333,6 +488,7 @@ pub(crate) fn download_verified_digest_held(
             Err(e) => break Err(e),
         };
         total += n as u64;
+        progress.advance(n as u64);
         if total > MAX_ARTIFACT {
             break Err(io::Error::other(format!(
                 "{url}: exceeds the {} GiB artifact cap; refusing",
@@ -348,6 +504,7 @@ pub(crate) fn download_verified_digest_held(
             break Err(e);
         }
     };
+    drop(progress);
     if let Err(e) = stream_result.and_then(|_| file.flush()) {
         drop(file);
         let _ = fs::remove_file(&tmp); // never leave partial downloads
@@ -417,6 +574,130 @@ mod tests {
         assert!(d.hex().starts_with("9b71d224bd62f378"));
         assert!(Digest::from_sri("md5-abc").is_err());
         assert!(Digest::from_sri("nodash").is_err());
+    }
+
+    /// The five user-facing network texts, and the one word a person
+    /// stranded on a plane looks for.
+    #[test]
+    fn network_failures_say_what_went_wrong_not_what_ureq_saw() {
+        let offline = transport_cause_with(
+            ureq::ErrorKind::ConnectionFailed,
+            "Network is unreachable (os error 101)",
+        )
+        .unwrap();
+        assert!(offline.contains("offline"), "{offline}");
+        assert!(offline.contains("os error 101"), "{offline}");
+        let dns = transport_cause(ureq::ErrorKind::Dns).unwrap();
+        assert!(
+            dns.contains("did not resolve") && dns.contains("offline"),
+            "{dns}"
+        );
+        let https = transport_cause(ureq::ErrorKind::InsecureRequestHttpsOnly).unwrap();
+        assert!(https.contains("https only"), "{https}");
+        let proxy = transport_cause(ureq::ErrorKind::ProxyUnauthorized).unwrap();
+        assert!(proxy.contains("proxy"), "{proxy}");
+        // A reply tog cannot read stays the library's own words.
+        assert!(transport_cause(ureq::ErrorKind::BadHeader).is_none());
+
+        assert!(status_cause(403).contains("credentials"));
+        assert!(status_cause(404).contains("yanked"));
+        assert!(status_cause(503).contains("registry's side"));
+        assert_eq!(status_cause(418), "the server replied 418");
+    }
+
+    /// `ErrorKind::Io` is ureq's catch-all. A rejected certificate behind a
+    /// corporate proxy is not "offline", and the reason it failed is the
+    /// only thing that distinguishes it, so it must survive the wrapping.
+    #[test]
+    fn a_tls_failure_is_not_reported_as_being_offline() {
+        let tls = transport_cause_with(
+            ureq::ErrorKind::Io,
+            "invalid peer certificate: UnknownIssuer",
+        )
+        .unwrap();
+        assert!(!tls.contains("offline"), "{tls}");
+        assert!(tls.starts_with("the connection failed"), "{tls}");
+        assert!(tls.contains("UnknownIssuer"), "cause was dropped: {tls}");
+
+        let reset = transport_cause_with(ureq::ErrorKind::Io, "Connection reset by peer").unwrap();
+        assert!(!reset.contains("offline"), "{reset}");
+        assert!(reset.contains("Connection reset by peer"), "{reset}");
+
+        // The genuinely-offline errnos still say so.
+        for source in [
+            "Network is unreachable (os error 101)",
+            "No route to host (os error 113)",
+            "failed to lookup address information",
+        ] {
+            let message = transport_cause_with(ureq::ErrorKind::Io, source).unwrap();
+            assert!(message.contains("offline"), "{source}: {message}");
+        }
+        assert!(looks_offline("Network is unreachable"));
+        assert!(!looks_offline("invalid peer certificate"));
+    }
+
+    /// ureq renders `{url}: {kind}: {message}: {source}`. tog names the URL
+    /// and translates the kind, so both come off; the remainder is kept
+    /// whole, because it is often itself colon-separated and the tail alone
+    /// ("UnknownIssuer") does not say what failed.
+    #[test]
+    fn a_transport_source_keeps_everything_past_the_kind() {
+        assert_eq!(
+            source_after_kind(
+                "https://files.pythonhosted.org/a.whl: Network Error: \
+                 invalid peer certificate: UnknownIssuer",
+                "Network Error",
+            ),
+            "invalid peer certificate: UnknownIssuer"
+        );
+        assert_eq!(
+            source_after_kind(
+                "https://example.com/a.whl: Dns Failed: failed to lookup address information",
+                "Dns Failed",
+            ),
+            "failed to lookup address information"
+        );
+        // No message and no source: the url and the kind are all there is,
+        // and tog already says both in its own words.
+        assert_eq!(
+            source_after_kind(
+                "https://example.com/a.whl: Connection Failed",
+                "Connection Failed"
+            ),
+            ""
+        );
+        // That empty source must not produce a dangling "()".
+        let bare = transport_cause_with(ureq::ErrorKind::ConnectionFailed, "").unwrap();
+        assert!(!bare.contains('('), "{bare}");
+
+        // The whole chain, as the user sees it.
+        let full = source_after_kind(
+            "https://files.pythonhosted.org/a.whl: Network Error: \
+             invalid peer certificate: UnknownIssuer",
+            "Network Error",
+        );
+        let message = transport_cause_with(ureq::ErrorKind::Io, &full).unwrap();
+        assert_eq!(
+            message,
+            "the connection failed (invalid peer certificate: UnknownIssuer)"
+        );
+    }
+
+    #[test]
+    fn artifact_names_come_from_the_last_url_segment() {
+        assert_eq!(
+            artifact_name("https://files.pythonhosted.org/ab/cd/flask-3.0.0.whl"),
+            "flask-3.0.0.whl"
+        );
+        assert_eq!(
+            artifact_name("https://example.com/a.tar.gz?token=x"),
+            "a.tar.gz"
+        );
+        // No path segment: the host is the registry, not the artifact, so
+        // labelling the progress line with it would be misleading.
+        assert_eq!(artifact_name("https://example.com/"), "download");
+        assert_eq!(artifact_name("https://example.com"), "download");
+        assert_eq!(artifact_name("file:///tmp/cache/x.whl"), "x.whl");
     }
 
     #[test]

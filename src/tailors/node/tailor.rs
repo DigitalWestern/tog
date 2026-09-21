@@ -291,8 +291,29 @@ fn encoded_workspace(workspace: &str) -> Option<String> {
     Some(workspace.replace('%', "%25").replace('/', "%2F"))
 }
 
+/// A `node_modules` that exists but is not a symlink. tog only ever
+/// projects a symlink, so a real directory here means an install tool
+/// (`npm install`, `yarn`, `pnpm`) ran and replaced the projection — the
+/// single most common way a synced project silently stops being synced.
+/// Named as its own detail so `tog status` says what happened rather than
+/// the generic "not the synced projection".
+fn replaced_by_a_real_directory(node_modules: &Path) -> bool {
+    std::fs::symlink_metadata(node_modules)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false)
+}
+
+/// The `State` detail for that case. Reads as one sentence inside the
+/// status line's "{what} is not the synced projection; run 'tog sync'".
+pub(crate) fn replaced_projection_detail(name: &str) -> String {
+    format!("{name} (a real directory an install tool wrote over the projection)")
+}
+
 fn node_projection_state(dir: &Path, body: &Value) -> State {
     let node_modules = dir.join("node_modules");
+    if replaced_by_a_real_directory(&node_modules) {
+        return State::ProjectionMissing(replaced_projection_detail("node_modules"));
+    }
     let Some(env_text) = body["env_object"].as_str() else {
         return if canonical_symlink_target(&node_modules).is_some() && node_modules.is_dir() {
             State::Unchecked("node projection provenance was not recorded".into())

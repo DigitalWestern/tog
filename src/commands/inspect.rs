@@ -572,11 +572,8 @@ fn store_checks(checks: &mut Vec<Check>) {
             disk_check(&store, checks);
             toolchains_check(&store, checks);
         }
-        Err(error) => checks.push(check(
-            "store",
-            Level::Fail,
-            format!("cannot open the store: {error}; set TOG_STORE to a writable directory"),
-        )),
+        // The error names the path, the cause, and TOG_STORE already.
+        Err(error) => checks.push(check("store", Level::Fail, format!("cannot {error}"))),
     }
 }
 
@@ -598,12 +595,12 @@ fn c_toolchain_check(platform: Platform, checks: &mut Vec<Check>) {
             format!("{} on PATH", required.join(", ")),
         ));
     } else {
-        let hint = match platform {
-            Platform::X86_64UnknownLinuxGnu => {
-                "Fedora: sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel"
-            }
-            Platform::Aarch64AppleDarwin => "xcode-select --install",
-        };
+        // Bubblewrap is not one of `required`; its hint belongs on the
+        // sandbox check, which is the one that tests it.
+        let hint = crate::kernel::platform::install_hint(
+            platform,
+            crate::kernel::platform::HostPackages::CToolchain,
+        );
         checks.push(check(
             "c-toolchain",
             Level::Warn,
@@ -626,6 +623,8 @@ fn platform_checks(platform: Platform, dir: &Path, checks: &mut Vec<Check>) {
     }
     match sandbox::probe(platform) {
         Ok(detail) => checks.push(check("sandbox", Level::Ok, detail)),
+        // The error already carries this host's install command and the
+        // reason; doctor only adds what the sandbox is for.
         Err(error) => checks.push(check(
             "sandbox",
             Level::Fail,
@@ -1163,6 +1162,24 @@ mod tests {
             rows[0].state,
             State::ProjectionMissing("workspace node_modules".into())
         );
+
+        // An `npm install` replaces the projection symlink with a real
+        // directory. That is the common way a synced project stops being
+        // synced, so status names the cause rather than reporting the
+        // generic missing projection.
+        fs::remove_file(project.join("node_modules")).unwrap();
+        fs::create_dir_all(project.join("node_modules/is-odd")).unwrap();
+        let rows = status(platform, project).unwrap();
+        let State::ProjectionMissing(detail) = &rows[0].state else {
+            panic!(
+                "a real node_modules was not reported missing: {:?}",
+                rows[0]
+            );
+        };
+        assert!(detail.contains("a real directory"), "{detail}");
+        assert!(detail.contains("install tool"), "{detail}");
+        let line = render_status(project, &rows, false).unwrap();
+        assert!(line.contains("run 'tog sync'"), "{line}");
     }
 
     #[test]
