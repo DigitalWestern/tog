@@ -17,7 +17,7 @@ use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -100,15 +100,69 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     sdk_pin(platform).map(|_| ())
 }
 
-fn sdk_identity(pin: &SdkPin) -> Identity {
+/// The recipe this tailor knows how to build an SDK object from. A lock
+/// naming any other recipe was written by a tog that installs the SDK some
+/// other way, and this one must not guess.
+const SDK_RECIPE: &str = "dotnet-sdk/1";
+
+/// One SDK realization's bytes, read from the selected toolchain rather
+/// than from the compiled pin table: the same fields a pin carries, owned,
+/// so a project's lock can supply them.
+#[derive(Debug)]
+struct SdkSpec {
+    platform: Platform,
+    version: String,
+    url: String,
+    sha512: String,
+}
+
+/// The selected SDK's row for `platform`, refused unless this tog knows the
+/// recipe that produced it. Microsoft publishes sha512, so the row must
+/// carry one: a sha256 row is a different provenance channel.
+fn sdk_spec(platform: Platform, selected: &Selected) -> io::Result<SdkSpec> {
+    if selected.ecosystem != "dotnet" || selected.runtime() != "dotnet-sdk" {
+        return Err(err(format!(
+            "dotnet: selected toolchain is {} ({}), not dotnet",
+            selected.ecosystem,
+            selected.runtime()
+        )));
+    }
+    let row = selected.artifact(platform, "dotnet-sdk")?;
+    if row.recipe != SDK_RECIPE {
+        return Err(err(format!(
+            "dotnet: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+            row.recipe
+        )));
+    }
+    if row.digest.algo() != "sha512" {
+        return Err(err(format!(
+            "dotnet: artifact digest must be sha512, got {}",
+            row.digest.algo()
+        )));
+    }
+    Ok(SdkSpec {
+        platform,
+        version: row.version,
+        url: row.url,
+        sha512: row.digest.hex().to_string(),
+    })
+}
+
+/// The shipped catalog's SDK, for callers with no project selection to
+/// honor. Inside a project every caller realizes from the lock instead.
+fn shipped_selection() -> io::Result<Selected> {
+    crate::kernel::toolchain::shipped(&toolchain_catalog()?)
+}
+
+fn sdk_identity(spec: &SdkSpec) -> Identity {
     Identity {
         kind: "dotnet-sdk".into(),
         name: "dotnet-sdk".into(),
-        version: SDK_VERSION.into(),
+        version: spec.version.clone(),
         inputs: BTreeMap::from([
             ("schema".to_string(), "dotnet-sdk/1".to_string()),
-            ("artifact_sha512".to_string(), pin.sha512.to_string()),
-            ("platform".to_string(), pin.platform.triple().to_string()),
+            ("artifact_sha512".to_string(), spec.sha512.clone()),
+            ("platform".to_string(), spec.platform.triple().to_string()),
         ]),
     }
 }
@@ -117,10 +171,10 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-pub fn sdk_fingerprint(platform: Platform) -> io::Result<String> {
-    Ok(hex::encode(
-        &Sha256::digest(sdk_pin(platform)?.sha512.as_bytes())[..8],
-    ))
+/// A short fingerprint of the SDK an output tree was built with: published
+/// build directories must not be shared across SDK upgrades.
+fn sdk_fingerprint_of(spec: &SdkSpec) -> String {
+    hex::encode(&Sha256::digest(spec.sha512.as_bytes())[..8])
 }
 
 fn nuget_identity(
@@ -151,9 +205,22 @@ fn nuget_identity(
     })
 }
 
+/// A spec straight from the compiled pin table: the catalog's own rows, and
+/// the fixture the identity goldens are written against.
+#[cfg(test)]
+fn pin_spec(platform: Platform) -> SdkSpec {
+    let pin = sdk_pin(platform).expect("pinned SDK for test platform");
+    SdkSpec {
+        platform: pin.platform,
+        version: SDK_VERSION.to_string(),
+        url: pin.url.to_string(),
+        sha512: pin.sha512.to_string(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
-    let sdk = sdk_identity(sdk_pin(platform).expect("pinned SDK for test platform"));
+    let sdk = sdk_identity(&pin_spec(platform));
     let empty_plan = DotnetPlan {
         sdk_version: SDK_VERSION.into(),
         project: "app.csproj".into(),
@@ -179,28 +246,41 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 
 /// Ensure the pinned .NET SDK is realized (muxer at <obj>/dotnet).
 pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
     ensure_sdk_for(store, Platform::host()?)
 }
 
+/// The shipped SDK, for callers with no project selection: tests and the
+/// host-side work that precedes a project's first sync.
 pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection()?)
+}
+
+/// Realize the SDK the selection names: its bytes, its version, its digest.
+/// A catalog refresh cannot move a project's SDK, because nothing here
+/// reads the pin table.
+pub fn realize_runtime(
+    store: &Store,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET SDK")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let pin = sdk_pin(platform)?;
-    let identity = sdk_identity(pin);
+    let spec = sdk_spec(platform, selected)?;
+    let identity = sdk_identity(&spec);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_digest_held(store, pin.url, &Digest::sha512(pin.sha512)?)?;
+    let digest = Digest::sha512(&spec.sha512)?;
+    let tarball = download_verified_digest_held(store, &spec.url, &digest)?;
     let staged = store.stage_with_activity(&activity)?;
     extract_sdk_archive_for(store, &tarball, &staged)?;
     store
         .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            deps.cache_digest(Digest::sha512(pin.sha512)?);
+            deps.cache_digest(digest);
             deps
         })
         .map(|(path, _)| path)
@@ -230,8 +310,10 @@ fn extract_sdk_archive_for(store: &Store, tarball: &Path, staged: &Path) -> io::
     Ok(())
 }
 
-/// global.json gate: exact pin, rollForward disable, no redirection.
-pub fn check_global_json(project_dir: &Path) -> io::Result<()> {
+/// global.json gate: it must name the SELECTED SDK exactly, with
+/// rollForward disabled and no redirection. Comparing against the shipped
+/// constant would let a catalog refresh start failing locked projects.
+pub fn check_global_json(project_dir: &Path, sdk_version: &str) -> io::Result<()> {
     let path = project_dir.join("global.json");
     if !regular_file_if_present(&path, "global.json")? {
         return Ok(());
@@ -248,9 +330,9 @@ pub fn check_global_json(project_dir: &Path) -> io::Result<()> {
         .get("version")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| err("global.json sdk.version is required"))?;
-    if want != SDK_VERSION {
+    if want != sdk_version {
         return Err(err(format!(
-            "global.json requires SDK {want}; pinned: {SDK_VERSION}"
+            "global.json requires SDK {want}; pinned: {sdk_version}"
         )));
     }
     if sdk.get("rollForward").and_then(serde_json::Value::as_str) != Some("disable") {
@@ -453,10 +535,10 @@ fn target_framework(target: &str) -> io::Result<&str> {
     Ok(tfm)
 }
 
-fn validate_plan(plan: &DotnetPlan) -> io::Result<()> {
-    if plan.sdk_version != SDK_VERSION {
+fn validate_plan(plan: &DotnetPlan, sdk_version: &str) -> io::Result<()> {
+    if plan.sdk_version != sdk_version {
         return Err(err(format!(
-            "plan requires SDK {}; pinned: {SDK_VERSION}",
+            "plan requires SDK {}; pinned: {sdk_version}",
             plan.sdk_version
         )));
     }
@@ -684,7 +766,7 @@ fn validate_lock_shape(path: &Path) -> io::Result<()> {
 
 /// Central v0 trust-boundary validation. The tuple is the canonical project
 /// file and its lock path (the latter may not exist until delegated planning).
-pub fn preflight(project_dir: &Path) -> io::Result<(PathBuf, PathBuf)> {
+pub fn preflight(project_dir: &Path, sdk_version: &str) -> io::Result<(PathBuf, PathBuf)> {
     let project_dir = project_dir.canonicalize()?;
     if !project_dir.is_dir() {
         return Err(err(format!(
@@ -702,7 +784,7 @@ pub fn preflight(project_dir: &Path) -> io::Result<(PathBuf, PathBuf)> {
     regular_file_if_present(&lock_path, "packages.lock.json")?;
     let global_path = project_dir.join("global.json");
     regular_file_if_present(&global_path, "global.json")?;
-    check_global_json(&project_dir)?;
+    check_global_json(&project_dir, sdk_version)?;
 
     for (depth, ancestor) in project_dir.ancestors().enumerate() {
         for name in [
@@ -747,8 +829,10 @@ pub fn plan_dotnet(
     store: &Store,
     project_dir: &Path,
     sdk_obj: &Path,
+    selected: &Selected,
 ) -> io::Result<(DotnetPlan, String)> {
-    let (mut csproj, mut lock_path) = preflight(project_dir)?;
+    let sdk_version = selected.version("dotnet-sdk")?.to_string();
+    let (mut csproj, mut lock_path) = preflight(project_dir, &sdk_version)?;
     if !lock_path.is_file() {
         eprintln!("tog: no packages.lock.json; resolving with the store SDK...");
         let scratch = store.stage()?;
@@ -777,7 +861,7 @@ pub fn plan_dotnet(
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
-        (csproj, lock_path) = preflight(project_dir)?;
+        (csproj, lock_path) = preflight(project_dir, &sdk_version)?;
     }
     let lock = fs::read_to_string(&lock_path)?;
     let v: serde_json::Value =
@@ -837,7 +921,8 @@ pub fn plan_dotnet(
         }
     }
     let plan = DotnetPlan {
-        sdk_version: SDK_VERSION.to_string(),
+        // The SDK this plan was restored under is the selected one.
+        sdk_version: sdk_version.clone(),
         project: csproj
             .file_name()
             .and_then(|n| n.to_str())
@@ -846,7 +931,7 @@ pub fn plan_dotnet(
         targets,
         packages: packages.into_values().collect(),
     };
-    validate_plan(&plan)?;
+    validate_plan(&plan, &sdk_version)?;
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
         return Err(err(
@@ -972,13 +1057,14 @@ pub fn realize_packages(
     plan: &DotnetPlan,
     sdk_obj: &Path,
     project_dir: &Path,
+    selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET packages")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let _ = sdk_pin(platform)?;
-    let _ = preflight(project_dir)?;
-    validate_plan(plan)?;
+    let spec = sdk_spec(platform, selected)?;
+    let _ = preflight(project_dir, &spec.version)?;
+    validate_plan(plan, &spec.version)?;
     let sdk_obj = sdk_obj.canonicalize()?;
     // Fetch every nupkg (nuget.org flatcontainer only in v0). No upfront
     // per-file hash exists (contentHash is semantic): download to tmp,
@@ -1119,6 +1205,7 @@ pub fn project_dotnet_env(
     packages_obj: &Path,
     plan: &DotnetPlan,
     lock_sha256: &str,
+    selected: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let sdk_obj = sdk_obj.canonicalize()?;
@@ -1126,6 +1213,31 @@ pub fn project_dotnet_env(
     let store = crate::comforter::store_from_object_path(&sdk_obj)
         .ok_or_else(|| err(".NET SDK object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    let mut refs = crate::comforter::ClosureRefs::new();
+    refs.object_path(&store, &activity, &sdk_obj)?;
+    refs.object_path(&store, &activity, &packages_obj)?;
+    crate::comforter::write_closure(
+        project_dir,
+        "dotnet",
+        closure_body(&sdk_obj, &packages_obj, plan, lock_sha256, selected)?,
+        &store,
+        &activity,
+        refs,
+        attribution,
+    )
+}
+
+/// The .NET closure body: the projection's objects and plan, plus the
+/// toolchain record that says which selection realized them. The SDK object
+/// is this ecosystem's runtime, and `project_dotnet_env` already holds it as
+/// a direct ref, so GC keeps it alive by the recorded id.
+fn closure_body(
+    sdk_obj: &Path,
+    packages_obj: &Path,
+    plan: &DotnetPlan,
+    lock_sha256: &str,
+    selected: &Selected,
+) -> io::Result<serde_json::Value> {
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -1133,23 +1245,19 @@ pub fn project_dotnet_env(
             .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
         Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
     };
-    let mut refs = crate::comforter::ClosureRefs::new();
-    refs.object_path(&store, &activity, &sdk_obj)?;
-    refs.object_path(&store, &activity, &packages_obj)?;
-    crate::comforter::write_closure(
-        project_dir,
-        "dotnet",
-        serde_json::json!({
-            "sdk_object": object_ref(&sdk_obj.canonicalize()?)?,
-            "packages_object": object_ref(&packages_obj.canonicalize()?)?,
-            "packages_lock_sha256": lock_sha256,
-            "plan": plan,
-        }),
-        &store,
-        &activity,
-        refs,
-        attribution,
-    )
+    let mut body = serde_json::json!({
+        "sdk_object": object_ref(sdk_obj)?,
+        "packages_object": object_ref(packages_obj)?,
+        "packages_lock_sha256": lock_sha256,
+        "plan": plan,
+    });
+    let record = crate::comforter::toolchain::closure_record(selected, sdk_obj);
+    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
+        for (key, value) in record {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(body)
 }
 
 fn dotnet_tmp_path(platform: Platform) -> PathBuf {
@@ -1423,9 +1531,11 @@ pub fn build_sandboxed(
     sdk_obj: &Path,
     packages_obj: &Path,
     args: &[String],
+    selected: &Selected,
 ) -> io::Result<()> {
     validate_build_args(args)?;
-    let (csproj, _) = preflight(project_dir)?;
+    let sdk_spec = sdk_spec(platform, selected)?;
+    let (csproj, _) = preflight(project_dir, &sdk_spec.version)?;
     let project_dir = project_dir.canonicalize()?;
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
@@ -1528,7 +1638,7 @@ pub fn build_sandboxed(
         &output_scratch,
         &project_dir,
         platform,
-        &sdk_fingerprint(platform)?,
+        &sdk_fingerprint_of(&sdk_spec),
         Some(&store),
     ) {
         Ok(output) => output,
@@ -1551,10 +1661,10 @@ mod tests {
     #[test]
     fn legacy_adapter_recovers_the_pinned_sdk_artifact() {
         for platform in Platform::ALL {
-            let pin = sdk_pin(*platform).unwrap();
+            let spec = pin_spec(*platform);
             assert_eq!(
-                recovered_cache(sdk_identity(pin)),
-                vec![format!("sha512:{}", pin.sha512)]
+                recovered_cache(sdk_identity(&spec)),
+                vec![format!("sha512:{}", spec.sha512)]
             );
         }
     }
@@ -1601,16 +1711,13 @@ mod tests {
 
     #[test]
     fn sdk_identities_and_fingerprints_are_platform_specific() {
-        let darwin = sdk_pin(Platform::Aarch64AppleDarwin).unwrap();
-        let linux = sdk_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        let darwin = pin_spec(Platform::Aarch64AppleDarwin);
+        let linux = pin_spec(Platform::X86_64UnknownLinuxGnu);
         assert_ne!(
-            sdk_identity(darwin).object_id(),
-            sdk_identity(linux).object_id()
+            sdk_identity(&darwin).object_id(),
+            sdk_identity(&linux).object_id()
         );
-        assert_ne!(
-            sdk_fingerprint(Platform::Aarch64AppleDarwin).unwrap(),
-            sdk_fingerprint(Platform::X86_64UnknownLinuxGnu).unwrap()
-        );
+        assert_ne!(sdk_fingerprint_of(&darwin), sdk_fingerprint_of(&linux));
     }
 
     #[test]
@@ -1625,12 +1732,133 @@ mod tests {
             pin.sha512,
             "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a"
         );
-        let identity = sdk_identity(pin);
+        let spec = pin_spec(platform);
+        let identity = sdk_identity(&spec);
         assert_eq!(
             identity.object_id(),
             "aebf0bc6741c81b414dfe7825ed9115ccc60f085-dotnet-sdk-9.0.317"
         );
-        assert_eq!(sdk_fingerprint(platform).unwrap(), "3a532efac27c3140");
+        assert_eq!(sdk_fingerprint_of(&spec), "3a532efac27c3140");
+    }
+
+    /// The selection is the only authority on the sync path, so the object
+    /// it realizes must be the object the pin table used to realize: same
+    /// id, on both platforms. If this drifts, every cached SDK is orphaned.
+    #[test]
+    fn a_selected_row_and_the_pin_build_the_same_identity() {
+        let selected = shipped_selection().unwrap();
+        for platform in Platform::ALL {
+            let from_lock = sdk_spec(*platform, &selected).unwrap();
+            let from_pin = pin_spec(*platform);
+            assert_eq!(from_lock.version, from_pin.version);
+            assert_eq!(from_lock.url, from_pin.url);
+            assert_eq!(from_lock.sha512, from_pin.sha512);
+            assert_eq!(
+                sdk_identity(&from_lock).object_id(),
+                sdk_identity(&from_pin).object_id(),
+                "{}",
+                platform.triple()
+            );
+            assert_eq!(
+                sdk_fingerprint_of(&from_lock),
+                sdk_fingerprint_of(&from_pin)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_recipe_and_a_foreign_selection_are_both_refused() {
+        let mut selected = shipped_selection().unwrap();
+        for row in &mut selected.bundle.artifacts {
+            row.recipe = "dotnet-sdk/99".into();
+        }
+        let error = sdk_spec(Platform::X86_64UnknownLinuxGnu, &selected)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("dotnet-sdk/99"), "{error}");
+        assert!(error.contains("upgrade tog"), "{error}");
+
+        let mut foreign = shipped_selection().unwrap();
+        foreign.ecosystem = "go".into();
+        let error = sdk_spec(Platform::X86_64UnknownLinuxGnu, &foreign)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not dotnet"), "{error}");
+
+        // Microsoft publishes sha512; a sha256 row is another provenance
+        // channel and this tailor does not accept one.
+        let mut wrong_algo = shipped_selection().unwrap();
+        for row in &mut wrong_algo.bundle.artifacts {
+            row.digest = Digest::sha256(&"a".repeat(64)).unwrap();
+        }
+        let error = sdk_spec(Platform::X86_64UnknownLinuxGnu, &wrong_algo)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be sha512"), "{error}");
+    }
+
+    /// The global.json gate answers to the selection, so a project locked to
+    /// an older SDK keeps passing after the shipped catalog moves on.
+    #[test]
+    fn the_global_json_gate_compares_against_the_selected_sdk() {
+        let temp = std::env::temp_dir().join(format!(
+            "tog-dotnet-globaljson-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("global.json"),
+            "{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"disable\"}}",
+        )
+        .unwrap();
+        check_global_json(&temp, "9.0.100").unwrap();
+        let error = check_global_json(&temp, SDK_VERSION)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires SDK 9.0.100"), "{error}");
+        assert!(error.contains(SDK_VERSION), "{error}");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// Every closure this tailor writes carries which bundle realized it and
+    /// which store object that bundle became: `tog status` compares the one,
+    /// `tog run` resolves the other.
+    #[test]
+    fn the_closure_body_records_the_bundle_and_the_runtime_object() {
+        let selected = shipped_selection().unwrap();
+        let sdk_obj = Path::new("/store/objects/abc-dotnet-sdk-9.0.317");
+        let plan = DotnetPlan {
+            sdk_version: SDK_VERSION.into(),
+            project: "app.csproj".into(),
+            targets: vec!["net9.0".into()],
+            packages: Vec::new(),
+        };
+        let body = closure_body(
+            sdk_obj,
+            Path::new("/store/objects/def-packages-0"),
+            &plan,
+            &"c".repeat(64),
+            &selected,
+        )
+        .unwrap();
+        assert_eq!(body["toolchain"]["ecosystem"], "dotnet");
+        assert_eq!(body["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(body["toolchain"]["versions"]["dotnet-sdk"], SDK_VERSION);
+        assert_eq!(body["runtime_object"]["id"], "abc-dotnet-sdk-9.0.317");
+        assert_eq!(
+            body["runtime_object"]["path"],
+            sdk_obj.display().to_string()
+        );
+        // The runtime object is the SDK the projection already records, and
+        // every pre-existing key survives beside the record.
+        assert_eq!(body["sdk_object"]["id"], body["runtime_object"]["id"]);
+        assert_eq!(body["packages_object"]["id"], "def-packages-0");
+        assert_eq!(body["packages_lock_sha256"], "c".repeat(64));
+        assert_eq!(body["plan"]["project"], "app.csproj");
     }
 
     #[test]
@@ -1784,11 +2012,14 @@ mod tests {
             targets: vec!["net9.0".into()],
             packages: vec![base.clone()],
         };
-        assert!(validate_plan(&ok).is_ok());
-        let error = validate_plan(&DotnetPlan {
-            targets: vec!["net9.0".into(), "net8.0".into()],
-            ..ok.clone()
-        })
+        assert!(validate_plan(&ok, SDK_VERSION).is_ok());
+        let error = validate_plan(
+            &DotnetPlan {
+                targets: vec!["net9.0".into(), "net8.0".into()],
+                ..ok.clone()
+            },
+            SDK_VERSION,
+        )
         .unwrap_err()
         .to_string();
         assert!(
@@ -1803,20 +2034,26 @@ mod tests {
             ],
             ..ok.clone()
         };
-        assert!(validate_plan(&same_tfm_rids).is_ok());
+        assert!(validate_plan(&same_tfm_rids, SDK_VERSION).is_ok());
         let mut evil = base.clone();
         evil.id = "../escape".into();
-        assert!(validate_plan(&DotnetPlan {
-            packages: vec![evil],
-            ..ok.clone()
-        })
+        assert!(validate_plan(
+            &DotnetPlan {
+                packages: vec![evil],
+                ..ok.clone()
+            },
+            SDK_VERSION
+        )
         .is_err());
         let mut bad = base.clone();
         bad.content_hash = "not/base64\n".into();
-        assert!(validate_plan(&DotnetPlan {
-            packages: vec![bad],
-            ..ok.clone()
-        })
+        assert!(validate_plan(
+            &DotnetPlan {
+                packages: vec![bad],
+                ..ok.clone()
+            },
+            SDK_VERSION
+        )
         .is_err());
     }
 
@@ -1831,31 +2068,31 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&temp).unwrap();
-        assert!(check_global_json(&temp).is_ok()); // absent
+        assert!(check_global_json(&temp, SDK_VERSION).is_ok()); // absent
         std::fs::write(
             temp.join("global.json"),
             format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}}}}"),
         )
         .unwrap();
-        assert!(check_global_json(&temp).is_ok());
+        assert!(check_global_json(&temp, SDK_VERSION).is_ok());
         std::fs::write(
             temp.join("global.json"),
             "{\"sdk\":{\"version\":\"8.0.100\",\"rollForward\":\"disable\"}}",
         )
         .unwrap();
-        assert!(check_global_json(&temp).is_err());
+        assert!(check_global_json(&temp, SDK_VERSION).is_err());
         std::fs::write(
             temp.join("global.json"),
             format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
         )
         .unwrap();
-        assert!(check_global_json(&temp).is_err()); // rollForward missing
+        assert!(check_global_json(&temp, SDK_VERSION).is_err()); // rollForward missing
         std::fs::write(
             temp.join("global.json"),
             "{\"msbuild-sdks\":{\"X\":\"1.0\"}}",
         )
         .unwrap();
-        assert!(check_global_json(&temp).is_err());
+        assert!(check_global_json(&temp, SDK_VERSION).is_err());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -1924,7 +2161,7 @@ mod tests {
             symlinked.join("project.csproj"),
         )
         .unwrap();
-        assert!(preflight(&symlinked).is_err());
+        assert!(preflight(&symlinked, SDK_VERSION).is_err());
 
         let project_lock = base.join("project-lock");
         fs::create_dir(&project_lock).unwrap();
@@ -1934,7 +2171,9 @@ mod tests {
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"Project","resolved":"1.0.0","contentHash":"A"}}}}"#,
         )
         .unwrap();
-        let error = preflight(&project_lock).unwrap_err().to_string();
+        let error = preflight(&project_lock, SDK_VERSION)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Project lock entries"), "{error}");
 
         let central_transitive = base.join("central-transitive");
@@ -1945,7 +2184,9 @@ mod tests {
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"CentralTransitive","resolved":"1.0.0","contentHash":"A"}}}}"#,
         )
         .unwrap();
-        let error = preflight(&central_transitive).unwrap_err().to_string();
+        let error = preflight(&central_transitive, SDK_VERSION)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Other"), "{error}");
         assert!(error.contains("CentralTransitive"), "{error}");
 
@@ -1956,13 +2197,13 @@ mod tests {
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"evil.targets\" /></Project>",
         )
         .unwrap();
-        assert!(preflight(&import).is_err());
+        assert!(preflight(&import, SDK_VERSION).is_err());
 
         let bad_global = base.join("bad-global");
         fs::create_dir(&bad_global).unwrap();
         fs::write(bad_global.join("project.csproj"), minimal_csproj()).unwrap();
         fs::write(bad_global.join("global.json"), "{}").unwrap();
-        assert!(preflight(&bad_global).is_err());
+        assert!(preflight(&bad_global, SDK_VERSION).is_err());
 
         let ancestor = base.join("ancestor");
         fs::create_dir(&ancestor).unwrap();
@@ -1970,7 +2211,7 @@ mod tests {
         let child = ancestor.join("child");
         fs::create_dir(&child).unwrap();
         fs::write(child.join("project.csproj"), minimal_csproj()).unwrap();
-        let error = preflight(&child).unwrap_err().to_string();
+        let error = preflight(&child, SDK_VERSION).unwrap_err().to_string();
         assert!(error.contains("ancestor global.json"), "{error}");
 
         let solution_only = base.join("solution-only");

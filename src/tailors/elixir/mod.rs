@@ -17,7 +17,7 @@ use crate::kernel::fetch::{download_verified_digest_held, download_verified_held
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -166,28 +166,128 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     otp_pin(platform).map(|_| ())
 }
 
-fn beam_identity(pin: &OtpPin, store_root: &Path) -> io::Result<Identity> {
-    beam_identity_with(pin, store_root, LINUX_RELOCATION_SCHEMA)
+/// The recipe a Darwin OTP row carries, and the one every platform-neutral
+/// BEAM row (Elixir, Hex, rebar3) carries.
+const BEAM_RECIPE: &str = "beam-toolchain/1";
+
+/// One BEAM realization's bytes, read from the selected toolchain rather
+/// than from the compiled pin tables. The composite object is built from
+/// four independently fetched artifacts, so the spec carries all four.
+#[derive(Debug)]
+struct BeamSpec {
+    platform: Platform,
+    /// The Linux OTP row's recipe, which is also the relocation recipe the
+    /// object's identity records. Darwin has no relocation step.
+    relocation_schema: String,
+    otp_version: String,
+    otp_url: String,
+    otp_sha256: String,
+    elixir_version: String,
+    elixir_url: String,
+    elixir_sha256: String,
+    hex_version: String,
+    hex_url: String,
+    hex_sha512: String,
+    rebar3_version: String,
+    rebar3_url: String,
+    rebar3_sha512: String,
 }
 
-fn beam_identity_with(
-    pin: &OtpPin,
-    store_root: &Path,
-    relocation_schema: &str,
-) -> io::Result<Identity> {
+/// The selected BEAM's four rows for `platform`, refused unless this tog
+/// knows every recipe involved. OTP's recipe is per platform: Darwin ships
+/// an already-installed tree, Linux a make-release tree this tog relocates,
+/// and the relocation recipe is an identity input.
+fn beam_spec(platform: Platform, selected: &Selected) -> io::Result<BeamSpec> {
+    if selected.ecosystem != "elixir" || selected.runtime() != "otp" {
+        return Err(err(format!(
+            "elixir: selected toolchain is {} ({}), not the BEAM pair",
+            selected.ecosystem,
+            selected.runtime()
+        )));
+    }
+    let known = |row: &crate::kernel::toolchain::ArtifactSpec, want: &str| -> io::Result<()> {
+        if row.recipe != want {
+            return Err(err(format!(
+                "elixir: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                row.recipe
+            )));
+        }
+        Ok(())
+    };
+    let sha256 = |row: &crate::kernel::toolchain::ArtifactSpec| -> io::Result<String> {
+        if row.digest.algo() != "sha256" {
+            return Err(err(format!(
+                "elixir: {} digest must be sha256, got {}",
+                row.component,
+                row.digest.algo()
+            )));
+        }
+        Ok(row.digest.hex().to_string())
+    };
+    let sha512 = |row: &crate::kernel::toolchain::ArtifactSpec| -> io::Result<String> {
+        if row.digest.algo() != "sha512" {
+            return Err(err(format!(
+                "elixir: {} digest must be sha512, got {}",
+                row.component,
+                row.digest.algo()
+            )));
+        }
+        Ok(row.digest.hex().to_string())
+    };
+
+    let otp = selected.artifact(platform, "otp")?;
+    let relocation_schema = if platform.is_macos() {
+        known(&otp, BEAM_RECIPE)?;
+        String::new()
+    } else {
+        known(&otp, LINUX_RELOCATION_SCHEMA)?;
+        otp.recipe.clone()
+    };
+    let elixir = selected.artifact(platform, "elixir")?;
+    known(&elixir, BEAM_RECIPE)?;
+    let hex = selected.artifact(platform, "hex")?;
+    known(&hex, BEAM_RECIPE)?;
+    let rebar3 = selected.artifact(platform, "rebar3")?;
+    known(&rebar3, BEAM_RECIPE)?;
+
+    Ok(BeamSpec {
+        platform,
+        relocation_schema,
+        otp_version: otp.version.clone(),
+        otp_url: otp.url.clone(),
+        otp_sha256: sha256(&otp)?,
+        elixir_version: elixir.version.clone(),
+        elixir_url: elixir.url.clone(),
+        elixir_sha256: sha256(&elixir)?,
+        hex_version: hex.version.clone(),
+        hex_url: hex.url.clone(),
+        hex_sha512: sha512(&hex)?,
+        rebar3_version: rebar3.version.clone(),
+        rebar3_url: rebar3.url.clone(),
+        rebar3_sha512: sha512(&rebar3)?,
+    })
+}
+
+/// The shipped catalog's BEAM, for callers with no project selection to
+/// honor. Inside a project every caller realizes from the lock instead.
+fn shipped_selection() -> io::Result<Selected> {
+    crate::kernel::toolchain::shipped(&toolchain_catalog()?)
+}
+
+fn beam_identity(spec: &BeamSpec, store_root: &Path) -> io::Result<Identity> {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "beam-toolchain/1".to_string()),
-        ("otp_sha256".to_string(), pin.sha256.to_string()),
-        ("elixir_sha256".to_string(), ELIXIR_SHA256.to_string()),
-        ("hex_sha512".to_string(), HEX_SHA512.to_string()),
-        ("rebar3_sha512".to_string(), REBAR3_SHA512.to_string()),
+        ("otp_sha256".to_string(), spec.otp_sha256.clone()),
+        ("elixir_sha256".to_string(), spec.elixir_sha256.clone()),
+        ("hex_sha512".to_string(), spec.hex_sha512.clone()),
+        ("rebar3_sha512".to_string(), spec.rebar3_sha512.clone()),
         (
             "versions".to_string(),
-            format!("hex{HEX_VERSION}:rebar{REBAR3_VERSION}"),
+            format!("hex{}:rebar{}", spec.hex_version, spec.rebar3_version),
         ),
-        ("platform".to_string(), pin.platform.triple().to_string()),
+        ("platform".to_string(), spec.platform.triple().to_string()),
     ]);
-    if !pin.platform.is_macos() {
+    if !spec.platform.is_macos() {
         // `Install -cross -minimal <final>` embeds the FINAL object prefix
         // (<store_root>/objects/<id>/otp) into the generated launchers, so
         // the object's bytes are a function of the store root. The root is
@@ -205,24 +305,24 @@ fn beam_identity_with(
             .ok_or_else(|| err("BEAM store root is not valid UTF-8"))?;
         inputs.insert(
             "relocation_schema".to_string(),
-            relocation_schema.to_string(),
+            spec.relocation_schema.clone(),
         );
         inputs.insert("store_root".to_string(), root.to_string());
     }
     Ok(Identity {
         kind: "beam".into(),
         name: "beam".into(),
-        version: format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"),
+        version: format!("{}-elixir{}", spec.otp_version, spec.elixir_version),
         inputs,
     })
 }
 
-fn hex_deps_identity(platform: Platform, plan: &ElixirPlan) -> io::Result<Identity> {
+fn hex_deps_identity(spec: &BeamSpec, plan: &ElixirPlan) -> io::Result<Identity> {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "hex-deps/1".to_string()),
-        // .hex markers are generated under the pinned toolchain; their
+        // .hex markers are generated under the selected toolchain; their
         // bytes live in the object.
-        ("beam".to_string(), beam_fingerprint(platform)?),
+        ("beam".to_string(), beam_fingerprint_for(spec)),
     ]);
     for d in &plan.deps {
         inputs.insert(
@@ -270,24 +370,21 @@ fn err(msg: impl Into<String>) -> io::Error {
 
 /// A short fingerprint of the whole BEAM toolchain, used to qualify build
 /// paths and identities (stale _build across toolchains is a real hazard).
-pub fn beam_fingerprint(platform: Platform) -> io::Result<String> {
-    Ok(beam_fingerprint_with(
-        otp_pin(platform)?,
-        LINUX_RELOCATION_SCHEMA,
-    ))
-}
-
-fn beam_fingerprint_with(pin: &OtpPin, relocation_schema: &str) -> String {
-    let joined = if pin.platform.is_macos() {
+fn beam_fingerprint_for(spec: &BeamSpec) -> String {
+    let joined = if spec.platform.is_macos() {
         // Darwin: byte-for-byte the pre-Linux formula (golden c35290f692496d51).
         format!(
-            "{}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}",
-            pin.sha256
+            "{}:{}:{}:{}",
+            spec.otp_sha256, spec.elixir_sha256, spec.hex_sha512, spec.rebar3_sha512
         )
     } else {
         format!(
-            "{}:{ELIXIR_SHA256}:{HEX_SHA512}:{REBAR3_SHA512}:{relocation_schema}",
-            pin.sha256
+            "{}:{}:{}:{}:{}",
+            spec.otp_sha256,
+            spec.elixir_sha256,
+            spec.hex_sha512,
+            spec.rebar3_sha512,
+            spec.relocation_schema
         )
     };
     fingerprint_of_joined(&joined)
@@ -422,7 +519,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Validate the uninstalled make-release tree BEFORE Install runs. bin/erl
 /// is deliberately not required here: Install creates it.
-fn validate_otp_pre_install(otp_root: &Path) -> io::Result<OtpLayout> {
+fn validate_otp_pre_install(otp_root: &Path, otp_version: &str) -> io::Result<OtpLayout> {
     if !otp_root.is_absolute() {
         return Err(err(format!(
             "OTP staging prefix must be absolute: {}",
@@ -509,12 +606,16 @@ fn validate_otp_pre_install(otp_root: &Path) -> io::Result<OtpLayout> {
     }
 
     require_directory(&otp_root.join("lib"), "library root")?;
-    let release_dir = otp_root.join("releases/29");
-    require_directory(&release_dir, "OTP 29 release directory")?;
+    let major = otp_version.split('.').next().unwrap_or_default();
+    if major.is_empty() || !major.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(err(format!("unusable OTP version {otp_version:?}")));
+    }
+    let release_dir = otp_root.join(format!("releases/{major}"));
+    require_directory(&release_dir, &format!("OTP {major} release directory"))?;
     let version = read_text(&release_dir.join("OTP_VERSION"), "OTP version file")?;
-    if version.trim() != OTP_VERSION {
+    if version.trim() != otp_version {
         return Err(err(format!(
-            "OTP version file says {:?}, expected {OTP_VERSION}",
+            "OTP version file says {:?}, expected {otp_version}",
             version.trim()
         )));
     }
@@ -957,25 +1058,39 @@ fn extract_otp_archive_for(
 /// roots — never merge their trees) + archives/ (unpacked Hex) +
 /// rebar3 escript.
 pub fn ensure_beam(store: &Store) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
     ensure_beam_for(store, Platform::host()?)
 }
 
+/// The shipped BEAM, for callers with no project selection: tests and the
+/// host-side work that precedes a project's first sync.
 pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection()?)
+}
+
+/// Realize the BEAM the selection names: OTP, Elixir, Hex and rebar3, each
+/// from its own row. A catalog refresh cannot move a project's runtime,
+/// because nothing here reads the pin tables.
+pub fn realize_runtime(
+    store: &Store,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "BEAM toolchain")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let pin = otp_pin(platform)?;
-    let identity = beam_identity(pin, &store.root)?;
+    let spec = beam_spec(platform, selected)?;
+    let identity = beam_identity(&spec, &store.root)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let otp_tar = download_verified_held(store, pin.url, pin.sha256)?;
-    let elixir_zip = download_verified_held(store, ELIXIR_URL, ELIXIR_SHA256)?;
-    let hex_ez = download_verified_digest_held(store, HEX_URL, &Digest::sha512(HEX_SHA512)?)?;
-    let rebar3 = download_verified_digest_held(store, REBAR3_URL, &Digest::sha512(REBAR3_SHA512)?)?;
+    let otp_tar = download_verified_held(store, &spec.otp_url, &spec.otp_sha256)?;
+    let elixir_zip = download_verified_held(store, &spec.elixir_url, &spec.elixir_sha256)?;
+    let hex_digest = Digest::sha512(&spec.hex_sha512)?;
+    let hex_ez = download_verified_digest_held(store, &spec.hex_url, &hex_digest)?;
+    let rebar3_digest = Digest::sha512(&spec.rebar3_sha512)?;
+    let rebar3 = download_verified_digest_held(store, &spec.rebar3_url, &rebar3_digest)?;
 
     let staged = store.stage_with_activity(&activity)?;
     let result = (|| {
@@ -990,7 +1105,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             // Uninstalled make-release tree: run Install against the FINAL
             // object path (known from the identity) while writing into
             // staging, then prove the result before the ordinary commit.
-            let layout = validate_otp_pre_install(&otp_root)?;
+            let layout = validate_otp_pre_install(&otp_root, &spec.otp_version)?;
             let final_root = store.object_path(&id).join("otp");
             let scratch = store.stage_with_activity(&activity)?;
             let installed = run_otp_install_with_store(&otp_root, &final_root, &scratch, |spec| {
@@ -1021,7 +1136,7 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             .args(["-oq"])
             .arg(&hex_ez)
             .args(["-d"])
-            .arg(staged.join(format!("archives/hex-{HEX_VERSION}")));
+            .arg(staged.join(format!("archives/hex-{}", spec.hex_version)));
         let st = crate::kernel::supervise::status(&mut command, &activity)?;
         if !st.success() {
             return Err(err("Hex archive extraction failed"));
@@ -1032,10 +1147,10 @@ pub fn ensure_beam_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
             fs::set_permissions(staged.join("rebar3"), fs::Permissions::from_mode(0o755))?;
         }
         let mut deps = crate::kernel::store::ObjectDeps::new();
-        deps.cache_digest(Digest::sha256(pin.sha256)?);
-        deps.cache_digest(Digest::sha256(ELIXIR_SHA256)?);
-        deps.cache_digest(Digest::sha512(HEX_SHA512)?);
-        deps.cache_digest(Digest::sha512(REBAR3_SHA512)?);
+        deps.cache_digest(Digest::sha256(&spec.otp_sha256)?);
+        deps.cache_digest(Digest::sha256(&spec.elixir_sha256)?);
+        deps.cache_digest(hex_digest);
+        deps.cache_digest(rebar3_digest);
         store
             .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
             .map(|(path, _)| path)
@@ -1308,6 +1423,7 @@ pub fn plan_elixir(
     store: &Store,
     project_dir: &Path,
     beam_obj: &Path,
+    selected: &Selected,
 ) -> io::Result<(ElixirPlan, String)> {
     if !project_dir.join("mix.exs").is_file() {
         return Err(err("mix.exs not found"));
@@ -1389,8 +1505,10 @@ pub fn plan_elixir(
     let mut deps = parsed.entries;
     deps.sort_by(|a, b| a.app.cmp(&b.app));
     let plan = ElixirPlan {
-        otp_version: OTP_VERSION.to_string(),
-        elixir_version: ELIXIR_VERSION.to_string(),
+        // The toolchain this plan was made under is the selected one, so
+        // the plan records the selection's versions, never the shipped pins.
+        otp_version: selected.version("otp")?.to_string(),
+        elixir_version: selected.version("elixir")?.to_string(),
         deps,
     };
     validate_plan(&plan)?;
@@ -1443,13 +1561,14 @@ pub fn realize_deps(
     platform: Platform,
     plan: &ElixirPlan,
     beam_obj: &Path,
+    selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Hex dependencies")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let _ = otp_pin(platform)?;
+    let spec = beam_spec(platform, selected)?;
     validate_plan(plan)?;
-    let identity = hex_deps_identity(platform, plan)?;
+    let identity = hex_deps_identity(&spec, plan)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
         crate::kernel::policy::check_cached(store, &id)?;
@@ -1619,8 +1738,10 @@ pub fn project_elixir_env(
     plan: &ElixirPlan,
     lock_sha256: &str,
     fresh: bool,
+    selected: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<PathBuf> {
+    let spec = beam_spec(platform, selected)?;
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&beam_obj)
@@ -1656,25 +1777,18 @@ pub fn project_elixir_env(
         crate::comforter::clone_tree_for_store(&store, &deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     crate::comforter::write_closure_with_project_lock(
         project_dir,
         "elixir",
-        serde_json::json!({
-            "beam_object": object_ref(&beam_obj)?,
-            "deps_object": object_ref(&deps_obj)?,
-            "deps_projection": proj_dir.display().to_string(),
-            "mutable_state": "unattested",
-            "mix_lock_sha256": lock_sha256,
-            "beam_fingerprint": beam_fingerprint(platform)?,
-            "plan": plan,
-        }),
+        closure_body(
+            &beam_obj,
+            &deps_obj,
+            &proj_dir,
+            plan,
+            lock_sha256,
+            &spec,
+            selected,
+        )?,
         &store,
         &activity,
         refs,
@@ -1684,10 +1798,62 @@ pub fn project_elixir_env(
     Ok(proj_dir)
 }
 
+/// The Elixir closure body: the projection's objects and plan, the
+/// toolchain fingerprint `tog run` reconstructs the build root from, and
+/// the toolchain record that says which selection realized them. The BEAM
+/// object is this ecosystem's runtime, and `project_elixir_env` already
+/// holds it as a direct ref, so GC keeps it alive by the recorded id.
+#[allow(clippy::too_many_arguments)]
+fn closure_body(
+    beam_obj: &Path,
+    deps_obj: &Path,
+    proj_dir: &Path,
+    plan: &ElixirPlan,
+    lock_sha256: &str,
+    spec: &BeamSpec,
+    selected: &Selected,
+) -> io::Result<serde_json::Value> {
+    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
+        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
+    };
+    let mut body = serde_json::json!({
+        "beam_object": object_ref(beam_obj)?,
+        "deps_object": object_ref(deps_obj)?,
+        "deps_projection": proj_dir.display().to_string(),
+        "mutable_state": "unattested",
+        "mix_lock_sha256": lock_sha256,
+        "beam_fingerprint": beam_fingerprint_for(spec),
+        "plan": plan,
+    });
+    let record = crate::comforter::toolchain::closure_record(selected, beam_obj);
+    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
+        for (key, value) in record {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(body)
+}
+
 /// Build root, qualified by the toolchain fingerprint: stale BEAM/native
 /// artifacts across OTP/Elixir upgrades are a real hazard.
-pub fn build_root(platform: Platform, project_dir: &Path) -> io::Result<PathBuf> {
-    Ok(project_dir.join(format!("_build/tog-{}", beam_fingerprint(platform)?)))
+pub fn build_root_at(project_dir: &Path, fingerprint: &str) -> PathBuf {
+    project_dir.join(format!("_build/tog-{fingerprint}"))
+}
+
+/// The build root of the selected toolchain.
+pub fn build_root(
+    platform: Platform,
+    project_dir: &Path,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
+    Ok(build_root_at(
+        project_dir,
+        &beam_fingerprint_for(&beam_spec(platform, selected)?),
+    ))
 }
 
 /// Sandboxed `mix compile`: network denied, writes only the qualified
@@ -1698,6 +1864,7 @@ pub fn build_sandboxed(
     beam_obj: &Path,
     deps_projection: &Path,
     args: &[String],
+    selected: &Selected,
 ) -> io::Result<()> {
     for arg in args {
         let norm = arg.trim_start_matches('-');
@@ -1710,7 +1877,7 @@ pub fn build_sandboxed(
     let deps_projection = deps_projection.canonicalize()?;
     let store = Store::open()?;
     let scratch = store.stage()?;
-    let build = build_root(platform, &project_dir)?;
+    let build = build_root(platform, &project_dir, selected)?;
     fs::create_dir_all(&build)?;
     let build = build.canonicalize()?;
     let mut argv = vec![
@@ -1748,10 +1915,39 @@ pub fn build_sandboxed(
     result
 }
 
+/// A spec straight from the compiled pin tables: the catalog's own rows,
+/// and the fixture the identity goldens are written against.
+#[cfg(test)]
+fn pin_spec_with(platform: Platform, relocation_schema: &str) -> BeamSpec {
+    let pin = otp_pin(platform).expect("pinned BEAM toolchain for test platform");
+    BeamSpec {
+        platform: pin.platform,
+        relocation_schema: relocation_schema.to_string(),
+        otp_version: OTP_VERSION.to_string(),
+        otp_url: pin.url.to_string(),
+        otp_sha256: pin.sha256.to_string(),
+        elixir_version: ELIXIR_VERSION.to_string(),
+        elixir_url: ELIXIR_URL.to_string(),
+        elixir_sha256: ELIXIR_SHA256.to_string(),
+        hex_version: HEX_VERSION.to_string(),
+        hex_url: HEX_URL.to_string(),
+        hex_sha512: HEX_SHA512.to_string(),
+        rebar3_version: REBAR3_VERSION.to_string(),
+        rebar3_url: REBAR3_URL.to_string(),
+        rebar3_sha512: REBAR3_SHA512.to_string(),
+    }
+}
+
+#[cfg(test)]
+fn pin_spec(platform: Platform) -> BeamSpec {
+    pin_spec_with(platform, LINUX_RELOCATION_SCHEMA)
+}
+
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
-    let pin = otp_pin(platform).expect("pinned BEAM toolchain for test platform");
-    let beam = beam_identity(pin, Path::new("/fixture/tog-store")).expect("offline BEAM identity");
+    let spec = pin_spec(platform);
+    let beam =
+        beam_identity(&spec, Path::new("/fixture/tog-store")).expect("offline BEAM identity");
     let empty_plan = ElixirPlan {
         otp_version: OTP_VERSION.into(),
         elixir_version: ELIXIR_VERSION.into(),
@@ -1768,9 +1964,9 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         }],
         ..empty_plan.clone()
     };
-    let hex_empty = hex_deps_identity(platform, &empty_plan).expect("empty Hex identity");
+    let hex_empty = hex_deps_identity(&spec, &empty_plan).expect("empty Hex identity");
     let hex_dependency =
-        hex_deps_identity(platform, &dependency_plan).expect("Hex dependency identity");
+        hex_deps_identity(&spec, &dependency_plan).expect("Hex dependency identity");
     vec![beam, hex_empty, hex_dependency]
 }
 
@@ -1783,11 +1979,10 @@ mod tests {
     #[test]
     fn legacy_adapter_recovers_the_beam_toolchain_artifacts() {
         for platform in Platform::ALL {
-            let pin = otp_pin(*platform).unwrap();
-            let identity =
-                beam_identity_with(pin, Path::new("/tmp/store"), LINUX_RELOCATION_SCHEMA).unwrap();
+            let spec = pin_spec(*platform);
+            let identity = beam_identity(&spec, Path::new("/tmp/store")).unwrap();
             let mut expected = vec![
-                format!("sha256:{}", pin.sha256),
+                format!("sha256:{}", spec.otp_sha256),
                 format!("sha256:{ELIXIR_SHA256}"),
                 format!("sha512:{HEX_SHA512}"),
                 format!("sha512:{REBAR3_SHA512}"),
@@ -1805,9 +2000,8 @@ mod tests {
     #[test]
     fn legacy_adapter_matches_the_beam_object_by_its_own_fingerprint() {
         for platform in Platform::ALL {
-            let pin = otp_pin(*platform).unwrap();
-            let identity =
-                beam_identity_with(pin, Path::new("/tmp/store"), LINUX_RELOCATION_SCHEMA).unwrap();
+            let spec = pin_spec(*platform);
+            let identity = beam_identity(&spec, Path::new("/tmp/store")).unwrap();
             let beam = crate::kernel::objmeta::legacy_record(identity);
             let outer = "a".repeat(64);
             let hex_deps = crate::kernel::types::Identity {
@@ -1816,10 +2010,7 @@ mod tests {
                 version: "1".into(),
                 inputs: std::collections::BTreeMap::from([
                     ("schema".to_string(), "hex-deps/1".to_string()),
-                    (
-                        "beam".to_string(),
-                        beam_fingerprint_with(pin, LINUX_RELOCATION_SCHEMA),
-                    ),
+                    ("beam".to_string(), beam_fingerprint_for(&spec)),
                     (
                         "dep:jason".to_string(),
                         format!("jason@1.4.4:{outer}:{}:mix", "b".repeat(64)),
@@ -1889,22 +2080,21 @@ mod tests {
 
     #[test]
     fn darwin_identity_unchanged() {
-        let pin = otp_pin(DARWIN).unwrap();
-        let identity = beam_identity(pin, Path::new("/unused")).unwrap();
+        let spec = pin_spec(DARWIN);
+        let identity = beam_identity(&spec, Path::new("/unused")).unwrap();
         assert_eq!(identity.object_id(), DARWIN_OBJECT_ID);
-        assert_eq!(beam_fingerprint(DARWIN).unwrap(), DARWIN_FINGERPRINT);
+        assert_eq!(beam_fingerprint_for(&spec), DARWIN_FINGERPRINT);
         // Darwin inputs: exactly the pre-Linux set, no recipe/store-root keys.
         assert_eq!(identity.inputs.len(), 7);
         assert!(!identity.inputs.contains_key("relocation_schema"));
         assert!(!identity.inputs.contains_key("store_root"));
         // Neither the recipe revision nor the store root moves Darwin.
-        let other_schema =
-            beam_identity_with(pin, Path::new("/x"), "otp-install-cross-minimal/99").unwrap();
-        assert_eq!(other_schema.object_id(), DARWIN_OBJECT_ID);
+        let other = pin_spec_with(DARWIN, "otp-install-cross-minimal/99");
         assert_eq!(
-            beam_fingerprint_with(pin, "otp-install-cross-minimal/99"),
-            DARWIN_FINGERPRINT
+            beam_identity(&other, Path::new("/x")).unwrap().object_id(),
+            DARWIN_OBJECT_ID
         );
+        assert_eq!(beam_fingerprint_for(&other), DARWIN_FINGERPRINT);
     }
 
     #[test]
@@ -1961,8 +2151,8 @@ mod tests {
     #[test]
     fn linux_identity_is_separate_and_tracks_recipe_and_store_root() {
         let root = Path::new("/srv/tog/store");
-        let linux = beam_identity(otp_pin(LINUX).unwrap(), root).unwrap();
-        let darwin = beam_identity(otp_pin(DARWIN).unwrap(), root).unwrap();
+        let linux = beam_identity(&pin_spec(LINUX), root).unwrap();
+        let darwin = beam_identity(&pin_spec(DARWIN), root).unwrap();
         assert_ne!(linux.object_id(), darwin.object_id());
         assert_eq!(linux.inputs["platform"], "x86_64-unknown-linux-gnu");
         assert_eq!(linux.inputs["relocation_schema"], LINUX_RELOCATION_SCHEMA);
@@ -1970,30 +2160,29 @@ mod tests {
         for key in ["otp_sha256", "elixir_sha256", "hex_sha512", "rebar3_sha512"] {
             assert!(linux.inputs.contains_key(key), "{key}");
         }
-        assert_eq!(linux.inputs["otp_sha256"], otp_pin(LINUX).unwrap().sha256);
+        assert_eq!(linux.inputs["otp_sha256"], pin_spec(LINUX).otp_sha256);
         // The object path itself is never an input (would be circular).
         assert!(!linux.inputs.values().any(|v| v.contains("/objects/")));
 
-        let other_root = beam_identity(otp_pin(LINUX).unwrap(), Path::new("/other/store")).unwrap();
+        let other_root = beam_identity(&pin_spec(LINUX), Path::new("/other/store")).unwrap();
         assert_ne!(other_root.object_id(), linux.object_id());
         let other_schema =
-            beam_identity_with(otp_pin(LINUX).unwrap(), root, "otp-install-cross-minimal/2")
-                .unwrap();
+            beam_identity(&pin_spec_with(LINUX, "otp-install-cross-minimal/2"), root).unwrap();
         assert_ne!(other_schema.object_id(), linux.object_id());
-        assert!(beam_identity(otp_pin(LINUX).unwrap(), Path::new("relative")).is_err());
+        assert!(beam_identity(&pin_spec(LINUX), Path::new("relative")).is_err());
     }
 
     #[test]
     fn linux_fingerprint_and_build_root_track_recipe() {
-        let linux = beam_fingerprint(LINUX).unwrap();
+        let linux = beam_fingerprint_for(&pin_spec(LINUX));
         assert_eq!(linux.len(), 16);
         assert_ne!(linux, DARWIN_FINGERPRINT);
         assert_ne!(
-            beam_fingerprint_with(otp_pin(LINUX).unwrap(), "otp-install-cross-minimal/2"),
+            beam_fingerprint_for(&pin_spec_with(LINUX, "otp-install-cross-minimal/2")),
             linux
         );
-        let linux_root = build_root(LINUX, Path::new("/p")).unwrap();
-        let darwin_root = build_root(DARWIN, Path::new("/p")).unwrap();
+        let linux_root = build_root_at(Path::new("/p"), &linux);
+        let darwin_root = build_root_at(Path::new("/p"), &beam_fingerprint_for(&pin_spec(DARWIN)));
         assert_eq!(
             linux_root,
             Path::new("/p").join(format!("_build/tog-{linux}"))
@@ -2226,7 +2415,7 @@ exit 0
     #[test]
     fn pre_install_layout_is_validated_without_bin_erl() {
         let fx = fixture("pre", &fake_install(""));
-        let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
+        let layout = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         assert_eq!(layout.erts_vsn, ERTS);
         assert_eq!(layout.erts_dir, fx.otp_root.join(format!("erts-{ERTS}")));
         assert!(!fx.otp_root.join("bin/erl").exists());
@@ -2235,26 +2424,26 @@ exit 0
         assert!(e.to_string().contains("bin"), "{e}");
         // Missing template inputs are contextual failures.
         fs::remove_file(fx.otp_root.join("releases/RELEASES.src")).unwrap();
-        let e = validate_otp_pre_install(&fx.otp_root).unwrap_err();
+        let e = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap_err();
         assert!(e.to_string().contains("RELEASES.src"), "{e}");
         // An Install without -cross is not this recipe's artifact.
         let fx2 = fixture(
             "pre2",
             "#!/bin/sh\nTARGET_ERL_ROOT=x %FINAL_ROOTDIR% -minimal)\n",
         );
-        let e = validate_otp_pre_install(&fx2.otp_root).unwrap_err();
+        let e = validate_otp_pre_install(&fx2.otp_root, OTP_VERSION).unwrap_err();
         assert!(e.to_string().contains("-cross"), "{e}");
         // An already-installed tree is rejected as pre-install input.
         let fx3 = fixture("pre3", &fake_install(""));
         fs::create_dir_all(fx3.otp_root.join("bin")).unwrap();
         fs::write(fx3.otp_root.join("bin/erl"), "x").unwrap();
-        assert!(validate_otp_pre_install(&fx3.otp_root).is_err());
+        assert!(validate_otp_pre_install(&fx3.otp_root, OTP_VERSION).is_err());
     }
 
     #[test]
     fn cross_install_embeds_final_prefix_and_leaves_no_staging_prefix() {
         let fx = fixture("cross", &fake_install(""));
-        let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
+        let layout = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         run_otp_install_with(
             &fx.otp_root,
             &fx.final_root,
@@ -2307,7 +2496,7 @@ exit 0
         // A hypothetical Install that bakes the physical root into a launcher.
         let leaky = fake_install("echo \"# built in $ERL_ROOT\" >> \"$ERL_ROOT/bin/erl\"");
         let fx = fixture("leak", &leaky);
-        let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
+        let layout = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         run_otp_install_with(
             &fx.otp_root,
             &fx.final_root,
@@ -2324,7 +2513,7 @@ exit 0
             "leaklink",
             &fake_install("ln -s \"$ERL_ROOT/erts-17.0.5/bin/heart\" \"$ERL_ROOT/bin/heart\""),
         );
-        let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
+        let layout = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         run_otp_install_with(
             &fx.otp_root,
             &fx.final_root,
@@ -2340,7 +2529,7 @@ exit 0
             "escape",
             &fake_install("ln -s /etc/passwd \"$ERL_ROOT/bin/escape\""),
         );
-        let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
+        let layout = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         run_otp_install_with(
             &fx.otp_root,
             &fx.final_root,
@@ -2353,7 +2542,7 @@ exit 0
 
         // Wrong embedded prefix (as if -cross were dropped) is caught too.
         let fx = fixture("nocross", &fake_install(""));
-        let layout = validate_otp_pre_install(&fx.otp_root).unwrap();
+        let layout = validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         let elsewhere = fx
             .final_root
             .parent()
@@ -2373,7 +2562,7 @@ exit 0
     fn install_failures_propagate_with_context() {
         // Nonzero exit from the real runner: status and stderr surface.
         let fx = fixture("fail", "#!/bin/sh\n# TARGET_ERL_ROOT %FINAL_ROOTDIR% -cross) -minimal)\necho boom >&2\nexit 7\n");
-        validate_otp_pre_install(&fx.otp_root).unwrap();
+        validate_otp_pre_install(&fx.otp_root, OTP_VERSION).unwrap();
         let e = run_otp_install_with(
             &fx.otp_root,
             &fx.final_root,
@@ -2485,13 +2674,122 @@ exit 0
 
     #[test]
     fn build_root_is_beam_qualified() {
-        let root = build_root(Platform::Aarch64AppleDarwin, Path::new("/p")).unwrap();
+        let spec = pin_spec(DARWIN);
+        let root = build_root_at(Path::new("/p"), &beam_fingerprint_for(&spec));
         assert!(root.display().to_string().contains("_build/tog-"));
+        assert_eq!(beam_fingerprint_for(&spec).len(), 16);
+        // Both routes to the build root agree for the shipped selection.
         assert_eq!(
-            beam_fingerprint(Platform::Aarch64AppleDarwin)
-                .unwrap()
-                .len(),
-            16
+            build_root(DARWIN, Path::new("/p"), &shipped_selection().unwrap()).unwrap(),
+            root
         );
+    }
+
+    /// The selection is the only authority on the sync path, so the object
+    /// it realizes must be the object the pin tables used to realize: same
+    /// id, on both platforms. If this drifts, every cached BEAM is orphaned.
+    #[test]
+    fn a_selected_row_and_the_pins_build_the_same_identity() {
+        let selected = shipped_selection().unwrap();
+        let root = Path::new("/srv/tog/store");
+        for platform in Platform::ALL {
+            let from_lock = beam_spec(*platform, &selected).unwrap();
+            let from_pin = pin_spec(*platform);
+            assert_eq!(from_lock.otp_version, from_pin.otp_version);
+            assert_eq!(from_lock.otp_url, from_pin.otp_url);
+            assert_eq!(from_lock.otp_sha256, from_pin.otp_sha256);
+            assert_eq!(from_lock.elixir_sha256, from_pin.elixir_sha256);
+            assert_eq!(from_lock.hex_sha512, from_pin.hex_sha512);
+            assert_eq!(from_lock.rebar3_sha512, from_pin.rebar3_sha512);
+            assert_eq!(
+                beam_identity(&from_lock, root).unwrap().object_id(),
+                beam_identity(&from_pin, root).unwrap().object_id(),
+                "{}",
+                platform.triple()
+            );
+            assert_eq!(
+                beam_fingerprint_for(&from_lock),
+                beam_fingerprint_for(&from_pin)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_recipe_and_a_foreign_selection_are_both_refused() {
+        // The Linux OTP row's recipe is the relocation recipe: an unknown
+        // one means an install procedure this tog does not implement.
+        let mut selected = shipped_selection().unwrap();
+        for row in &mut selected.bundle.artifacts {
+            if row.component == "otp" {
+                row.recipe = "otp-install-cross-minimal/99".into();
+            }
+        }
+        let error = beam_spec(LINUX, &selected).unwrap_err().to_string();
+        assert!(error.contains("otp-install-cross-minimal/99"), "{error}");
+        assert!(error.contains("upgrade tog"), "{error}");
+
+        // A platform-neutral row is refused the same way.
+        let mut hex_moved = shipped_selection().unwrap();
+        for row in &mut hex_moved.bundle.artifacts {
+            if row.component == "hex" {
+                row.recipe = "beam-toolchain/9".into();
+            }
+        }
+        let error = beam_spec(LINUX, &hex_moved).unwrap_err().to_string();
+        assert!(error.contains("beam-toolchain/9"), "{error}");
+
+        let mut foreign = shipped_selection().unwrap();
+        foreign.ecosystem = "ruby".into();
+        let error = beam_spec(LINUX, &foreign).unwrap_err().to_string();
+        assert!(error.contains("not the BEAM pair"), "{error}");
+
+        // All four components are required; dropping one is a refusal that
+        // names what is missing.
+        let mut without_rebar = shipped_selection().unwrap();
+        without_rebar
+            .bundle
+            .artifacts
+            .retain(|row| row.component != "rebar3");
+        let error = beam_spec(LINUX, &without_rebar).unwrap_err().to_string();
+        assert!(error.contains("rebar3"), "{error}");
+    }
+
+    /// Every closure this tailor writes carries which bundle realized it and
+    /// which store object that bundle became: `tog status` compares the one,
+    /// `tog run` resolves the other, and `tog run` rebuilds the build root
+    /// from the recorded fingerprint.
+    #[test]
+    fn the_closure_body_records_the_bundle_and_the_runtime_object() {
+        let selected = shipped_selection().unwrap();
+        let spec = beam_spec(LINUX, &selected).unwrap();
+        let beam_obj = Path::new("/store/objects/abc-beam-29.0.5-elixir1.20.4");
+        let plan = ElixirPlan {
+            otp_version: OTP_VERSION.into(),
+            elixir_version: ELIXIR_VERSION.into(),
+            deps: Vec::new(),
+        };
+        let body = closure_body(
+            beam_obj,
+            Path::new("/store/objects/def-deps-0"),
+            Path::new("/store/forests/aa/def-deps-0/hex-deps"),
+            &plan,
+            &"c".repeat(64),
+            &spec,
+            &selected,
+        )
+        .unwrap();
+        assert_eq!(body["toolchain"]["ecosystem"], "elixir");
+        assert_eq!(body["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(body["toolchain"]["versions"]["otp"], OTP_VERSION);
+        assert_eq!(body["toolchain"]["versions"]["elixir"], ELIXIR_VERSION);
+        assert_eq!(body["runtime_object"]["id"], "abc-beam-29.0.5-elixir1.20.4");
+        // The runtime object is the BEAM the projection already records, and
+        // every pre-existing key survives beside the record.
+        assert_eq!(body["beam_object"]["id"], body["runtime_object"]["id"]);
+        assert_eq!(body["deps_object"]["id"], "def-deps-0");
+        assert_eq!(body["mix_lock_sha256"], "c".repeat(64));
+        assert_eq!(body["mutable_state"], "unattested");
+        assert_eq!(body["beam_fingerprint"], beam_fingerprint_for(&spec));
+        assert_eq!(body["plan"]["otp_version"], OTP_VERSION);
     }
 }

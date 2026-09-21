@@ -17,7 +17,7 @@ use crate::kernel::fetch::{download_verified_held, hash_file, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
+use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -108,27 +108,80 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     ruby_pin(platform).map(|_| ())
 }
 
-fn ruby_identity(pin: &RubyPin) -> Identity {
+/// The recipe this tailor knows how to build a Ruby object from. A lock
+/// naming any other recipe was written by a tog that builds Ruby some other
+/// way, and this one must not guess.
+const RUBY_RECIPE: &str = "ruby-toolchain/1";
+
+/// One Ruby realization's bytes, read from the selected toolchain rather
+/// than from the compiled pin table: the same fields a pin carries, owned,
+/// so a project's lock can supply them.
+#[derive(Debug)]
+struct RubySpec {
+    platform: Platform,
+    version: String,
+    url: String,
+    sha256: String,
+}
+
+/// The selected Ruby's row for `platform`, refused unless this tog knows
+/// the recipe that produced it.
+fn ruby_spec(platform: Platform, selected: &Selected) -> io::Result<RubySpec> {
+    if selected.ecosystem != "ruby" || selected.runtime() != "ruby" {
+        return Err(err(format!(
+            "ruby: selected toolchain is {} ({}), not ruby",
+            selected.ecosystem,
+            selected.runtime()
+        )));
+    }
+    let row = selected.artifact(platform, "ruby")?;
+    if row.recipe != RUBY_RECIPE {
+        return Err(err(format!(
+            "ruby: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+            row.recipe
+        )));
+    }
+    if row.digest.algo() != "sha256" {
+        return Err(err(format!(
+            "ruby: artifact digest must be sha256, got {}",
+            row.digest.algo()
+        )));
+    }
+    Ok(RubySpec {
+        platform,
+        version: row.version,
+        url: row.url,
+        sha256: row.digest.hex().to_string(),
+    })
+}
+
+/// The shipped catalog's Ruby, for callers with no project selection to
+/// honor. Inside a project every caller realizes from the lock instead.
+fn shipped_selection() -> io::Result<Selected> {
+    crate::kernel::toolchain::shipped(&toolchain_catalog()?)
+}
+
+fn ruby_identity(spec: &RubySpec) -> Identity {
     Identity {
         kind: "ruby".into(),
         name: "ruby".into(),
-        version: RUBY_VERSION.into(),
+        version: spec.version.clone(),
         inputs: BTreeMap::from([
             ("schema".to_string(), "ruby-toolchain/1".to_string()),
-            ("artifact_sha256".to_string(), pin.sha256.to_string()),
-            ("platform".to_string(), pin.platform.triple().to_string()),
+            ("artifact_sha256".to_string(), spec.sha256.clone()),
+            ("platform".to_string(), spec.platform.triple().to_string()),
         ]),
     }
 }
 
-fn ruby_gems_identity(pin: &RubyPin, plan: &RubyPlan) -> Identity {
+fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "ruby-gems/1".to_string()),
         // Installer recipe AND wrapper-byte provenance: generated binstubs
         // embed interpreter paths.
         (
             "installer".to_string(),
-            format!("ruby{}:{}", RUBY_VERSION, pin.sha256),
+            format!("ruby{}:{}", spec.version, spec.sha256),
         ),
         ("ruby_platform".to_string(), plan.ruby_platform.clone()),
     ]);
@@ -274,23 +327,35 @@ fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()>
     validate_ruby_layout(staged)
 }
 
-/// Ensure the pinned portable Ruby is realized (interpreter at <obj>/bin/ruby).
+/// Ensure the shipped portable Ruby is realized (interpreter at
+/// <obj>/bin/ruby). For callers with no project selection: tests and the
+/// host-side lock generation `tog add` runs before a sync exists.
 pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
     ensure_ruby_for(store, Platform::host()?)
 }
 
 pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection()?)
+}
+
+/// Realize the Ruby the selection names: its bytes, its version, its
+/// digest. A catalog refresh cannot move a project's interpreter, because
+/// nothing here reads the pin table.
+pub fn realize_runtime(
+    store: &Store,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Ruby")?;
-    let pin = ruby_pin(platform)?;
-    let identity = ruby_identity(pin);
+    let spec = ruby_spec(platform, selected)?;
+    let identity = ruby_identity(&spec);
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
+    let tarball = download_verified_held(store, &spec.url, &spec.sha256)?;
     let staged = store.stage()?;
     if let Err(error) = extract_ruby_bottle(store, &tarball, &staged) {
         let _ = crate::kernel::store::remove_tree(&staged);
@@ -299,7 +364,7 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
     store
         .commit_with_deps(&identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps.cache_digest(Digest::sha256(&spec.sha256)?);
             deps
         })
         .map(|(path, _)| path)
@@ -627,6 +692,7 @@ pub fn plan_ruby(
     store: &Store,
     project_dir: &Path,
     ruby_obj: &Path,
+    selected: &Selected,
 ) -> io::Result<(RubyPlan, String)> {
     if !project_dir.join("Gemfile").is_file() {
         return Err(err("Gemfile not found"));
@@ -760,7 +826,9 @@ pub fn plan_ruby(
         });
     }
     let plan = RubyPlan {
-        ruby_version: RUBY_VERSION.to_string(),
+        // The interpreter this plan was made under is the selected one, so
+        // the plan records the selection's version, never the shipped pin.
+        ruby_version: selected.version("ruby")?.to_string(),
         ruby_platform: parsed.ruby_platform,
         bundler_version: parsed.bundler,
         gems,
@@ -782,12 +850,13 @@ pub fn realize_gems(
     platform: Platform,
     plan: &RubyPlan,
     ruby_obj: &Path,
+    selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Ruby gems")?;
-    let pin = ruby_pin(platform)?;
+    let spec = ruby_spec(platform, selected)?;
     validate_plan(plan)?;
-    let identity = ruby_gems_identity(pin, plan);
+    let identity = ruby_gems_identity(&spec, plan);
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
@@ -939,6 +1008,7 @@ pub fn project_ruby_env(
     gems_obj: &Path,
     plan: &RubyPlan,
     lock_sha256: &str,
+    selected: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let ruby_obj = ruby_obj.canonicalize()?;
@@ -946,25 +1016,13 @@ pub fn project_ruby_env(
     let store = crate::comforter::store_from_object_path(&ruby_obj)
         .ok_or_else(|| err("Ruby object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
-        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
-    };
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, &activity, &ruby_obj)?;
     refs.object_path(&store, &activity, &gems_obj)?;
     crate::comforter::write_closure(
         project_dir,
         "ruby",
-        serde_json::json!({
-            "ruby_object": object_ref(&ruby_obj.canonicalize()?)?,
-            "gems_object": object_ref(&gems_obj.canonicalize()?)?,
-            "gemfile_lock_sha256": lock_sha256,
-            "plan": plan,
-        }),
+        closure_body(&ruby_obj, &gems_obj, plan, lock_sha256, selected)?,
         &store,
         &activity,
         refs,
@@ -972,10 +1030,57 @@ pub fn project_ruby_env(
     )
 }
 
+/// The Ruby closure body: the projection's objects and plan, plus the
+/// toolchain record that says which selection realized them. The
+/// interpreter object is this ecosystem's runtime, and `project_ruby_env`
+/// already holds it as a direct ref, so GC keeps it alive by the recorded
+/// id.
+fn closure_body(
+    ruby_obj: &Path,
+    gems_obj: &Path,
+    plan: &RubyPlan,
+    lock_sha256: &str,
+    selected: &Selected,
+) -> io::Result<serde_json::Value> {
+    let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| err(format!("object path has no UTF-8 id: {}", path.display())))?;
+        Ok(serde_json::json!({"path": path.display().to_string(), "id": id}))
+    };
+    let mut body = serde_json::json!({
+        "ruby_object": object_ref(ruby_obj)?,
+        "gems_object": object_ref(gems_obj)?,
+        "gemfile_lock_sha256": lock_sha256,
+        "plan": plan,
+    });
+    let record = crate::comforter::toolchain::closure_record(selected, ruby_obj);
+    if let (Some(body), Some(record)) = (body.as_object_mut(), record.as_object()) {
+        for (key, value) in record {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(body)
+}
+
+/// A spec straight from the compiled pin table: the catalog's own rows, and
+/// the fixture the identity goldens are written against.
+#[cfg(test)]
+fn pin_spec(platform: Platform) -> RubySpec {
+    let pin = ruby_pin(platform).expect("pinned Ruby toolchain for test platform");
+    RubySpec {
+        platform: pin.platform,
+        version: RUBY_VERSION.to_string(),
+        url: pin.url.to_string(),
+        sha256: pin.sha256.to_string(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
-    let pin = ruby_pin(platform).expect("pinned Ruby toolchain for test platform");
-    let ruby = ruby_identity(pin);
+    let spec = pin_spec(platform);
+    let ruby = ruby_identity(&spec);
     let empty_plan = RubyPlan {
         ruby_version: RUBY_VERSION.into(),
         ruby_platform: if platform.is_macos() {
@@ -998,8 +1103,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     };
     vec![
         ruby,
-        ruby_gems_identity(pin, &empty_plan),
-        ruby_gems_identity(pin, &gem_plan),
+        ruby_gems_identity(&spec, &empty_plan),
+        ruby_gems_identity(&spec, &gem_plan),
     ]
 }
 
@@ -1012,10 +1117,10 @@ mod tests {
     #[test]
     fn legacy_adapter_recovers_the_pinned_ruby_artifact() {
         for platform in Platform::ALL {
-            let pin = ruby_pin(*platform).unwrap();
+            let spec = pin_spec(*platform);
             assert_eq!(
-                recovered_cache(ruby_identity(pin)),
-                vec![format!("sha256:{}", pin.sha256)]
+                recovered_cache(ruby_identity(&spec)),
+                vec![format!("sha256:{}", spec.sha256)]
             );
         }
     }
@@ -1092,10 +1197,10 @@ mod tests {
 
     #[test]
     fn linux_and_darwin_identities_are_distinct_rows_of_one_schema() {
-        let darwin_pin = ruby_pin(Platform::Aarch64AppleDarwin).unwrap();
-        let linux_pin = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
-        let darwin = ruby_identity(darwin_pin);
-        let linux = ruby_identity(linux_pin);
+        let darwin_pin = pin_spec(Platform::Aarch64AppleDarwin);
+        let linux_pin = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let darwin = ruby_identity(&darwin_pin);
+        let linux = ruby_identity(&linux_pin);
         assert_ne!(darwin.object_id(), linux.object_id());
         // Same input keys: the Linux pin is a row, not a second recipe.
         assert_eq!(
@@ -1106,10 +1211,10 @@ mod tests {
         assert_eq!(linux.inputs["artifact_sha256"], linux_pin.sha256);
 
         let plan = linux_test_plan();
-        let darwin_gems = ruby_gems_identity(darwin_pin, &plan);
-        let linux_gems = ruby_gems_identity(linux_pin, &plan);
+        let darwin_gems = ruby_gems_identity(&darwin_pin, &plan);
+        let linux_gems = ruby_gems_identity(&linux_pin, &plan);
         assert_ne!(darwin_gems.object_id(), linux_gems.object_id());
-        assert!(linux_gems.inputs["installer"].contains(linux_pin.sha256));
+        assert!(linux_gems.inputs["installer"].contains(&linux_pin.sha256));
     }
 
     #[test]
@@ -1117,11 +1222,11 @@ mod tests {
         // Goldens for the shared-store check: a Mac
         // and a Linux box realizing the same pin must not collide, and the
         // Linux ids must not drift without a deliberate identity change.
-        let pin = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
+        let spec = pin_spec(Platform::X86_64UnknownLinuxGnu);
         assert_eq!(
             (
-                ruby_identity(pin).object_id(),
-                ruby_gems_identity(pin, &linux_test_plan()).object_id(),
+                ruby_identity(&spec).object_id(),
+                ruby_gems_identity(&spec, &linux_test_plan()).object_id(),
             ),
             (
                 "192a4c7b501dd09eb3c76a3ebd427e8077fbda6e-ruby-3.4.6".to_string(),
@@ -1184,8 +1289,7 @@ mod tests {
     #[test]
     fn darwin_identity_unchanged() {
         let platform = Platform::Aarch64AppleDarwin;
-        let pin = ruby_pin(platform).unwrap();
-        let identity = ruby_identity(pin);
+        let identity = ruby_identity(&pin_spec(platform));
         assert_eq!(
             identity.object_id(),
             "c4c2411b7540521f48dcdd8cff25786e261ed1ee-ruby-3.4.6"
@@ -1194,7 +1298,7 @@ mod tests {
 
     #[test]
     fn darwin_ruby_gems_identity_unchanged() {
-        let pin = ruby_pin(Platform::Aarch64AppleDarwin).unwrap();
+        let spec = pin_spec(Platform::Aarch64AppleDarwin);
         let plan = RubyPlan {
             ruby_version: RUBY_VERSION.into(),
             ruby_platform: "arm64-darwin20".into(),
@@ -1207,7 +1311,7 @@ mod tests {
                 sha256: "a".repeat(64),
             }],
         };
-        let identity = ruby_gems_identity(pin, &plan);
+        let identity = ruby_gems_identity(&spec, &plan);
         assert_eq!(
             identity.object_id(),
             "c017bc4da37483c7d35d1997df4c541d35e4a751-gems-1"
@@ -1275,6 +1379,92 @@ mod tests {
             ],
         };
         assert!(validate_plan(&plan).is_ok());
+    }
+
+    /// The selection is the only authority on the sync path, so the object
+    /// it realizes must be the object the pin table used to realize: same
+    /// id, on both platforms. If this drifts, every cached Ruby is orphaned.
+    #[test]
+    fn a_selected_row_and_the_pin_build_the_same_identity() {
+        let selected = shipped_selection().unwrap();
+        for platform in Platform::ALL {
+            let from_lock = ruby_spec(*platform, &selected).unwrap();
+            let from_pin = pin_spec(*platform);
+            assert_eq!(from_lock.version, from_pin.version);
+            assert_eq!(from_lock.url, from_pin.url);
+            assert_eq!(from_lock.sha256, from_pin.sha256);
+            assert_eq!(
+                ruby_identity(&from_lock).object_id(),
+                ruby_identity(&from_pin).object_id(),
+                "{}",
+                platform.triple()
+            );
+            let plan = linux_test_plan();
+            assert_eq!(
+                ruby_gems_identity(&from_lock, &plan).object_id(),
+                ruby_gems_identity(&from_pin, &plan).object_id()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_recipe_and_a_foreign_selection_are_both_refused() {
+        let mut selected = shipped_selection().unwrap();
+        for row in &mut selected.bundle.artifacts {
+            row.recipe = "ruby-toolchain/99".into();
+        }
+        let error = ruby_spec(Platform::X86_64UnknownLinuxGnu, &selected)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ruby-toolchain/99"), "{error}");
+        assert!(error.contains("upgrade tog"), "{error}");
+
+        let mut foreign = shipped_selection().unwrap();
+        foreign.ecosystem = "python".into();
+        let error = ruby_spec(Platform::X86_64UnknownLinuxGnu, &foreign)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not ruby"), "{error}");
+
+        // A selection of the right ecosystem with no row for this host is a
+        // refusal too, and it names what it could not find.
+        let mut empty = shipped_selection().unwrap();
+        empty.bundle.artifacts.clear();
+        let error = ruby_spec(Platform::X86_64UnknownLinuxGnu, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("x86_64-unknown-linux-gnu"), "{error}");
+    }
+
+    /// Every closure this tailor writes carries which bundle realized it and
+    /// which store object that bundle became: `tog status` compares the one,
+    /// `tog run` resolves the other.
+    #[test]
+    fn the_closure_body_records_the_bundle_and_the_runtime_object() {
+        let selected = shipped_selection().unwrap();
+        let ruby_obj = Path::new("/store/objects/abc-ruby-3.4.6");
+        let body = closure_body(
+            ruby_obj,
+            Path::new("/store/objects/def-gems-1"),
+            &linux_test_plan(),
+            &"c".repeat(64),
+            &selected,
+        )
+        .unwrap();
+        assert_eq!(body["toolchain"]["ecosystem"], "ruby");
+        assert_eq!(body["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(body["toolchain"]["versions"]["ruby"], RUBY_VERSION);
+        assert_eq!(body["runtime_object"]["id"], "abc-ruby-3.4.6");
+        assert_eq!(
+            body["runtime_object"]["path"],
+            ruby_obj.display().to_string()
+        );
+        // The runtime object is the interpreter the projection already
+        // records, and every pre-existing key survives beside the record.
+        assert_eq!(body["ruby_object"]["id"], body["runtime_object"]["id"]);
+        assert_eq!(body["gems_object"]["id"], "def-gems-1");
+        assert_eq!(body["gemfile_lock_sha256"], "c".repeat(64));
+        assert_eq!(body["plan"]["ruby_platform"], "x86_64-linux");
     }
 
     #[test]

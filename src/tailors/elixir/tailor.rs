@@ -36,9 +36,8 @@ impl Tailor for Elixir {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let _ = toolchain;
-        let beam = elixir::ensure_beam_for(&ctx.store, ctx.platform)?;
-        let (plan, _) = elixir::plan_elixir(&ctx.store, dir, &beam)?;
+        let beam = elixir::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
+        let (plan, _) = elixir::plan_elixir(&ctx.store, dir, &beam, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -49,14 +48,14 @@ impl Tailor for Elixir {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
-        let _ = request.toolchain;
+        let toolchain = request.toolchain;
         let fresh = request.fresh;
 
         let platform = ctx.platform;
         let store = &ctx.store;
-        let beam = elixir::ensure_beam_for(store, platform)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, dir, &beam)?;
-        let deps = elixir::realize_deps(store, platform, &plan, &beam)?;
+        let beam = elixir::realize_runtime(store, platform, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(store, dir, &beam, toolchain)?;
+        let deps = elixir::realize_deps(store, platform, &plan, &beam, toolchain)?;
         let projection = elixir::project_elixir_env(
             platform,
             dir,
@@ -65,6 +64,7 @@ impl Tailor for Elixir {
             &plan,
             &lock_sha256,
             fresh,
+            toolchain,
             attribution,
         )?;
         ui::synced("hex deps", &projection);
@@ -98,12 +98,11 @@ impl Tailor for Elixir {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
-        let _ = toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let beam = elixir::ensure_beam_for(store, platform)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, root, &beam)?;
-        let deps = elixir::realize_deps(store, platform, &plan, &beam)?;
+        let beam = elixir::realize_runtime(store, platform, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(store, root, &beam, toolchain)?;
+        let deps = elixir::realize_deps(store, platform, &plan, &beam, toolchain)?;
         let projection = elixir::project_elixir_env(
             platform,
             root,
@@ -112,9 +111,10 @@ impl Tailor for Elixir {
             &plan,
             &lock_sha256,
             false,
+            toolchain,
             attribution,
         )?;
-        elixir::build_sandboxed(platform, root, &beam, &projection, args)
+        elixir::build_sandboxed(platform, root, &beam, &projection, args, toolchain)
     }
 
     fn run_env(
@@ -128,7 +128,6 @@ impl Tailor for Elixir {
         let mut prefix = Vec::new();
         if dir.join(".tog/closures/elixir.json").exists() {
             let store = &ctx.store;
-            let platform = ctx.platform;
             let closure = comforter::read_closure(dir, "elixir")?;
             let beam = comforter::closure_object(store, &closure, "beam_object", "elixir/bin/mix")?;
             // The deps projection is a writable clone OUTSIDE the store; verify
@@ -153,10 +152,18 @@ impl Tailor for Elixir {
             prefix.push(beam.join("otp/bin").to_string_lossy().into_owned());
             let scratch = std::env::temp_dir().join(format!("tog-mix-run-{}", std::process::id()));
             std::fs::create_dir_all(&scratch)?;
+            // The build root belongs to the toolchain this closure was
+            // synced with, not to whatever the catalog offers now.
+            let fingerprint = closure["beam_fingerprint"].as_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "elixir closure records no toolchain fingerprint; run `tog sync`",
+                )
+            })?;
             let (prefixes, remove, set) = elixir::run_env(
                 &beam,
                 &projection,
-                &elixir::build_root(platform, dir)?,
+                &elixir::build_root_at(dir, fingerprint),
                 &scratch,
             )?;
             sandbox::force_env(command, &prefixes, &remove, &set);
