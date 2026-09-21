@@ -576,6 +576,13 @@ pub struct RubyGem {
     pub sha256: String,
 }
 
+/// Where a planned gem's `.gem` is fetched from. rubygems.org is the only
+/// source the plan validator admits, so this is the single spelling of that
+/// URL rather than a per-gem field.
+fn gem_url(gem: &RubyGem) -> String {
+    format!("https://rubygems.org/downloads/{}.gem", gem.full_name)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubyPlan {
     pub ruby_version: String,
@@ -791,14 +798,18 @@ pub fn realize_gems(
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
     let mut artifacts: Vec<(&RubyGem, PathBuf)> = Vec::new();
-    // One download per gem: the lease taken to verify the embedded gemspec is
-    // the same lease that keeps the cached `.gem` alive through the sandboxed
-    // installs below. Nothing between here and publication fetches again, so
-    // there is no window in which a sweep could drop the artifact.
+    // One download per gem, digest-verified once, and the lease from that
+    // download is held through the sandboxed installs below: no sweep can
+    // drop a `.gem` between verification and use. The trade-off is that the
+    // second pass this replaces also re-hashed every artifact immediately
+    // before install, which caught a same-user replacement of a cache entry
+    // during the gemspec phase; the lease does not (see `fetch.rs`
+    // `download_verified_digest_held`, which re-verifies on every hit for
+    // exactly that reason).
     let mut _cache_leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
-        let url = format!("https://rubygems.org/downloads/{}.gem", g.full_name);
+        let url = gem_url(g);
         let lease = download_verified_held(store, &url, &g.sha256)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
         let file_path = lease.to_path_buf();

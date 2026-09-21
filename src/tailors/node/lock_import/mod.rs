@@ -1468,6 +1468,34 @@ is-number@^6.0.0:
                 format!("is-odd@3.0.1: {lock_source} entry has no integrity")
             );
         }
+
+        // And the whole way through a real importer: a pnpm entry whose
+        // resolution carries a tarball but no integrity.
+        let dir = project();
+        let lock = "\
+lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      is-odd:
+        specifier: 3.0.1
+        version: 3.0.1
+packages:
+  is-odd@3.0.1:
+    resolution: {tarball: https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz}
+snapshots:
+  is-odd@3.0.1: {}
+";
+        let error = super::pnpm::plan_pnpm_with_policy(
+            Platform::X86_64UnknownLinuxGnu,
+            lock,
+            &dir,
+            &crate::kernel::policy::Policy::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "is-odd@3.0.1: pnpm-lock.yaml entry has no integrity");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -1475,7 +1475,7 @@ pub fn build_sandboxed(
         .and_then(Path::parent)
         .map(|path| path.join("tmp"))
         .ok_or_else(|| err("cannot locate store tmp for Cargo build"))?;
-    let scratch = unique_dir(&store_tmp, BUILD_SCRATCH_PREFIX)?;
+    let scratch = build_scratch(&store_tmp)?;
     // Disposable per-build CARGO_HOME + config inside the scratch dir: the
     // projected cargo-home must never be writable in-sandbox, or a build
     // script could replace the wrapper that later runs UNsandboxed under
@@ -1542,6 +1542,13 @@ fn project_child_dir(project_dir: &Path, relative: &str) -> io::Result<PathBuf> 
         )));
     }
     Ok(path)
+}
+
+/// The scratch directory one `cargo build` runs in. Every caller of the
+/// build goes through here, so the prefix cannot drift away from the one the
+/// gc stage sweep reclaims without the sweep test noticing.
+fn build_scratch(store_tmp: &Path) -> io::Result<PathBuf> {
+    unique_dir(store_tmp, BUILD_SCRATCH_PREFIX)
 }
 
 /// A scratch directory under `store/tmp`. Every caller passes a `stage-`
@@ -2169,10 +2176,11 @@ checksum = "{hash_b}"
     #[test]
     fn a_leftover_cargo_build_scratch_is_swept_by_gc() {
         with_temp_store(|store, root| {
-            let scratch = unique_dir(&store.root.join("tmp"), BUILD_SCRATCH_PREFIX).unwrap();
+            // Through the same helper `build_sandboxed` uses, so a prefix
+            // that drifts back out of the swept namespace fails here.
+            let scratch = build_scratch(&store.root.join("tmp")).unwrap();
             let name = scratch.file_name().unwrap().to_str().unwrap().to_string();
             assert!(name.starts_with("stage-"), "{name}");
-            assert!(name.starts_with(BUILD_SCRATCH_PREFIX), "{name}");
             fs::write(scratch.join("cargo-home"), b"leftover").unwrap();
             // Only stages older than a day are stale; a live build's scratch
             // is never swept out from under it.

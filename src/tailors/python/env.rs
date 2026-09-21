@@ -518,7 +518,6 @@ mod tests {
     use super::*;
     use crate::kernel::types::LockedPackage;
     use sha2::Digest as _;
-    use std::os::unix::fs::PermissionsExt as _;
 
     fn test_store(label: &str) -> Store {
         let root = std::env::temp_dir().join(format!(
@@ -626,49 +625,6 @@ mod tests {
         };
         fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
         key
-    }
-
-    fn write_closure(dir: &Path, platform: Option<&str>) {
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
-        let mut v = serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "body": {"ok": true}
-        });
-        if let Some(platform) = platform {
-            v["platform"] = serde_json::Value::String(platform.to_string());
-        }
-        fs::write(dir.join(".tog/closures/python.json"), v.to_string()).unwrap();
-    }
-
-    fn closure_test_body(store: &Store) -> serde_json::Value {
-        serde_json::json!({"store_object": store.object_path("closure-test")})
-    }
-
-    fn complete_object(store: &Store, name: &str) -> String {
-        crate::kernel::objmeta::register_test_kinds();
-        let identity = crate::kernel::types::Identity {
-            kind: "test".into(),
-            name: name.into(),
-            version: "1".into(),
-            inputs: Default::default(),
-        };
-        let id = identity.object_id();
-        let staged = store.stage().unwrap();
-        fs::write(staged.join("payload"), name).unwrap();
-        store
-            .commit_with_deps(
-                &identity,
-                &staged,
-                &[],
-                &crate::kernel::store::ObjectDeps::new(),
-            )
-            .unwrap();
-        let object = store.object_path(&id);
-        let mut perms = fs::metadata(&object).unwrap().permissions();
-        perms.set_mode(perms.mode() & !0o222);
-        fs::set_permissions(&object, perms).unwrap();
-        id
     }
 
     /// `python-env/3` goldens, on both platforms, from fixed inputs: a
