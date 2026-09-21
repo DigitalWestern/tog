@@ -30,7 +30,6 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::kernel::activity::{ActivityMode, StoreActivity};
-use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 
 /// One archive member as the header reader read it.
@@ -79,8 +78,14 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-fn tar_command(platform: Platform) -> Command {
-    let _ = platform;
+/// The tar that lists and extracts every archive: the host's own
+/// `/usr/bin/tar`, GNU tar on Linux and bsdtar on macOS. There is no
+/// per-platform choice to make here. The binary sits at the same path on
+/// both hosts, the flags below are fixed because a different command line
+/// would change what lands in an object, and the two tars' differences are
+/// handled where they show: the header reader models both, and `cross_check`
+/// refuses an archive the reader and the host tar disagree about.
+fn tar_command() -> Command {
     let mut command = Command::new("/usr/bin/tar");
     // The user's environment must not add extraction flags.
     command.env_remove("TAR_OPTIONS");
@@ -101,12 +106,8 @@ const TAR_PARSE_FLAGS: [&str; 1] = ["--numeric-owner"];
 
 /// List `archive` by reading its tar headers, cross-checked against the
 /// platform tar's own listing.
-pub fn list(
-    platform: Platform,
-    archive: &Path,
-    compression: Compression,
-) -> io::Result<Vec<Entry>> {
-    list_inner(platform, archive, compression, None)
+pub fn list(archive: &Path, compression: Compression) -> io::Result<Vec<Entry>> {
+    list_inner(archive, compression, None)
 }
 
 /// Store-consuming archive listing. A shared activity lease is held for the
@@ -114,15 +115,13 @@ pub fn list(
 /// depends on an extracted/cache input.
 pub(crate) fn list_for_store(
     store: &Store,
-    platform: Platform,
     archive: &Path,
     compression: Compression,
 ) -> io::Result<Vec<Entry>> {
-    list_inner(platform, archive, compression, Some(store))
+    list_inner(archive, compression, Some(store))
 }
 
 fn list_inner(
-    platform: Platform,
     archive: &Path,
     compression: Compression,
     store: Option<&Store>,
@@ -141,7 +140,7 @@ fn list_inner(
     // a reader that is wrong about a name is a reader whose containment
     // decision was made on text that is not the name. Refuse rather than
     // extract on a guess.
-    let names = list_names(platform, archive, compression, activity.as_ref())?;
+    let names = list_names(archive, compression, activity.as_ref())?;
     cross_check(archive, &entries, &names)?;
     Ok(entries)
 }
@@ -149,12 +148,11 @@ fn list_inner(
 /// The archive listed by the platform tar without `-v`: one stored name per
 /// line, no columns.
 fn list_names(
-    platform: Platform,
     archive: &Path,
     compression: Compression,
     activity: Option<&StoreActivity>,
 ) -> io::Result<Vec<String>> {
-    let mut command = tar_command(platform);
+    let mut command = tar_command();
     command
         .args(TAR_PARSE_FLAGS)
         .arg(format!("-t{}f", compression.flag()))
@@ -825,14 +823,13 @@ fn symlink_contained(
 /// List, validate, and extract `archive` into `destination`, returning the
 /// validated listing. Nothing is written when validation fails.
 pub fn extract(
-    platform: Platform,
     archive: &Path,
     destination: &Path,
     strip: usize,
     compression: Compression,
 ) -> io::Result<Vec<Entry>> {
-    let entries = list(platform, archive, compression)?;
-    extract_validated(platform, archive, destination, strip, compression, &entries)?;
+    let entries = list(archive, compression)?;
+    extract_validated(archive, destination, strip, compression, &entries)?;
     Ok(entries)
 }
 
@@ -840,27 +837,17 @@ pub fn extract(
 /// (so it could check layout first). The listing is validated again here;
 /// the check is cheap and this is the function that writes.
 pub fn extract_validated(
-    platform: Platform,
     archive: &Path,
     destination: &Path,
     strip: usize,
     compression: Compression,
     entries: &[Entry],
 ) -> io::Result<()> {
-    extract_validated_inner(
-        platform,
-        archive,
-        destination,
-        strip,
-        compression,
-        entries,
-        None,
-    )
+    extract_validated_inner(archive, destination, strip, compression, entries, None)
 }
 
 pub(crate) fn extract_validated_for_store(
     store: &Store,
-    platform: Platform,
     archive: &Path,
     destination: &Path,
     strip: usize,
@@ -868,7 +855,6 @@ pub(crate) fn extract_validated_for_store(
     entries: &[Entry],
 ) -> io::Result<()> {
     extract_validated_inner(
-        platform,
         archive,
         destination,
         strip,
@@ -879,7 +865,6 @@ pub(crate) fn extract_validated_for_store(
 }
 
 fn extract_validated_inner(
-    platform: Platform,
     archive: &Path,
     destination: &Path,
     strip: usize,
@@ -888,7 +873,7 @@ fn extract_validated_inner(
     store: Option<&Store>,
 ) -> io::Result<()> {
     validate(entries, strip)?;
-    let mut command = tar_command(platform);
+    let mut command = tar_command();
     command
         .args(TAR_PARSE_FLAGS)
         .arg(format!("-x{}f", compression.flag()))
@@ -922,6 +907,7 @@ fn status_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::platform::Platform;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -1232,7 +1218,7 @@ mod tests {
         let temp = temp_dir(label);
         let archive = temp.join("a.tar");
         fs::write(&archive, bytes).unwrap();
-        let result = list(host(), &archive, Compression::None);
+        let result = list(&archive, Compression::None);
         let _ = fs::remove_dir_all(&temp);
         result
     }
@@ -1251,6 +1237,40 @@ mod tests {
             error.to_string().contains(needle),
             "{needle:?} not in {error}"
         );
+    }
+
+    /// One tar runs everywhere: the host's `/usr/bin/tar`, taking no
+    /// platform argument, because the command line is fixed by the
+    /// object-identity contract and the binary is at the same path on both
+    /// supported hosts. The builder is also the one place the child's
+    /// environment is scrubbed, so the user cannot add extraction flags or
+    /// reshape tar's output through the locale.
+    #[test]
+    fn tar_command_is_the_hosts_tar_with_a_scrubbed_environment() {
+        // The signature is the guard: a platform argument would not compile.
+        let command = tar_command();
+        assert_eq!(command.get_program(), "/usr/bin/tar");
+        let env: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for removed in ["TAR_OPTIONS", "LC_TIME"] {
+            assert!(
+                env.contains(&(removed.to_string(), None)),
+                "{removed} is not cleared: {env:?}"
+            );
+        }
+        for (key, value) in [("LC_ALL", "C"), ("LANG", "C")] {
+            assert!(
+                env.contains(&(key.to_string(), Some(value.to_string()))),
+                "{key} is not pinned to {value}: {env:?}"
+            );
+        }
     }
 
     // ---- the header reader -------------------------------------------------
@@ -1283,7 +1303,7 @@ mod tests {
         );
 
         // The name must survive parsing intact: `..` still reads as `..`.
-        let entries = list(host(), &archive, Compression::None).unwrap();
+        let entries = list(&archive, Compression::None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].name, "../escape",
@@ -1296,7 +1316,7 @@ mod tests {
 
         let destination = base.join("dest");
         fs::create_dir_all(&destination).unwrap();
-        assert!(extract(host(), &archive, &destination, 0, Compression::None).is_err());
+        assert!(extract(&archive, &destination, 0, Compression::None).is_err());
         assert!(
             !base.join("escape").exists(),
             "a member escaped the destination"
@@ -1433,7 +1453,7 @@ mod tests {
                 members.push(ustar("pkg/link", b'2', "benign", b""));
                 let archive = temp.join("conflict.tar");
                 write_tar(&archive, &members);
-                let error = extract(host(), &archive, &destination, 1, Compression::None)
+                let error = extract(&archive, &destination, 1, Compression::None)
                     .expect_err("conflicting extensions must be refused before extraction");
                 assert!(
                     error
@@ -1695,13 +1715,13 @@ mod tests {
         let bytes = joined(&sample_members());
         let plain = temp.join("pkg.tar");
         fs::write(&plain, &bytes).unwrap();
-        let expected = list(host(), &plain, Compression::None).unwrap();
+        let expected = list(&plain, Compression::None).unwrap();
 
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&bytes).unwrap();
         let single = temp.join("pkg.tar.gz");
         fs::write(&single, encoder.finish().unwrap()).unwrap();
-        assert_eq!(list(host(), &single, Compression::Gzip).unwrap(), expected);
+        assert_eq!(list(&single, Compression::Gzip).unwrap(), expected);
 
         // Two concatenated gzip members, which is what `tar -z` accepts and
         // what a plain single-stream decoder would silently truncate.
@@ -1715,7 +1735,7 @@ mod tests {
         }
         let multi = temp.join("multi.tar.gz");
         fs::write(&multi, &concatenated).unwrap();
-        assert_eq!(list(host(), &multi, Compression::Gzip).unwrap(), expected);
+        assert_eq!(list(&multi, Compression::Gzip).unwrap(), expected);
         let _ = fs::remove_dir_all(&temp);
     }
 
@@ -1725,16 +1745,13 @@ mod tests {
         let bytes = joined(&sample_members());
         let plain = temp.join("pkg.tar");
         fs::write(&plain, &bytes).unwrap();
-        let expected = list(host(), &plain, Compression::None).unwrap();
+        let expected = list(&plain, Compression::None).unwrap();
 
         let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), 6);
         encoder.write_all(&bytes).unwrap();
         let compressed = temp.join("pkg.tar.xz");
         fs::write(&compressed, encoder.finish().unwrap()).unwrap();
-        assert_eq!(
-            list(host(), &compressed, Compression::Xz).unwrap(),
-            expected
-        );
+        assert_eq!(list(&compressed, Compression::Xz).unwrap(), expected);
         let _ = fs::remove_dir_all(&temp);
     }
 
@@ -1753,7 +1770,7 @@ mod tests {
         fs::create_dir_all(&base).unwrap();
         let archive = base.join("dot.tar");
         write_tar(&archive, &[ustar("./l", b'2', "../ESCAPED", b"")]);
-        let entries = list(host(), &archive, Compression::None).unwrap();
+        let entries = list(&archive, Compression::None).unwrap();
         assert!(
             validate(&entries, 0).is_err(),
             "a `.` component bought an extra level of climb: {entries:?}"
@@ -1764,7 +1781,7 @@ mod tests {
             &padded,
             &[ustar("pkg/././././l", b'2', "../../../../ESCAPED", b"")],
         );
-        let entries = list(host(), &padded, Compression::None).unwrap();
+        let entries = list(&padded, Compression::None).unwrap();
         assert!(
             validate(&entries, 1).is_err(),
             "padded `.` components bought an unbounded climb: {entries:?}"
@@ -1830,8 +1847,7 @@ mod tests {
             let mut members = benign.to_vec();
             members.push(hostile);
             write_tar(&archive, &members);
-            let error =
-                extract(host(), &archive, &destination, 1, Compression::None).expect_err(label);
+            let error = extract(&archive, &destination, 1, Compression::None).expect_err(label);
             assert!(
                 !error.to_string().is_empty(),
                 "{label}: refusal must explain itself"
@@ -1865,7 +1881,7 @@ mod tests {
         );
         let destination = temp.join("dest");
         fs::create_dir_all(&destination).unwrap();
-        let entries = extract(host(), &archive, &destination, 1, Compression::None).unwrap();
+        let entries = extract(&archive, &destination, 1, Compression::None).unwrap();
         assert_eq!(entries.len(), 8);
         assert!(destination.join("bin/tool").is_file());
         assert_eq!(
@@ -1887,7 +1903,7 @@ mod tests {
         let plain = temp.join("plain");
         fs::create_dir_all(&plain).unwrap();
         std::env::set_var("TAR_OPTIONS", "--strip-components=1");
-        let result = extract(host(), &archive, &plain, 0, Compression::None);
+        let result = extract(&archive, &plain, 0, Compression::None);
         std::env::remove_var("TAR_OPTIONS");
         result.unwrap();
         assert!(plain.join("root/bin/tool").is_file());
@@ -1911,7 +1927,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        let entries = list(host(), &archive, Compression::Gzip).unwrap();
+        let entries = list(&archive, Compression::Gzip).unwrap();
         let listed: Vec<&str> = names(&entries);
         assert!(listed.contains(&"pkg/bin/tool"), "{listed:?}");
         let alias = entries.iter().find(|e| e.name == "pkg/bin/alias").unwrap();
@@ -1947,7 +1963,7 @@ mod tests {
                 .status()
                 .unwrap()
                 .success());
-            listings.push((format, list(host(), &archive, Compression::None).unwrap()));
+            listings.push((format, list(&archive, Compression::None).unwrap()));
         }
         let (_, first) = &listings[0];
         for (format, listing) in &listings[1..] {

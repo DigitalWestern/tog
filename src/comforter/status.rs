@@ -82,7 +82,10 @@ pub fn canonical_symlink_target(path: &Path) -> Option<PathBuf> {
     target.canonicalize().ok()
 }
 
-fn object_path_exists(body: &Value, fields: &[&str]) -> Option<String> {
+/// The first of `fields` whose recorded object directory is gone, labelled
+/// for the user. `None` means every recorded path is still a directory, so
+/// the name says what the return value means: `Some` is the defect.
+fn missing_object_path(body: &Value, fields: &[&str]) -> Option<String> {
     for field in fields {
         let Some(path) = body[*field]["path"].as_str() else {
             continue;
@@ -95,7 +98,7 @@ fn object_path_exists(body: &Value, fields: &[&str]) -> Option<String> {
 }
 
 pub fn object_liveness_state(body: &Value, fields: &[&str]) -> Option<State> {
-    object_path_exists(body, fields).map(State::ProjectionMissing)
+    missing_object_path(body, fields).map(State::ProjectionMissing)
 }
 
 pub fn recorded_inputs_state(dir: &Path, body: &Value) -> io::Result<State> {
@@ -124,4 +127,37 @@ pub fn lock_state(dir: &Path, lock: &str, recorded: &str) -> io::Result<State> {
     } else {
         State::Changed(changed)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The helper reports the missing path, not the present one: a `Some`
+    /// is always a defect, and `object_liveness_state` turns exactly that
+    /// into `ProjectionMissing`.
+    #[test]
+    fn missing_object_path_names_the_absent_object() {
+        let present = std::env::temp_dir();
+        let absent = present.join("tog-status-no-such-object");
+        let body = json!({
+            "env_object": {"path": present.display().to_string()},
+            "cache_object": {"path": absent.display().to_string()},
+        });
+        let fields = ["env_object", "cache_object"];
+
+        assert_eq!(
+            missing_object_path(&body, &fields),
+            Some("cache_object object".to_string())
+        );
+        assert_eq!(missing_object_path(&body, &["env_object"]), None);
+        assert_eq!(
+            object_liveness_state(&body, &fields),
+            Some(State::ProjectionMissing("cache_object object".into()))
+        );
+        assert_eq!(object_liveness_state(&body, &["env_object"]), None);
+        // A field the closure never recorded is not a missing object.
+        assert_eq!(missing_object_path(&body, &["absent_field"]), None);
+    }
 }

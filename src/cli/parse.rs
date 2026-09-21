@@ -118,9 +118,7 @@ fn global_flag(
     let arg = args[index].as_str();
     match arg {
         "-C" | "--directory" => {
-            let value = args
-                .get(index + 1)
-                .ok_or_else(|| UsageError::new(format!("{arg} needs a directory"), command))?;
+            let value = separate_value(args, index, arg, command, "a directory")?;
             options.directory = Some(PathBuf::from(value));
             Ok(Some(2))
         }
@@ -174,10 +172,12 @@ fn is_command_option(spec: &Spec, arg: &str) -> bool {
 /// command's own grammar untouched. Three things are never looked inside:
 /// everything after `--`; for a command that ends in a tool's own arguments
 /// (`fmt`, `x`), everything from its first non-option word on; and the value
-/// slot of one of the command's own value-taking options, so `tog sbom -o -v`
-/// still writes a file named `-v` rather than turning it into `--verbose`.
-/// A list option (`--register <dir>...`) holds its slot until the next
-/// long option, the same boundary its own parser uses.
+/// slot of one of the command's own value-taking options, so `-v` in a slot
+/// reaches that option's own grammar rather than becoming `--verbose`. What
+/// the option then makes of it is its own business: a list option
+/// (`--register <dir>...`) holds its slot until the next long option and
+/// takes `-v` as a directory name, while an option taking a single value
+/// refuses it under `separate_value`.
 fn take_global_flags(
     args: &[String],
     options: &mut Options,
@@ -289,16 +289,8 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--" => passthrough = true,
             "--check" => check = true,
             "--eco" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| UsageError::new("fmt: --eco needs an ecosystem", Some("fmt")))?;
-                if value.is_empty() || value.starts_with('-') {
-                    return Err(UsageError::new(
-                        "fmt: --eco needs an ecosystem",
-                        Some("fmt"),
-                    ));
-                }
-                ecosystem = Some(value.clone());
+                let value = separate_value(args, index, "fmt: --eco", Some("fmt"), "an ecosystem")?;
+                ecosystem = Some(value.to_string());
                 index += 1;
             }
             value if value.starts_with("--eco=") => {
@@ -362,21 +354,19 @@ fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--json" => json = true,
             "-h" | "--help" => return Ok(None),
             // A mistyped flag (`--policy --json`) is a usage error, not a
-            // file name.
+            // file name; a policy file whose name starts with a dash is
+            // named inline, as `--policy=-x.toml`.
             "--policy" => {
-                let value = args
-                    .get(index + 1)
-                    .filter(|value| !value.starts_with('-'))
-                    .ok_or_else(|| UsageError::new("--policy needs a file path", Some("audit")))?;
-                policy = Some(non_empty(value, "--policy", Some("audit"))?);
+                let value = separate_value(args, index, arg, Some("audit"), "a file path")?;
+                policy = Some(PathBuf::from(value));
                 index += 1;
             }
             _ if arg.starts_with("--policy=") => {
-                let value = &arg["--policy=".len()..];
-                if value.starts_with('-') {
-                    return Err(UsageError::new("--policy needs a file path", Some("audit")));
-                }
-                policy = Some(non_empty(value, "--policy", Some("audit"))?);
+                policy = Some(non_empty(
+                    &arg["--policy=".len()..],
+                    "--policy",
+                    Some("audit"),
+                )?);
             }
             other => return Err(reject("audit", other)),
         }
@@ -518,11 +508,9 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--py" | "--python" => ecosystem = Some("python".to_string()),
             "--npm" | "--node" => ecosystem = Some("node".to_string()),
             "--from" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| UsageError::new("--from needs a package name", Some("x")))?;
+                let value = separate_value(args, index, arg, Some("x"), "a package name")?;
                 validate_x_package(value)?;
-                from = Some(value.clone());
+                from = Some(value.to_string());
                 index += 1;
             }
             _ if arg.starts_with("--from=") => {
@@ -727,12 +715,11 @@ fn parse_sbom(args: &[String]) -> Result<Option<Command>, UsageError> {
         match arg {
             "-h" | "--help" => return Ok(None),
             // Both spellings take the same value through the same rule, so
-            // an empty path cannot slip in by being written as two words.
+            // neither an empty path nor an option-shaped one can slip in by
+            // being written as two words.
             "-o" | "--output" => {
-                let value = args.get(index + 1).ok_or_else(|| {
-                    UsageError::new(format!("{arg} needs a file path"), Some("sbom"))
-                })?;
-                output = Some(non_empty(value, "--output", Some("sbom"))?);
+                let value = separate_value(args, index, arg, Some("sbom"), "a file path")?;
+                output = Some(PathBuf::from(value));
                 index += 1;
             }
             _ if arg.starts_with("--output=") => {
@@ -819,9 +806,7 @@ fn parse_gc(args: &[String]) -> Result<Option<Command>, UsageError> {
                     .push(valid_object_id(&arg["--drop-object=".len()..])?);
             }
             "--keep-days" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| UsageError::new("--keep-days needs <n>", Some("gc")))?;
+                let value = separate_value(args, index, arg, Some("gc"), "<n>")?;
                 gc.keep_days = Some(parse_days(value)?);
                 index += 1;
             }
@@ -954,6 +939,27 @@ fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
     Ok(Some(Command::Completions { shell }))
 }
 
+/// The value of a value-taking flag written as a separate word. One rule
+/// for all of them: the value must be there, must not be empty, and must not
+/// start with `-`, so `tog sbom -o --json` is the mistyped flag it looks like
+/// rather than a file named `--json`. A value that really does start with a
+/// dash is given inline instead, as `--output=-x`.
+fn separate_value<'a>(
+    args: &'a [String],
+    index: usize,
+    flag: &str,
+    command: Option<&'static str>,
+    needs: &str,
+) -> Result<&'a str, UsageError> {
+    args.get(index + 1)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty() && !value.starts_with('-'))
+        .ok_or_else(|| UsageError::new(format!("{flag} needs {needs}"), command))
+}
+
+/// The inline `--flag=value` half of the same rule: the `=` already says
+/// where the value begins, so only an empty one is refused here. What the
+/// value may contain is each flag's own business.
 fn non_empty(
     value: &str,
     flag: &str,
@@ -1358,8 +1364,17 @@ mod tests {
             message(&["audit", "--policy", "--json"]),
             "--policy needs a file path"
         );
+        // The inline form is the escape hatch for a value that starts
+        // with a dash, so it names a file rather than refusing.
         assert_eq!(
-            message(&["audit", "--policy=--json"]),
+            command(&["audit", "--policy=--json"]),
+            Command::Audit {
+                policy: Some("--json".into()),
+                json: false
+            }
+        );
+        assert_eq!(
+            message(&["audit", "--policy", ""]),
             "--policy needs a file path"
         );
         assert_eq!(
@@ -1582,12 +1597,29 @@ mod tests {
         }
         assert_eq!(message(&["sbom", "--output"]), "--output needs a file path");
         assert_eq!(message(&["sbom", "--output="]), "--output= needs a value");
-        // An empty path is refused in either spelling, not turned into a
-        // write to the current directory.
-        assert_eq!(message(&["sbom", "-o", ""]), "--output= needs a value");
+        // The one rule, through either spelling: a value written as a
+        // separate word is never empty and never starts with a dash, so
+        // neither an empty path nor a mistyped flag becomes a file name.
+        for words in [
+            &["sbom", "-o", "--json"][..],
+            &["sbom", "-o", ""],
+            &["sbom", "-o", "-v"],
+        ] {
+            assert_eq!(message(words), "-o needs a file path", "{words:?}");
+        }
+        for words in [
+            &["sbom", "--output", "--json"][..],
+            &["sbom", "--output", ""],
+        ] {
+            assert_eq!(message(words), "--output needs a file path", "{words:?}");
+        }
+        // The inline form is how a path that really starts with a dash is
+        // given.
         assert_eq!(
-            message(&["sbom", "--output", ""]),
-            "--output= needs a value"
+            command(&["sbom", "--output=-report.json"]),
+            Command::Sbom {
+                output: Some(PathBuf::from("-report.json"))
+            }
         );
         assert_eq!(
             message(&["sbom", "--out", "x"]),
@@ -1777,6 +1809,17 @@ mod tests {
         assert_eq!(run(&["plan"]).options, Options::default());
         assert_eq!(message(&["-C"]), "-C needs a directory");
         assert_eq!(message(&["--directory="]), "--directory= needs a value");
+        for words in [&["-C", "", "plan"][..], &["-C", "-q", "plan"]] {
+            assert_eq!(message(words), "-C needs a directory", "{words:?}");
+        }
+        assert_eq!(
+            message(&["plan", "--directory", "--json"]),
+            "--directory needs a directory"
+        );
+        assert_eq!(
+            run(&["--directory=-work", "plan"]).options.directory,
+            Some(PathBuf::from("-work"))
+        );
         assert_eq!(
             command(&["run", "make", "-C", "sub"]),
             Command::Run {
@@ -1807,6 +1850,43 @@ mod tests {
             command(&["run", "pytest", "-q"]),
             Command::Run {
                 command: argv(&["pytest", "-q"])
+            }
+        );
+    }
+
+    /// A value belongs to the flag that takes it. The global scan that
+    /// lifts `-q` out of a command's arguments must step over a value-taking
+    /// flag's value, or it turns a mistyped flag into a missing one and, for
+    /// `x --from`, silently promotes the tool name to the package name.
+    #[test]
+    fn the_global_scan_steps_over_a_flags_value() {
+        assert_eq!(
+            message(&["x", "--from", "-q", "ruff"]),
+            "--from needs a package name"
+        );
+        assert_eq!(
+            message(&["fmt", "--eco", "-q"]),
+            "fmt: --eco needs an ecosystem"
+        );
+        // A value that is not a flag is still the flag's, and a global
+        // typed after it is still taken.
+        let parsed = run(&["sbom", "-o", "bom.json", "-q"]);
+        assert!(parsed.options.quiet);
+        assert_eq!(
+            parsed.command,
+            Command::Sbom {
+                output: Some(PathBuf::from("bom.json"))
+            }
+        );
+        let parsed = run(&["x", "--from", "black", "-q", "black"]);
+        assert!(parsed.options.quiet);
+        assert_eq!(
+            parsed.command,
+            Command::X {
+                ecosystem: None,
+                from: Some("black".into()),
+                tool: "black".into(),
+                args: Vec::new()
             }
         );
     }
@@ -1857,10 +1937,13 @@ mod tests {
         // An unknown option is still an unknown option.
         assert_eq!(message(&["sync", "-j"]), "sync: unknown option '-j'");
 
-        // The value slot of the command's own option is not searched: a
-        // file or a policy really can be called '-v'.
+        // The value slot of the command's own option is not searched, so
+        // `-v` reaches sbom's own grammar. There it is refused: a value
+        // written as a separate word never starts with a dash, and
+        // `--output=-v` is how a file really called that is named.
+        assert_eq!(message(&["sbom", "-o", "-v"]), "-o needs a file path");
         assert_eq!(
-            command(&["sbom", "-o", "-v"]),
+            command(&["sbom", "--output=-v"]),
             Command::Sbom {
                 output: Some(PathBuf::from("-v"))
             }
@@ -1871,10 +1954,10 @@ mod tests {
             message(&["audit", "--policy", "-q"]),
             "--policy needs a file path"
         );
-        assert!(!run(&["sbom", "-o", "-v"]).options.verbose);
+        assert!(!run(&["sbom", "-o", "bom.json"]).options.verbose);
         assert_eq!(
             message(&["gc", "--keep-days", "-v"]),
-            "--keep-days expects a whole number of days, got '-v'"
+            "--keep-days needs <n>"
         );
         // A list option holds its slot for every value, the same boundary
         // gc's own parser uses: a directory may be called '-v' too.

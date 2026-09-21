@@ -158,21 +158,15 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// release archives have exactly one `go/` root; strip that one level while
 /// retaining the complete toolchain tree below it.
 #[cfg(test)]
-fn extract_go_toolchain(platform: Platform, archive: &Path, staged: &Path) -> io::Result<()> {
-    extract_go_toolchain_inner(platform, archive, staged, None)
+fn extract_go_toolchain(archive: &Path, staged: &Path) -> io::Result<()> {
+    extract_go_toolchain_inner(archive, staged, None)
 }
 
-fn extract_go_toolchain_for(
-    store: &Store,
-    platform: Platform,
-    archive: &Path,
-    staged: &Path,
-) -> io::Result<()> {
-    extract_go_toolchain_inner(platform, archive, staged, Some(store))
+fn extract_go_toolchain_for(store: &Store, archive: &Path, staged: &Path) -> io::Result<()> {
+    extract_go_toolchain_inner(archive, staged, Some(store))
 }
 
 fn extract_go_toolchain_inner(
-    platform: Platform,
     archive: &Path,
     staged: &Path,
     store: Option<&Store>,
@@ -180,15 +174,8 @@ fn extract_go_toolchain_inner(
     // List first: the layout check below and the containment rules both
     // run before tar writes anything.
     let entries = match store {
-        Some(store) => crate::kernel::archive::list_for_store(
-            store,
-            archive_platform(platform),
-            archive,
-            Compression::Gzip,
-        ),
-        None => {
-            crate::kernel::archive::list(archive_platform(platform), archive, Compression::Gzip)
-        }
+        Some(store) => crate::kernel::archive::list_for_store(store, archive, Compression::Gzip),
+        None => crate::kernel::archive::list(archive, Compression::Gzip),
     }
     .map_err(|e| err(format!("could not inspect Go archive layout: {e}")))?;
     let mut saw_entry = false;
@@ -216,7 +203,6 @@ fn extract_go_toolchain_inner(
     match store {
         Some(store) => crate::kernel::archive::extract_validated_for_store(
             store,
-            archive_platform(platform),
             archive,
             staged,
             1,
@@ -224,7 +210,6 @@ fn extract_go_toolchain_inner(
             &entries,
         )?,
         None => crate::kernel::archive::extract_validated(
-            archive_platform(platform),
             archive,
             staged,
             1,
@@ -236,12 +221,6 @@ fn extract_go_toolchain_inner(
         return Err(err("go tarball extraction failed or has unexpected layout"));
     }
     Ok(())
-}
-
-/// The tar that runs is the host's, whatever platform the pin is for; the
-/// archive module needs the host so it parses the host tar's listing.
-fn archive_platform(platform: Platform) -> Platform {
-    Platform::host().unwrap_or(platform)
 }
 
 /// Ensure the pinned Go toolchain is realized in the store.
@@ -265,7 +244,7 @@ pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Re
     }
     let tarball = download_verified_held(store, pin.url, pin.sha256)?;
     let staged = store.stage()?;
-    extract_go_toolchain_for(store, platform, &tarball, &staged)?;
+    extract_go_toolchain_for(store, &tarball, &staged)?;
     store
         .commit_with_deps(&identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -1600,7 +1579,7 @@ mod tests {
             .success());
         let staged = temp.join("staged");
         std::fs::create_dir_all(&staged).unwrap();
-        extract_go_toolchain(Platform::host().unwrap(), &archive, &staged).unwrap();
+        extract_go_toolchain(&archive, &staged).unwrap();
         assert!(staged.join("bin/go").is_file());
         assert!(staged.join("bin/gofmt").is_file());
         assert!(staged.join("src/README").is_file());
@@ -1621,9 +1600,7 @@ mod tests {
             .success());
         let nested_staged = temp.join("nested-staged");
         std::fs::create_dir_all(&nested_staged).unwrap();
-        let error =
-            extract_go_toolchain(Platform::host().unwrap(), &nested_archive, &nested_staged)
-                .unwrap_err();
+        let error = extract_go_toolchain(&nested_archive, &nested_staged).unwrap_err();
         assert!(error.to_string().contains("unexpected layout"));
         assert!(!nested_staged.join("go").exists());
 
