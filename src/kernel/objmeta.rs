@@ -788,6 +788,21 @@ pub(crate) fn check_identity_grammar(identity: &Identity) -> Result<(), String> 
     }
 }
 
+/// Can this identity only have come from an older tog, never from a live
+/// commit? True for a kind with no row at all and for a superseded schema.
+///
+/// Narrow on purpose: an identity whose kind and schema are both current but
+/// whose inputs are wrong is a mistake in the fixture, and its caller should
+/// keep failing at the commit guard rather than quietly taking the
+/// write-by-hand path.
+#[cfg(test)]
+pub(crate) fn is_historical_only(identity: &Identity) -> bool {
+    match adapter_for(&identity.kind, schema_input_of(identity)) {
+        Some(adapter) => adapter.superseded_by.is_some(),
+        None => !registered_kinds().any(|adapter| adapter.kind == identity.kind),
+    }
+}
+
 fn adapt_inner(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
     let kind = record.identity.kind.as_str();
     let schema = record.schema_input();
