@@ -10,8 +10,9 @@ use crate::comforter::{
     ClosureRefs, InputRecord,
 };
 use crate::kernel::fetch::download_verified_held;
-use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::Selected;
 use crate::kernel::types::{ArtifactKind, Identity, Plan};
 use crate::tailors::python;
 use crate::tailors::python::pyselect;
@@ -25,9 +26,44 @@ use std::path::{Path, PathBuf};
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
+/// Realize the environment for a caller that holds no selection: the
+/// shipped catalog release for the plan's interpreter. `x` outside a
+/// project and tests use this; a project sync uses `realize_env_for`.
 pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
+    let shipped = python::shipped_selection(&plan.python_version)?;
+    realize_env_for(store, platform, plan, &shipped)
+}
+
+/// Realize the environment for `plan` with the toolchain the project's
+/// selection names. Downloads and validates every artifact, assembles the
+/// venv shape in a staging dir, commits atomically. Cache hit if the
+/// identical env already exists.
+pub fn realize_env_for(
+    store: &Store,
+    platform: Platform,
+    plan: &Plan,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    realize_env_at_depth(store, platform, plan, 0)
+    realize_env_at_depth(store, platform, plan, selected, 0)
+}
+
+/// A plan and the toolchain realizing it must name one CPython. They are
+/// produced together on every path; a disagreement is a programming error
+/// caught here rather than an environment built against the wrong
+/// interpreter.
+pub(super) fn agreeing(plan: &Plan, selected: &Selected) -> io::Result<()> {
+    if plan.python_version != selected.version("cpython")? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "python plan names cpython {} but the selected toolchain names {}",
+                plan.python_version,
+                selected.version("cpython")?
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Canonical package order and duplicate rejection shared by planning and
@@ -122,8 +158,9 @@ pub(super) fn environment_identity(
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
+    selected: &Selected,
 ) -> io::Result<Identity> {
-    environment_identity_inner(store, platform, plan, cpython_id, None)
+    environment_identity_inner(store, platform, plan, cpython_id, selected, None)
 }
 
 /// The exact producer drift `python-env/3` exists to catch: the plan names
@@ -135,9 +172,17 @@ pub(super) fn environment_identity_skipping_input(
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
+    selected: &Selected,
     skip_package: &str,
 ) -> io::Result<Identity> {
-    environment_identity_inner(store, platform, plan, cpython_id, Some(skip_package))
+    environment_identity_inner(
+        store,
+        platform,
+        plan,
+        cpython_id,
+        selected,
+        Some(skip_package),
+    )
 }
 
 fn environment_identity_inner(
@@ -145,12 +190,12 @@ fn environment_identity_inner(
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
+    selected: &Selected,
     // The drift test seam, carried in release builds too: production always
     // passes `None`, and only `environment_identity_skipping_input` does not.
     skip_package: Option<&str>,
 ) -> io::Result<Identity> {
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
+    agreeing(plan, selected)?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
     inputs.insert("schema".to_string(), "python-env/3".to_string());
@@ -181,7 +226,7 @@ fn environment_identity_inner(
                     store,
                     platform,
                     p,
-                    &pin.version,
+                    selected,
                     Some(plan),
                 )?;
                 if native_libs_id.is_none() {
@@ -243,11 +288,10 @@ pub(crate) fn planned_env_object_id(
     store: &Store,
     platform: Platform,
     plan: &Plan,
+    selected: &Selected,
 ) -> io::Result<String> {
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
-    let cpython_id = python::object_id_for(platform, &pin.version)?;
-    Ok(environment_identity(store, platform, plan, &cpython_id)?.object_id())
+    let cpython_id = crate::tailors::python::cpython_object_id(selected, platform)?;
+    Ok(environment_identity(store, platform, plan, &cpython_id, selected)?.object_id())
 }
 
 /// Internal realization entry point used by sdist build environments. The
@@ -257,13 +301,13 @@ pub(crate) fn realize_env_at_depth(
     store: &Store,
     platform: Platform,
     plan: &Plan,
+    selected: &Selected,
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Python environment")?;
-    let pin = python::lookup(platform, &plan.python_version)
-        .ok_or_else(|| no_pin(&format!("cpython {}", plan.python_version), platform))?;
-    let python_obj = python::ensure_python_for(store, pin, platform)?;
+    agreeing(plan, selected)?;
+    let python_obj = python::realize_runtime(store, platform, selected)?;
 
     // Identity planning and realization use exactly the same input builder.
     // In particular, native sdist requirements contribute the pure libset id;
@@ -273,7 +317,7 @@ pub(crate) fn realize_env_at_depth(
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let identity = environment_identity(store, platform, plan, &cpython_id)?;
+    let identity = environment_identity(store, platform, plan, &cpython_id, selected)?;
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
@@ -309,7 +353,7 @@ pub(crate) fn realize_env_at_depth(
                     store,
                     platform,
                     source,
-                    &pin.version,
+                    selected,
                     Some(plan),
                     sdist_depth + 1,
                 )?
@@ -328,7 +372,12 @@ pub(crate) fn realize_env_at_depth(
         }
     }
 
-    let minor = pin.version.split('.').take(2).collect::<Vec<_>>().join(".");
+    let minor = plan
+        .python_version
+        .split('.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(".");
     let staged = store.stage()?;
     let bin = staged.join("bin");
     let site = staged.join(format!("lib/python{minor}/site-packages"));
@@ -346,7 +395,7 @@ pub(crate) fn realize_env_at_depth(
         format!(
             "home = {}\ninclude-system-site-packages = false\nversion = {}\n",
             python_obj.join("bin").display(),
-            pin.version
+            plan.python_version
         ),
     )?;
 
@@ -398,13 +447,61 @@ pub(crate) fn realize_env_at_depth(
     Ok(object)
 }
 
-/// `project_env_with_selection` plus the input files recorded for status.
+/// The closure record `tog status`, `tog ls` and `tog gc` read. The
+/// toolchain entries are present exactly when the caller held a selection:
+/// which bundle this environment was built from, and the interpreter object
+/// realized from it.
+fn python_closure_body(
+    env_obj: &Path,
+    native_reference: &Option<serde_json::Value>,
+    backup: &Option<PathBuf>,
+    plan: &Plan,
+    selection: Option<&pyselect::PythonSelection>,
+    inputs: &[InputRecord],
+    runtime_record: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let python = selection
+        .map(|selection| {
+            serde_json::json!({
+                "version": selection.pin.version,
+                "constraint": selection.constraint,
+                "constraint_source": selection.constraint_source,
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "version": plan.python_version,
+                "constraint": serde_json::Value::Null,
+                "constraint_source": serde_json::Value::Null,
+            })
+        });
+    let mut body = serde_json::json!({
+        "env_object": env_obj,
+        "native_libs": native_reference,
+        "backup_path": backup,
+        "plan": plan,
+        "python": python,
+        "inputs": inputs,
+    });
+    if let Some(record) = runtime_record {
+        for (key, value) in record.as_object().into_iter().flatten() {
+            body[key] = value.clone();
+        }
+    }
+    body
+}
+
+/// `project_env_with_selection` plus the input files recorded for status
+/// and, on a project path, the toolchain this environment was built with:
+/// the bundle it came from and the interpreter object it realized, which
+/// the closure records so a later run resolves the same bytes.
 pub fn project_env_with_inputs(
     project_dir: &Path,
     env_obj: &Path,
     plan: &Plan,
     selection: &pyselect::PythonSelection,
     inputs: &[InputRecord],
+    toolchain: Option<(&Selected, &Path)>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
@@ -413,6 +510,7 @@ pub fn project_env_with_inputs(
         plan,
         Some(selection),
         inputs,
+        toolchain,
         attribution,
     )
 }
@@ -434,6 +532,7 @@ pub fn project_env_with_selection(
         plan,
         Some(selection),
         &[],
+        None,
         attribution,
     )
 }
@@ -444,6 +543,7 @@ pub(super) fn project_env_inner(
     plan: &Plan,
     selection: Option<&pyselect::PythonSelection>,
     inputs: &[InputRecord],
+    toolchain: Option<(&Selected, &Path)>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let venv = project_dir.join(".venv");
@@ -456,6 +556,17 @@ pub(super) fn project_env_inner(
     let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
     let mut refs = ClosureRefs::new();
     refs.object_path(&store, &activity, &env_obj)?;
+    // The interpreter is referenced directly, not only through the
+    // environment, so gc keeps the object a later run resolves.
+    let runtime_record = match toolchain {
+        Some((selected, runtime)) => {
+            refs.object_path(&store, &activity, runtime)?;
+            Some(crate::comforter::toolchain::closure_record(
+                selected, runtime,
+            ))
+        }
+        None => None,
+    };
     if let Some(native_reference) = native_reference.as_ref() {
         let native_id = native_reference["id"].as_str().ok_or_else(|| {
             io::Error::new(
@@ -479,32 +590,19 @@ pub(super) fn project_env_inner(
     // sync.
     replace_project_symlink(&venv, &env_obj, ".venv")?;
 
-    let python = selection
-        .map(|selection| {
-            serde_json::json!({
-                "version": selection.pin.version,
-                "constraint": selection.constraint,
-                "constraint_source": selection.constraint_source,
-            })
-        })
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "version": plan.python_version,
-                "constraint": serde_json::Value::Null,
-                "constraint_source": serde_json::Value::Null,
-            })
-        });
+    let body = python_closure_body(
+        &env_obj,
+        &native_reference,
+        &backup,
+        plan,
+        selection,
+        inputs,
+        runtime_record,
+    );
     write_closure_with_project_lock(
         project_dir,
         "python",
-        serde_json::json!({
-            "env_object": env_obj,
-            "native_libs": native_reference,
-            "backup_path": backup,
-            "plan": plan,
-            "python": python,
-            "inputs": inputs,
-        }),
+        body,
         &store,
         &activity,
         refs,
@@ -516,6 +614,66 @@ pub(super) fn project_env_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What sync writes: the bundle it planned from and the interpreter
+    /// object it realized, beside every key `ls`, `status` and `sbom`
+    /// already read.
+    #[test]
+    fn the_closure_body_records_the_bundle_and_the_runtime_object() {
+        let selected = selected_3_12();
+        let plan = Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: Vec::new(),
+        };
+        let selection = pyselect::locked(
+            Platform::host().unwrap(),
+            "3.12.14",
+            &pyselect::PythonInputs::default(),
+        )
+        .unwrap();
+        let runtime = Path::new("/store/objects/cpython-3.12.14-abcdef");
+        let body = python_closure_body(
+            Path::new("/store/objects/env-1"),
+            &None,
+            &None,
+            &plan,
+            Some(&selection),
+            &[],
+            Some(crate::comforter::toolchain::closure_record(
+                &selected, runtime,
+            )),
+        );
+        assert_eq!(body["toolchain"]["ecosystem"], "python");
+        assert_eq!(body["toolchain"]["bundle_id"], selected.bundle_id());
+        assert_eq!(body["toolchain"]["versions"]["cpython"], "3.12.14");
+        assert_eq!(body["runtime_object"]["id"], "cpython-3.12.14-abcdef");
+        assert_eq!(body["runtime_object"]["path"], runtime.to_str().unwrap());
+        // Every key the older readers depend on is still there.
+        assert_eq!(body["python"]["version"], "3.12.14");
+        assert_eq!(body["env_object"], "/store/objects/env-1");
+        assert_eq!(body["plan"]["python_version"], "3.12.14");
+
+        // A caller with no selection (`x` outside a project) writes the
+        // body it always wrote, with no toolchain entries to resolve.
+        let bare = python_closure_body(
+            Path::new("/store/objects/env-1"),
+            &None,
+            &None,
+            &plan,
+            Some(&selection),
+            &[],
+            None,
+        );
+        assert!(bare.get("toolchain").is_none());
+        assert!(bare.get("runtime_object").is_none());
+    }
+
+    /// The shipped release the fixture plans name. Selection is the
+    /// kernel's job; these tests are about what an identity hashes.
+    fn selected_3_12() -> crate::kernel::toolchain::Selected {
+        python::shipped_selection("3.12.14").expect("shipped CPython release")
+    }
     use crate::kernel::types::LockedPackage;
     use sha2::Digest as _;
 
@@ -669,8 +827,12 @@ mod tests {
             ),
         ] {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
-            let empty = environment_identity(&store, platform, &empty_plan, &cpython).unwrap();
-            let wheel = environment_identity(&store, platform, &wheel_plan, &cpython).unwrap();
+            let empty =
+                environment_identity(&store, platform, &empty_plan, &cpython, &selected_3_12())
+                    .unwrap();
+            let wheel =
+                environment_identity(&store, platform, &wheel_plan, &cpython, &selected_3_12())
+                    .unwrap();
             assert_eq!(wheel.inputs["schema"], "python-env/3");
             assert_eq!(wheel.inputs["native"], NATIVE_NONE);
             assert_eq!(wheel.object_id(), golden, "{}", platform.triple());
@@ -741,8 +903,17 @@ mod tests {
         };
         for platform in Platform::ALL.iter().copied() {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
-            let empty = environment_identity(&store, platform, &empty_plan, &cpython).unwrap();
-            let one = environment_identity(&store, platform, &one_wheel_plan, &cpython).unwrap();
+            let empty =
+                environment_identity(&store, platform, &empty_plan, &cpython, &selected_3_12())
+                    .unwrap();
+            let one = environment_identity(
+                &store,
+                platform,
+                &one_wheel_plan,
+                &cpython,
+                &selected_3_12(),
+            )
+            .unwrap();
             // The collision `python-env/2` had.
             assert_ne!(one.object_id(), empty.object_id(), "{}", platform.triple());
 
@@ -750,9 +921,15 @@ mod tests {
                 (&one_wheel_plan, "example"),
                 (&two_wheel_plan, "second-example"),
             ] {
-                let drifted =
-                    environment_identity_skipping_input(&store, platform, plan, &cpython, skipped)
-                        .unwrap();
+                let drifted = environment_identity_skipping_input(
+                    &store,
+                    platform,
+                    plan,
+                    &cpython,
+                    &selected_3_12(),
+                    skipped,
+                )
+                .unwrap();
                 assert!(!drifted.inputs.contains_key(&format!("pkg:{skipped}")));
                 let reason = crate::kernel::objmeta::check_identity_grammar(&drifted).unwrap_err();
                 assert!(
@@ -778,7 +955,9 @@ mod tests {
             python_version: "3.12.14".into(),
             packages: vec![fast.clone()],
         };
-        let actual = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
+        let actual =
+            planned_env_object_id(&store, Platform::host().unwrap(), &plan, &selected_3_12())
+                .unwrap();
         let mut inputs = BTreeMap::from([
             ("schema".to_string(), "python-env/3".to_string()),
             (
@@ -825,9 +1004,13 @@ mod tests {
             packages: vec![fast, isolated],
         };
         let key = cached_build_plan(&store, "setuptools~=83.1", &"a".repeat(64));
-        let first = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
+        let first =
+            planned_env_object_id(&store, Platform::host().unwrap(), &plan, &selected_3_12())
+                .unwrap();
         cached_build_plan(&store, "setuptools~=83.1", &"b".repeat(64));
-        let second = planned_env_object_id(&store, Platform::host().unwrap(), &plan).unwrap();
+        let second =
+            planned_env_object_id(&store, Platform::host().unwrap(), &plan, &selected_3_12())
+                .unwrap();
         assert_ne!(
             first, second,
             "isolated-build build_env input must affect parent id"
@@ -857,9 +1040,10 @@ mod tests {
             python_version: "3.12.14".into(),
             packages: vec![native],
         };
-        let planned = planned_env_object_id(&store, platform, &plan).unwrap();
+        let planned = planned_env_object_id(&store, platform, &plan, &selected_3_12()).unwrap();
         let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
-        let realized = environment_identity(&store, platform, &plan, &cpython_id).unwrap();
+        let realized =
+            environment_identity(&store, platform, &plan, &cpython_id, &selected_3_12()).unwrap();
         assert_eq!(planned, realized.object_id());
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
             let native_id =

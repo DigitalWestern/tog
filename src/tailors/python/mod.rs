@@ -19,7 +19,10 @@ pub mod wheel;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence};
+use crate::kernel::toolchain::{
+    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component, LegacyEvidence, Request, Selected,
+    Source, Version, VersionRequest,
+};
 use crate::kernel::types::Identity;
 #[cfg(test)]
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
@@ -183,6 +186,7 @@ pub(crate) fn object_id_for(platform: Platform, version: &str) -> io::Result<Str
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let cpython_pin = lookup(platform, "3.12.14").expect("pinned CPython for test platform");
     let cpython = cpython_identity(cpython_pin);
+    let selected = shipped_selection(cpython_pin.version).expect("shipped CPython release");
     let uv = uv_identity(
         UV.iter()
             .find(|pin| pin.platform == platform)
@@ -221,10 +225,22 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         }],
         ..empty_plan.clone()
     };
-    let env_empty = env::environment_identity(&store, platform, &empty_plan, &cpython.object_id())
-        .expect("empty Python environment identity");
-    let env_wheel = env::environment_identity(&store, platform, &wheel_plan, &cpython.object_id())
-        .expect("Python wheel environment identity");
+    let env_empty = env::environment_identity(
+        &store,
+        platform,
+        &empty_plan,
+        &cpython.object_id(),
+        &selected,
+    )
+    .expect("empty Python environment identity");
+    let env_wheel = env::environment_identity(
+        &store,
+        platform,
+        &wheel_plan,
+        &cpython.object_id(),
+        &selected,
+    )
+    .expect("Python wheel environment identity");
     let mut cases = vec![cpython.clone(), uv, env_empty, env_wheel];
     if platform == Platform::X86_64UnknownLinuxGnu {
         let native_pkg = build::local_native_sdist_for_test(&store, "matrix-python-native");
@@ -232,9 +248,14 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             packages: vec![native_pkg],
             ..empty_plan.clone()
         };
-        let env_native =
-            env::environment_identity(&store, platform, &native_plan, &cpython.object_id())
-                .expect("Python native-sdist environment identity");
+        let env_native = env::environment_identity(
+            &store,
+            platform,
+            &native_plan,
+            &cpython.object_id(),
+            &selected,
+        )
+        .expect("Python native-sdist environment identity");
         cases.push(env_native);
         cases.push(
             nativelibs::live_identity_for_test(&store, platform)
@@ -332,13 +353,13 @@ pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
 /// realized like any toolchain so a bare machine needs nothing besides
 /// tog.
 const UV_VERSION: &str = "0.12.7";
-struct PinnedUv {
-    platform: Platform,
-    url: &'static str,
-    sha256: &'static str,
+pub(crate) struct PinnedUv {
+    pub platform: Platform,
+    pub url: &'static str,
+    pub sha256: &'static str,
 }
 
-const UV: &[PinnedUv] = &[
+pub(crate) const UV: &[PinnedUv] = &[
     PinnedUv {
         platform: Platform::Aarch64AppleDarwin,
         url: "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz",
@@ -350,6 +371,143 @@ const UV: &[PinnedUv] = &[
         sha256: "788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21",
     },
 ];
+
+/// The recipe ids this tailor knows how to lay out. A lock row naming
+/// anything else was written by a tog that extracts or relocates these
+/// artifacts differently, so the bytes it locked are not the bytes this
+/// code would produce.
+const CPYTHON_RECIPE: &str = "cpython/legacy";
+const UV_RECIPE: &str = "uv/legacy";
+
+fn not_python(selected: &Selected) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "python: asked to realize a {} toolchain",
+            selected.ecosystem
+        ),
+    )
+}
+
+/// One component's row from the selection, checked against the layout this
+/// tailor implements.
+fn row(
+    selected: &Selected,
+    platform: Platform,
+    component: &str,
+    recipe: &str,
+) -> io::Result<ArtifactSpec> {
+    if selected.ecosystem != "python" {
+        return Err(not_python(selected));
+    }
+    let spec = selected.artifact(platform, component)?;
+    if spec.recipe != recipe {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "python: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                spec.recipe
+            ),
+        ));
+    }
+    Ok(spec)
+}
+
+/// The shipped catalog's selection for one CPython version, exact
+/// (`3.12.14`) or by line (`3.12`). For work with no project lock to
+/// honor: `x` outside a project, a nested build environment, node-gyp's
+/// interpreter, and tests.
+pub fn shipped_selection(version: &str) -> io::Result<Selected> {
+    let catalog = toolchain_catalog()?;
+    let parsed = Version::parse(version)?;
+    let request = Request::newest().with(
+        "cpython",
+        if parsed.parts().len() >= 3 {
+            VersionRequest::Exact(parsed)
+        } else {
+            VersionRequest::Prefix(parsed)
+        },
+    );
+    Ok(Selected {
+        ecosystem: "python".into(),
+        bundle: catalog.select(&request)?.clone(),
+        lock_sha256: None,
+        source: Source::Shipped,
+    })
+}
+
+/// The shipped catalog's newest complete release.
+pub fn shipped_newest() -> io::Result<Selected> {
+    crate::kernel::toolchain::shipped(&toolchain_catalog()?)
+}
+
+/// The CPython row's `<version>:<artifact sha256>`, the `python` input
+/// every sdist-build identity carries.
+pub(crate) fn cpython_identity_input(
+    selected: &Selected,
+    platform: Platform,
+) -> io::Result<String> {
+    let spec = row(selected, platform, "cpython", CPYTHON_RECIPE)?;
+    Ok(format!("{}:{}", spec.version, artifact_sha256(&spec)?))
+}
+
+/// The object id this selection's CPython realizes to, without realizing
+/// it. Planning uses it; realization returns the same id.
+pub(crate) fn cpython_object_id(selected: &Selected, platform: Platform) -> io::Result<String> {
+    let spec = row(selected, platform, "cpython", CPYTHON_RECIPE)?;
+    Ok(cpython_identity_of(&spec, platform)?.object_id())
+}
+
+/// The sha256 an artifact row names, refused when the row names another
+/// algorithm: CPython and uv are published as sha256 and the identity input
+/// is that bare hex.
+fn artifact_sha256(spec: &ArtifactSpec) -> io::Result<&str> {
+    if spec.digest.algo() != "sha256" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} {}: tog realizes this component from a sha256 digest, not {}",
+                spec.component,
+                spec.version,
+                spec.digest.algo()
+            ),
+        ));
+    }
+    Ok(spec.digest.hex())
+}
+
+/// The CPython object identity, from the row the selection names. It is
+/// byte-identical to the one the pin table produced: the row carries the
+/// same version and the same artifact digest.
+fn cpython_identity_of(spec: &ArtifactSpec, platform: Platform) -> io::Result<Identity> {
+    Ok(Identity {
+        kind: "cpython".into(),
+        name: "cpython".into(),
+        version: spec.version.clone(),
+        inputs: BTreeMap::from([
+            (
+                "artifact_sha256".to_string(),
+                artifact_sha256(spec)?.to_string(),
+            ),
+            ("platform".to_string(), platform.triple().to_string()),
+        ]),
+    })
+}
+
+fn uv_identity_of(spec: &ArtifactSpec, platform: Platform) -> io::Result<Identity> {
+    Ok(Identity {
+        kind: "uv".into(),
+        name: "uv".into(),
+        version: spec.version.clone(),
+        inputs: BTreeMap::from([
+            (
+                "artifact_sha256".to_string(),
+                artifact_sha256(spec)?.to_string(),
+            ),
+            ("platform".to_string(), platform.triple().to_string()),
+        ]),
+    })
+}
 
 fn cpython_identity(pin: &PinnedPython) -> Identity {
     Identity {
@@ -363,7 +521,8 @@ fn cpython_identity(pin: &PinnedPython) -> Identity {
     }
 }
 
-fn uv_identity(pin: &PinnedUv) -> Identity {
+#[cfg(test)]
+pub(crate) fn uv_identity(pin: &PinnedUv) -> Identity {
     Identity {
         kind: "uv".into(),
         name: "uv".into(),
@@ -375,26 +534,27 @@ fn uv_identity(pin: &PinnedUv) -> Identity {
     }
 }
 
-/// Ensure uv is realized in the store (binary at <obj>/uv).
-pub fn ensure_uv(store: &Store) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    ensure_uv_for(store, Platform::host()?)
+/// Ensure the shipped uv is realized in the store (binary at <obj>/uv), for
+/// work with no project selection to honor.
+pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+    realize_uv(store, platform, &shipped_newest()?)
 }
 
-pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
+/// Realize the uv this selection names (binary at <obj>/uv). uv is the
+/// resolver this tailor delegates to, so it is a component of the same
+/// release bundle as the interpreter.
+pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "uv")?;
-    let pin = UV
-        .iter()
-        .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("uv", platform))?;
-    let identity = uv_identity(pin);
+    let spec = &row(selected, platform, "uv", UV_RECIPE)?;
+    let identity = uv_identity_of(spec, platform)?;
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
+    let sha256 = artifact_sha256(spec)?;
+    let tarball = download_verified_held(store, &spec.url, sha256)?;
     let staged = store.stage()?;
     // Tarball root is platform-specific; strip it.
     let mut command = Command::new("/usr/bin/tar");
@@ -411,45 +571,35 @@ pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
     store
         .commit_with_deps(&identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps.cache_digest(Digest::sha256(sha256)?);
             deps
         })
         .map(|(path, _)| path)
 }
 
-/// Ensure the given CPython is realized in the store. Returns the object path
+/// Realize the CPython this selection names. Returns the object path
 /// (interpreter at <path>/bin/python3).
-pub fn ensure_python(store: &Store, pin: &PinnedPython) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    ensure_python_for(store, pin, Platform::host()?)
-}
-
-pub(crate) fn ensure_python_for(
+///
+/// This is the one place a Python run learns which bytes its interpreter
+/// is made of: the row carries the version, the URL and the digest, so a
+/// refreshed catalog cannot change a locked project's interpreter.
+pub fn realize_runtime(
     store: &Store,
-    pin: &PinnedPython,
     platform: Platform,
+    selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "CPython")?;
-    if pin.platform != platform {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "CPython pin {} is for {}, not host {} (unsupported platform)",
-                pin.version,
-                pin.platform.triple(),
-                platform.triple()
-            ),
-        ));
-    }
-    let identity = cpython_identity(pin);
+    let spec = &row(selected, platform, "cpython", CPYTHON_RECIPE)?;
+    let identity = cpython_identity_of(spec, platform)?;
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
         return Ok(store.object_path(&id));
     }
 
-    let tarball = download_verified_held(store, pin.url, pin.sha256)?;
+    let sha256 = artifact_sha256(spec)?;
+    let tarball = download_verified_held(store, &spec.url, sha256)?;
     let staged = store.stage()?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
     let mut command = Command::new("/usr/bin/tar");
@@ -469,10 +619,20 @@ pub(crate) fn ensure_python_for(
     store
         .commit_with_deps(&identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
-            deps.cache_digest(Digest::sha256(pin.sha256)?);
+            deps.cache_digest(Digest::sha256(sha256)?);
             deps
         })
         .map(|(path, _)| path)
+}
+
+/// Realize a pinned CPython for a caller that holds no selection: the
+/// shipped catalog row for that pin's version.
+pub fn ensure_python_for(
+    store: &Store,
+    pin: &PinnedPython,
+    platform: Platform,
+) -> io::Result<PathBuf> {
+    realize_runtime(store, platform, &shipped_selection(pin.version)?)
 }
 
 #[cfg(test)]
@@ -627,5 +787,116 @@ mod tests {
         );
         assert!(lookup_in_pins(&pins, Platform::Aarch64AppleDarwin, "3.12").is_none());
         assert!(lookup_in_pins(&pins, Platform::X86_64UnknownLinuxGnu, "3.12.3").is_none());
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+
+    /// A selection whose CPython row names a layout this tog does not
+    /// implement: the bytes it locked are not the bytes this code would
+    /// produce, so realization refuses instead of guessing.
+    fn with_recipe(platform: Platform, component: &str, recipe: &str) -> Selected {
+        let mut selected = shipped_selection("3.12.14").expect("shipped CPython release");
+        for row in &mut selected.bundle.artifacts {
+            if row.component == component && row.platform == platform {
+                row.recipe = recipe.to_string();
+            }
+        }
+        selected
+    }
+
+    #[test]
+    fn realization_refuses_an_unknown_recipe_and_another_ecosystem() {
+        let store = Store {
+            root: std::env::temp_dir().join("tog-python-recipe-refusal"),
+        };
+        // The row check is per platform; realization can only run for the
+        // host, which `require_host` refuses first for the other one.
+        for platform in Platform::ALL {
+            let error = row(
+                &with_recipe(*platform, "cpython", "cpython/2"),
+                *platform,
+                "cpython",
+                CPYTHON_RECIPE,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("recipe cpython/2"), "{error}");
+            assert!(error.contains("upgrade tog"), "{error}");
+        }
+        let platform = Platform::host().unwrap();
+        let error = realize_runtime(
+            &store,
+            platform,
+            &with_recipe(platform, "cpython", "cpython/2"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("recipe cpython/2"), "{error}");
+        assert!(error.contains("upgrade tog"), "{error}");
+        let error = realize_uv(&store, platform, &with_recipe(platform, "uv", "uv/2"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recipe uv/2"), "{error}");
+
+        let mut node = shipped_selection("3.12.14").unwrap();
+        node.ecosystem = "node".into();
+        let error = realize_runtime(&store, platform, &node)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a node toolchain"), "{error}");
+        assert!(!store.root.exists(), "a refusal touched the store");
+    }
+
+    /// The row and the pin describe the same bytes, so the object a locked
+    /// project realizes is the object every existing store already holds.
+    #[test]
+    fn an_identity_from_a_selected_row_equals_the_identity_from_the_pin() {
+        for platform in Platform::ALL {
+            for pin in PYTHONS.iter().filter(|pin| pin.platform == *platform) {
+                let selected = shipped_selection(pin.version).unwrap();
+                let spec = row(&selected, *platform, "cpython", CPYTHON_RECIPE).unwrap();
+                assert_eq!(
+                    cpython_identity_of(&spec, *platform).unwrap().object_id(),
+                    cpython_identity(pin).object_id(),
+                    "cpython {} on {}",
+                    pin.version,
+                    platform.triple()
+                );
+                assert_eq!(
+                    cpython_object_id(&selected, *platform).unwrap(),
+                    cpython_identity(pin).object_id()
+                );
+                assert_eq!(
+                    cpython_identity_input(&selected, *platform).unwrap(),
+                    format!("{}:{}", pin.version, pin.sha256)
+                );
+            }
+            for pin in UV.iter().filter(|pin| pin.platform == *platform) {
+                let selected = shipped_newest().unwrap();
+                let spec = row(&selected, *platform, "uv", UV_RECIPE).unwrap();
+                assert_eq!(
+                    uv_identity_of(&spec, *platform).unwrap().object_id(),
+                    uv_identity(pin).object_id(),
+                    "uv on {}",
+                    platform.triple()
+                );
+            }
+        }
+    }
+
+    /// A lock naming a version this tog has no build for is refused by the
+    /// planner, naming the file and the command that rewrites it.
+    #[test]
+    fn a_version_with_no_pinned_build_is_refused_by_the_planner() {
+        let platform = Platform::host().unwrap();
+        let error = pyselect::locked(platform, "3.9.1", &pyselect::PythonInputs::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("3.9.1"), "{error}");
+        assert!(error.contains("tog-toolchain.toml"), "{error}");
+        assert!(error.contains("tog update --toolchain python"), "{error}");
     }
 }

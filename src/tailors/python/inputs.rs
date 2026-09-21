@@ -8,6 +8,7 @@ use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
 use crate::kernel::supervise;
+use crate::kernel::toolchain::Selected;
 use crate::kernel::types;
 use crate::kernel::ui;
 use crate::tailors::python;
@@ -89,58 +90,47 @@ pub fn python_input_records(
 ///
 /// Planning hits PyPI, so successful plans are cached in `.tog/plan.json`
 /// keyed by a hash of the inputs; an unchanged lock replans offline.
-pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<PythonPlan> {
+pub fn read_plan(
+    platform: Platform,
+    dir: &Path,
+    store: &store::Store,
+    selected: &Selected,
+) -> io::Result<PythonPlan> {
     let project = ProjectRoot::open(dir)?;
-    let mut manifest = manifest::discover(platform, dir)?;
-    let mut selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
+    // The interpreter is decided: it is the one this project's toolchain
+    // selection names. Planning reads the manifest with it and checks it
+    // against every declared constraint; nothing here reselects, so a
+    // `setup.py` probe cannot move the version out from under the lock.
+    let version = selected.version("cpython")?;
+    let mut manifest = manifest::discover(platform, dir, version)?;
+    let mut selection = pyselect::locked(platform, version, &manifest.python)?;
     if manifest.requires_setup() {
         let dynamic_dependencies = manifest.dynamic_dependencies;
-        const MAX_SETUP_PROBES: usize = 3;
-        let mut selection_history = vec![selection.pin.version.to_string()];
-        let mut stabilized = false;
-        for _ in 0..MAX_SETUP_PROBES {
-            let probed_version = selection.pin.version;
-            if let Err(error) =
-                manifest.prepare_setup(platform, dir, &project, store, probed_version)
-            {
-                // Every ordinary failure in here is already `InvalidData`
-                // (`unreadable` in the manifest layer hardcodes it, and it
-                // wraps the sandboxed egg_info probe), so the kind cannot
-                // tell a descriptor refusal from a probe that did not work.
-                // Fall back on both: a symlinked `.tog` is still refused a
-                // few lines below, at the first write through the project
-                // descriptor.
-                if !dynamic_dependencies {
-                    return Err(error);
-                }
-                let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
-                    return Err(error);
-                };
-                eprintln!(
-                    "tog: setup.py metadata probe failed; using the requirements directory convention: {error}"
-                );
-                fallback.python = manifest.python.clone();
-                manifest = fallback;
-                selection = pyselect::select_python_with_inputs(platform, &manifest.python)?;
-                stabilized = true;
-                break;
+        if let Err(error) = manifest.prepare_setup(platform, dir, &project, store, selected) {
+            // Every ordinary failure in here is already `InvalidData`
+            // (`unreadable` in the manifest layer hardcodes it, and it
+            // wraps the sandboxed egg_info probe), so the kind cannot
+            // tell a descriptor refusal from a probe that did not work.
+            // Fall back on both: a symlinked `.tog` is still refused a
+            // few lines below, at the first write through the project
+            // descriptor.
+            if !dynamic_dependencies {
+                return Err(error);
             }
-
-            let next = pyselect::select_python_with_inputs(platform, &manifest.python)?;
-            if next.pin.version == probed_version {
-                selection = next;
-                stabilized = true;
-                break;
-            }
-            selection = next;
-            selection_history.push(selection.pin.version.to_string());
+            let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
+                return Err(error);
+            };
+            eprintln!(
+                "tog: setup.py metadata probe failed; using the requirements directory convention: {error}"
+            );
+            fallback.python = manifest.python.clone();
+            manifest = fallback;
         }
-        if !stabilized {
-            return Err(io::Error::other(format!(
-                "setup.py metadata probe and Python selection did not stabilize after {MAX_SETUP_PROBES} probes (oscillation: {})",
-                selection_history.join(" -> "),
-            )));
-        }
+        // The probe may have added a `requires-python` the lock never
+        // reads. It cannot change the interpreter, so it is checked
+        // against the locked one instead: the probe loop this replaces
+        // existed only to let selection chase its own metadata.
+        selection = pyselect::locked(platform, version, &manifest.python)?;
     }
     if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
         manifest.provenance.push_str(" (empty manifest)");
@@ -153,7 +143,6 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         record_skippable_specs(&input, &source)?;
     }
     selection.emit_warnings();
-    let pin = selection.pin;
 
     // A found manifest may intentionally declare no dependencies. Keep the
     // interpreter-only plan on the normal realization/projection path, but do
@@ -163,7 +152,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         return Ok((
             types::Plan {
                 ecosystem: "python".into(),
-                python_version: pin.version.into(),
+                python_version: version.into(),
                 packages: Vec::new(),
             },
             selection,
@@ -175,7 +164,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         return Ok((
             types::Plan {
                 ecosystem: "python".into(),
-                python_version: pin.version.into(),
+                python_version: version.into(),
                 packages,
             },
             selection,
@@ -233,7 +222,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
                     store,
                     &input,
                     &resolver_source,
-                    pin.version,
+                    selected,
                     compile_path,
                 )?
             }
@@ -246,7 +235,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
             store,
             &input,
             &resolver_source,
-            pin.version,
+            selected,
             compile_path,
         )?
     };
@@ -260,7 +249,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
     };
     // The lock may have just been (re)written above: hash it now.
     let inputs = python_input_records(dir, &manifest)?;
-    let input_hash = planner_input_hash(platform, pin.version, &text, glibc);
+    let input_hash = planner_input_hash(platform, version, &text, glibc);
     // A symlinked or non-regular cache is a refusal; an unreadable regular
     // file is a miss that the write below replaces.
     let cached = match project.read_file(Path::new(PLAN_CACHE)) {
@@ -278,7 +267,7 @@ pub fn read_plan(platform: Platform, dir: &Path, store: &store::Store) -> io::Re
         }
     }
 
-    let plan = pypi::plan_python(platform, &text, pin.version)?;
+    let plan = pypi::plan_python(platform, &text, version)?;
     project.write_file(
         Path::new(PLAN_CACHE),
         &serde_json::to_vec_pretty(&serde_json::json!({
@@ -361,9 +350,10 @@ pub fn locked_requirements(
     store: &store::Store,
     input: &str,
     source: &str,
-    pyver: &str,
+    selected: &Selected,
     compile_path: Option<&Path>,
 ) -> io::Result<String> {
+    let pyver = selected.version("cpython")?;
     let lock_path = dir.join("requirements.lock.txt");
     let stamp_path = dir.join(LOCK_STAMP);
     let source_hash = if compile_path.is_some_and(|path| {
@@ -387,7 +377,7 @@ pub fn locked_requirements(
     }
     eprintln!("tog: {input} is not hash-pinned; resolving with the store uv...");
     // Store-pinned uv, not host uv: a bare machine needs only tog.
-    let uv = python::ensure_uv_for(store, platform)?.join("uv");
+    let uv = python::realize_uv(store, platform, selected)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut command = std::process::Command::new(&uv);
     command.args(["pip", "compile", compile_input, "--generate-hashes"]);
@@ -439,6 +429,12 @@ pub fn lock_source_hash(pyver: &str, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The selection these tests plan with: the shipped release for the
+    /// interpreter the fixtures expect. Choosing it is the kernel's job.
+    fn selected() -> crate::kernel::toolchain::Selected {
+        python::shipped_selection(pyselect::DEFAULT_VERSION).expect("shipped CPython release")
+    }
 
     #[test]
     fn cache_key_builders_track_independent_inputs() {
@@ -520,7 +516,7 @@ mod tests {
         let store = store::Store {
             root: temp.0.join("absent-store"),
         };
-        let e = read_plan(Platform::host().unwrap(), &project, &store)
+        let e = read_plan(Platform::host().unwrap(), &project, &store, &selected())
             .unwrap_err()
             .to_string();
         assert!(e.contains("not a real directory"), "{e}");
@@ -582,7 +578,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
         let store = store_with_stub_uv(&temp.0.join("store"));
 
-        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store, &selected())
             .unwrap_err()
             .to_string();
         assert!(error.contains("not a real directory"), "{error}");
@@ -651,7 +647,8 @@ mod tests {
             )
             .unwrap();
 
-        let (planned, selection, inputs) = read_plan(platform, &project_dir, &store).unwrap();
+        let (planned, selection, inputs) =
+            read_plan(platform, &project_dir, &store, &selected()).unwrap();
         assert_eq!(planned.python_version, version);
         assert_eq!(selection.pin.version, version);
         assert!(
@@ -682,7 +679,7 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
 
-        let error = read_plan(Platform::host().unwrap(), &project_dir, &store)
+        let error = read_plan(Platform::host().unwrap(), &project_dir, &store, &selected())
             .unwrap_err()
             .to_string();
         assert!(error.contains("not a real directory"), "{error}");

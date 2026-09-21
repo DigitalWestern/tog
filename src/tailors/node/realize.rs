@@ -240,15 +240,36 @@ pub(super) fn native_libs_identity_id(
 /// Realize the node_modules tree as an immutable store object. The object
 /// content root holds `node_modules/` plus one
 /// `workspaces/<encoded importer>/node_modules` per workspace importer.
+/// Realize the tree for a caller that holds no selection: the shipped
+/// Node release. `x` outside a project and tests use this; a project sync
+/// uses `realize_node_env_for`.
 pub fn realize_node_env(
     store: &Store,
     platform: Platform,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
+    realize_node_env_for(
+        store,
+        platform,
+        plan,
+        artifacts,
+        &crate::tailors::node::shipped_selection()?,
+    )
+}
+
+/// Realize the tree with the Node the project's selection names.
+pub fn realize_node_env_for(
+    store: &Store,
+    platform: Platform,
+    plan: &NpmPlan,
+    artifacts: &[DeclaredArtifact],
+    selected: &crate::kernel::toolchain::Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "node environment")?;
-    let node_obj = ensure_node_for(store, platform).map_err(wrap_ensure_node_error)?;
+    let node_obj = crate::tailors::node::realize_runtime(store, platform, selected)
+        .map_err(wrap_ensure_node_error)?;
     realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
 }
 
@@ -1260,15 +1281,17 @@ fn ensure_gyp_python(
     if let Some(p) = python_obj {
         return Ok(p.clone());
     }
-    let pin = crate::tailors::python::lookup(platform, "3.12")
-        .ok_or_else(|| crate::kernel::platform::no_pin("cpython 3.12", platform))?;
-    let p = crate::tailors::python::ensure_python_for(store, pin, platform)
+    // node-gyp's interpreter is not a component of the Node release bundle
+    // (the pin table records no version for it), so it comes from the
+    // shipped Python catalog rather than this project's node selection.
+    let python = crate::tailors::python::shipped_selection("3.12")?;
+    let p = crate::tailors::python::realize_runtime(store, platform, &python)
         .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
     Ok(python_obj.insert(p).clone())
 }
 
 /// PATH for one package's lifecycle scripts: the tool shims first, then the
-/// node toolchain, then the nearest and root .bin dirs, then the system.
+/// node selected, then the nearest and root .bin dirs, then the system.
 fn lifecycle_path_env(
     tools_dir: &Path,
     node_obj: &Path,

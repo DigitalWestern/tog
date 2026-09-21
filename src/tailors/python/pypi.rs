@@ -772,10 +772,11 @@ pub(crate) fn lock_requirement_text_with_uv(
     store: &Store,
     platform: Platform,
     requirements_text: &str,
-    python_version: &str,
+    selected: &crate::kernel::toolchain::Selected,
     constraints: Option<&str>,
 ) -> io::Result<String> {
-    let uv = crate::tailors::python::ensure_uv_for(store, platform)?.join("uv");
+    let python_version = selected.version("cpython")?;
+    let uv = crate::tailors::python::realize_uv(store, platform, selected)?.join("uv");
     let scratch = store.stage()?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");

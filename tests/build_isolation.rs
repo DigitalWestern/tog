@@ -8,6 +8,7 @@ use std::process::Command;
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 use tog::kernel::types::{ArtifactKind, LockedPackage, Plan};
+use tog::tailors::python;
 use tog::tailors::python::build;
 
 fn package(name: &str, version: &str, filename: &str, url: &str, sha256: &str) -> LockedPackage {
@@ -84,8 +85,13 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
         "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz",
         "2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021",
     );
-    let wheel = build::build_sdist_wheel(&store, Platform::host().unwrap(), &pkg, "3.12.14")
-        .expect("tomli-w sdist build");
+    let wheel = build::build_sdist_wheel(
+        &store,
+        Platform::host().unwrap(),
+        &pkg,
+        &python::shipped_selection("3.12.14").unwrap(),
+    )
+    .expect("tomli-w sdist build");
     assert!(wheel.is_file());
     python_import(
         &wheel,
@@ -111,7 +117,7 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
         &store,
         Platform::host().unwrap(),
         &pkg,
-        "3.12.14",
+        &python::shipped_selection("3.12.14").unwrap(),
         &runtime_numpy(),
     )
     .expect("insightface sdist build");
@@ -143,7 +149,7 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
         &store,
         Platform::host().unwrap(),
         &tokenizers,
-        "3.12.14",
+        &python::shipped_selection("3.12.14").unwrap(),
     ) {
         Ok(wheel) => wheel,
         Err(error) => {
@@ -160,8 +166,13 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
                 "https://files.pythonhosted.org/packages/c3/7d/d9daedf0f2ebcacd20d599928f8913e9d2aea1d56d2d355a93bfa2b611d7/fastuuid-0.14.0.tar.gz",
                 "178947fc2f995b38497a74172adee64fdeb8b7ec18f2a5934d037641ba265d26",
             );
-            build::build_sdist_wheel(&store, Platform::host().unwrap(), &fallback, "3.12.14")
-                .expect("fastuuid Rust fallback sdist build")
+            build::build_sdist_wheel(
+                &store,
+                Platform::host().unwrap(),
+                &fallback,
+                &python::shipped_selection("3.12.14").unwrap(),
+            )
+            .expect("fastuuid Rust fallback sdist build")
         }
     };
     assert!(wheel.is_file());

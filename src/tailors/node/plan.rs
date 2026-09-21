@@ -358,8 +358,22 @@ fn npm_package_from_entry(
 
 /// Parse package-lock.json (lockfileVersion 2 or 3) into a plan.
 /// Pure parsing: no network. Deterministic (sorted by path).
+///
+/// `node_version` is the version the project's toolchain selection names:
+/// the plan records the Node this sync will realize, never a table lookup
+/// that could disagree with the lock.
 pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
-    let node = node_pin(platform)?;
+    let shipped = crate::tailors::node::shipped_selection()?;
+    plan_npm_with(platform, lock_json, shipped.version("node")?)
+}
+
+/// `plan_npm` for a caller that holds a selection: the plan records the
+/// Node this sync will realize.
+pub fn plan_npm_with(
+    platform: Platform,
+    lock_json: &str,
+    node_version: &str,
+) -> io::Result<NpmPlan> {
     let v: serde_json::Value =
         serde_json::from_str(lock_json).map_err(|e| err(format!("package-lock.json: {e}")))?;
     let lockfile_version = v["lockfileVersion"].as_u64().unwrap_or(0);
@@ -444,7 +458,7 @@ pub fn plan_npm(platform: Platform, lock_json: &str) -> io::Result<NpmPlan> {
     out.sort_by(|a, b| a.path.cmp(&b.path));
     links.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(NpmPlan {
-        node_version: node.version.to_string(),
+        node_version: node_version.to_string(),
         packages: out,
         links,
         workspaces: workspace_dirs.into_iter().map(str::to_string).collect(),

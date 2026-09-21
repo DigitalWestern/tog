@@ -568,6 +568,7 @@ pub fn plan_yarn(
     lock: &str,
     package_json: &str,
     project_dir: &Path,
+    node_version: &str,
 ) -> io::Result<NpmPlan> {
     let entries = parse_yarn_entries(lock)?;
     let package: JsonValue = serde_json::from_str(package_json)
@@ -704,7 +705,7 @@ pub fn plan_yarn(
             .collect(),
         local_link_deps: BTreeMap::new(),
     };
-    build_plan(platform, graph, "yarn.lock")
+    build_plan(platform, graph, "yarn.lock", node_version)
 }
 
 pub(super) fn yarn_package_dependencies(

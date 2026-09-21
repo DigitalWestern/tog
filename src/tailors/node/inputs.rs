@@ -4,6 +4,7 @@
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
 use crate::kernel::supervise;
+use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::node;
 use crate::tailors::node::lock_import;
@@ -14,7 +15,12 @@ use std::path::Path;
 /// pnpm-lock.yaml, yarn.lock): delegate lock generation to npm, mirroring
 /// the uv flow for Python. Resolution is the ecosystem's job; realization
 /// is tog's.
-pub fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> io::Result<()> {
+pub fn ensure_npm_lock(
+    platform: Platform,
+    dir: &Path,
+    store: &store::Store,
+    selected: &Selected,
+) -> io::Result<()> {
     if !dir.join("package.json").exists()
         || dir.join("package-lock.json").exists()
         || dir.join("pnpm-lock.yaml").exists()
@@ -34,7 +40,9 @@ pub fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> 
     eprintln!("tog: no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
     // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
-    let node = node::ensure_node_for(store, platform)?;
+    // The npm that writes this lock is the one bundled in the Node the
+    // project's toolchain selection names.
+    let node = node::realize_runtime(store, platform, selected)?;
     let path = format!(
         "{}:{}",
         node.join("bin").display(),
@@ -59,11 +67,17 @@ pub fn ensure_npm_lock(platform: Platform, dir: &Path, store: &store::Store) -> 
     Ok(())
 }
 
-pub fn load_npm_plan(platform: Platform, dir: &Path) -> io::Result<Option<node::NpmPlan>> {
+pub fn load_npm_plan(
+    platform: Platform,
+    dir: &Path,
+    selected: &Selected,
+) -> io::Result<Option<node::NpmPlan>> {
+    let node_version = selected.version("node")?;
     if dir.join("package-lock.json").is_file() {
-        return Ok(Some(node::plan_npm(
+        return Ok(Some(node::plan_npm_with(
             platform,
             &std::fs::read_to_string(dir.join("package-lock.json"))?,
+            node_version,
         )?));
     }
     if dir.join("pnpm-lock.yaml").is_file() {
@@ -71,6 +85,7 @@ pub fn load_npm_plan(platform: Platform, dir: &Path) -> io::Result<Option<node::
             platform,
             &std::fs::read_to_string(dir.join("pnpm-lock.yaml"))?,
             dir,
+            node_version,
         )?));
     }
     if dir.join("yarn.lock").is_file() {
@@ -80,6 +95,7 @@ pub fn load_npm_plan(platform: Platform, dir: &Path) -> io::Result<Option<node::
             &std::fs::read_to_string(dir.join("yarn.lock"))?,
             &package,
             dir,
+            node_version,
         )?));
     }
     Ok(None)
