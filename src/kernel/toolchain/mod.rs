@@ -9,7 +9,9 @@
 //! Realization still reads the pin tables directly: a catalog row carries the
 //! same URL and digest, it does not mint a new object identity.
 
+pub mod input;
 pub mod legacy;
+pub mod lock;
 pub mod select;
 pub mod source;
 

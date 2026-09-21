@@ -481,18 +481,24 @@ fn open_directory_at(
     })
 }
 
-/// `.tog-tmp.<pid>.<16 hex>`: a fresh random name per attempt, so an
-/// occupied name (a crash leftover, or an entry planted at a guessable
-/// name) is stepped around, never unlinked and never written through. The
-/// destination name is not part of it, so a destination of any valid
-/// length publishes.
+/// Operating-system randomness: `count` bytes from `/dev/urandom`. One
+/// shared helper, so every temporary name and identifier in the tree reads
+/// the same source on Linux and macOS.
+pub fn urandom_bytes(count: usize) -> io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = vec![0u8; count];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// `.tog-tmp.<32 hex>`: a fresh random name per attempt, so an occupied
+/// name (a crash leftover, or an entry planted at a guessable name) is
+/// stepped around, never unlinked and never written through. The name
+/// carries no process identity, so two runs in containers that reuse small
+/// pids never pick the same fixed point. The destination name is not part
+/// of it, so a destination of any valid length publishes.
 fn random_temp_name(_name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
-    use ring::rand::SecureRandom as _;
-    let mut nonce = [0u8; 8];
-    ring::rand::SystemRandom::new()
-        .fill(&mut nonce)
-        .map_err(|_| io::Error::other("system randomness is unavailable"))?;
-    Ok(format!(".tog-tmp.{}.{}", std::process::id(), hex::encode(nonce)).into_bytes())
+    Ok(format!(".tog-tmp.{}", hex::encode(urandom_bytes(16)?)).into_bytes())
 }
 
 #[cfg(test)]
@@ -915,6 +921,60 @@ mod tests {
         assert!(published.file_type().is_file());
         assert_eq!(fs::read(&link).unwrap(), b"new");
         assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
+    }
+
+    #[test]
+    fn toolchain_lock_and_inputs_fail_closed() {
+        // The lock and its inputs are read through the held root, so a
+        // symlinked lock, a symlinked input file, and a symlinked ancestor
+        // are all refused instead of read through.
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let victim = temp.0.join("victim");
+        fs::write(&victim, b"3.12.1\n").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+
+        symlink(&victim, dir.join("tog-toolchain.toml")).unwrap();
+        let error = root.read_file(Path::new("tog-toolchain.toml")).unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+
+        fs::remove_file(dir.join("tog-toolchain.toml")).unwrap();
+        symlink(&victim, dir.join(".python-version")).unwrap();
+        let error = root.read_file(Path::new(".python-version")).unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+
+        fs::remove_file(dir.join(".python-version")).unwrap();
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::remove_dir(dir.join("sub")).unwrap();
+        symlink(&outside, dir.join("sub")).unwrap();
+        let error = root
+            .read_file(Path::new("sub/.python-version"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn plain_path_reads_do_not_fail_closed() {
+        // The negative half of the lock guarantee: ordinary path reads
+        // follow a symlinked input, so only the held-descriptor walk above
+        // refuses. If this ever fails, the refusal tests prove nothing.
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let victim = temp.0.join("victim");
+        fs::write(&victim, b"3.12.1\n").unwrap();
+        symlink(&victim, dir.join(".python-version")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        assert!(root.read_file(Path::new(".python-version")).is_err());
+        assert_eq!(
+            fs::read(dir.join(".python-version")).unwrap(),
+            b"3.12.1\n",
+            "plain read refused a symlink it should follow"
+        );
     }
 
     #[test]

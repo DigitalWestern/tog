@@ -3,9 +3,11 @@
 
 use crate::commands::shared::no_inputs;
 use crate::kernel::context::{self, Context};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
 use crate::kernel::store;
+use crate::kernel::toolchain::{input, lock::ToolchainLock};
 use crate::tailors::{self, Tailor};
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -19,6 +21,14 @@ pub fn preflight_sync(platform: Platform, dir: &Path) -> io::Result<Vec<&'static
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable(dir)?;
+    // Dormant toolchain discovery: read every declarative input and the
+    // lock (when present) through the held root descriptor, before the
+    // store is opened. The result is unused and nothing is written or
+    // required; a tampered input or lock still fails closed here.
+    if let Ok(root) = ProjectRoot::open(dir) {
+        let _inputs = input::discover_all(&root)?;
+        let _lock = ToolchainLock::read_via(&root)?;
+    }
     let present = tailors::detected(dir)?;
     for tailor in &present {
         tailor.preflight(platform, dir)?;
@@ -323,6 +333,28 @@ mod tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("cannot protect"), "{error}");
+    }
+
+    #[test]
+    fn dormant_toolchain_discovery_writes_no_lock() {
+        // Preflight reads declarative inputs through the held root but the
+        // lock stays dormant: nothing is written and nothing is required.
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
+        let present = preflight_sync(Platform::host().unwrap(), &project).unwrap();
+        assert!(present.iter().any(|tailor| tailor.id() == "python"));
+        assert!(!project.join("tog-toolchain.toml").exists());
+        let root = ProjectRoot::open(&project).unwrap();
+        let rows = input::discover(&root, "python").unwrap();
+        assert_eq!(rows[0].value.as_deref(), Some("3.12.14"));
+        assert!(ToolchainLock::read_via(&root).unwrap().is_none());
     }
 
     #[test]

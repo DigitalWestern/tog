@@ -12,11 +12,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// urn:uuid v4 from /dev/urandom.
+/// urn:uuid v4 from the shared operating-system randomness helper.
 fn serial_number() -> io::Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 16];
-    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let bytes = crate::kernel::fsroot::urandom_bytes(16)?;
+    let mut bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| io::Error::other("system randomness returned the wrong length"))?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let h: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
