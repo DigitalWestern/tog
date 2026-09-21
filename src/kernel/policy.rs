@@ -492,6 +492,14 @@ fn current() -> &'static Policy {
     POLICY.get_or_init(Policy::default)
 }
 
+/// Does the policy chain in force declare a `[signing]` table? That table
+/// is the only evidence that anyone here cares whether closures are
+/// signed, so it is what decides whether an unsigned sync is worth saying
+/// anything about.
+pub fn signing_configured() -> bool {
+    current().signing.is_some()
+}
+
 /// Whether `policy` refuses an exception of `kind`.
 pub fn denied(policy: &Policy, kind: &str) -> bool {
     policy.strict || policy.deny.contains(canonical_kind(kind))

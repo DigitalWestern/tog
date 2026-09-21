@@ -44,13 +44,41 @@ pub struct Store {
     pub root: PathBuf,
 }
 
+/// Why the store could not be created, in the user's terms: the path that
+/// failed, the cause translated out of errno, and the one lever they have.
+/// A bare `?` here surfaces as "Permission denied (os error 13)" with no
+/// path and no hint that `TOG_STORE` exists.
+fn open_error(path: &Path, from_env: bool, error: io::Error) -> io::Error {
+    let lever = if from_env {
+        "TOG_STORE names this path; point it at a writable directory"
+    } else {
+        "set TOG_STORE to a writable directory"
+    };
+    let cause = match error.raw_os_error() {
+        Some(code) if code == libc::ENOSPC => "the filesystem is full".to_string(),
+        Some(code) if code == libc::EROFS => "the filesystem is read-only".to_string(),
+        Some(code) if code == libc::EDQUOT => "the disk quota is exhausted".to_string(),
+        _ => match error.kind() {
+            io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+            io::ErrorKind::NotFound => "a parent directory does not exist".to_string(),
+            _ => error.to_string(),
+        },
+    };
+    io::Error::new(
+        error.kind(),
+        format!("create the store at {}: {cause}; {lever}", path.display()),
+    )
+}
+
 impl Store {
     pub fn open() -> io::Result<Store> {
-        let root = std::env::var_os("TOG_STORE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".tog/store"));
-        fs::create_dir_all(&root)?;
-        let root = root.canonicalize()?;
+        let explicit = std::env::var_os("TOG_STORE").map(PathBuf::from);
+        let from_env = explicit.is_some();
+        let root = explicit.unwrap_or_else(|| home().join(".tog/store"));
+        fs::create_dir_all(&root).map_err(|error| open_error(&root, from_env, error))?;
+        let root = root
+            .canonicalize()
+            .map_err(|error| open_error(&root, from_env, error))?;
         for sub in [
             "objects",
             "meta",
@@ -63,7 +91,8 @@ impl Store {
             "backups",
             "root-locks",
         ] {
-            ensure_directory_tree(&root, Path::new(sub))?;
+            ensure_directory_tree(&root, Path::new(sub))
+                .map_err(|error| open_error(&root.join(sub), from_env, error))?;
         }
         Ok(Store { root })
     }
@@ -606,6 +635,50 @@ mod tests {
         assert!(fs::read_to_string(entry.registry_path)
             .unwrap()
             .contains("base64"));
+    }
+
+    /// A store that cannot be created is the first thing a new user hits on
+    /// a locked-down machine. The message names the path, says what errno
+    /// meant, and names the variable that moves the store.
+    #[test]
+    fn store_creation_failures_name_the_path_the_cause_and_the_lever() {
+        let denied = open_error(
+            Path::new("/ro/home/.tog/store"),
+            false,
+            io::Error::from(io::ErrorKind::PermissionDenied),
+        );
+        assert_eq!(
+            denied.to_string(),
+            "create the store at /ro/home/.tog/store: permission denied; \
+             set TOG_STORE to a writable directory"
+        );
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+
+        let full = open_error(
+            Path::new("/mnt/small/store"),
+            true,
+            io::Error::from_raw_os_error(libc::ENOSPC),
+        );
+        assert!(
+            full.to_string().contains("the filesystem is full"),
+            "{full}"
+        );
+        assert!(
+            full.to_string().contains("TOG_STORE names this path"),
+            "{full}"
+        );
+
+        let read_only = open_error(
+            Path::new("/store"),
+            false,
+            io::Error::from_raw_os_error(libc::EROFS),
+        );
+        assert!(
+            read_only
+                .to_string()
+                .contains("the filesystem is read-only"),
+            "{read_only}"
+        );
     }
 
     #[test]

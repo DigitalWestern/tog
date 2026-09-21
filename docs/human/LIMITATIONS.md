@@ -138,6 +138,12 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   setup.py is unhandled — declare it in `pyproject.toml`. Rust sdists without a shipped
   `Cargo.lock` get a store-Cargo lock recorded `unattested-cargo-lock`.
 - **Immutable venvs are not drop-in venvs**: no activate scripts, and pip cannot mutate them.
+  `tog run pip ...` and `tog run activate` are refused with the verb that replaces them
+  (`tog add`, `tog run <command>`) rather than left to report a missing file, but **no pip
+  shim and no `activate` script are planned**: a shim that accepted `pip install` would have
+  to either mutate a read-only store object or silently rewrite the manifest, and a shell
+  activation would make the environment ambient, which is the property tog exists to remove.
+  A per-shell activation (`tog shell`) is a feature, not a fix, and is not built.
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
@@ -147,6 +153,11 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
 
 ## JavaScript / npm
 
+- **`npm install` is refused, not prevented.** `tog run npm install` is refused with an
+  explanation, but npm run directly in the project still replaces the `node_modules` symlink
+  with a real directory. Nothing enforces the projection at the filesystem level. `tog status`
+  reports it as a real directory written over the projection and the next `tog sync` moves it
+  aside and re-projects, so it is recoverable, not prevented.
 - **Install scripts needing network for logic** are permissive with `install-script-failed`
   (declared-artifacts covers only matching cache locations; Electron-class needs per-version
   declarations). **Git sources are realized only when pinned to a full commit.**

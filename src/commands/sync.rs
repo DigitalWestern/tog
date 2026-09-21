@@ -99,13 +99,64 @@ fn sync_preflighted(
         return Err(no_inputs());
     }
     print_exception_summary(dir)?;
-    if crate::comforter::signing_key().is_none() {
-        eprintln!(
-            "tog: closures unsigned; tog audit reports them outdated \
-             (set TOG_SIGNING_KEY=<key file> to sign; 'tog keygen' makes one)"
+    print_signing_notice(&ctx.store);
+    Ok(())
+}
+
+fn print_signing_notice(store: &store::Store) {
+    let signed = crate::comforter::signing_key().is_some();
+    let matters = policy::signing_configured();
+    // Claim the once-per-store slot only when the answer could depend on
+    // it, so a signed sync does not burn it.
+    let first = || !signed && !matters && first_signing_notice(store);
+    if let Some(message) = signing_notice(signed, matters, first) {
+        crate::kernel::ui::warning(message);
+    }
+}
+
+/// What to say about unsigned closures, if anything.
+///
+/// Unsigned is the default and is fine for a solo project, so it is worth
+/// saying once per store, not as the last line of every sync. It stays on
+/// every sync only where a `[signing]` table proves someone is checking
+/// signatures: there an unsigned closure is a finding, not a preference.
+fn signing_notice(
+    signed: bool,
+    signing_in_policy: bool,
+    first_for_this_store: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+    if signed {
+        return None;
+    }
+    if signing_in_policy {
+        return Some(
+            "closures written unsigned while this policy declares [signing] trusted keys: \
+             'tog audit' will report them outdated (set TOG_SIGNING_KEY=<key file>; \
+             'tog keygen' makes one)",
         );
     }
-    Ok(())
+    first_for_this_store().then_some(
+        "closures are written unsigned, which is fine until you want 'tog audit' to vouch \
+         for them (set TOG_SIGNING_KEY=<key file>; 'tog keygen' makes one). Said once per store",
+    )
+}
+
+/// Claim the once-per-store signing notice. The marker's creation is the
+/// claim (`create_new`), so two concurrent syncs print it once between
+/// them; a store that cannot be written stays quiet rather than nagging.
+///
+/// `--quiet` never claims it: the line would be dropped on the way out and
+/// the user would have spent their one showing on a run that could not
+/// display it.
+fn first_signing_notice(store: &store::Store) -> bool {
+    if crate::kernel::ui::quiet() {
+        return false;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(store.root.join("signing-notice"))
+        .is_ok()
 }
 
 fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
@@ -127,13 +178,22 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
             total += value["body"]["exceptions"].as_array().map_or(0, Vec::len);
         }
     }
-    if total > 0 {
-        eprintln!(
-            "tog: {total} exception(s) recorded in .tog/closures/*.json — \
-             `tog sync --strict` to refuse them"
-        );
+    if let Some(line) = exception_summary(total) {
+        crate::kernel::ui::warning(&line);
     }
     Ok(())
+}
+
+/// A count and where to read it. The line this replaces advised `tog sync
+/// --strict`, which does not refuse the recorded exceptions: it fails the
+/// sync that recorded them, undoing the work that just finished.
+fn exception_summary(total: usize) -> Option<String> {
+    (total > 0).then(|| {
+        format!(
+            "{total} policy exception(s) recorded; read them in .tog/closures/*.json, or judge \
+             them against a policy with 'tog audit'"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -207,6 +267,46 @@ mod tests {
                 None => std::env::remove_var("TOG_SIGNING_KEY"),
             }
         }
+    }
+
+    /// A solo user's first sync should not end on an Ed25519 key-management
+    /// warning, and the one after it should not repeat it. Where a policy
+    /// declares trusted keys, unsigned is a finding and the line stays.
+    #[test]
+    fn the_signing_notice_is_once_per_store_unless_a_policy_asks_for_signatures() {
+        // Signed: nothing to say, and the once-per-store slot is untouched.
+        assert!(signing_notice(true, false, || panic!("slot claimed")).is_none());
+        assert!(signing_notice(true, true, || panic!("slot claimed")).is_none());
+
+        let unsigned = signing_notice(false, false, || true).expect("the first sync says it");
+        assert!(unsigned.contains("once per store"), "{unsigned}");
+        assert!(unsigned.contains("TOG_SIGNING_KEY"), "{unsigned}");
+        assert!(signing_notice(false, false, || false).is_none());
+
+        // A [signing] table means someone reads signatures: say it every
+        // time, whatever the once-per-store slot holds.
+        let policy_cares = signing_notice(false, true, || false).expect("a policy wants signing");
+        assert!(policy_cares.contains("[signing]"), "{policy_cares}");
+
+        // The slot is a real once-per-store claim, not a coin flip.
+        let temp = TempDir::new();
+        let store = store::Store {
+            root: temp.0.clone(),
+        };
+        assert!(first_signing_notice(&store));
+        assert!(!first_signing_notice(&store));
+    }
+
+    /// `tog sync --strict` does not refuse recorded exceptions; it fails
+    /// the sync that recorded them. The summary must not advise it.
+    #[test]
+    fn the_exception_summary_counts_and_points_at_a_read_command() {
+        assert_eq!(exception_summary(0), None);
+        let line = exception_summary(3).unwrap();
+        assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
+        assert!(line.contains(".tog/closures/*.json"), "{line}");
+        assert!(line.contains("tog audit"), "{line}");
+        assert!(!line.contains("--strict"), "{line}");
     }
 
     /// Sync ends by registering the project as a GC root, so a path no

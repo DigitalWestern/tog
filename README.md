@@ -23,12 +23,27 @@ back atomically.
 
 Tog downloads every language toolchain itself, but native builds
 compile against the host C toolchain, and the Linux build sandbox uses
-bubblewrap. On Fedora:
+bubblewrap.
 
 ```sh
+# Ubuntu / Debian
+sudo apt install bubblewrap build-essential pkg-config patch \
+  zlib1g-dev libxcrypt-dev
+
+# Fedora
 sudo dnf install bubblewrap gcc gcc-c++ make binutils glibc-devel \
   pkgconf-pkg-config patch zlib-ng-compat-devel libxcrypt-devel
+
+# Arch
+sudo pacman -S bubblewrap base-devel pkgconf patch zlib libxcrypt
+
+# macOS: the command-line tools; the sandbox is the system's own
+xcode-select --install
 ```
+
+`tog doctor` prints the command for the host it runs on. Ubuntu 22.04's
+bubblewrap cannot run tog's sandbox (issue #87); Ubuntu 24.04 and
+Debian 13 work.
 
 ## Install
 
