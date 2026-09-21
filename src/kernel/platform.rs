@@ -120,9 +120,119 @@ pub fn require_host(platform: Platform, what: &str) -> io::Result<()> {
     ))
 }
 
+/// A set of host packages tog's native paths need but does not provide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPackages {
+    /// The compiler, linker, and helpers native builds link against.
+    CToolchain,
+    /// The Linux build sandbox.
+    Bubblewrap,
+}
+
+/// Per-distro install commands, as `(manager binary, distro label, command)`.
+/// The binary is what decides which one this host gets; the label is what a
+/// host with none of them is shown instead.
+const C_TOOLCHAIN_COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "apt",
+        "Ubuntu/Debian",
+        "sudo apt install build-essential pkg-config patch zlib1g-dev libxcrypt-dev",
+    ),
+    (
+        "dnf",
+        "Fedora",
+        "sudo dnf install gcc gcc-c++ make binutils glibc-devel pkgconf-pkg-config patch \
+         zlib-ng-compat-devel libxcrypt-devel",
+    ),
+    (
+        "pacman",
+        "Arch",
+        "sudo pacman -S base-devel pkgconf patch zlib libxcrypt",
+    ),
+];
+
+const BUBBLEWRAP_COMMANDS: &[(&str, &str, &str)] = &[
+    ("apt", "Ubuntu/Debian", "sudo apt install bubblewrap"),
+    ("dnf", "Fedora", "sudo dnf install bubblewrap"),
+    ("pacman", "Arch", "sudo pacman -S bubblewrap"),
+];
+
+/// The command for the manager `present` names, or every distro's command
+/// when this host has none of them (a container image, NixOS, a stripped
+/// base): a wrong guess is worse than a short list.
+fn install_command(present: Option<&str>, table: &[(&str, &str, &str)]) -> String {
+    match present.and_then(|binary| table.iter().find(|(name, _, _)| *name == binary)) {
+        Some((_, _, command)) => (*command).to_string(),
+        None => table
+            .iter()
+            .map(|(_, label, command)| format!("{label}: {command}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
+}
+
+fn manager_on_path(table: &[(&'static str, &str, &str)]) -> Option<&'static str> {
+    let path = std::env::var_os("PATH")?;
+    for (binary, _, _) in table {
+        for directory in std::env::split_paths(&path) {
+            if directory.join(binary).is_file() {
+                return Some(binary);
+            }
+        }
+    }
+    None
+}
+
+/// How to install `packages` on this host, in one line, ready to paste.
+pub fn install_hint(platform: Platform, packages: HostPackages) -> String {
+    match (platform, packages) {
+        (Platform::Aarch64AppleDarwin, HostPackages::CToolchain) => {
+            "xcode-select --install".to_string()
+        }
+        // macOS sandboxes with /usr/bin/sandbox-exec, which ships with the
+        // system: nothing to install.
+        (Platform::Aarch64AppleDarwin, HostPackages::Bubblewrap) => String::new(),
+        (Platform::X86_64UnknownLinuxGnu, HostPackages::CToolchain) => {
+            install_command(manager_on_path(C_TOOLCHAIN_COMMANDS), C_TOOLCHAIN_COMMANDS)
+        }
+        (Platform::X86_64UnknownLinuxGnu, HostPackages::Bubblewrap) => {
+            install_command(manager_on_path(BUBBLEWRAP_COMMANDS), BUBBLEWRAP_COMMANDS)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every distro tog claims to run on gets its own command, and a host
+    /// whose package manager tog does not recognize gets all of them rather
+    /// than Fedora's.
+    #[test]
+    fn install_hints_are_per_distro_and_fall_back_to_every_distro() {
+        assert_eq!(
+            install_command(Some("apt"), BUBBLEWRAP_COMMANDS),
+            "sudo apt install bubblewrap"
+        );
+        assert_eq!(
+            install_command(Some("pacman"), BUBBLEWRAP_COMMANDS),
+            "sudo pacman -S bubblewrap"
+        );
+        let unknown = install_command(None, BUBBLEWRAP_COMMANDS);
+        for label in ["Ubuntu/Debian", "Fedora", "Arch"] {
+            assert!(unknown.contains(label), "{unknown}");
+        }
+        // An unrecognized manager is the same as none: never guess dnf.
+        assert_eq!(install_command(Some("apk"), BUBBLEWRAP_COMMANDS), unknown);
+
+        let c = install_command(Some("apt"), C_TOOLCHAIN_COMMANDS);
+        assert!(c.contains("build-essential"), "{c}");
+        assert_eq!(
+            install_hint(Platform::Aarch64AppleDarwin, HostPackages::CToolchain),
+            "xcode-select --install"
+        );
+        assert!(install_hint(Platform::Aarch64AppleDarwin, HostPackages::Bubblewrap).is_empty());
+    }
 
     #[test]
     fn host_matches_test_machine() {

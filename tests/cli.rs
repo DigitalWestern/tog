@@ -134,7 +134,7 @@ fn usage_errors_exit_2_with_a_next_step() {
     let cases: &[(&[&str], &str, &str)] = &[
         (&["snyc"], "unknown command 'snyc'; did you mean 'sync'?", "tog --help"),
         (&["sync", "--fersh"], "sync: unknown option '--fersh'; did you mean '--fresh'?", "tog help sync"),
-        (&["sync", "now"], "sync: unexpected argument 'now'", "tog help sync"),
+        (&["sync", "now"], "sync: unexpected argument 'now'; sync realizes what the project already declares — to add a dependency run 'tog add now'", "tog help sync"),
         (&["plan", "--jsno"], "plan: unknown option '--jsno'; did you mean '--json'?", "tog help plan"),
         (&["gc", "--keep-days", "soon"], "--keep-days expects a whole number of days, got 'soon'", "tog help gc"),
         (&["gc", "--dryrun"], "gc: unknown option '--dryrun'; did you mean '--dry-run'?", "tog help gc"),
@@ -662,6 +662,130 @@ fn install_alias_reaches_sync() {
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         assert!(text(&out.stderr).contains("no_manifest"), "{args:?}");
     }
+}
+
+/// `tog install <pkg>` is what a pip or npm user types first, and
+/// `install` is an alias for `sync`, which takes no package. Every
+/// spelling must name `tog add` rather than reject the word.
+#[test]
+fn installing_a_package_by_name_points_at_add() {
+    let home = TempDir::new("install-pkg");
+    let project = TempDir::new("install-pkg-project");
+    for verb in ["install", "i", "sync"] {
+        let out = tog(&project.0, &home.0, &[verb, "requests"]);
+        assert_eq!(out.status.code(), Some(2), "{verb}");
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("tog add requests"), "{verb}: {stderr}");
+        assert!(
+            stderr.contains("Run 'tog help sync' for usage."),
+            "{stderr}"
+        );
+    }
+    // The help the error sends them to names the verb too.
+    let help = text(&tog(&project.0, &home.0, &["help", "sync"]).stdout);
+    assert!(help.contains("tog add <package>"), "{help}");
+}
+
+/// A projected environment is immutable, so the habits that mutate one are
+/// refused with the tog verb that replaces them — before the projection is
+/// even looked for, because the explanation is the same everywhere.
+#[test]
+fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
+    let home = TempDir::new("immutable");
+    let project = TempDir::new("immutable-project");
+    let cases: &[(&[&str], &str)] = &[
+        (&["run", "pip", "install", "flask"], "tog add <package>"),
+        (
+            &["run", "pip", "uninstall", "flask"],
+            "tog remove <package>",
+        ),
+        // The same pip by another road.
+        (
+            &["run", "python", "-m", "pip", "install", "flask"],
+            "tog add <package>",
+        ),
+        // A value-taking option puts a bare word before the subcommand.
+        (
+            &[
+                "run",
+                "pip",
+                "--index-url",
+                "https://m/simple",
+                "install",
+                "flask",
+            ],
+            "tog add <package>",
+        ),
+        (&["run", "activate"], "no activate script"),
+        (
+            &["run", "source", ".venv/bin/activate"],
+            "no activate script",
+        ),
+        // install/ci install the lockfile, so `tog sync` replaces them.
+        (
+            &["run", "npm", "install", "is-odd"],
+            "'tog sync' rebuilds node_modules",
+        ),
+        (&["run", "npm", "ci"], "'tog sync' rebuilds node_modules"),
+        (&["run", "yarn", "add", "is-odd"], "node_modules"),
+        // Bare yarn and bare bun install.
+        (&["run", "yarn"], "node_modules"),
+        (&["run", "bun"], "node_modules"),
+    ];
+    for (args, expected) in cases {
+        let out = tog(&project.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("No such file or directory"),
+            "{args:?} leaked a raw os error: {stderr}"
+        );
+    }
+    // Running or reading the environment is untouched; only the verbs that
+    // would change it are refused.
+    for args in [
+        &["run", "npm", "run", "build"][..],
+        &["run", "npm", "ls"],
+        &["run", "pip", "list"],
+        &["run", "pip", "--version"],
+        &["run", "python", "-m", "pip", "list"],
+        // `-m` after the script belongs to the script, not to python.
+        &["run", "python", "script.py", "-m", "pip", "install", "x"],
+    ] {
+        let stderr = text(&tog(&project.0, &home.0, args).stderr);
+        assert!(
+            stderr.contains("no environment projected here"),
+            "{args:?} was refused instead of run: {stderr}"
+        );
+    }
+}
+
+/// `--quiet` points fd 2 at /dev/null. A panic must still reach the user,
+/// or the process exits 101 having printed nothing at all.
+#[test]
+fn a_panic_is_printed_even_under_quiet() {
+    let home = TempDir::new("panic-quiet");
+    // No HOME and no TOG_STORE: the store's home lookup panics. The only
+    // deterministic panic the CLI can be driven into from outside.
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tog"));
+    let out = command
+        .args(["--quiet", "store", "path"])
+        .current_dir(&home.0)
+        .env_remove("HOME")
+        .env_remove("TOG_STORE")
+        .env_remove("TOG_POLICY")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn tog");
+    assert_eq!(out.status.code(), Some(101));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("internal error"),
+        "quiet swallowed: {stderr:?}"
+    );
+    assert!(stderr.contains("HOME"), "{stderr}");
+    assert!(stderr.contains("bug in tog"), "{stderr}");
 }
 
 #[test]

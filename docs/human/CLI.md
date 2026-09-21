@@ -88,7 +88,15 @@ with what each one locks, is in 'tog help sync'.
   options get an edit-distance or prefix suggestion
   (`sync: unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
-  and every subprocess command line — the bug-report mode.
+  and every subprocess command line — the bug-report mode. An error is never
+  narration: `--quiet` redirects stderr but keeps a private copy of it, and
+  errors *and panics* go there, so a crash is never silent.
+- **Downloads report progress** on a tty stderr — the artifact's name, the
+  bytes so far, and the total when the server declares a `Content-Length` —
+  redrawn in place about ten times a second and erased when the download
+  ends. A redirected stderr (a pipe, a log, CI) and `--quiet` get nothing.
+- **Network failures say what happened**: offline, DNS, proxy, https-only,
+  or the server's status, with the URL named once. Not ureq's words.
 - **Color** only on a tty stderr, only for `error:`/`warning:` and `synced:`
   words; `--no-color` or `NO_COLOR` turns it off, and stdout never gets it.
 - **Global options work before or after the command.** `-C <dir>`, `-q`,
@@ -142,10 +150,15 @@ the first word when a package.json is present.
 `sync`) discovers every ecosystem present in the current directory, realizes
 each locked plan into the store, and projects it (`.venv`, `node_modules`,
 `.tog/...`); a manifest with no dependencies syncs an interpreter-only
-environment, and `--fresh` drops project-local caches and rebuilds. Policy
-exceptions are recorded in `.tog/closures/*.json` and summarized;
-`--strict`, `TOG_STRICT=1`, or a `.tog/policy.toml` deny list
-refuses them instead.
+environment, and `--fresh` drops project-local caches and rebuilds. It takes
+no package name: `tog install requests` is a usage error that names
+`tog add requests`. Policy exceptions are recorded in `.tog/closures/*.json`
+and summarized as a count with where to read them; `--strict`,
+`TOG_STRICT=1`, or a `.tog/policy.toml` deny list refuses them instead —
+note that `--strict` fails the sync, so it is a setting to sync *under*, not
+a way to clear exceptions already recorded. Closures are written unsigned
+unless `TOG_SIGNING_KEY` is set; sync says so once per store, and on every
+sync only where the policy chain declares a `[signing]` table.
 
 **add / remove / update** edit the manifest and lock with the ecosystem's own
 pinned tool (uv, npm, pnpm, cargo, go, bundler, mix), then sync. `--no-sync`
@@ -183,6 +196,28 @@ runs with the npm lifecycle environment; the exit code passes through.
 `tog <script>` is the short form for any first word that is not a
 built-in command, and a built-in always wins (`tog build` is the
 sandboxed build, never a script named build).
+
+A projection is a symlink into an immutable store object, so the commands
+that would *mutate* one are refused with the verb that replaces them, before
+the projection is even looked up:
+
+- `pip install|uninstall|wheel` and `easy_install` — and the same through
+  `python -m pip` — name `tog add` / `tog remove`.
+- `activate`, and `source .../activate`: there is no activate script.
+  `tog run <command>` *is* the activation, per command rather than per
+  shell.
+- `npm`/`pnpm`/`yarn`/`bun` with an installing subcommand (`install`, `ci`,
+  `add`, `remove`, `update`, `link`, `dedupe`, …), plus bare `yarn` and bare
+  `bun`, which install. `install` and `ci` are answered with `tog sync`,
+  which rebuilds `node_modules` from the lockfile; the verbs that change the
+  lockfile are answered with `tog add` / `tog remove` / `tog update`.
+
+Reading an environment is not changing it, so `pip list`, `pip freeze`,
+`pip show`, `pip check`, `pip download` and `npm ls` run normally, as does
+everything else: `npm run build`, `npm test`, `python -m pytest`. A
+`node_modules` that a tool already replaced is reported by `tog status` as a
+real directory written over the projection, and the next `tog sync` moves it
+aside — saying where it went — and re-projects.
 
 **x** resolves a tool from PyPI or npm, realizes it as an ordinary store
 environment (a store hit from the second run on), and executes it. Registry:

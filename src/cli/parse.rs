@@ -251,10 +251,23 @@ fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
             "--fresh" => fresh = true,
             "--strict" => strict = true,
             "-h" | "--help" => return Ok(None),
+            other if !other.starts_with('-') => {
+                return Err(UsageError::new(sync_takes_no_package(other), Some("sync")))
+            }
             other => return Err(reject("sync", other)),
         }
     }
     Ok(Some(Command::Sync { fresh, strict }))
+}
+
+/// `tog install requests` is the first thing a pip or npm user types, and
+/// `install` is an alias for `sync`, which takes no package. Name the verb
+/// that does instead of rejecting the word.
+fn sync_takes_no_package(package: &str) -> String {
+    format!(
+        "sync: unexpected argument '{package}'; sync realizes what the project already declares \
+         — to add a dependency run 'tog add {package}'"
+    )
 }
 
 fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1234,10 +1247,25 @@ mod tests {
             message(&["i", "--strict=1"]),
             "sync: unknown option '--strict=1'; did you mean '--strict'?"
         );
-        assert_eq!(message(&["sync", "now"]), "sync: unexpected argument 'now'");
+        // A positional is almost always a package name: `tog install
+        // requests` from a pip or npm habit. Name the verb that takes one.
+        for argv_words in [
+            ["install", "requests"],
+            ["i", "requests"],
+            ["sync", "requests"],
+        ] {
+            let message = message(&argv_words);
+            assert!(
+                message.contains("tog add requests"),
+                "{argv_words:?}: {message}"
+            );
+        }
         assert_eq!(
             parse(&argv(&["sync", "now"])).unwrap_err().render(),
-            "tog: error: sync: unexpected argument 'now'\nRun 'tog help sync' for usage.\n"
+            format!(
+                "tog: error: {}\nRun 'tog help sync' for usage.\n",
+                sync_takes_no_package("now")
+            )
         );
     }
 

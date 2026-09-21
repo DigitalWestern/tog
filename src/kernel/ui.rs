@@ -7,13 +7,15 @@
 //! /dev/null after one private copy of the original stderr is kept for
 //! errors. That silences every module's `eprintln!` and every subprocess
 //! (uv, npm, cargo, ...) without threading a flag through them, and it
-//! guarantees the one thing quiet must never hide: the error.
+//! guarantees the one thing quiet must never hide: the error. A panic is
+//! an error, so the panic hook writes through that saved copy too.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Settings {
@@ -51,7 +53,38 @@ pub fn init(quiet: bool, verbose: bool, no_color: bool) -> io::Result<()> {
     if quiet {
         silence_stderr()?;
     }
+    install_panic_hook();
     Ok(())
+}
+
+/// A panic must reach the user whatever `--quiet` did to fd 2: the default
+/// hook writes to fd 2, which quiet points at /dev/null, so the process
+/// would exit 101 having printed nothing.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // A download may be holding the cursor's row. Clear it first, or
+        // the panic prints onto the tail of the progress line.
+        erase_progress_line();
+        if ERROR_FD.get().is_none() {
+            default(info);
+            return;
+        }
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panicked".to_string());
+        let where_ = match info.location() {
+            Some(location) => format!(" at {}:{}", location.file(), location.line()),
+            None => String::new(),
+        };
+        write_error_channel(&format!(
+            "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n",
+            paint("internal error", RED)
+        ));
+    }));
 }
 
 fn silence_stderr() -> io::Result<()> {
@@ -147,6 +180,135 @@ pub fn synced(what: &str, target: &std::path::Path) {
     eprintln!("{}: {what} -> {}", paint("synced", GREEN), target.display());
 }
 
+/// How often a download redraws its progress line. Slow enough that a
+/// fast local mirror cannot flood a terminal, fast enough to look live.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Bytes as a human reads them: three significant figures and a unit, so
+/// the line does not change width every redraw.
+pub(crate) fn human_bytes(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 4] = [
+        ("GiB", 1 << 30),
+        ("MiB", 1 << 20),
+        ("KiB", 1 << 10),
+        ("B", 1),
+    ];
+    for (unit, scale) in UNITS {
+        if bytes >= scale {
+            if scale == 1 {
+                return format!("{bytes} B");
+            }
+            return format!("{:.1} {unit}", bytes as f64 / scale as f64);
+        }
+    }
+    "0 B".to_string()
+}
+
+/// The one-line body of a download's progress report. Pure, so the shape
+/// is testable without a terminal.
+pub(crate) fn progress_line(what: &str, done: u64, total: Option<u64>) -> String {
+    match total {
+        Some(total) if total > 0 => {
+            let percent = (done.min(total) as f64 / total as f64 * 100.0).round() as u64;
+            format!(
+                "downloading {what}  {} / {} ({percent}%)",
+                human_bytes(done),
+                human_bytes(total)
+            )
+        }
+        _ => format!("downloading {what}  {}", human_bytes(done)),
+    }
+}
+
+/// A download's progress on stderr, redrawn in place and erased when it
+/// ends. Narration, so `--quiet` silences it; a redrawn line is noise in a
+/// log file, so a stderr that is not a terminal gets nothing either. The
+/// value is inert in both cases, so callers need no branch.
+pub struct Progress {
+    what: String,
+    total: Option<u64>,
+    done: u64,
+    drawn: bool,
+    live: bool,
+    next: Instant,
+}
+
+impl Progress {
+    /// Start reporting a download of `what` (the artifact's name), with its
+    /// total size when the server declared one.
+    pub fn start(what: &str, total: Option<u64>) -> Self {
+        Self {
+            what: what.to_string(),
+            total,
+            done: 0,
+            drawn: false,
+            live: !quiet() && io::stderr().is_terminal(),
+            next: Instant::now(),
+        }
+    }
+
+    /// Account for `bytes` more, redrawing at most once per interval.
+    ///
+    /// Every write is ignored on failure: a closed or full stderr must not
+    /// take down a download that is otherwise fine, and `eprint!` panics
+    /// where `write!` returns.
+    pub fn advance(&mut self, bytes: u64) {
+        self.done = self.done.saturating_add(bytes);
+        if !self.live {
+            return;
+        }
+        let now = Instant::now();
+        if now < self.next {
+            return;
+        }
+        self.next = now + PROGRESS_INTERVAL;
+        // \x1b[K clears the rest of the row, so a shorter line never leaves
+        // the tail of a longer one behind.
+        let mut stderr = io::stderr();
+        let _ = write!(
+            stderr,
+            "\rtog: {}\x1b[K",
+            progress_line(&self.what, self.done, self.total)
+        );
+        let _ = stderr.flush();
+        self.drawn = true;
+        LINE_HELD.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        if self.live && self.drawn {
+            erase_progress_line();
+        }
+    }
+}
+
+/// Is a progress line currently occupying the cursor's row? The panic hook
+/// reads this so a crash mid-download does not print its message onto the
+/// tail of `downloading cpython-3.12.14.tar.gz  12.0 MiB / 28.3 MiB (42%)`.
+static LINE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+use std::sync::atomic::Ordering;
+
+/// Return the cursor to a clean row if a progress line is holding it.
+/// Idempotent, and a no-op when nothing was drawn.
+fn erase_progress_line() {
+    if !LINE_HELD.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let mut stderr = io::stderr();
+    let _ = write!(stderr, "\r\x1b[K");
+    let _ = stderr.flush();
+}
+
+/// An argv rendered as a shell line the user can paste back.
+pub fn shell_line<S: AsRef<str>>(argv: &[S]) -> String {
+    argv.iter()
+        .map(|word| shell_word(word.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Decision-level detail, only under `--verbose`.
 pub fn trace(message: &str) {
     if verbose() {
@@ -195,6 +357,77 @@ mod tests {
         assert_eq!(shell_word("a b"), "'a b'");
         assert_eq!(shell_word("it's"), "'it'\\''s'");
         assert_eq!(shell_word(""), "''");
+    }
+
+    #[test]
+    fn progress_lines_name_the_artifact_and_scale_the_bytes() {
+        assert_eq!(
+            progress_line("cpython-3.12.tar.gz", 1024 * 1024, Some(4 * 1024 * 1024)),
+            "downloading cpython-3.12.tar.gz  1.0 MiB / 4.0 MiB (25%)"
+        );
+        // No Content-Length: bytes so far, no percentage to invent.
+        assert_eq!(
+            progress_line("flask-3.0.0.whl", 2048, None),
+            "downloading flask-3.0.0.whl  2.0 KiB"
+        );
+        // A declared total of zero cannot be divided by.
+        assert_eq!(
+            progress_line("empty.tar", 0, Some(0)),
+            "downloading empty.tar  0 B"
+        );
+        // Overshoot (a server that under-declares) clamps at 100%.
+        assert!(progress_line("x", 30, Some(10)).ends_with("(100%)"));
+        assert_eq!(human_bytes(1), "1 B");
+        assert_eq!(human_bytes(3 << 30), "3.0 GiB");
+    }
+
+    /// Progress is narration on a terminal. Under `cargo test` stderr is a
+    /// pipe, so `live` must be false, nothing may be drawn, and no progress
+    /// line may be left holding the cursor for the panic hook to clear.
+    /// The byte count is kept regardless, because the caller reads it.
+    #[test]
+    fn progress_is_silent_when_stderr_is_not_a_terminal() {
+        assert!(
+            !io::stderr().is_terminal(),
+            "the test harness is expected to capture stderr"
+        );
+        LINE_HELD.store(false, Ordering::Relaxed);
+        let mut progress = Progress::start("artifact.tar.gz", Some(10));
+        assert!(
+            !progress.live,
+            "a piped stderr must not get a progress line"
+        );
+        progress.advance(4);
+        progress.advance(6);
+        assert!(!progress.drawn, "a piped stderr was drawn to");
+        assert!(
+            !LINE_HELD.load(Ordering::Relaxed),
+            "nothing was drawn, so no line is held"
+        );
+        assert_eq!(progress.done, 10);
+        drop(progress);
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
+    }
+
+    /// The panic hook clears the row a live download is holding, so a crash
+    /// mid-transfer does not print onto the tail of the progress line.
+    #[test]
+    fn a_held_progress_line_is_erased_once() {
+        LINE_HELD.store(true, Ordering::Relaxed);
+        erase_progress_line();
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
+        // Idempotent: the hook and Drop can both run.
+        erase_progress_line();
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn shell_lines_quote_each_word() {
+        assert_eq!(
+            shell_line(&["uv", "pip", "install", "a b"]),
+            "uv pip install 'a b'"
+        );
+        assert_eq!(shell_line::<&str>(&[]), "");
     }
 
     #[test]
