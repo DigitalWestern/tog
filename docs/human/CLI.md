@@ -117,6 +117,10 @@ with what each one locks, is in 'tog help sync'.
       tog sbom --output=-report.json
       tog --directory=-work plan
 
+  A lone `-` is a separate word starting with `-` like any other, so it is
+  refused too; `tog sbom --output=-` names a file called `-`. Nothing needs
+  it: `sbom` already writes to stdout when `--output` is left off.
+
   The rule stops at the option's own grammar, so a value tog will not use
   as a path is refused in both forms: `--eco` and `--from` name an
   ecosystem and a package, `--forget` and `--drop-object` a key and an
