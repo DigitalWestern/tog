@@ -88,6 +88,26 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// With a setup flag the bare `tog` is a sync, so a directory with no
+/// project fails and says so, rather than printing the help (a CI job
+/// pointed at the wrong directory must go red) or naming a missing
+/// tog-toolchain.toml.
+#[test]
+fn setup_flags_outside_a_project_fail_naming_the_missing_manifest() {
+    let home = TempDir::new("flags-noproject");
+    for flag in ["--frozen", "--strict", "--fresh"] {
+        let out = tog(&home.0, &home.0, &[flag]);
+        assert_eq!(out.status.code(), Some(1), "{flag}");
+        assert!(out.stdout.is_empty(), "{flag}: {}", text(&out.stdout));
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains("nothing to sync here: no manifest found"),
+            "{flag}: {stderr}"
+        );
+        assert!(!stderr.contains("tog-toolchain.toml"), "{flag}: {stderr}");
+    }
+}
+
 /// A bare `tog` where there is nothing to sync is a request for
 /// orientation, not a mistake: the help goes to stdout, the one line that
 /// says why goes to stderr, and the status is 0.
@@ -1085,15 +1105,15 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     assert!(stderr.contains("syncing first: "), "{stderr}");
     assert!(stderr.contains("node not synced"), "{stderr}");
     assert!(stderr.contains("no pinned CPython"), "{stderr}");
-    // A built-in verb always wins over a same-named script, and `build`,
-    // like `run`, syncs a stale project before it starts: the refusal is
-    // the sync's, and the script never ran.
+    // A built-in verb always wins over a same-named script. `build` syncs
+    // only for the ecosystem it builds, so the stale node and python
+    // environments here start no sync in front of its own refusal.
     let out = tog(&project.0, &home.0, &["build"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("syncing first: "), "{stderr}");
-    assert!(stderr.contains("no pinned CPython"), "{stderr}");
-    assert!(!text(&out.stdout).contains("built"), "{stderr}");
+    assert!(stderr.contains("tog build requires"), "{stderr}");
+    assert!(!stderr.contains("syncing first"), "{stderr}");
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
     // Not a script, not a verb: usage error naming the package.json.
     let out = tog(&project.0, &home.0, &["deploy"]);
     assert_eq!(out.status.code(), Some(2));

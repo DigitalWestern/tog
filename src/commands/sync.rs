@@ -33,6 +33,12 @@ pub fn preflight_sync(
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable(dir)?;
     let present = tailors::detected(dir)?;
+    // No project is the answer before any lock is: `tog --frozen` in the
+    // wrong directory must say there is no manifest here, not that
+    // tog-toolchain.toml is missing.
+    if present.is_empty() {
+        return Err(no_inputs());
+    }
     // The declarative inputs and the lock are read through the held root
     // descriptor, so a tampered input or lock fails closed here. Only
     // detected ecosystems are consulted, so a stray symlink for an ecosystem
@@ -162,10 +168,25 @@ fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool) -> io::Result<()
 /// workspace member syncs and projects at the workspace root, so the
 /// projection to read is not always the directory that was synced.
 pub(crate) fn ensure_current(ctx: &Context, cwd: &Path) -> io::Result<PathBuf> {
+    ensure_current_for(ctx, cwd, None)
+}
+
+/// `ensure_current`, deciding on one ecosystem's row only when `only`
+/// names it. `build` uses one environment, so a stale or broken ecosystem
+/// it does not build (a Python docs tool in a Rust repo) does not start a
+/// sync in front of it. When the built ecosystem is stale the sync is the
+/// ordinary whole-project one: the toolchain lock is written for every
+/// ecosystem at once.
+pub(crate) fn ensure_current_for(
+    ctx: &Context,
+    cwd: &Path,
+    only: Option<&str>,
+) -> io::Result<PathBuf> {
     let dir = sync_root(cwd)?;
     let rows = crate::commands::inspect::status(ctx.platform, &dir)?;
     let stale: Vec<String> = rows
         .iter()
+        .filter(|row| only.is_none_or(|ecosystem| row.ecosystem == ecosystem))
         .filter(|row| !row.is_synced())
         .map(stale_reason)
         .collect();

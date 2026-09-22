@@ -177,7 +177,7 @@ directory with no project is a failure (exit 1) rather than orientation, so
 a CI job pointed at the wrong directory goes red: `tog --frozen` validates
 the locks without writing them (below), `tog --fresh` drops project-local
 caches and rebuilds, and `tog --strict` refuses every policy exception.
-`tog -q` is a sync with no narration and no help. The flags go on the bare
+Inside a project `tog -q` is a sync with no narration and no help. The flags go on the bare
 form only: `tog --frozen status` is a usage error. `tog help setup` is the
 bare form's screen and `tog help inputs` the files it reads per ecosystem.
 
@@ -392,9 +392,12 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 the pinned toolchain and realized dependency objects; the ecosystem is
 inferred only when exactly one build-capable project (Cargo.toml, go.mod,
 mix.exs, `*.csproj`) is found from here upward — name it when several are.
-Like `run`, it syncs first when the project is not synced or its inputs
-changed, so it never builds against a lock the manifest has moved past; that
-sync may write a lock, as `cargo build` updates `Cargo.lock`. The build
+Like `run`, it syncs first when the ecosystem it builds is not synced or its
+inputs changed, so it never builds against a lock the manifest has moved
+past; that sync may write a lock (and `tog-toolchain.toml`), as `cargo build`
+updates `Cargo.lock`. Only the built ecosystem decides: a stale Python or Node
+environment elsewhere in the repository does not start a sync in front of a
+Cargo build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do.
 
@@ -579,7 +582,7 @@ TOG_STRICT`), or the file that set `strict = true`.
 toolchain per package, `-v` adds artifact and store object (and works in
 either position); the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`, `rustfmt`.
-**plan** prints what `sync` would realize, one JSON document per ecosystem.
+**plan** prints what a sync would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'tog
 update --self'` when one is newer, `ok` with `not checked` when the manifest
@@ -650,7 +653,7 @@ jobs:
         with: { name: sbom, path: sbom.json }
 ```
 
-**Which jobs may hold the key.** `sync` executes project code while
+**Which jobs may hold the key.** A sync executes project code while
 planning, and mode 0600 does not stop same-user code from reading a key, so
 the job above is only safe on a ref you control — a protected branch, or a
 `pull_request_target`-style job you have deliberately reviewed. For pull

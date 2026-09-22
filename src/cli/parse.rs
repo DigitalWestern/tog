@@ -26,7 +26,10 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         if HELP_WORDS.contains(&arg) {
-            return help_topic(args.get(index + 1).map(String::as_str)).map(Parsed::Print);
+            // `tog --frozen --help` asks about the bare form's flags.
+            let topic = args.get(index + 1).map(String::as_str);
+            let topic = topic.or_else(|| (!setup.is_empty()).then_some("setup"));
+            return help_topic(topic).map(Parsed::Print);
         }
         if VERSION_WORDS.contains(&arg) {
             return Ok(Parsed::Print(version_text()));
@@ -42,15 +45,15 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         }
         if arg.starts_with('-') {
             let known = [
-                "--frozen",
-                "--fresh",
-                "--strict",
                 "--directory",
                 "--quiet",
                 "--verbose",
                 "--no-color",
                 "--help",
                 "--version",
+                "--frozen",
+                "--fresh",
+                "--strict",
             ];
             return Err(UsageError::new(
                 with_suggestion(
@@ -1482,6 +1485,10 @@ mod tests {
                 strict: true,
                 frozen: true
             }
+        );
+        assert_eq!(
+            printed(&["--frozen", "--help"]),
+            help(spec("sync").unwrap())
         );
         // Ahead of any other verb they mean nothing, so they are refused.
         let error = parse(&argv(&["--frozen", "run", "pytest"])).unwrap_err();
