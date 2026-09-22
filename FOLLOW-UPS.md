@@ -21,8 +21,23 @@ by position.
    offline replay test (`tests/toolchain_lock.rs`) proves the lock answers
    without the catalog, not that two stores realize the same objects (#136).
 
+2. **Stop advertising `sync` (#143).** The cargo model: no verb brings the
+   environment current, because every verb that needs it does that on the
+   way in. `--frozen`, `--fresh` and `--strict` move onto the bare `tog`,
+   `sync`/`install`/`i` become hidden aliases, `build` and `x` gain the
+   `ensure_current` check `run` uses, and the seventy "run 'tog sync'"
+   strings say `tog`. Decide on purpose whether `build` syncing first is
+   wanted.
+
 ## Decisions waiting on the owner
 
+- **Help after every bare `tog` (#145).** Since #142 a successful sync is
+  followed by the full help screen, which can scroll the sync result away.
+  Watch daily use; the candidates are a short footer, the full screen only
+  when nothing needed syncing, or leaving it.
+- **Fix lines that explain rather than resolve (#146).** Two of the 28
+  `fix:` lines are diagnostics (`setup.py egg_info`, `tog audit`). One
+  label and plainer wording, a second `next:` label, or notes.
 - **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
   missing-lock generation run the ecosystem's own tool unsandboxed with
   network, outside what `tog audit` can see. Options: a registry-proxy
@@ -45,6 +60,14 @@ by position.
 
 ## Open work, each its own pull request
 
+- **`tog audit` without trusted keys (#144).** It exits 2 by design, so a
+  recorded policy exception has no command that judges it in the default
+  unsigned setup. An unsigned mode of `audit`, exceptions in `tog status`,
+  or both; then the exception summary can name a real fix again.
+- **An offline fixture where a sync succeeds (#147).** Every green-sync
+  test downloads a toolchain and is ignored, so "bare `tog`, then the
+  help" and anything else that runs after a successful sync is verified by
+  hand.
 - **`tog audit` does not read the toolchain lock.** `status` reports a
   missing or stale `tog-toolchain.toml` and a closure built from another
   bundle; `audit` reuses only the per-record `closure_state`, so a gate that
