@@ -54,6 +54,13 @@ fn tog_env(cwd: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> Outp
         .env_remove("TOG_POLICY")
         .env_remove("TOG_STRICT")
         .env_remove("TOG_SIGNING_KEY")
+        // `doctor` asks GitHub for the latest release; point it at a file
+        // that does not exist so the suite stays offline and the row says
+        // "not checked".
+        .env(
+            "TOG_RELEASE_MANIFEST",
+            format!("file://{}", home.join("no-release.json").display()),
+        )
         .env("NO_COLOR", "1");
     for (name, value) in env {
         command.env(name, value);
@@ -135,13 +142,35 @@ fn help_goes_to_stdout_and_exits_0() {
 #[test]
 fn version() {
     let home = TempDir::new("version");
+    let expected = format!("{}\n", tog::cli::version_line());
+    // The crate version, then the build in parentheses: a short commit id
+    // and its date from the checkout this binary was built in, or the one
+    // word `unknown build` outside a checkout. Either way the line starts
+    // with `tog <version>`, which is what install.sh matches on.
+    assert!(
+        expected.starts_with(&format!("tog {} (", env!("CARGO_PKG_VERSION"))),
+        "{expected}"
+    );
+    let build = expected
+        .trim_end()
+        .rsplit_once('(')
+        .map(|(_, build)| build.trim_end_matches(')'))
+        .unwrap();
+    if build != "unknown build" {
+        let (commit, date) = build.split_once(' ').unwrap_or_else(|| panic!("{build}"));
+        assert!(
+            commit.len() >= 7 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{build}"
+        );
+        assert!(
+            date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-',
+            "{build}"
+        );
+    }
     for args in [&["--version"][..], &["-V"], &["version"]] {
         let out = tog(&home.0, &home.0, args);
         assert_eq!(out.status.code(), Some(0), "{args:?}");
-        assert_eq!(
-            text(&out.stdout),
-            format!("tog {}\n", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(text(&out.stdout), expected);
     }
 }
 
@@ -1050,13 +1079,31 @@ fn inspect_verbs_offline() {
 
     let out = tog(&project.0, &home.0, &["doctor"]);
     let stdout = text(&out.stdout);
-    for name in ["platform", "store", "sandbox", "c-toolchain", "project"] {
+    for name in [
+        "version",
+        "platform",
+        "store",
+        "sandbox",
+        "c-toolchain",
+        "project",
+    ] {
         assert!(stdout.contains(&format!("  {name}")), "{stdout}");
     }
+    // The build is the first row, and an unreachable release manifest is
+    // reported, not failed: offline is not unhealthy.
+    let first = stdout.lines().next().unwrap();
+    assert!(
+        first.starts_with("ok    version   ")
+            && first.contains(&tog::cli::version_line())
+            && first.contains("newer release not checked ("),
+        "{first}"
+    );
     assert!(stdout.contains("python found; not synced yet"), "{stdout}");
     let out = tog(&project.0, &home.0, &["doctor", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(value["checks"].is_array());
+    assert_eq!(value["checks"][0]["name"], "version");
+    assert_eq!(value["checks"][0]["level"], "ok");
 
     let out = tog(&project.0, &home.0, &["completions", "bash"]);
     assert_eq!(out.status.code(), Some(0));

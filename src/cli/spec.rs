@@ -148,8 +148,8 @@ choice. For a plain requirements file tog deletes the line itself.",
     Spec {
         name: "update",
         group: Group::Everyday,
-        summary: "update dependencies, or --toolchain, and sync",
-        usage: "tog update [<package>...] [--no-sync]\n  tog update --toolchain [<ecosystem>] [--no-sync]",
+        summary: "update dependencies, --toolchain, or --self (tog itself)",
+        usage: "tog update [<package>...] [--no-sync]\n  tog update --toolchain [<ecosystem>] [--no-sync]\n  tog update --self",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
@@ -165,12 +165,23 @@ tog-toolchain.toml, and syncs. It takes no package name and leaves every
 dependency lock alone. It is also how an ecosystem the project just gained
 gets its section, and the next step every stale-lock refusal names.
 --no-sync stops after the lock is written, so the diff can be reviewed
-before anything is realized.",
+before anything is realized.
+
+--self updates tog itself and touches no project: it asks GitHub for the
+newest release, stops when this build is already that version, and
+otherwise downloads the binary for this machine, checks the sha256 the
+release publishes, and renames it over the running binary. It refuses,
+naming the directory, when that directory is not writable. 'tog doctor'
+says when a newer release exists; nothing checks in the background.",
         options: &[
             ("--no-sync", "stop after the lock edit; review, then run 'tog'"),
             (
                 "--toolchain [<ecosystem>]",
                 "re-select the toolchain from the project's version files and rewrite tog-toolchain.toml, then sync",
+            ),
+            (
+                "--self",
+                "replace this tog binary with the newest GitHub release",
             ),
             HELP_OPTION,
         ],
@@ -307,11 +318,13 @@ Other ecosystems are not implemented yet.",
         summary: "check host prerequisites, the sandbox, and the store",
         usage: "tog doctor [--json]",
         description: "\
-The first-five-minutes command. Checks the platform, the store (path,
-writable, free space), the build sandbox (bubblewrap and user namespaces on
-Linux, sandbox-exec on macOS), the host C toolchain native builds need, the
-toolchains already realized, and the project in the current directory. Each
-line is ok, warn, or fail with the fix; exit status 1 on any fail.",
+The first-five-minutes command. Checks this build against the newest
+GitHub release (one request; 'not checked' when offline), the platform,
+the store (path, writable, free space), the build sandbox (bubblewrap and
+user namespaces on Linux, sandbox-exec on macOS), the host C toolchain
+native builds need, the toolchains already realized, and the project in
+the current directory. Each line is ok, warn, or fail with the fix; exit
+status 1 on any fail.",
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
     },

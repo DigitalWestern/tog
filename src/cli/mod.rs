@@ -35,6 +35,23 @@ pub use self::spec::{
 use std::path::PathBuf;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The short commit id and the commit date the binary was built from,
+/// stamped by `build.rs`; `unknown` outside a git checkout.
+pub const BUILD_COMMIT: &str = env!("TOG_BUILD_COMMIT");
+pub const BUILD_DATE: &str = env!("TOG_BUILD_DATE");
+
+/// What `tog --version` prints, without the newline: `tog 0.1.0 (7688cfd
+/// 2026-09-21)`. The crate version alone cannot say whether a binary is
+/// stale, because every local build of the same crate version prints the
+/// same number; the commit and its date can. `install.sh` and the
+/// self-update compare this whole line, so a rebuild of the same version
+/// from a newer commit counts as a different build.
+pub fn version_line() -> String {
+    match (BUILD_COMMIT, BUILD_DATE) {
+        ("unknown", "unknown") => format!("tog {VERSION} (unknown build)"),
+        (commit, date) => format!("tog {VERSION} ({commit} {date})"),
+    }
+}
 pub const EXIT_FAILURE: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 
@@ -93,6 +110,11 @@ pub enum Command {
         no_sync: bool,
         toolchain: Option<ToolchainUpdate>,
     },
+    /// `update --self`: replace this binary with the newest GitHub release.
+    /// Its own variant rather than a third mode of `Update`: it needs no
+    /// project, no store, and no signing key, and the dispatcher must be
+    /// able to tell that apart without reading three fields.
+    SelfUpdate,
     /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
     X {
         ecosystem: Option<String>,

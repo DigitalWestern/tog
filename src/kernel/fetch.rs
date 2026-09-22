@@ -315,6 +315,37 @@ fn artifact_name(url: &str) -> &str {
     }
 }
 
+/// Open `url` for reading: a `file://` path (mirrors, tests) or an https
+/// request. `https_only` holds across redirects too, so nothing ever
+/// downgrades to http. The second value is the declared Content-Length,
+/// when the server sent one, for progress narration. `timeout` bounds the
+/// whole request, for the one-shot checks that must never hang a command
+/// (the release lookup `doctor` makes); the store's downloads pass `None`.
+fn open_url(
+    url: &str,
+    verb: &str,
+    timeout: Option<std::time::Duration>,
+) -> io::Result<(Box<dyn Read>, Option<u64>)> {
+    if let Some(path) = url.strip_prefix("file://") {
+        let file = fs::File::open(path)
+            .map_err(|e| io::Error::new(e.kind(), format!("open {path}: {e}")))?;
+        return Ok((Box::new(file), None));
+    }
+    let mut builder = ureq::AgentBuilder::new().https_only(true);
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    let resp = builder
+        .build()
+        .get(url)
+        .call()
+        .map_err(|e| network_error(verb, url, e))?;
+    let declared = resp
+        .header("Content-Length")
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    Ok((Box::new(resp.into_reader()), declared))
+}
+
 /// Fetch a small text file over HTTPS (a checksum manifest, for example).
 ///
 /// There is no hash to check against — this IS the checksum source — so the
@@ -322,18 +353,76 @@ fn artifact_name(url: &str) -> &str {
 /// pinned toolchain tables do. Capped so a hostile server cannot stream
 /// forever.
 pub fn fetch_text(url: &str) -> io::Result<String> {
+    fetch_text_within(url, None)
+}
+
+/// `fetch_text` with a deadline on the whole request. A `file://` URL reads
+/// the file and ignores the deadline.
+pub fn fetch_text_within(url: &str, timeout: Option<std::time::Duration>) -> io::Result<String> {
     const MAX_TEXT: u64 = 8 << 20;
-    let agent = ureq::AgentBuilder::new().https_only(true).build();
-    let resp = agent
-        .get(url)
-        .call()
-        .map_err(|e| network_error("fetch", url, e))?;
+    let (reader, _) = open_url(url, "fetch", timeout)?;
     let mut text = String::new();
-    resp.into_reader()
+    reader
         .take(MAX_TEXT)
         .read_to_string(&mut text)
         .map_err(|e| io::Error::new(e.kind(), format!("read {url}: {e}")))?;
     Ok(text)
+}
+
+/// Download `url` to `dest`, verifying its sha256 as it streams, without
+/// the store: for the one artifact that is not a store object, tog's own
+/// release binary. `dest` is written whole or not at all (a mismatch or a
+/// short read removes it), and the stream is capped so a hostile server
+/// cannot fill the disk before the hash check fails.
+pub fn download_file(url: &str, dest: &Path, sha256: &str) -> io::Result<()> {
+    const MAX_FILE: u64 = 256 << 20;
+    let digest = Digest::sha256(sha256)?;
+    let (mut reader, declared) = open_url(url, "download", None)?;
+    let mut progress = crate::kernel::ui::Progress::start(artifact_name(url), declared);
+    let mut file = fs::File::create(dest)
+        .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", dest.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    let mut total: u64 = 0;
+    let streamed: io::Result<()> = loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => n,
+            Err(e) => break Err(io::Error::new(e.kind(), format!("read {url}: {e}"))),
+        };
+        total += n as u64;
+        progress.advance(n as u64);
+        if total > MAX_FILE {
+            break Err(io::Error::other(format!(
+                "{url}: exceeds the {} MiB cap for a tog release; refusing",
+                MAX_FILE >> 20
+            )));
+        }
+        hasher.update(&buf[..n]);
+        if let Err(e) = file.write_all(&buf[..n]) {
+            break Err(e);
+        }
+    };
+    drop(progress);
+    let outcome = streamed.and_then(|_| file.flush()).and_then(|_| {
+        let got = hex::encode(hasher.finalize());
+        if got == digest.hex() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "hash mismatch for {url}\n  expected sha256 {}\n  got      {got}",
+                    digest.hex()
+                ),
+            ))
+        }
+    });
+    drop(file);
+    if outcome.is_err() {
+        let _ = fs::remove_file(dest);
+    }
+    outcome
 }
 
 /// Sha256-hex convenience for callers outside the store. Internal extraction
@@ -452,24 +541,7 @@ pub(crate) fn download_verified_digest_held(
         digest.hex()
     ));
 
-    let mut declared: Option<u64> = None;
-    let mut reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
-        Box::new(
-            fs::File::open(path)
-                .map_err(|e| io::Error::new(e.kind(), format!("open {path}: {e}")))?,
-        )
-    } else {
-        // https_only holds across redirects too — no downgrade-to-http.
-        let agent = ureq::AgentBuilder::new().https_only(true).build();
-        let resp = agent
-            .get(url)
-            .call()
-            .map_err(|e| network_error("download", url, e))?;
-        declared = resp
-            .header("Content-Length")
-            .and_then(|value| value.trim().parse::<u64>().ok());
-        Box::new(resp.into_reader())
-    };
+    let (mut reader, declared) = open_url(url, "download", None)?;
     // A first sync moves hundreds of MB. Narrate it, so the wait has a
     // visible cause. Inert off a terminal and under --quiet, and erased
     // when the download ends.
