@@ -46,7 +46,7 @@ sandbox and native builds need them; the
 
 ```
 $ tog doctor
-ok    version      tog 0.1.0 (7688cfd 2026-09-21); the latest release is v0.1.0
+ok    version      tog 0.1.0 (7688cfd 2026-09-21); the latest release is v0.1.0 (same version; releases are compared by version, not by commit)
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
 ok    disk         12.1 GiB free under the store

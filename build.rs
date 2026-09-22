@@ -48,19 +48,23 @@ fn in_own_checkout() -> bool {
 /// points at when it is symbolic, and packed-refs, where a ref lands after
 /// `git gc`. Every path comes from `--git-path`, which is what makes a
 /// worktree right: its HEAD is private, its refs and packed-refs are the
-/// main checkout's. The ref's directory is watched as well as the ref, so
-/// a loose ref that `pack-refs` removed and a later commit recreated still
-/// restamps the build. Without these, cargo would keep an old stamp until
-/// something else forced a rebuild.
+/// main checkout's. Every ancestor of the ref up to `refs/` is watched as
+/// well as the ref, so a loose ref that `pack-refs` removed, together with
+/// the now-empty directory of a nested branch name, is still noticed when
+/// a later commit recreates it: the nearest ancestor that survived the
+/// prune sees the new entry. Without these, cargo would keep an old stamp
+/// until something else forced a rebuild.
 fn watch_git_files() {
-    let mut paths = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    let mut names = vec!["HEAD".to_string(), "packed-refs".to_string()];
     if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
-        if let Some((dir, _)) = reference.rsplit_once('/') {
-            paths.push(dir.to_string());
+        let mut ancestor = reference.as_str();
+        while let Some((dir, _)) = ancestor.rsplit_once('/') {
+            names.push(dir.to_string());
+            ancestor = dir;
         }
-        paths.push(reference);
+        names.push(reference.clone());
     }
-    for name in paths {
+    for name in names {
         let Some(path) = git(&["rev-parse", "--git-path", &name]).map(PathBuf::from) else {
             continue;
         };
