@@ -1,12 +1,13 @@
 # Hit rate
 
-How often `tog sync` works with zero configuration on popular real
+How often a bare `tog` works with zero configuration on popular real
 repositories. It is a measurement, not a gate, but run it before merging
 anything that touches npm projection or the store's real-directory checks.
 
 **Method.** `python3 tests/hitrate.py --repos tests/fixtures/hitrate-repos.lock`
 takes 30 top-starred Python and 30 top-starred npm repositories pinned to
-fixed commits, shallow-clones each, and runs `tog sync` against a
+fixed commits, shallow-clones each, and runs `tog sync` (the bare form's hidden alias,
+so no help screen lands in the log) against a
 throwaway store with a 600 s cap. Each failure is classified by the
 `RULES` regexes in `tests/hitrate.py`. Raw results are dated CSVs under
 `tests/fixtures/`; they are historical records and are never rewritten. A

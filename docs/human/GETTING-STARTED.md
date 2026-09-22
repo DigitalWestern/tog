@@ -50,11 +50,11 @@ ok    version      tog 0.1.0 (7688cfd 2026-09-21); the latest release is v0.1.0 
 ok    platform     x86_64-unknown-linux-gnu
 ok    store        /tmp/tog-demo/store (0 objects, 0 cached artifacts)
 ok    disk         12.1 GiB free under the store
-ok    toolchains   none realized yet; the first 'tog sync' downloads what the project needs
+ok    toolchains   none realized yet; the first 'tog' downloads what the project needs
 ok    sandbox      bubblewrap at /usr/bin/bwrap
 ok    c-toolchain  cc, c++, make, pkg-config, patch on PATH
 ok    policy       permissive (no policy file, TOG_STRICT unset)
-ok    project      python found; not synced yet: python (run 'tog sync')
+ok    project      python found; not synced yet: python (run 'tog')
 ```
 
 Nine rows, exit 0 when none says `fail`. The first row is the build you
@@ -71,11 +71,24 @@ Nothing to configure and nothing to initialize. A directory with a
 
 ```
 $ cd api
-$ tog sync
+$ tog
 tog: python inputs: requirements.txt
 synced: .venv -> /tmp/tog-demo/store/objects/4002574e4e21aab52a9e4abe4ff2b2c6e9158b48-env-3.12.14
 tog: warning: closures are written unsigned, which is fine until you want 'tog audit' to vouch for them; the fix sets a key for this shell, and a shell profile keeps it. Said once per store
 tog:     fix: tog keygen ~/.tog/signing.key && export TOG_SIGNING_KEY=~/.tog/signing.key
+tog 0.1.0 — one command for every package manager
+
+USAGE:
+  tog                        set up this project, then show this help
+  tog <command> [<args>...]  run a command ('tog help <command>' explains it)
+  tog <script> [<args>...]   run a package.json script (like 'npm run')
+
+START HERE:
+  tog                   set up the project from its lockfiles
+  tog run <command>     run something inside that environment
+  tog add <package>     add a dependency, re-lock, sync
+  tog doctor            check this machine when something looks wrong
+...
 ```
 
 5.1 seconds from an empty store, most of it downloading CPython. On a
@@ -88,8 +101,13 @@ until you hand tog a key, `tog audit` is the only command that minds, and
 the line is said once per store rather than on every sync — you will not see
 it again below.
 
-Inside a project, a bare `tog` syncs and then prints the help screen, so
-from here on it is one word.
+That one word is the whole setup step: it builds the environment from the
+lockfiles and then prints the help screen (cut short above) so you can see
+what else there is. There is no `install` or `sync` to remember, and you
+rarely need even `tog`: `tog run`, `tog env`, `tog build` and
+`tog <script>` set the project up first whenever it is not set up or its
+inputs changed. In CI, `tog --frozen` checks the locks are current without
+writing them, and prints no help after it.
 
 Run something in it:
 
@@ -119,13 +137,14 @@ Same command. A `package-lock.json` is enough:
 
 ```
 $ cd ../web
-$ tog sync
+$ tog
 synced: node_modules -> /tmp/tog-demo/store/objects/9d0333722d78ff1fa9a845b3693f9794be556d7c-env-24.20.0
 ```
 
 3.7 seconds, including downloading Node 24.20.0. A directory holding both a
 `requirements.txt` and a `package-lock.json` gets both ecosystems out of one
-`tog sync`, with no flags and no ordering.
+`tog`, with no flags and no ordering. (The help screen after it is left out
+of this transcript from here on.)
 
 This project's `package.json` declares one script:
 
@@ -245,7 +264,7 @@ Add a second script to `package.json` and it says so, naming the file:
 
 ```
 $ tog status
-node  changed     package.json since the last sync; run 'tog sync'
+node  changed     package.json since the last sync; run 'tog'
 
 0 of 1 synced; 1 changed.
 Exit status is 0 only when every ecosystem is synced.
@@ -276,14 +295,15 @@ Two you will hit first.
 
 ```
 $ tog
-tog: no project in /tmp/tog-demo/scratch: nothing to sync here.
+tog: no project in /tmp/tog-demo/scratch: nothing to sync, so here is the help
 ```
 
-No manifest here, so there was no command to run: that is a usage error and
-exits 2, and tog prints its usage after that line so you can see what else
-it does. The full list of files it looked for is in `tog help sync`. (Asking
-for a specific verb in the same directory — `tog plan`, say — is a command
-that failed rather than a malformed one, and exits 1.)
+No manifest here, so there was nothing to set up: tog prints the help after
+that line and exits 0, because a bare `tog` outside a project is a request
+for orientation. The files it looks for, per ecosystem, are in
+`tog help inputs`. (Asking for a specific verb in the same directory —
+`tog plan`, say — is a command that failed, and exits 1; so does
+`tog --frozen`, so CI pointed at the wrong directory fails.)
 
 ```
 $ cd ../api && tog run python --version

@@ -33,7 +33,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   file machine authority. `projected_at` is authenticated metadata, not an expiry: a genuine
   old record whose recorded inputs still match passes. Any record the gate cannot believe or
   compare (no signature, no recorded inputs, no recorded platform, no exception record)
-  fails as `outdated` rather than passing, so pre-signing projects need one `tog sync`
+  fails as `outdated` rather than passing, so pre-signing projects need one `tog`
   under a trusted key (and one `tog fmt` for a `rustfmt` record) before the gate is
   useful. An exception kind this binary does not know (a record written by a newer tog)
   fails as `unknown` rather than being permitted. Loud.
@@ -53,7 +53,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   forwarded — terminal process-group delivery (`^C`) is the supported path. A cancellation
   across the spawn boundary is never dropped. `128 + signal` is a shell-visible exit code, not
   a wait status.
-- **`tog sync` addresses the project by pathname.** It checks the project directory's
+- **A sync addresses the project by pathname.** It checks the project directory's
   identity before and after waiting for the store lease and refuses if it changed, but a
   same-user process that renames the directory and puts another project at the same path
   *during* the sync can make tog sync the replacement under the original's policy and
@@ -173,7 +173,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
 - **`npm install` is refused, not prevented.** `tog run npm install` is refused with an
   explanation, but npm run directly in the project still replaces the `node_modules` symlink
   with a real directory. Nothing enforces the projection at the filesystem level. `tog status`
-  reports it as a real directory written over the projection and the next `tog sync` moves it
+  reports it as a real directory written over the projection and the next sync moves it
   aside and re-projects, so it is recoverable, not prevented.
 - **Install scripts needing network for logic** are permissive with `install-script-failed`
   (declared-artifacts covers only matching cache locations; Electron-class needs per-version

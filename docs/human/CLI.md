@@ -9,7 +9,7 @@ file and the binary differ, fix this file.*
 tog 0.1.0 — one command for every package manager
 
 USAGE:
-  tog                        sync this project, then show this help
+  tog                        set up this project, then show this help
   tog <command> [<args>...]  run a command ('tog help <command>' explains it)
   tog <script> [<args>...]   run a package.json script (like 'npm run')
 
@@ -20,7 +20,6 @@ START HERE:
   tog doctor            check this machine when something looks wrong
 
 EVERYDAY:
-  sync         set up the environment(s) from the locks; aliases: install, i
   add          add a dependency, re-lock, sync
   remove       remove a dependency, re-lock, sync
   update       update dependencies, --toolchain, or --self (tog itself)
@@ -46,6 +45,11 @@ MAINTAIN:
   help         show help for a command
   version      print the version
 
+SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
+  --frozen    CI: check the locks are current without writing them
+  --fresh     rebuild .venv / node_modules from scratch
+  --strict    refuse every policy exception (same as TOG_STRICT=1)
+
 OPTIONS (before or after the command; after 'run' or 'build' everything
 belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
 own arguments):
@@ -58,14 +62,14 @@ own arguments):
 
 ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
-  TOG_STRICT=1        refuse every policy exception, like 'sync --strict'
+  TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
   TOG_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR            plain output, like --no-color
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
 the program's status through. Which files tog reads per ecosystem:
-'tog help sync'. Full reference: docs/human/CLI.md.
+'tog help inputs'. Full reference: docs/human/CLI.md.
 ```
 
 ## Conventions
@@ -98,7 +102,7 @@ the program's status through. Which files tog reads per ecosystem:
   `--json`; `plan` prints JSON either way.
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
-  (`sync: unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
+  (`unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never
   narration: `--quiet` redirects stderr but keeps a private copy of it, and
@@ -159,19 +163,31 @@ the first word when a package.json is present.
 
 ## Everyday verbs
 
-**sync** (aliases: `install`, `i`; a bare `tog` inside a project syncs and
-then prints what `tog help` prints, and outside a project it prints that
-help and exits 0) discovers every ecosystem present in the current
-directory, realizes each locked plan into the store, and projects it
-(`.venv`, `node_modules`, `.tog/...`); a manifest with no dependencies syncs
-an interpreter-only environment, and `--fresh` drops project-local caches
-and rebuilds. The help only follows a sync that succeeded, so a failure
-stays the last thing on screen; CI that wants a sync and nothing else types
-`tog sync` or `tog -q`. It takes no package name: `tog install requests` is
-a usage error that names `tog add requests`. `run`, `env` and `tog <script>`
-sync on their own when the project is not synced or its inputs changed (see
-**run**), so the verb is typed for a sync with options, or a sync with
-nothing to run after it.
+**The bare `tog`** is the setup step, and there is no verb for it: like
+`cargo build`, every command that needs the environment brings it current on
+the way in. Inside a project a bare `tog` discovers every ecosystem present
+in the current directory, realizes each locked plan into the store, projects
+it (`.venv`, `node_modules`, `.tog/...`), and then prints what `tog help`
+prints; outside a project it prints that help and exits 0. A manifest with
+no dependencies syncs an interpreter-only environment. The help only follows
+a sync that succeeded, so a failure stays the last thing on screen.
+
+It takes three flags, and with any of them the help is not printed and a
+directory with no project is a failure (exit 1) rather than orientation, so
+a CI job pointed at the wrong directory goes red: `tog --frozen` validates
+the locks without writing them (below), `tog --fresh` drops project-local
+caches and rebuilds, and `tog --strict` refuses every policy exception.
+`tog -q` is a sync with no narration and no help. The flags go on the bare
+form only: `tog --frozen status` is a usage error. `tog help setup` is the
+bare form's screen and `tog help inputs` the files it reads per ecosystem.
+
+`run`, `env`, `build` and `tog <script>` sync on their own when the project
+is not synced or its inputs changed (see **run**), so a bare `tog` is only
+needed for a sync with nothing to run after it. `sync`, `install` and `i`
+still work as hidden aliases of the bare form, flags included, so a pip or
+npm reflex and existing CI keep working; they are not listed, completed, or
+suggested. They take no package name: `tog install requests` is a usage
+error that names `tog add requests`.
 
 The first writable sync of a project with no toolchain lock selects a
 runtime per ecosystem, writes `tog-toolchain.toml` at the project root, and
@@ -302,15 +318,16 @@ the projection is even looked up:
   shell.
 - `npm`/`pnpm`/`yarn`/`bun` with an installing subcommand (`install`, `ci`,
   `add`, `remove`, `update`, `link`, `dedupe`, …), plus bare `yarn` and bare
-  `bun`, which install. `install` and `ci` are answered with `tog sync`,
-  which rebuilds `node_modules` from the lockfile; the verbs that change the
+  `bun`, which install. `install` and `ci` are answered with the bare `tog`,
+  which sets `node_modules` up from the lockfile (`tog --fresh` rebuilds
+  it); the verbs that change the
   lockfile are answered with `tog add` / `tog remove` / `tog update`.
 
 Reading an environment is not changing it, so `pip list`, `pip freeze`,
 `pip show`, `pip check`, `pip download` and `npm ls` run normally, as does
 everything else: `npm run build`, `npm test`, `python -m pytest`. A
 `node_modules` that a tool already replaced is reported by `tog status` as a
-real directory written over the projection, and the next `tog sync` moves it
+real directory written over the projection, and the next sync moves it
 aside — saying where it went — and re-projects.
 
 **env** prints that same environment on stdout as lines a shell can eval:
@@ -375,6 +392,11 @@ something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
 the pinned toolchain and realized dependency objects; the ecosystem is
 inferred only when exactly one build-capable project (Cargo.toml, go.mod,
 mix.exs, `*.csproj`) is found from here upward — name it when several are.
+Like `run`, it syncs first when the project is not synced or its inputs
+changed, so it never builds against a lock the manifest has moved past; that
+sync may write a lock, as `cargo build` updates `Cargo.lock`. The build
+itself never writes one. CI that must not write a lock runs `tog --frozen`
+before it, and the check then finds nothing to do.
 
 ## Inspect verbs
 
@@ -388,11 +410,11 @@ was written on another platform and says nothing about this host),
 and `unchecked` — a closure this binary could not compare, because the
 record predates the input recording the comparison needs. The toolchain lock
 is part of the comparison and reports under `changed`, naming
-`tog-toolchain.toml`: a missing lock (run `tog sync` to create it), a
+`tog-toolchain.toml`: a missing lock (run `tog` to create it), a
 source that disagrees with a recorded row or a lock with no section for
 this ecosystem (both name `tog update --toolchain <ecosystem>`), or a
-projection built from a bundle the lock no longer names (run `tog sync`).
-A verdict that `tog sync` would refuse is reported ahead of the closure's
+projection built from a bundle the lock no longer names (run `tog`).
+A verdict that a sync would refuse is reported ahead of the closure's
 own changed files, so the row names the verb that moves it; a closure that
 recorded no toolchain at all is `unchecked` until one sync records it.
 `unchecked` is not a
@@ -484,7 +506,7 @@ algorithm; find out who changed it, then regenerate under a trusted key),
 `untrusted` (verifies under a key the effective set does not contain; the
 line names the key and the scopes that exclude it), `outdated` (no
 signature, or a record from before inputs, platform, or the exception
-record were written; run `tog sync` once under a trusted key, then
+record were written; run `tog` once under a trusted key, then
 commit), `stale` (the same inputs-changed / projection-missing /
 other-platform checks `status` makes, made per closure file from that
 file's own record), `denied` (each denied exception's kind, subject, and
@@ -615,7 +637,7 @@ jobs:
           # appended to the key. umask before the write, so the file is
           # never briefly world-readable.
           (umask 077; printf '%s' '${{ secrets.TOG_SIGNING_KEY }}' > "$TOG_SIGNING_KEY")
-          tog sync
+          tog --frozen
           rm -f "$TOG_SIGNING_KEY"
 
       # Every closure signed by a trusted key, current for the inputs on
@@ -636,7 +658,7 @@ requests from forks, drop the key and the `audit` step and run the sync
 alone:
 
 ```yaml
-      - run: tog sync --strict    # or: tog sync, under ci/tog-policy.toml
+      - run: tog --frozen --strict    # or: tog --frozen, under ci/tog-policy.toml
       - run: tog sbom -o sbom.json
 ```
 
