@@ -17,8 +17,10 @@
 //!   belongs to a program (`run`, `build`) or to a tool (`fmt`, `x`, after
 //!   its own options);
 //! - a bare `tog` and an unknown first word are *not* decided here: the
-//!   dispatcher turns them into `sync` inside a project and into a
-//!   package.json script run when one matches.
+//!   dispatcher turns a bare `tog` into `sync` inside a project (and prints
+//!   `usage()` after a sync that succeeded, so the first word a newcomer
+//!   types also shows them the rest), into the help outside one, and an
+//!   unknown first word into a package.json script run when one matches.
 //!
 //! Exit status contract: 0 success, 1 the command failed, 2 usage error.
 
@@ -295,6 +297,11 @@ pub struct Spec {
     pub summary: &'static str,
     pub usage: &'static str,
     pub description: &'static str,
+    /// `(command line, one-line gloss)`, printed under EXAMPLES before the
+    /// options. Every command has at least one, and each one is a line that
+    /// works as written: the examples are the part of a help screen a
+    /// newcomer reads first.
+    pub examples: &'static [(&'static str, &'static str)],
     /// `(flag spelling, description)`; each comma-separated spelling's
     /// first token (before a space or `=`) is what suggestions match.
     pub options: &'static [(&'static str, &'static str)],
