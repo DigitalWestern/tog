@@ -120,9 +120,13 @@ pub fn read_plan(
             let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
                 return Err(error);
             };
-            ui::warning(&format!(
-                "setup.py metadata probe failed; using the requirements directory convention: {error}"
-            ));
+            ui::warning(
+                &format!(
+                    "setup.py metadata probe failed; using the requirements directory \
+                     convention: {error}"
+                ),
+                "tog run python setup.py egg_info",
+            );
             fallback.python = manifest.python.clone();
             manifest = fallback;
         }
@@ -211,10 +215,13 @@ pub fn read_plan(
             Ok(_) => source,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) => {
-                ui::warning(&format!(
-                    "requirements.txt is pinned but not directly \
-                     consumable ({e}); re-locking for this platform with uv..."
-                ));
+                ui::warning(
+                    &format!(
+                        "requirements.txt is pinned but not directly consumable ({e}); \
+                         re-locking for this platform with uv into requirements.lock.txt"
+                    ),
+                    "git add requirements.lock.txt",
+                );
                 locked_requirements(
                     platform,
                     dir,

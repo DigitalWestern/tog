@@ -559,7 +559,10 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
             ));
         }
         let kind = canonical_kind(kind);
-        ui::warning(&format!("exception {kind}: {subject}: {detail}"));
+        ui::warning(
+            &format!("exception {kind}: {subject}: {detail}"),
+            "tog audit",
+        );
         frame.exceptions.push(Exception {
             kind: kind.into(),
             subject: subject.into(),

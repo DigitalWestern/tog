@@ -524,12 +524,12 @@ fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
             .unwrap_or(false);
         if is_ours {
             let _ = fs::remove_file(&p);
-            crate::kernel::ui::warning(&format!("removed stale sync-duplicate symlink {name:?}"));
+            crate::kernel::ui::note(&format!("removed stale sync-duplicate symlink {name:?}"));
         } else {
-            crate::kernel::ui::warning(&format!(
-                "{name:?} looks like a cloud-sync duplicate of node_modules; \
-                 consider removing it"
-            ));
+            crate::kernel::ui::warning(
+                &format!("{name:?} looks like a cloud-sync duplicate of node_modules"),
+                &crate::kernel::ui::shell_line(&["rm", "-rf", &p.display().to_string()]),
+            );
         }
     }
 }
@@ -682,12 +682,16 @@ pub fn project_node_env_recorded(
         // symlink: either a project tog has never synced, or one where an
         // `npm install` overwrote the projection. Say so — the user's
         // packages are not deleted, and they should know where they went.
-        crate::kernel::ui::warning(&format!(
-            "{} was a real directory, not the tog projection (an install tool ran here); \
-             moved to {} and re-projected",
-            source.display(),
-            backup.display()
-        ));
+        crate::kernel::ui::warning(
+            &format!(
+                "{} was a real directory, not the tog projection (an install tool ran here); \
+                 moved to {} and re-projected, and 'tog gc --project' collects it once \
+                 nothing needs it",
+                source.display(),
+                backup.display()
+            ),
+            "tog gc --project",
+        );
         crate::comforter::move_reserved_backup(&source, &backup)?;
     }
     remove_stale_workspace_links(project_dir, &store, home, &previous_workspaces, &workspaces)?;

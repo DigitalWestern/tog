@@ -198,20 +198,52 @@ pub fn error_json(message: &str) {
     write_error_channel(&format!("{object}\n"));
 }
 
-/// Something the user should know but that did not stop the command.
-/// Suppressed by `--quiet` like all narration.
-pub fn warning(message: &str) {
+/// The prefix of an advisory's first line, before color is applied. Kept
+/// plain so a caller can compare, store or re-color the text.
+pub(crate) const WARNING_PREFIX: &str = "tog: warning: ";
+/// The prefix of the fix line. The same 14 columns as `WARNING_PREFIX`, so
+/// `fix:` right-aligns under `warning:`.
+pub(crate) const FIX_PREFIX: &str = "tog:     fix: ";
+
+/// Something the user should know that did not stop the command, and the
+/// one command that resolves it. Suppressed by `--quiet` like all
+/// narration.
+///
+/// `fix` is a command to paste into a shell: no leading "run", no trailing
+/// period, no explanation — the explanation is the message. An advisory
+/// with nothing for the user to do is not a warning; it is progress, so
+/// print it with `note`.
+pub fn warning(message: &str, fix: &str) {
     if quiet() {
         return;
     }
-    eprint!("{}", warning_line(message));
+    eprint!("{}", warning_lines(message, fix));
 }
 
-/// The text `warning` prints, newline included, for a caller that writes
-/// to a handle of its own (the maintenance narration holds a locked
-/// stderr) and must still look like every other advisory.
-pub fn warning_line(message: &str) -> String {
+/// Both lines as text, newlines included, for a caller that writes to a
+/// handle of its own (the maintenance narration holds a locked stderr) and
+/// must still look like every other advisory.
+pub fn warning_lines(message: &str, fix: &str) -> String {
+    debug_assert!(
+        !fix.trim().is_empty(),
+        "a warning names the command that resolves it: {message}"
+    );
+    debug_assert!(
+        !fix.starts_with("run ") && !fix.starts_with("Run "),
+        "the fix line is a command, not a sentence about one: {fix}"
+    );
+    format!("{}{}", advisory_line(message), fix_line(fix))
+}
+
+/// The first of the two lines, colored for the current terminal.
+pub(crate) fn advisory_line(message: &str) -> String {
     format!("tog: {}: {message}\n", paint("warning", YELLOW))
+}
+
+/// The second of the two lines, colored for the current terminal. Green,
+/// like `synced`: it is the way out, not the problem.
+pub(crate) fn fix_line(command: &str) -> String {
+    format!("tog:     {}: {command}\n", paint("fix", GREEN))
 }
 
 /// Progress narration.
@@ -520,6 +552,29 @@ mod tests {
             "uv pip install 'a b'"
         );
         assert_eq!(shell_line::<&str>(&[]), "");
+    }
+
+    /// Every warning is two lines: what happened, then the one command that
+    /// resolves it, with `fix:` right-aligned under `warning:`.
+    #[test]
+    fn a_warning_is_followed_by_the_command_that_resolves_it() {
+        // `init` was never called, so color is off and the text is plain.
+        assert!(!color(), "the test process has no terminal");
+        assert_eq!(
+            warning_lines(
+                "node_modules was a real directory; moved aside",
+                "tog gc --project"
+            ),
+            "tog: warning: node_modules was a real directory; moved aside\n\
+             tog:     fix: tog gc --project\n"
+        );
+        assert_eq!(
+            WARNING_PREFIX.len(),
+            FIX_PREFIX.len(),
+            "the two labels must line up"
+        );
+        assert_eq!(advisory_line("x"), format!("{WARNING_PREFIX}x\n"));
+        assert_eq!(fix_line("tog sync"), format!("{FIX_PREFIX}tog sync\n"));
     }
 
     #[test]

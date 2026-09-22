@@ -1314,9 +1314,14 @@ pub(super) fn unresolvable(result: io::Result<()>, mode: ImportMode) -> io::Resu
         Err(error) => match mode {
             ImportMode::Strict => Err(error),
             ImportMode::DropUnresolvable => {
-                ui::warning(&format!(
-                    "dropping a historical closure reference this store cannot resolve: {error}"
-                ));
+                ui::warning(
+                    &format!(
+                        "dropping a historical closure reference this store cannot resolve \
+                         ({error}); it protects nothing here, and a fresh sync re-records \
+                         the references this store does hold"
+                    ),
+                    "tog sync",
+                );
                 Ok(false)
             }
         },

@@ -30,10 +30,13 @@ pub fn ensure_npm_lock(
     }
     for other in ["bun.lock", "bun.lockb"] {
         if dir.join(other).exists() {
-            ui::warning(&format!(
-                "{other} found; generating package-lock.json via npm \
-                 (versions resolve fresh — they may differ from {other})"
-            ));
+            ui::warning(
+                &format!(
+                    "{other} found but no package-lock.json; generating one with npm \
+                     (versions resolve fresh and may differ from {other})"
+                ),
+                "git add package-lock.json",
+            );
             break;
         }
     }

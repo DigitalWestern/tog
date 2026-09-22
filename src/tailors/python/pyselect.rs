@@ -70,7 +70,9 @@ pub struct PythonSelection {
     pub pin: &'static PinnedPython,
     pub constraint: Option<String>,
     pub constraint_source: Option<String>,
-    pub warnings: Vec<String>,
+    /// Advisories this selection carries: (message, the command that
+    /// resolves it), printed as one warning and its fix line each.
+    pub warnings: Vec<(String, String)>,
     pub explicit_request: Option<String>,
 }
 
@@ -100,8 +102,8 @@ impl PythonSelection {
     }
 
     pub fn emit_warnings(&self) {
-        for warning in &self.warnings {
-            crate::kernel::ui::warning(warning);
+        for (message, fix) in &self.warnings {
+            crate::kernel::ui::warning(message, fix);
         }
         if !self.is_default() {
             crate::kernel::ui::note(&self.selection_message());
@@ -200,11 +202,14 @@ pub fn locked(
         .map(|(constraint, _)| format!("\"{}\" from {}", constraint.text, constraint.source))
         .collect();
     if !violated.is_empty() {
-        warnings.push(format!(
-            "cpython {} from tog-toolchain.toml does not satisfy {}; honoring the lock \
-             (change the declaration, then run `tog update --toolchain python`)",
-            pin.version,
-            violated.join(", ")
+        warnings.push((
+            format!(
+                "cpython {} from tog-toolchain.toml does not satisfy {}; honoring the lock \
+                 (change the declaration first)",
+                pin.version,
+                violated.join(", ")
+            ),
+            "tog update --toolchain python".to_string(),
         ));
     }
     Ok(PythonSelection {
@@ -298,9 +303,13 @@ pub fn select_python_with_inputs(
                 .map(|constraint| format!("\"{}\" from {}", constraint.text, constraint.source))
                 .collect::<Vec<_>>()
                 .join(", ");
-            warnings.push(format!(
-                ".python-version \"{}\" violates declared Python constraint {}; honoring explicit request",
-                explicit.raw, declared
+            warnings.push((
+                format!(
+                    ".python-version \"{}\" violates declared Python constraint {}; honoring \
+                     .python-version (change one of them first)",
+                    explicit.raw, declared
+                ),
+                "tog update --toolchain python".to_string(),
             ));
         }
         (pin, Some(explicit.raw.clone()))
@@ -929,11 +938,15 @@ mod tests {
         assert!(selection
             .warnings
             .iter()
-            .any(|warning| warning.contains("3.10")));
+            .any(|(message, _)| message.contains("3.10")));
         assert!(selection
             .warnings
             .iter()
-            .any(|warning| warning.contains(">=3.12")));
+            .any(|(message, _)| message.contains(">=3.12")));
+        assert!(selection
+            .warnings
+            .iter()
+            .all(|(_, fix)| fix == "tog update --toolchain python"));
     }
 
     #[test]

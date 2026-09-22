@@ -888,11 +888,10 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
             ),
         )
     })?;
-    ui::warning(&format!(
-        "moved existing {} to {} (delete it once you're happy)",
-        path.display(),
-        dest.display()
-    ));
+    ui::warning(
+        &format!("moved existing {} to {}", path.display(), dest.display()),
+        &ui::shell_line(&["rm", "-rf", &dest.display().to_string()]),
+    );
     Ok(Some(dest))
 }
 
@@ -1047,11 +1046,14 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
     })?;
     source_dir.sync_all()?;
     backups_dir.sync_all()?;
-    ui::warning(&format!(
-        "moved existing {} to {} (delete it once you're happy)",
-        path.display(),
-        destination.display()
-    ));
+    ui::warning(
+        &format!(
+            "moved existing {} to {}; 'tog gc --project' collects it once nothing needs it",
+            path.display(),
+            destination.display()
+        ),
+        "tog gc --project",
+    );
     Ok(())
 }
 

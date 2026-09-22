@@ -321,8 +321,8 @@ fn print_signing_notice(store: &store::Store) {
     // Claim the once-per-store slot only when the answer could depend on
     // it, so a signed sync does not burn it.
     let first = || !signed && !matters && first_signing_notice(store);
-    if let Some(message) = signing_notice(signed, matters, first) {
-        crate::kernel::ui::warning(message);
+    if let Some((message, fix)) = signing_notice(signed, matters, first) {
+        crate::kernel::ui::warning(message, fix);
     }
 }
 
@@ -336,22 +336,28 @@ fn signing_notice(
     signed: bool,
     signing_in_policy: bool,
     first_for_this_store: impl FnOnce() -> bool,
-) -> Option<&'static str> {
+) -> Option<(&'static str, &'static str)> {
     if signed {
         return None;
     }
     if signing_in_policy {
-        return Some(
+        return Some((
             "closures written unsigned while this policy declares [signing] trusted keys: \
-             'tog audit' will report them outdated (set TOG_SIGNING_KEY=<key file>; \
-             'tog keygen' makes one)",
-        );
+             'tog audit' will report them outdated; make a key, then export \
+             TOG_SIGNING_KEY=<key file>",
+            KEYGEN_FIX,
+        ));
     }
-    first_for_this_store().then_some(
+    first_for_this_store().then_some((
         "closures are written unsigned, which is fine until you want 'tog audit' to vouch \
-         for them (set TOG_SIGNING_KEY=<key file>; 'tog keygen' makes one). Said once per store",
-    )
+         for them; make a key, then export TOG_SIGNING_KEY=<key file>. Said once per store",
+        KEYGEN_FIX,
+    ))
 }
+
+/// The first half of the signing fix: a key has to exist before
+/// `TOG_SIGNING_KEY` can name one.
+const KEYGEN_FIX: &str = "tog keygen ~/.tog/signing.key";
 
 /// Claim the once-per-store signing notice. The marker's creation is the
 /// claim (`create_new`), so two concurrent syncs print it once between
@@ -390,8 +396,8 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
             total += value["body"]["exceptions"].as_array().map_or(0, Vec::len);
         }
     }
-    if let Some(line) = exception_summary(total) {
-        crate::kernel::ui::warning(&line);
+    if let Some((message, fix)) = exception_summary(total) {
+        crate::kernel::ui::warning(&message, fix);
     }
     Ok(())
 }
@@ -399,11 +405,11 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
 /// A count and where to read it. The line this replaces advised `tog sync
 /// --strict`, which does not refuse the recorded exceptions: it fails the
 /// sync that recorded them, undoing the work that just finished.
-fn exception_summary(total: usize) -> Option<String> {
+fn exception_summary(total: usize) -> Option<(String, &'static str)> {
     (total > 0).then(|| {
-        format!(
-            "{total} policy exception(s) recorded; read them in .tog/closures/*.json, or judge \
-             them against a policy with 'tog audit'"
+        (
+            format!("{total} policy exception(s) recorded in .tog/closures/*.json"),
+            "tog audit",
         )
     })
 }
@@ -490,15 +496,19 @@ mod tests {
         assert!(signing_notice(true, false, || panic!("slot claimed")).is_none());
         assert!(signing_notice(true, true, || panic!("slot claimed")).is_none());
 
-        let unsigned = signing_notice(false, false, || true).expect("the first sync says it");
+        let (unsigned, fix) =
+            signing_notice(false, false, || true).expect("the first sync says it");
         assert!(unsigned.contains("once per store"), "{unsigned}");
         assert!(unsigned.contains("TOG_SIGNING_KEY"), "{unsigned}");
+        assert_eq!(fix, "tog keygen ~/.tog/signing.key");
         assert!(signing_notice(false, false, || false).is_none());
 
         // A [signing] table means someone reads signatures: say it every
         // time, whatever the once-per-store slot holds.
-        let policy_cares = signing_notice(false, true, || false).expect("a policy wants signing");
+        let (policy_cares, policy_fix) =
+            signing_notice(false, true, || false).expect("a policy wants signing");
         assert!(policy_cares.contains("[signing]"), "{policy_cares}");
+        assert_eq!(policy_fix, "tog keygen ~/.tog/signing.key");
 
         // The slot is a real once-per-store claim, not a coin flip.
         let temp = TempDir::new();
@@ -553,10 +563,10 @@ mod tests {
     #[test]
     fn the_exception_summary_counts_and_points_at_a_read_command() {
         assert_eq!(exception_summary(0), None);
-        let line = exception_summary(3).unwrap();
+        let (line, fix) = exception_summary(3).unwrap();
         assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
         assert!(line.contains(".tog/closures/*.json"), "{line}");
-        assert!(line.contains("tog audit"), "{line}");
+        assert_eq!(fix, "tog audit");
         assert!(!line.contains("--strict"), "{line}");
     }
 
