@@ -7,6 +7,7 @@ pub(crate) mod build;
 pub(crate) mod completions;
 pub(crate) mod deps;
 pub(crate) mod doctor;
+pub(crate) mod env;
 pub(crate) mod fmt;
 pub(crate) mod gc;
 /// `pub` on purpose: the read-only closure/status views were public before
@@ -175,6 +176,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         Plan { .. }
             | Build { .. }
             | Run { .. }
+            | Env { .. }
             | Add { .. }
             | Remove { .. }
             | Update { .. }
@@ -198,6 +200,10 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         Plan { .. } => plan::run(&ctx).map(|_| 0),
         Build { args } => build::run(&ctx, &args).map(|_| 0),
         Run { command } => run::run(&ctx, &command),
+        // Like `run`, `env` needs the store open: a closure's recorded
+        // runtime is a store object, and its bin directory is part of the
+        // PATH `env` prints.
+        Env { shell } => env::run(&ctx, shell),
         Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),
         Add {
             specs,

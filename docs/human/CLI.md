@@ -14,22 +14,23 @@ USAGE:
   tog <script> [<args>...] run a package.json script (like 'npm run')
 
 EVERYDAY:
-  sync         realize and project the environment(s); aliases: install, i
+  sync         set up the environment(s) from the locks; aliases: install, i
   add          add a dependency, re-lock, sync
   remove       remove a dependency, re-lock, sync
   update       update dependencies, or --toolchain, and sync
-  run          run a command or package.json script inside the projected env(s)
-  x            run a tool without adding it to the project (like npx / uvx)
+  run          run a command or package.json script in the environment(s)
+  env          print the environment as shell exports (for eval or direnv)
+  x            run a tool without adding it as a dependency (like npx / uvx)
   build        sandboxed, network-denied build (cargo | go | elixir | dotnet)
-  fmt          format the Rust project with the pinned rustfmt
+  fmt          format the Rust workspace with the pinned rustfmt
 
 INSPECT:
   doctor       check host prerequisites, the sandbox, and the store
-  status       is the projection current with the manifest and the lock?
+  status       is the environment current with the manifest and the lock?
   ls           list what is installed, per ecosystem
-  audit        would the synced closures pass a policy? (CI admission gate)
+  audit        would the synced environments pass a policy? (CI gate)
   plan         print the locked plan(s) as JSON
-  sbom         CycloneDX 1.5 SBOM of the synced closures
+  sbom         CycloneDX 1.5 SBOM of the synced environments
 
 MAINTAIN:
   gc           collect unreferenced store objects and cached artifacts
@@ -68,14 +69,16 @@ with what each one locks, is in 'tog help sync'.
 
 ## Conventions
 
-- **stdout is results, stderr is narration.** `plan`, `sbom`, `store path`,
-  and the `--json` forms write parseable output to stdout and nothing else;
-  narration stays on stderr with a `tog:` prefix, and the prefix says which
-  kind it is: progress is `tog: <what is happening>`, an advisory you may
-  want to act on — a fallback, a lock disagreement, a recorded policy
-  exception — is `tog: warning: <what happened>`, and a failure is
-  `tog: error: <what failed>`. `--quiet` silences the first two and never
-  the third. `gc` narrates, so every line
+- **stdout is results, stderr is narration.** `plan`, `sbom`, `env`,
+  `store path`, and the `--json` forms write parseable output to stdout and
+  nothing else (`env` is evaled by a shell, so a stray word there is a
+  syntax error in someone's session). Narration stays on stderr with a
+  `tog:` prefix, and the prefix says which kind it is: progress is
+  `tog: <what is happening>`, an advisory you may want to act on (a
+  fallback, a lock disagreement, a recorded policy exception) is
+  `tog: warning: <what happened>`, and a failure is `tog: error: <what
+  failed>`. `--quiet` silences the first two and never the third. `gc`
+  narrates, so every line
   it prints — registered, forgot, would free, freed, cleanup skipped — is
   stderr and `--quiet` silences all of it.
 - **`--json` is a promise about both streams.** With `--json`, stdout
@@ -245,9 +248,7 @@ script). Arguments after the script name go to the script unchanged, so
 there is no npm-style `--` separator: `tog test --watch` passes `--watch`,
 and `tog test -- --watch` passes a literal `--` as well. Completion offers
 the package.json script names as first words whenever a package.json is
-present, which is where most people find the shorthand. There is no
-`tog env` and no direnv integration: everything still runs through a tog
-process (issue #108).
+present, which is where most people find the shorthand.
 
 A projection is a symlink into an immutable store object, so the commands
 that would *mutate* one are refused with the verb that replaces them, before
@@ -270,6 +271,41 @@ everything else: `npm run build`, `npm test`, `python -m pytest`. A
 `node_modules` that a tool already replaced is reported by `tog status` as a
 real directory written over the projection, and the next `tog sync` moves it
 aside — saying where it went — and re-projects.
+
+**env** prints that same environment on stdout as lines a shell can eval:
+one `export PATH=...` with the projected prefixes ahead of `"$PATH"`, then
+one line per ecosystem variable (`VIRTUAL_ENV`, `PYTHONDONTWRITEBYTECODE`,
+`CARGO_HOME`, the Go and Ruby variables, …). A variable the projection
+*removes* — `RUSTUP_TOOLCHAIN`, for one — is printed as `unset NAME`. Every
+value is single-quoted whether it needs it or not, so a path with a space
+or a quote in it survives; the inherited PATH is referenced rather than
+expanded, so the output never freezes one shell's PATH into another's.
+Nothing else reaches stdout.
+
+`--shell bash|zsh|fish` picks the syntax. bash and zsh are identical POSIX
+sh; fish gets `set -gx PATH <dir>... $PATH` and `set -e NAME`. The default
+is the basename of `$SHELL` when that is one of the three and bash
+otherwise, so a shell tog does not speak gets the form most likely to work
+rather than a refusal; an unrecognized `--shell` value is a usage error with
+a suggestion, exactly like `completions`. Outside a projection nothing is
+printed and it exits 1 naming `tog sync`.
+
+```sh
+eval "$(tog env)"        # this shell, until it exits
+echo 'eval "$(tog env)"' > .envrc && direnv allow   # this directory
+```
+
+The trade-off is worth stating, because it is the one tog otherwise avoids:
+`tog run <command>` scopes the environment to one child process, while an
+evaled `tog env` is *ambient* — every later command in that shell sees it,
+including ones tog knows nothing about, and it outlives a `cd` out of the
+project. direnv is what puts the scope back, loading the environment on
+entering the directory and unloading it on leaving. That is also why this is
+a verb you type rather than an `activate` script tog writes into the
+projection ([LIMITATIONS.md](LIMITATIONS.md)). A package.json script named
+`env` is reached with `tog run env`; a built-in always wins. Editors see a
+projection through this verb and through the `.venv` interpreter path:
+[EDITORS.md](EDITORS.md).
 
 **x** resolves a tool from PyPI or npm, realizes it as an ordinary store
 environment (a store hit from the second run on), and executes it. Registry:

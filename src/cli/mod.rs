@@ -65,6 +65,12 @@ pub enum Command {
     Run {
         command: Vec<String>,
     },
+    /// `env [--shell <shell>]`: the environment `run` would give a child,
+    /// printed as shell assignments. `None` leaves the choice to the
+    /// command, which reads `$SHELL`: the grammar stays pure.
+    Env {
+        shell: Option<Shell>,
+    },
     Sbom {
         output: Option<PathBuf>,
     },

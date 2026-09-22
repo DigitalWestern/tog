@@ -46,7 +46,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec {
         name: "sync",
         group: Group::Everyday,
-        summary: "realize and project the environment(s); aliases: install, i",
+        summary: "set up the environment(s) from the locks; aliases: install, i",
         usage: "tog sync [--fresh] [--strict] [--frozen]   (aliases: install, i)",
         description: "\
 Discovers every ecosystem present in the current directory, realizes each
@@ -176,7 +176,7 @@ before anything is realized.",
     Spec {
         name: "run",
         group: Group::Everyday,
-        summary: "run a command or package.json script inside the projected env(s)",
+        summary: "run a command or package.json script in the environment(s)",
         usage: "tog run [--] <command> [<args>...]",
         description: "\
 Executes <command> with PATH and the ecosystem variables of the nearest
@@ -190,9 +190,47 @@ form when the script name is not a tog command. Everything after
         words: &[],
     },
     Spec {
+        name: "env",
+        group: Group::Everyday,
+        summary: "print the environment as shell exports (for eval or direnv)",
+        usage: "tog env [--shell <bash|zsh|fish>]",
+        description: "\
+Prints, on stdout, the same PATH and ecosystem variables 'tog run' would
+give a child: one line per variable, in the syntax --shell names. Nothing
+but those lines goes to stdout, so the output is safe to eval.
+
+'tog run <command>' scopes that environment to one command. 'env' makes it
+ambient instead: every later command in the shell that evals it sees the
+environment, including commands tog knows nothing about. direnv is what
+scopes an ambient environment back to a directory, loading it on entry and
+unloading it on exit.
+
+  eval \"$(tog env)\"        # this shell, until it exits
+  echo 'eval \"$(tog env)\"' > .envrc && direnv allow
+                           # direnv: scoped to this directory
+
+--shell defaults to the basename of $SHELL when that is bash, zsh, or fish,
+and to bash otherwise; bash and zsh get identical POSIX sh syntax. A
+variable the environment removes is printed as 'unset NAME' ('set -e NAME'
+for fish), and $PATH is kept at the end of the new PATH rather than
+expanded, so the same line can be evaled twice.
+
+It needs a synced environment in this directory or an ancestor: without one
+nothing is printed and it exits 1, naming 'tog sync'. A package.json script
+named 'env' is reached with 'tog run env': a built-in always wins.",
+        options: &[
+            (
+                "--shell <bash|zsh|fish>",
+                "which syntax to print; default: the basename of $SHELL when it is one of these, else bash",
+            ),
+            HELP_OPTION,
+        ],
+        words: &[],
+    },
+    Spec {
         name: "x",
         group: Group::Everyday,
-        summary: "run a tool without adding it to the project (like npx / uvx)",
+        summary: "run a tool without adding it as a dependency (like npx / uvx)",
         usage: "tog x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]\n  tog x --clean [--py | --npm] [--from <package>] [<tool>[@<version>]]",
         description: "\
 Resolves the package with the store uv or npm, realizes it as an ordinary
@@ -234,7 +272,7 @@ Every argument after the ecosystem is handed to the tool unchanged, so
     Spec {
         name: "fmt",
         group: Group::Everyday,
-        summary: "format the Rust project with the pinned rustfmt",
+        summary: "format the Rust workspace with the pinned rustfmt",
         usage: "tog fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
         description: "\
 Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
@@ -269,7 +307,7 @@ line is ok, warn, or fail with the fix; exit status 1 on any fail.",
     Spec {
         name: "status",
         group: Group::Inspect,
-        summary: "is the projection current with the manifest and the lock?",
+        summary: "is the environment current with the manifest and the lock?",
         usage: "tog status [--json]",
         description: "\
 For every ecosystem found here: 'synced' when the last sync's inputs are
@@ -302,7 +340,7 @@ cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
     Spec {
         name: "audit",
         group: Group::Inspect,
-        summary: "would the synced closures pass a policy? (CI admission gate)",
+        summary: "would the synced environments pass a policy? (CI gate)",
         usage: "tog audit [--policy <file>] [--json]",
         description: "\
 Reads the closure records every sync committed to .tog/closures/*.json,
@@ -352,7 +390,7 @@ stderr.",
     Spec {
         name: "sbom",
         group: Group::Inspect,
-        summary: "CycloneDX 1.5 SBOM of the synced closures",
+        summary: "CycloneDX 1.5 SBOM of the synced environments",
         usage: "tog sbom [--output <file>]",
         description: "\
 Emits a CycloneDX 1.5 document covering every ecosystem closure recorded by
@@ -731,6 +769,28 @@ mod tests {
                     usage.contains(long),
                     "tog {} usage omits {long}: {usage}",
                     command.name
+                );
+            }
+        }
+    }
+
+    /// The command list is the first screen a newcomer reads, so no summary
+    /// line explains tog with tog's own words. The internal vocabulary
+    /// stays in the long descriptions, where there is room to define it; a
+    /// summary says install, set up, link, or environment instead. No
+    /// allow-list: every summary passes as written, so a new command's
+    /// has to as well.
+    #[test]
+    fn no_summary_explains_tog_in_togs_own_vocabulary() {
+        const JARGON: &[&str] = &["realiz", "project"];
+        for spec in COMMANDS {
+            let summary = spec.summary.to_ascii_lowercase();
+            for word in JARGON {
+                assert!(
+                    !summary.contains(word),
+                    "tog {}: the summary says '{word}': {}",
+                    spec.name,
+                    spec.summary
                 );
             }
         }
