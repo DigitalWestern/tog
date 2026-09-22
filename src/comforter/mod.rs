@@ -888,11 +888,10 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
             ),
         )
     })?;
-    ui::warning(&format!(
-        "moved existing {} to {} (delete it once you're happy)",
-        path.display(),
-        dest.display()
-    ));
+    ui::warning(
+        &format!("moved existing {} to {}", path.display(), dest.display()),
+        &ui::shell_line(&["rm", "-rf", &dest.display().to_string()]),
+    );
     Ok(Some(dest))
 }
 
@@ -1047,11 +1046,21 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
     })?;
     source_dir.sync_all()?;
     backups_dir.sync_all()?;
-    ui::warning(&format!(
-        "moved existing {} to {} (delete it once you're happy)",
-        path.display(),
-        destination.display()
-    ));
+    // The one advisory for a real directory found where tog projects a
+    // symlink, said after the move so it is true when it is read. The
+    // project's root record keeps protecting the backup, so `gc --project`
+    // will not collect it while the project exists: the way out is to
+    // delete it once nothing in it is missed.
+    ui::warning(
+        &format!(
+            "moved existing {} to {}: it was a real directory where tog projects a symlink \
+             (an install tool ran here, or tog had never synced this project); delete it \
+             once you are sure nothing in it is missed",
+            path.display(),
+            destination.display()
+        ),
+        &ui::shell_line(&["rm", "-rf", &destination.display().to_string()]),
+    );
     Ok(())
 }
 

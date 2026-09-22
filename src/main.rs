@@ -64,6 +64,11 @@ fn main() {
         }
         ui::trace(&format!("working directory: {}", dir.display()));
     }
+    // A bare `tog` is a sync *and* an orientation: the one word a newcomer
+    // types should also show them what else there is. The help follows a
+    // sync that succeeded, so a failure stays the last thing on screen, and
+    // `-q` (results only) suppresses it, which is what CI would use.
+    let bare = matches!(pending, commands::Pending::Implicit);
     let command = match commands::resolve(pending) {
         Ok(command) => command,
         Err(error) => {
@@ -78,5 +83,8 @@ fn main() {
             cli::EXIT_FAILURE
         }
     };
+    if bare && code == 0 && !ui::quiet() {
+        print!("{}", cli::usage());
+    }
     exit(code);
 }

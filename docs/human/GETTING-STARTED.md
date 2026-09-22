@@ -74,7 +74,8 @@ $ cd api
 $ tog sync
 tog: python inputs: requirements.txt
 synced: .venv -> /tmp/tog-demo/store/objects/4002574e4e21aab52a9e4abe4ff2b2c6e9158b48-env-3.12.14
-tog: warning: closures are written unsigned, which is fine until you want 'tog audit' to vouch for them (set TOG_SIGNING_KEY=<key file>; 'tog keygen' makes one). Said once per store
+tog: warning: closures are written unsigned, which is fine until you want 'tog audit' to vouch for them; the fix sets a key for this shell, and a shell profile keeps it. Said once per store
+tog:     fix: tog keygen ~/.tog/signing.key && export TOG_SIGNING_KEY=~/.tog/signing.key
 ```
 
 5.1 seconds from an empty store, most of it downloading CPython. On a
@@ -87,8 +88,8 @@ until you hand tog a key, `tog audit` is the only command that minds, and
 the line is said once per store rather than on every sync — you will not see
 it again below.
 
-Inside a project, a bare `tog` means `tog sync`, so from here on it is one
-word.
+Inside a project, a bare `tog` syncs and then prints the help screen, so
+from here on it is one word.
 
 Run something in it:
 

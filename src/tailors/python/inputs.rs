@@ -120,9 +120,27 @@ pub fn read_plan(
             let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
                 return Err(error);
             };
-            ui::warning(&format!(
-                "setup.py metadata probe failed; using the requirements directory convention: {error}"
-            ));
+            // The probe's error carries the sandbox log's last lines after
+            // a marker; those go out as progress lines first, so the
+            // warning and its fix stay a pair.
+            let text = error.to_string();
+            let (reason, tail) = match text.split_once("last 20 lines:\n") {
+                Some((reason, tail)) => (reason.trim_end_matches("; ").to_string(), Some(tail)),
+                None => (text.clone(), None),
+            };
+            if let Some(tail) = tail {
+                ui::note("setup.py probe output, last 20 lines:");
+                for line in tail.lines() {
+                    ui::note(&format!("  {line}"));
+                }
+            }
+            ui::warning(
+                &format!(
+                    "setup.py metadata probe failed; using the requirements directory \
+                     convention: {reason}"
+                ),
+                "tog run python setup.py egg_info",
+            );
             fallback.python = manifest.python.clone();
             manifest = fallback;
         }
@@ -211,11 +229,11 @@ pub fn read_plan(
             Ok(_) => source,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) => {
-                ui::warning(&format!(
-                    "requirements.txt is pinned but not directly \
-                     consumable ({e}); re-locking for this platform with uv..."
+                ui::note(&format!(
+                    "requirements.txt is pinned but not directly consumable ({e}); \
+                     re-locking for this platform with uv into requirements.lock.txt"
                 ));
-                locked_requirements(
+                let text = locked_requirements(
                     platform,
                     dir,
                     &project,
@@ -224,7 +242,19 @@ pub fn read_plan(
                     &resolver_source,
                     selected,
                     compile_path,
-                )?
+                )?;
+                // Said once the lock exists, with its full path: an
+                // automatic sync can run from a subdirectory of the project.
+                let lock = dir.join("requirements.lock.txt");
+                ui::warning(
+                    &format!(
+                        "{} holds the pins this platform can consume; commit it so every \
+                         sync reads the same lock",
+                        lock.display()
+                    ),
+                    &ui::shell_line(&["git", "add", &lock.display().to_string()]),
+                );
+                text
             }
         }
     } else {

@@ -1222,13 +1222,15 @@ pub(super) fn check_poetry_content_hash(
     let json = python_json_spacing(&compact).into_bytes();
     let actual = hex::encode(Sha256::digest(json));
     if actual != expected {
-        crate::kernel::ui::warning(
-            "poetry.lock content-hash disagrees with pyproject.toml; preferring the lock",
-        );
+        // The exception is the one warning this event gets; its detail
+        // carries the wording and the fix.
         crate::kernel::policy::record(
             crate::kernel::policy::LOCK_DISAGREEMENT,
             "poetry.lock",
-            &format!("content-hash {expected} != computed {actual}; lock preferred"),
+            &format!(
+                "content-hash {expected} != computed {actual}; lock preferred; \
+                 'tog x poetry lock' rewrites it"
+            ),
         )?;
     }
     Ok(())

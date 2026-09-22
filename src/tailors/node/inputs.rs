@@ -28,14 +28,14 @@ pub fn ensure_npm_lock(
     {
         return Ok(());
     }
-    for other in ["bun.lock", "bun.lockb"] {
-        if dir.join(other).exists() {
-            ui::warning(&format!(
-                "{other} found; generating package-lock.json via npm \
-                 (versions resolve fresh — they may differ from {other})"
-            ));
-            break;
-        }
+    let bun_lock = ["bun.lock", "bun.lockb"]
+        .into_iter()
+        .find(|other| dir.join(other).exists());
+    if let Some(other) = bun_lock {
+        ui::note(&format!(
+            "{other} found but no package-lock.json; generating one with npm \
+             (versions resolve fresh and may differ from {other})"
+        ));
     }
     ui::note("no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
@@ -63,6 +63,20 @@ pub fn ensure_npm_lock(
     })?;
     if !status.success() {
         return Err(io::Error::other("npm install --package-lock-only failed"));
+    }
+    if let Some(other) = bun_lock {
+        // Said once the file exists, with its full path: an automatic sync
+        // can run from a subdirectory of the project, where a relative
+        // `git add` would name the wrong place.
+        let lock = dir.join("package-lock.json");
+        ui::warning(
+            &format!(
+                "{} was generated from package.json, not from {other}, so its versions may \
+                 differ; commit it so every sync reads the same lock",
+                lock.display()
+            ),
+            &ui::shell_line(&["git", "add", &lock.display().to_string()]),
+        );
     }
     Ok(())
 }

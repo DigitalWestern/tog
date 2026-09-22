@@ -3151,10 +3151,12 @@ mod tests {
         let text = announce("first");
         assert!(text.contains("metadata maintenance deferred"), "{text}");
         assert!(text.contains(&format!("--drop-object {first}")), "{text}");
-        assert!(
-            text.contains("this warning is shown once per store"),
-            "{text}"
-        );
+        assert!(text.contains("tog: shown once per store"), "{text}");
+        // At most three warnings, and each one names the command that
+        // resolves it on the line below.
+        let warnings = text.matches("tog: warning: ").count();
+        assert!(warnings <= 3, "{warnings} warnings: {text}");
+        assert_eq!(warnings, text.matches("tog:     fix: ").count(), "{text}");
         assert!(marker.is_file(), "the marker was not written: {text}");
 
         let text = announce("second");

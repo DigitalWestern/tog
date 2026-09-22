@@ -2,6 +2,7 @@
 //! additive upgrades under the exclusive lease, never a deletion permission.
 
 use super::*;
+use crate::kernel::ui::{FIX_PREFIX, WARNING_PREFIX};
 
 // ===========================================================================
 // Automatic maintenance and legacy migration.
@@ -45,8 +46,9 @@ pub fn migrate_metadata<W: Write>(
 pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result<MigrationReport> {
     let Some(activity) = store.try_activity_exclusive()? else {
         out.write_all(
-            crate::kernel::ui::warning_line(
+            crate::kernel::ui::warning_lines(
                 "metadata maintenance deferred: a Tog job is using this store",
+                MIGRATE_FIX,
             )
             .as_bytes(),
         )?;
@@ -74,11 +76,14 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
             }
             Ok((report, _)) => {
                 buffer.extend_from_slice(
-                    plain_warning_line(&format!(
-                        "metadata maintenance deferred: {} store record(s) unresolved, so \
-                         'tog gc' cannot sweep; 'tog gc --migrate-metadata' explains each",
-                        report.unresolved
-                    ))
+                    plain_advisory(
+                        &format!(
+                            "metadata maintenance deferred: {} store record(s) unresolved, \
+                             so 'tog gc' cannot sweep",
+                            report.unresolved
+                        ),
+                        MIGRATE_FIX,
+                    )
                     .as_bytes(),
                 );
                 (report, buffer)
@@ -89,8 +94,11 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
                 // destructive path stays fail-closed, and the explicit migration
                 // command still surfaces this error.
                 buffer.extend_from_slice(
-                    plain_warning_line(&format!("metadata maintenance deferred: {error}"))
-                        .as_bytes(),
+                    plain_advisory(
+                        &format!("metadata maintenance deferred: {error}"),
+                        MIGRATE_FIX,
+                    )
+                    .as_bytes(),
                 );
                 (MigrationReport::default(), buffer)
             }
@@ -117,34 +125,50 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
     // does, say nothing about printing once — the claim would be false.
     let recorded = write_deferral_marker(store, &marker, &deferral).is_ok();
     if recorded {
-        out.write_all(
-            crate::kernel::ui::warning_line(
-                "this warning is shown once per store; 'tog gc --migrate-metadata' repeats it",
-            )
-            .as_bytes(),
+        // Nothing to do about this line, so it is progress, not a warning.
+        writeln!(
+            out,
+            "tog: shown once per store; 'tog gc --migrate-metadata' repeats it"
         )?;
     }
     Ok(report)
 }
 
-/// The prefix every automatic-maintenance advisory carries before color is
-/// applied. Kept plain so the deferral marker compares the same bytes
-/// whether stderr was a terminal or a pipe.
-const WARNING_PREFIX: &str = "tog: warning: ";
+// `WARNING_PREFIX` and `FIX_PREFIX` (from `ui`) are the plain prefixes every
+// automatic-maintenance advisory carries before color is applied, so the
+// deferral marker compares the same bytes whether stderr was a terminal or
+// a pipe.
+
+/// The one command that resolves every deferral: it is the long form of the
+/// maintenance that was just deferred.
+const MIGRATE_FIX: &str = "tog gc --migrate-metadata";
 
 /// One advisory line in the plain form the deferral marker stores.
 fn plain_warning_line(message: &str) -> String {
     format!("{WARNING_PREFIX}{message}\n")
 }
 
-/// Print captured plain advisories the way `ui::warning` prints them, the
-/// word colored on a terminal. A line without the prefix (an upgrade
+/// Its fix line, in the same plain form.
+fn plain_fix_line(command: &str) -> String {
+    format!("{FIX_PREFIX}{command}\n")
+}
+
+/// A whole advisory: what happened, then the command that resolves it.
+fn plain_advisory(message: &str, fix: &str) -> String {
+    format!("{}{}", plain_warning_line(message), plain_fix_line(fix))
+}
+
+/// Print captured plain advisories the way `ui::warning` prints them, each
+/// word colored on a terminal. A line without either prefix (an upgrade
 /// count) is written as it is.
 fn write_advisories<W: Write>(out: &mut W, text: &[u8]) -> io::Result<()> {
     for line in String::from_utf8_lossy(text).lines() {
-        match line.strip_prefix(WARNING_PREFIX) {
-            Some(message) => out.write_all(crate::kernel::ui::warning_line(message).as_bytes())?,
-            None => writeln!(out, "{line}")?,
+        if let Some(message) = line.strip_prefix(WARNING_PREFIX) {
+            out.write_all(crate::kernel::ui::advisory_line(message).as_bytes())?;
+        } else if let Some(command) = line.strip_prefix(FIX_PREFIX) {
+            out.write_all(crate::kernel::ui::fix_line(command).as_bytes())?;
+        } else {
+            writeln!(out, "{line}")?;
         }
     }
     Ok(())
@@ -215,17 +239,27 @@ pub(super) fn migrate_metadata_locked<W: Write>(
             // One line, one decision: the id to drop, or the file to
             // restore. The reason is kept because it is what a backup or a
             // bug report needs.
-            let advice = if store::is_object_id(stem) {
-                format!("'tog gc --drop-object {stem}' drops it and the next sync rebuilds it")
+            let (message, fix) = if store::is_object_id(stem) {
+                (
+                    format!(
+                        "store record meta/{file} is unusable ({reason}); the next sync \
+                         rebuilds the object once the record is dropped"
+                    ),
+                    format!("tog gc --drop-object {stem}"),
+                )
             } else {
-                format!("delete meta/{file} by hand or restore it from a backup")
+                (
+                    format!(
+                        "store record meta/{file} is unusable ({reason}); restore it from a \
+                         backup instead if you have one"
+                    ),
+                    crate::kernel::ui::shell_line(&[
+                        "rm",
+                        &store.root.join("meta").join(file).display().to_string(),
+                    ]),
+                )
             };
-            out.write_all(
-                plain_warning_line(&format!(
-                    "store record meta/{file} is unusable ({reason}); {advice}"
-                ))
-                .as_bytes(),
-            )?;
+            out.write_all(plain_advisory(&message, &fix).as_bytes())?;
             continue;
         }
         let advice = if store::is_object_id(stem) {
@@ -338,10 +372,13 @@ pub(super) fn migrate_metadata_locked<W: Write>(
     for (id, reason) in &unresolved {
         if automatic {
             out.write_all(
-                plain_warning_line(&format!(
-                    "store record for object {id} cannot be migrated ({reason}); \
-                     'tog gc --drop-object {id}' drops it and the next sync rebuilds it"
-                ))
+                plain_advisory(
+                    &format!(
+                        "store record for object {id} cannot be migrated ({reason}); the next \
+                         sync rebuilds it once dropped"
+                    ),
+                    &format!("tog gc --drop-object {id}"),
+                )
                 .as_bytes(),
             )?;
             continue;

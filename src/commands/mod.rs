@@ -40,7 +40,8 @@ use std::process::exit;
 /// What argv asked for, once the grammar has had its say.
 pub enum Pending {
     Command(cli::Command),
-    /// Bare `tog`: sync inside a project, usage outside.
+    /// Bare `tog`: sync inside a project (and then the help, printed by
+    /// `main` when the sync succeeded), the help alone outside one.
     Implicit,
     /// An unknown first word: a package.json script if one matches.
     Script {
@@ -50,9 +51,10 @@ pub enum Pending {
     },
 }
 
-/// A bare `tog` inside a project is `sync`; an unknown first word that
-/// names a package.json script runs it. Anything else is the usage error
-/// the grammar already prepared (exit 2).
+/// A bare `tog` inside a project is `sync` (`main` prints the help after a
+/// sync that succeeded); an unknown first word that names a package.json
+/// script runs it. Anything else is the usage error the grammar already
+/// prepared (exit 2).
 pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
     match pending {
         Pending::Command(command) => Ok(command),
@@ -66,12 +68,17 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
                     frozen: false,
                 });
             }
-            eprint!(
-                "tog: no project in {}: nothing to sync here.\n\n{}",
-                cwd.display(),
-                cli::usage()
-            );
-            exit(cli::EXIT_USAGE);
+            // Nothing to sync, so the whole invocation is the help: it goes
+            // to stdout and exits 0, because someone who typed `tog` alone
+            // outside a project asked for orientation, not for an error.
+            // Printed here rather than returned as a command so that
+            // `resolve` keeps one job and `dispatch` stays a table of verbs.
+            ui::note(&format!(
+                "no project in {}: nothing to sync, so here is the help",
+                cwd.display()
+            ));
+            print!("{}", cli::usage());
+            exit(0);
         }
         Pending::Script {
             name,

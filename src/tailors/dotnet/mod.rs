@@ -1119,7 +1119,7 @@ pub fn realize_packages(
             .ok_or_else(|| err("plan has no target framework"))?,
     )?;
     if plan.targets.len() > 1 {
-        ui::warning(&format!(
+        ui::note(&format!(
             "synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}"
         ));
     }
@@ -1517,10 +1517,10 @@ fn publish_output(
             // The publish itself succeeded; rolling back here could lose
             // BOTH versions (the old tree may be partially deleted). Keep
             // the new output and report the leftover.
-            ui::warning(&format!(
-                "previous output left at {} ({e}); remove it manually",
-                old.display()
-            ));
+            ui::warning(
+                &format!("previous output left at {} ({e})", old.display()),
+                &ui::shell_line(&["rm", "-rf", &old.display().to_string()]),
+            );
         }
     }
     Ok(output)

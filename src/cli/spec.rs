@@ -52,12 +52,13 @@ pub const COMMANDS: &[Spec] = &[
 Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
 (.venv, node_modules, .tog/...). A bare 'tog' inside a project does the
-same, and 'tog run', 'tog env' and 'tog <script>' sync on their own
+same and then prints this help; outside a project it prints the help and
+exits 0. 'tog run', 'tog env' and 'tog <script>' sync on their own
 whenever the project is not synced or its inputs changed, so typing
-'sync' is for a sync with options, or a sync with nothing to run after
-it. A found manifest with no dependencies syncs an interpreter-only
-environment. It takes no package name: adding a dependency is
-'tog add <package>'.
+'sync' is for a sync with options, a sync with nothing to run after it,
+or a sync with no help after it. A found manifest with no dependencies
+syncs an interpreter-only environment. It takes no package name: adding a
+dependency is 'tog add <package>'.
 
 PROJECT INPUTS (any combination; each ecosystem found here is synced):
   python   requirements.txt, pyproject.toml, setup.cfg/setup.py,
@@ -92,6 +93,11 @@ Policy exceptions (unattested inputs, failed install scripts, ...) are
 recorded in .tog/closures/*.json and summarized at the end; --strict, a
 TOG_STRICT=1 environment, or a .tog/policy.toml deny list refuses
 them instead.",
+        examples: &[
+            ("tog", "sync this project; the bare form also prints this help"),
+            ("tog sync --frozen", "CI: check the locks are current without writing them"),
+            ("tog sync --fresh", "rebuild .venv / node_modules from scratch"),
+        ],
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
             ("--strict", "refuse every policy exception (same as TOG_STRICT=1)"),
@@ -123,6 +129,11 @@ registries are asked and a name known to exactly one wins; if several know
 it you are asked at the terminal. Tog never guesses from the bare name.
 Constraints pass through to the tool: 'requests>=2', 'react@18',
 'serde@1', 'rails@~> 7.1'.",
+        examples: &[
+            ("tog add requests", "add a dependency, re-lock, and sync"),
+            ("tog add react@18 --dev", "a development dependency, at a version"),
+            ("tog add py:requests", "name the ecosystem when several manifests are here"),
+        ],
         options: &[
             ("-D, --dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
@@ -138,6 +149,10 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
         description: "\
 The inverse of add, through the same pinned tools with the same ecosystem
 choice. For a plain requirements file tog deletes the line itself.",
+        examples: &[
+            ("tog remove requests", "drop it from the manifest, re-lock, and sync"),
+            ("tog remove react --dev", "from the development dependencies"),
+        ],
         options: &[
             ("-D, --dev", "remove from development dependencies (uv --dev, cargo --dev)"),
             ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
@@ -173,6 +188,11 @@ otherwise downloads the binary for this machine, checks the sha256 the
 release publishes, and renames it over the running binary. It refuses,
 naming the directory, when that directory is not writable. 'tog doctor'
 says when a newer release exists; nothing checks in the background.",
+        examples: &[
+            ("tog update", "re-lock every dependency"),
+            ("tog update --toolchain python", "move the pinned Python, then sync"),
+            ("tog update --self", "replace this binary with the newest release"),
+        ],
         options: &[
             ("--no-sync", "stop after the lock edit; review, then run 'tog'"),
             (
@@ -206,6 +226,11 @@ synced yet, or 'tog status' would say a manifest or lock changed, the
 project is synced first (one line on stderr says why) and then the command
 runs. A sync that would refuse refuses here too, in its own words. A
 directory with no manifest has nothing to sync and exits 1 saying so.",
+        examples: &[
+            ("tog run python app.py", "run a program in the project's environment"),
+            ("tog run pytest -q", "every argument after the command is passed through"),
+            ("tog dev", "a package.json script, without the word 'run'"),
+        ],
         options: &[HELP_OPTION],
         words: &[],
     },
@@ -240,6 +265,10 @@ changed; that narration goes to stderr, so stdout still carries only the
 environment. A directory with no manifest prints nothing and exits 1
 saying so. A package.json script named 'env' is reached with
 'tog run env': a built-in always wins.",
+        examples: &[
+            ("eval \"$(tog env)\"", "this shell, until it exits"),
+            ("echo 'eval \"$(tog env)\"' > .envrc && direnv allow", "direnv, per directory"),
+        ],
         options: &[
             (
                 "--shell <bash|zsh|fish>",
@@ -266,6 +295,11 @@ and are gc roots like any project. `--clean` removes every cached x
 environment, or only the selected tool's environments; store objects stay
 until the next `tog gc`. A running tool is left in place and reported as
 in use; retry after it exits.",
+        examples: &[
+            ("tog x ruff check .", "run a tool that is not a dependency"),
+            ("tog x --npm prettier --write .", "say which registry when it is ambiguous"),
+            ("tog x --from httpie http example.com", "when the tool and the package differ"),
+        ],
         options: &[
             ("--clean", "remove cached x environments instead of running a tool"),
             ("--py, --python", "resolve from PyPI"),
@@ -288,6 +322,10 @@ mix.exs, *.csproj) is found from here upward; name it when several are.
 Every argument after the ecosystem is handed to the tool unchanged, so
 'tog build --release' works; use '--' if the first tool argument is
 '-h' or '--help'.",
+        examples: &[
+            ("tog build", "network-denied build with the pinned toolchain"),
+            ("tog build --release", "arguments after the verb go to the build tool"),
+        ],
         options: &[HELP_OPTION],
         words: BUILD_WORDS,
     },
@@ -305,6 +343,10 @@ A package.json script named fmt takes precedence and is run as
 'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
 Other ecosystems are not implemented yet.",
+        examples: &[
+            ("tog fmt", "format the Rust workspace with the pinned rustfmt"),
+            ("tog fmt --check", "CI: fail when something is unformatted"),
+        ],
         options: &[
             ("--check", "check formatting without editing files"),
             ("--eco <ecosystem>", "select the ecosystem (Rust: rust)"),
@@ -325,6 +367,10 @@ user namespaces on Linux, sandbox-exec on macOS), the host C toolchain
 native builds need, the toolchains already realized, and the project in
 the current directory. Each line is ok, warn, or fail with the fix; exit
 status 1 on any fail.",
+        examples: &[
+            ("tog doctor", "check this machine, the sandbox, and the store"),
+            ("tog doctor --json", "the same rows as one JSON document"),
+        ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
     },
@@ -340,6 +386,10 @@ otherwise which file changed, that the projection is missing, or that the
 closure was synced on another platform. Offline and read-only. Exit status
 0 only when everything is synced, so CI can use it as a 'did you commit the
 lock' gate.",
+        examples: &[
+            ("tog status", "is the environment current with the lock?"),
+            ("tog status --json", "machine-readable, for a CI step"),
+        ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
     },
@@ -354,6 +404,10 @@ toolchain each runs on; -v adds the artifact and store object. Read from
 .tog/closures/*.json, no store access. Ecosystems: python, node,
 cargo, go, ruby, elixir, dotnet; plus rustfmt, the toolchain-only closure
 'tog fmt' writes.",
+        examples: &[
+            ("tog ls", "every package in every synced ecosystem"),
+            ("tog ls python", "one ecosystem only"),
+        ],
         options: &[
             ("-v, --verbose", "add each package's artifact and store object"),
             JSON_OPTION,
@@ -389,6 +443,10 @@ access, no sandbox needed. Exit status 0 when every closure is clean and
 none is missing, 1 otherwise, 2 when no trusted key is configured.
 'tog keygen' creates a signing key; set TOG_SIGNING_KEY where sync
 runs. A company deny list to start from ships as docs/human/policy-company.toml.",
+        examples: &[
+            ("tog audit", "the CI gate for a pipeline"),
+            ("tog audit --policy docs/human/policy-company.toml", "add a company deny list"),
+        ],
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
             JSON_OPTION,
@@ -408,6 +466,10 @@ own uv/npm/cargo and cache the result under .tog/.
 The output is JSON either way; --json adds nothing but the promise every
 --json command makes: stdout is JSON and a failure is a JSON object on
 stderr.",
+        examples: &[
+            ("tog plan", "the locked plan for every ecosystem, as JSON"),
+            ("tog plan | jq .", "read it with jq"),
+        ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
     },
@@ -420,6 +482,10 @@ stderr.",
 Emits a CycloneDX 1.5 document covering every ecosystem closure recorded by
 the last sync: pinned hashes, purls, and toolchain store ids. Writes to
 stdout unless --output is given.",
+        examples: &[
+            ("tog sbom", "a CycloneDX document on stdout"),
+            ("tog sbom -o sbom.json", "write it to a file instead"),
+        ],
         options: &[
             ("-o, --output <file>", "write the document to <file> instead of stdout"),
             HELP_OPTION,
@@ -449,6 +515,11 @@ recorded evidence cannot be certified stops the sweep rather than being
 guessed at; --migrate-metadata lists every record that stops it and
 --drop-object removes the ones that cannot be repaired. Usable on a copied
 store from any host.",
+        examples: &[
+            ("tog gc --dry-run", "what would be collected, without collecting it"),
+            ("tog gc", "collect unreferenced store objects"),
+            ("tog gc --project", "also collect old project forests and backups"),
+        ],
         options: &[
             (
                 "--dry-run",
@@ -488,9 +559,14 @@ store from any host.",
         group: Group::Maintain,
         summary: "'store path', 'store roots'",
         usage: "tog store <path | roots>",
-        description: "\
-  path    print the store root (~/.tog/store unless TOG_STORE is set)
+        // Not a `\`-continued literal: that escape eats the leading spaces
+        // of the next line, and this description is a two-row table.
+        description: "  path    print the store root (~/.tog/store unless TOG_STORE is set)
   roots   list every registered project root as '<key>  <path>'",
+        examples: &[
+            ("tog store path", "where the store lives"),
+            ("tog store roots", "every project the store protects"),
+        ],
         options: &[HELP_OPTION],
         words: &["path", "roots"],
     },
@@ -508,6 +584,10 @@ machine policy. Set TOG_SIGNING_KEY=<path> where 'tog sync' and
 accepts only records signed by a key the machine policy trusts. Keep the
 key outside the checkout, the store, and any sandbox read root; a job that
 runs untrusted project code must not hold one.",
+        examples: &[
+            ("tog keygen ~/.tog/signing.key", "then set TOG_SIGNING_KEY to it where sync runs"),
+            ("tog keygen ci.key", "the public key it prints goes in the policy"),
+        ],
         options: &[HELP_OPTION],
         words: &[],
     },
@@ -524,22 +604,30 @@ Install:
   fish   tog completions fish > ~/.config/fish/completions/tog.fish
 Package.json script names complete after 'tog run' and as the first
 word when a package.json is in the current directory.",
+        examples: &[
+            ("eval \"$(tog completions bash)\"", "this shell, right now"),
+            ("tog completions zsh > \"${fpath[1]}/_tog\"", "then: compinit"),
+        ],
         options: &[HELP_OPTION],
         words: SHELL_WORDS,
     },
 ];
 
-const PROJECT_INPUTS: &str = "\
-PROJECT INPUTS: every ecosystem whose manifest is found here is synced —
-requirements.txt/pyproject.toml/setup.py, package-lock.json/pnpm-lock.yaml/
-yarn.lock, Cargo.toml, go.mod, Gemfile, mix.exs, *.csproj. The full table,
-with what each one locks, is in 'tog help sync'.
+/// The four lines a newcomer needs before the command table means anything:
+/// set up, run, add, and the one command that explains a broken machine.
+/// Hand-written rather than generated, because the order is the lesson.
+const START_HERE: &str = "\
+START HERE:
+  tog                   set up the project from its lockfiles
+  tog run <command>     run something inside that environment
+  tog add <package>     add a dependency, re-lock, sync
+  tog doctor            check this machine when something looks wrong
 ";
 
 const ENVIRONMENT: &str = "\
 ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
-  TOG_STRICT=1        refuse every policy exception, like --strict
+  TOG_STRICT=1        refuse every policy exception, like 'sync --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
   TOG_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR            plain output, like --no-color
@@ -559,25 +647,33 @@ pub fn canonical_name(name: &str) -> &str {
     }
 }
 
+/// The global options, with the heading carrying the rule about where they
+/// may appear: a note under the block was read as a footnote and missed.
 const GLOBAL_OPTIONS: &str = "\
-OPTIONS:
+OPTIONS (before or after the command; after 'run' or 'build' everything
+belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
+own arguments):
   -C, --directory <dir>  run as if tog had been started in <dir>
-  -q, --quiet            no narration: only errors and results on stdout
-  -v, --verbose          show every decision and subprocess command line
+  -q, --quiet            errors and results only
+  -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
-  -h, --help             print help ('tog help <command>' for one command)
+  -h, --help             this help ('tog help <command>' for one command)
   -V, --version          print the version
 ";
 
-/// Top-level help: the command list by group, global options, inputs.
+/// Top-level help: what the three shapes of argv mean, the four commands to
+/// start with, the command list by group, the global options, and the
+/// environment. The lockfile table is reference material and lives in
+/// `tog help sync`, which names every file per ecosystem.
 pub fn usage() -> String {
     let mut text = format!(
         "tog {VERSION} — one command for every package manager\n\n\
          USAGE:\n  \
-         tog [<options>] <command> [<args>...]\n  \
-         tog                      in a project: the same as 'tog sync'\n  \
-         tog <script> [<args>...] run a package.json script (like 'npm run')\n"
+         tog                        sync this project, then show this help\n  \
+         tog <command> [<args>...]  run a command ('tog help <command>' explains it)\n  \
+         tog <script> [<args>...]   run a package.json script (like 'npm run')\n\n"
     );
+    text.push_str(START_HERE);
     let width = COMMANDS
         .iter()
         .map(|spec| spec.name.len())
@@ -602,18 +698,13 @@ pub fn usage() -> String {
     }
     text.push('\n');
     text.push_str(GLOBAL_OPTIONS);
-    text.push_str(
-        "  Any of these may be given before or after the command, except\n  \
-         where the rest of the line belongs to a program ('run', 'build')\n  \
-         or a tool ('fmt', 'x').\n",
-    );
     text.push('\n');
     text.push_str(ENVIRONMENT);
     text.push_str(
-        "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'\n\
-         pass the program's status through.\n\n",
+        "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass\n\
+         the program's status through. Which files tog reads per ecosystem:\n\
+         'tog help sync'. Full reference: docs/human/CLI.md.\n",
     );
-    text.push_str(PROJECT_INPUTS);
     text
 }
 
@@ -662,12 +753,25 @@ fn global_option_note(name: &str) -> &'static str {
     }
 }
 
-/// Help for one command.
+/// Help for one command: what it is, how it is spelled, what it looks like
+/// in use, its options, and only then the prose. EXAMPLES comes before
+/// OPTIONS because a working line teaches the shape faster than a flag
+/// list, and DETAILS gives the prose a heading to skip past.
 pub fn help(spec: &Spec) -> String {
     let mut text = format!(
-        "tog {} — {}\n\nUSAGE:\n  {}\n\nOPTIONS:\n",
+        "tog {} — {}\n\nUSAGE:\n  {}\n\nEXAMPLES:\n",
         spec.name, spec.summary, spec.usage
     );
+    let width = spec
+        .examples
+        .iter()
+        .map(|(command, _)| command.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (command, gloss) in spec.examples {
+        text.push_str(&option_line(command, width, gloss));
+    }
+    text.push_str("\nOPTIONS:\n");
     let width = spec
         .options
         .iter()
@@ -677,7 +781,7 @@ pub fn help(spec: &Spec) -> String {
     for (flag, description) in spec.options {
         text.push_str(&option_line(flag, width, description));
     }
-    text.push('\n');
+    text.push_str("\nDETAILS:\n");
     text.push_str(spec.description);
     text.push_str("\n\n");
     text.push_str(global_option_note(spec.name));
@@ -692,10 +796,11 @@ mod tests {
     fn usage_lists_every_command_with_its_help() {
         let text = usage();
         for title in [
+            "START HERE:",
             "EVERYDAY:",
             "INSPECT:",
             "MAINTAIN:",
-            "OPTIONS:",
+            "OPTIONS (",
             "ENVIRONMENT:",
         ] {
             assert!(text.contains(title), "usage lacks {title}");
@@ -720,13 +825,45 @@ mod tests {
             }
         }
         assert!(text.contains("TOG_STORE"));
-        assert!(text.contains("requirements.txt"));
+        // The lockfile table moved to 'tog help sync'; the top level says so.
+        assert!(text.contains("'tog help sync'"));
         assert!(text.contains("tog <script> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
     }
 
     fn words(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Every command shows what it looks like in use, and every example is
+    /// a line that can be typed: it invokes tog, either as the first word
+    /// or inside a shell substitution (`eval "$(tog env)"`). An example
+    /// that is not a tog command line teaches the wrong thing.
+    #[test]
+    fn every_command_shows_an_example_that_runs_tog() {
+        for spec in COMMANDS {
+            assert!(
+                !spec.examples.is_empty(),
+                "tog {}: no EXAMPLES block",
+                spec.name
+            );
+            let help = help(spec);
+            assert!(help.contains("EXAMPLES:"), "tog {}", spec.name);
+            assert!(help.contains("DETAILS:"), "tog {}", spec.name);
+            for (command, gloss) in spec.examples {
+                assert!(
+                    *command == "tog" || command.starts_with("tog ") || command.contains("tog "),
+                    "tog {}: '{command}' does not run tog",
+                    spec.name
+                );
+                assert!(
+                    !gloss.is_empty(),
+                    "tog {}: '{command}' has no gloss",
+                    spec.name
+                );
+                assert!(help.contains(command), "tog {}: '{command}'", spec.name);
+            }
+        }
     }
 
     /// Help is read in a terminal, so every line of it fits one. This holds
@@ -829,10 +966,11 @@ mod tests {
         assert!(position("  sync") < position("  fmt"));
         assert!(position("  doctor") < position("  audit"));
         assert!(position("EVERYDAY:") < position("INSPECT:"));
-        // The lockfile table is reference material, not the first thing to
-        // read; the verbs and the options come before it.
-        assert!(position("OPTIONS:") < position("PROJECT INPUTS"));
-        assert!(position("ENVIRONMENT:") < position("PROJECT INPUTS"));
+        // The four commands to start with come before the full table, and
+        // the reference material (options, environment) after it.
+        assert!(position("START HERE:") < position("EVERYDAY:"));
+        assert!(position("EVERYDAY:") < position("OPTIONS ("));
+        assert!(position("OPTIONS (") < position("ENVIRONMENT:"));
         for alias in SYNC_ALIASES {
             assert!(text.contains(*alias), "the command list hides '{alias}'");
         }

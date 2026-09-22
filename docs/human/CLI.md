@@ -9,9 +9,15 @@ file and the binary differ, fix this file.*
 tog 0.1.0 — one command for every package manager
 
 USAGE:
-  tog [<options>] <command> [<args>...]
-  tog                      in a project: the same as 'tog sync'
-  tog <script> [<args>...] run a package.json script (like 'npm run')
+  tog                        sync this project, then show this help
+  tog <command> [<args>...]  run a command ('tog help <command>' explains it)
+  tog <script> [<args>...]   run a package.json script (like 'npm run')
+
+START HERE:
+  tog                   set up the project from its lockfiles
+  tog run <command>     run something inside that environment
+  tog add <package>     add a dependency, re-lock, sync
+  tog doctor            check this machine when something looks wrong
 
 EVERYDAY:
   sync         set up the environment(s) from the locks; aliases: install, i
@@ -40,31 +46,26 @@ MAINTAIN:
   help         show help for a command
   version      print the version
 
-OPTIONS:
+OPTIONS (before or after the command; after 'run' or 'build' everything
+belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
+own arguments):
   -C, --directory <dir>  run as if tog had been started in <dir>
-  -q, --quiet            no narration: only errors and results on stdout
-  -v, --verbose          show every decision and subprocess command line
+  -q, --quiet            errors and results only
+  -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
-  -h, --help             print help ('tog help <command>' for one command)
+  -h, --help             this help ('tog help <command>' for one command)
   -V, --version          print the version
-  Any of these may be given before or after the command, except
-  where the rest of the line belongs to a program ('run', 'build')
-  or a tool ('fmt', 'x').
 
 ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
-  TOG_STRICT=1        refuse every policy exception, like --strict
+  TOG_STRICT=1        refuse every policy exception, like 'sync --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
   TOG_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR            plain output, like --no-color
 
-Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt'
-pass the program's status through.
-
-PROJECT INPUTS: every ecosystem whose manifest is found here is synced —
-requirements.txt/pyproject.toml/setup.py, package-lock.json/pnpm-lock.yaml/
-yarn.lock, Cargo.toml, go.mod, Gemfile, mix.exs, *.csproj. The full table,
-with what each one locks, is in 'tog help sync'.
+Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
+the program's status through. Which files tog reads per ecosystem:
+'tog help sync'. Full reference: docs/human/CLI.md.
 ```
 
 ## Conventions
@@ -75,12 +76,15 @@ with what each one locks, is in 'tog help sync'.
   syntax error in someone's session). Narration stays on stderr with a
   `tog:` prefix, and the prefix says which kind it is: progress is
   `tog: <what is happening>`, an advisory you may want to act on (a
-  fallback, a lock disagreement, a recorded policy exception) is
-  `tog: warning: <what happened>`, and a failure is `tog: error: <what
-  failed>`. `--quiet` silences the first two and never the third. `gc`
-  narrates, so every line
-  it prints — registered, forgot, would free, freed, cleanup skipped — is
-  stderr and `--quiet` silences all of it.
+  fallback, a directory moved aside, unsigned closures under a policy that
+  checks signatures) is
+  `tog: warning: <what happened>`, and every warning is followed by
+  `tog:     fix: <command>`, the one command that resolves it, ready to
+  paste; a line with nothing for you to do is progress, not a warning. A
+  failure is `tog: error: <what failed>`. `--quiet` silences the first two
+  and never the third. `gc` narrates, so every line it prints — registered,
+  forgot, would free, freed, cleanup skipped — is stderr and `--quiet`
+  silences all of it.
 - **`--json` is a promise about both streams.** With `--json`, stdout
   carries the JSON document and nothing else, narration stays on stderr,
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
@@ -105,8 +109,9 @@ with what each one locks, is in 'tog help sync'.
   ends. A redirected stderr (a pipe, a log, CI) and `--quiet` get nothing.
 - **Network failures say what happened**: offline, DNS, proxy, https-only,
   or the server's status, with the URL named once. Not ureq's words.
-- **Color** only on a tty stderr, only for `error:`/`warning:` and `synced:`
-  words; `--no-color` or `NO_COLOR` turns it off, and stdout never gets it.
+- **Color** only on a tty stderr, only for `error:`/`warning:` and
+  `fix:`/`synced:` words (`fix:` is green, like `synced:`); `--no-color` or
+  `NO_COLOR` turns it off, and stdout never gets it.
 - **Global options work before or after the command.** `-C <dir>`, `-q`,
   `-v` and `--no-color` mean the same thing in either position (`tog ls -v`
   and `tog -v ls` are the same command), except where the rest of the line
@@ -154,15 +159,19 @@ the first word when a package.json is present.
 
 ## Everyday verbs
 
-**sync** (aliases: `install`, `i`; a bare `tog` inside a project means
-`sync`) discovers every ecosystem present in the current directory, realizes
-each locked plan into the store, and projects it (`.venv`, `node_modules`,
-`.tog/...`); a manifest with no dependencies syncs an interpreter-only
-environment, and `--fresh` drops project-local caches and rebuilds. It takes
-no package name: `tog install requests` is a usage error that names
-`tog add requests`. `run`, `env` and `tog <script>` sync on their own when
-the project is not synced or its inputs changed (see **run**), so the verb
-is typed for a sync with options, or a sync with nothing to run after it.
+**sync** (aliases: `install`, `i`; a bare `tog` inside a project syncs and
+then prints what `tog help` prints, and outside a project it prints that
+help and exits 0) discovers every ecosystem present in the current
+directory, realizes each locked plan into the store, and projects it
+(`.venv`, `node_modules`, `.tog/...`); a manifest with no dependencies syncs
+an interpreter-only environment, and `--fresh` drops project-local caches
+and rebuilds. The help only follows a sync that succeeded, so a failure
+stays the last thing on screen; CI that wants a sync and nothing else types
+`tog sync` or `tog -q`. It takes no package name: `tog install requests` is
+a usage error that names `tog add requests`. `run`, `env` and `tog <script>`
+sync on their own when the project is not synced or its inputs changed (see
+**run**), so the verb is typed for a sync with options, or a sync with
+nothing to run after it.
 
 The first writable sync of a project with no toolchain lock selects a
 runtime per ecosystem, writes `tog-toolchain.toml` at the project root, and

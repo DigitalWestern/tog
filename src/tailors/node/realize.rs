@@ -1016,7 +1016,7 @@ fn link_package_bins(staged: &Path, packages: &[(NpmPackage, PathBuf)]) -> io::R
                 // Real graphs collide (playwright + @playwright/test both
                 // declare `playwright`). npm keeps the first hoisted claim;
                 // plan order is sorted, so first-wins is deterministic.
-                crate::kernel::ui::warning(&format!(
+                crate::kernel::ui::note(&format!(
                     "bin {bin_name:?} already claimed; skipping the one from {}",
                     p.path
                 ));
@@ -1403,10 +1403,7 @@ fn apply_artifact_policy(
         Err(error) => {
             // A provisioning failure is not fatal: the install script still
             // runs and fails loudly on its own if it needs the artifact.
-            crate::kernel::ui::warning(&format!(
-                "{}: could not provision its artifact: {error}",
-                p.name
-            ));
+            // The exception below is the one warning this event gets.
             crate::kernel::policy::record(
                 crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
                 &format!("{}@{}", p.name, p.version),
