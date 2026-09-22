@@ -303,7 +303,8 @@ inferred when exactly one build-capable project (Cargo.toml, go.mod,
 mix.exs, *.csproj) is found from here upward; name it when several are.
 Every argument after the ecosystem is handed to the tool unchanged, so
 'tog build --release' works; use '--' if the first tool argument is
-'-h' or '--help'.",
+'-h' or '--help'. Like 'run', it sets the project up first when it is not
+set up or its inputs changed; in CI run 'tog --frozen' before it.",
         examples: &[
             ("tog build", "network-denied build with the pinned toolchain"),
             ("tog build --release", "arguments after the verb go to the build tool"),

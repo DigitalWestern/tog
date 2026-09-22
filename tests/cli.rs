@@ -99,7 +99,8 @@ fn no_arguments_outside_a_project_prints_the_help_and_exits_0() {
     let stdout = text(&out.stdout);
     assert!(stdout.contains("USAGE:"), "{stdout}");
     assert!(stdout.contains("START HERE:"), "{stdout}");
-    assert!(stdout.contains("  sync"), "{stdout}");
+    assert!(stdout.contains("  run"), "{stdout}");
+    assert!(stdout.contains("SETUP OPTIONS"), "{stdout}");
     let stderr = text(&out.stderr);
     assert!(stderr.starts_with("tog: no project in "), "{stderr}");
     assert!(
@@ -160,11 +161,18 @@ fn help_goes_to_stdout_and_exits_0() {
         assert!(stdout.contains("EVERYDAY:"), "{args:?}: {stdout}");
         assert!(stdout.contains("TOG_STORE"), "{args:?}: {stdout}");
     }
-    for args in [&["help", "sync"][..], &["sync", "--help"], &["sync", "-h"]] {
+    // The bare form's screen, under its topic and under the hidden name a
+    // pip or npm reflex reaches for.
+    for args in [
+        &["help", "setup"][..],
+        &["help", "sync"],
+        &["sync", "--help"],
+        &["i", "-h"],
+    ] {
         let out = tog(&home.0, &home.0, args);
         assert_eq!(out.status.code(), Some(0), "{args:?}");
         let stdout = text(&out.stdout);
-        assert!(stdout.starts_with("tog sync — "), "{args:?}: {stdout}");
+        assert!(stdout.starts_with("tog — "), "{args:?}: {stdout}");
         // Every command screen leads with what it looks like in use and
         // keeps the prose behind a heading a reader can skip to.
         assert!(stdout.contains("EXAMPLES:"), "{args:?}: {stdout}");
@@ -172,10 +180,13 @@ fn help_goes_to_stdout_and_exits_0() {
         assert!(stdout.contains("--fresh"), "{args:?}: {stdout}");
         assert!(stdout.contains("--frozen"), "{args:?}: {stdout}");
         assert!(
-            stdout.contains("tog sync [--fresh] [--strict] [--frozen]"),
+            stdout.contains("tog [--frozen] [--fresh] [--strict]"),
             "{args:?}: {stdout}"
         );
     }
+    let inputs = text(&tog(&home.0, &home.0, &["help", "inputs"]).stdout);
+    assert!(inputs.starts_with("tog inputs — "), "{inputs}");
+    assert!(inputs.contains("package-lock.json"), "{inputs}");
     // `update` is two verbs and the help screen is the specification of the
     // surface, so both grammars are printed.
     let update = text(&tog(&home.0, &home.0, &["help", "update"]).stdout);
@@ -188,9 +199,9 @@ fn help_goes_to_stdout_and_exits_0() {
         "{update}"
     );
     assert!(update.contains("--toolchain [<ecosystem>]"), "{update}");
-    let out = tog(&home.0, &home.0, &["help", "snyc"]);
+    let out = tog(&home.0, &home.0, &["help", "inptus"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(text(&out.stderr).contains("did you mean 'sync'?"));
+    assert!(text(&out.stderr).contains("did you mean 'inputs'?"));
 }
 
 #[test]
@@ -232,9 +243,11 @@ fn version() {
 fn usage_errors_exit_2_with_a_next_step() {
     let home = TempDir::new("usage");
     let cases: &[(&[&str], &str, &str)] = &[
-        (&["snyc"], "unknown command 'snyc'; did you mean 'sync'?", "tog --help"),
-        (&["sync", "--fersh"], "sync: unknown option '--fersh'; did you mean '--fresh'?", "tog help sync"),
-        (&["sync", "now"], "sync: unexpected argument 'now'; sync realizes what the project already declares — to add a dependency run 'tog add now'", "tog help sync"),
+        (&["snyc"], "unknown command 'snyc'", "tog --help"),
+        (&["--fersh"], "unknown option '--fersh'; did you mean '--fresh'?", "tog --help"),
+        (&["--frozen", "status"], "--frozen belongs to the bare 'tog'; run 'tog --frozen' on its own", "tog --help"),
+        (&["sync", "--fersh"], "sync: unknown option '--fersh'; did you mean '--fresh'?", "tog help setup"),
+        (&["sync", "now"], "unexpected argument 'now'; 'tog' sets up what the project already declares — to add a dependency run 'tog add now'", "tog help setup"),
         (&["plan", "--jsno"], "plan: unknown option '--jsno'; did you mean '--json'?", "tog help plan"),
         (&["gc", "--keep-days", "soon"], "--keep-days expects a whole number of days, got 'soon'", "tog help gc"),
         (&["gc", "--dryrun"], "gc: unknown option '--dryrun'; did you mean '--dry-run'?", "tog help gc"),
@@ -251,7 +264,7 @@ fn usage_errors_exit_2_with_a_next_step() {
         (&["add", "--", "--index-url"], "add: dependency spec '--index-url' looks like a tool option; package options are not allowed", "tog help add"),
         (&["add", "requests\n--index-url evil"], "add: dependency spec contains CR, LF, or NUL", "tog help add"),
         (&["x", "--from", "six", "/absolute/executable"], "x: --from requires a single safe executable name", "tog help x"),
-        (&["sync", "--frzoen"], "sync: unknown option '--frzoen'; did you mean '--frozen'?", "tog help sync"),
+        (&["sync", "--frzoen"], "sync: unknown option '--frzoen'; did you mean '--frozen'?", "tog help setup"),
         (&["update", "--toolchain", "serde"], "update --toolchain takes an ecosystem name, not a package; 'serde' is not one of python, node, rust, go, ruby, elixir, dotnet", "tog help update"),
         (&["update", "--toolchain", "pyhton"], "update --toolchain takes an ecosystem name, not a package; 'pyhton' is not one of python, node, rust, go, ruby, elixir, dotnet; did you mean 'python'?", "tog help update"),
         (&["add", "--toolchain"], "add: unknown option '--toolchain'", "tog help add"),
@@ -925,7 +938,7 @@ fn install_alias_reaches_sync() {
 }
 
 /// `tog install <pkg>` is what a pip or npm user types first, and
-/// `install` is an alias for `sync`, which takes no package. Every
+/// `install` is a hidden alias of the bare `tog`, which takes no package. Every
 /// spelling must name `tog add` rather than reject the word.
 #[test]
 fn installing_a_package_by_name_points_at_add() {
@@ -937,12 +950,12 @@ fn installing_a_package_by_name_points_at_add() {
         let stderr = text(&out.stderr);
         assert!(stderr.contains("tog add requests"), "{verb}: {stderr}");
         assert!(
-            stderr.contains("Run 'tog help sync' for usage."),
+            stderr.contains("Run 'tog help setup' for usage."),
             "{stderr}"
         );
     }
     // The help the error sends them to names the verb too.
-    let help = text(&tog(&project.0, &home.0, &["help", "sync"]).stdout);
+    let help = text(&tog(&project.0, &home.0, &["help", "setup"]).stdout);
     assert!(help.contains("tog add <package>"), "{help}");
 }
 
@@ -1072,14 +1085,15 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     assert!(stderr.contains("syncing first: "), "{stderr}");
     assert!(stderr.contains("node not synced"), "{stderr}");
     assert!(stderr.contains("no pinned CPython"), "{stderr}");
-    // A built-in verb always wins over a same-named script.
+    // A built-in verb always wins over a same-named script, and `build`,
+    // like `run`, syncs a stale project before it starts: the refusal is
+    // the sync's, and the script never ran.
     let out = tog(&project.0, &home.0, &["build"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(
-        text(&out.stderr).contains("tog build requires"),
-        "{}",
-        text(&out.stderr)
-    );
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("syncing first: "), "{stderr}");
+    assert!(stderr.contains("no pinned CPython"), "{stderr}");
+    assert!(!text(&out.stdout).contains("built"), "{stderr}");
     // Not a script, not a verb: usage error naming the package.json.
     let out = tog(&project.0, &home.0, &["deploy"]);
     assert_eq!(out.status.code(), Some(2));
