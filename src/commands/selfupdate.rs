@@ -63,9 +63,19 @@ impl Version {
         Some(version)
     }
 
-    /// The crate version this binary was built from.
-    pub fn running() -> Version {
-        Version::parse(cli::VERSION).expect("Cargo.toml version is x.y.z")
+    /// The crate version this binary was built from. An error rather than
+    /// a panic when Cargo.toml carries a pre-release suffix one day: the
+    /// verb has nothing to compare against, and says so.
+    pub fn running() -> io::Result<Version> {
+        Version::parse(cli::VERSION).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "this build's version '{}' is not x.y.z, so it cannot be compared with a release",
+                    cli::VERSION
+                ),
+            )
+        })
     }
 }
 
@@ -149,10 +159,25 @@ pub fn latest() -> io::Result<Release> {
 /// release exists. Offline, or with a manifest tog cannot read, the row
 /// says the check did not happen and stays `ok`: a laptop on a plane is
 /// not unhealthy, and a CI job must not fail on GitHub's rate limit.
+///
+/// A release is compared by version only. A release does not name the
+/// commit it was built from, so a local build of the same crate version
+/// (from an older or a newer commit) reads as "same version", and the row
+/// says so rather than calling it current.
 pub fn doctor_check() -> Check {
     let running = cli::version_line();
+    let current = match Version::running() {
+        Ok(current) => current,
+        Err(error) => {
+            return Check {
+                name: "version",
+                level: Level::Warn,
+                detail: format!("{running}; {error}"),
+            }
+        }
+    };
     match latest() {
-        Ok(release) if release.version > Version::running() => Check {
+        Ok(release) if release.version > current => Check {
             name: "version",
             level: Level::Warn,
             detail: format!(
@@ -160,10 +185,21 @@ pub fn doctor_check() -> Check {
                 release.tag
             ),
         },
+        Ok(release) if release.version == current => Check {
+            name: "version",
+            level: Level::Ok,
+            detail: format!(
+                "{running}; the latest release is {} (same version; releases are compared by version, not by commit)",
+                release.tag
+            ),
+        },
         Ok(release) => Check {
             name: "version",
             level: Level::Ok,
-            detail: format!("{running}; the latest release is {}", release.tag),
+            detail: format!(
+                "{running}; newer than the latest release, {}",
+                release.tag
+            ),
         },
         Err(error) => Check {
             name: "version",
@@ -192,15 +228,40 @@ fn running_binary() -> io::Result<PathBuf> {
     })
 }
 
-/// A scratch directory removed on every exit path.
+/// A name no other process, and no earlier run of this one, could have
+/// left behind: pid, a nanosecond clock, and a per-process counter. Every
+/// path below is created with `create_new` on top of that, so a name that
+/// does exist (a stale file, or one planted by another user in a shared
+/// temporary directory) is refused rather than opened.
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}.{nanos}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// A scratch directory in the system temporary directory, created fresh
+/// (mode 0700, never an existing path, so a symlink planted under a
+/// guessable name is never followed) and removed on every exit path.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> io::Result<Scratch> {
-        let path = std::env::temp_dir().join(format!("tog-update-{}", std::process::id()));
-        fs::create_dir_all(&path).map_err(|error| {
-            io::Error::new(error.kind(), format!("create {}: {error}", path.display()))
-        })?;
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::env::temp_dir().join(format!("tog-update-{}", unique_suffix()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|error| {
+                io::Error::new(error.kind(), format!("create {}: {error}", path.display()))
+            })?;
         Ok(Scratch(path))
     }
 }
@@ -211,37 +272,74 @@ impl Drop for Scratch {
     }
 }
 
-/// The sibling the new binary is written to before the rename. Creating it
-/// is the writability probe: it happens before any download, so a refused
-/// update touches nothing but this one file, and it names the directory
-/// the user has to make writable or the installer they should use instead.
-fn stage_path(target: &Path) -> io::Result<PathBuf> {
-    let dir = target
-        .parent()
-        .ok_or_else(|| io::Error::other(format!("{} has no parent directory", target.display())))?;
-    let stage = dir.join(format!(".tog.update.{}", std::process::id()));
-    match fs::File::create(&stage) {
-        Ok(_) => Ok(stage),
-        Err(error) => Err(io::Error::new(
-            error.kind(),
-            format!(
-                "cannot write to {} ({error}); tog is installed there. Make that directory \
-                 writable, or install a copy you own:\n  curl -fsSL \
-                 https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh",
-                dir.display()
-            ),
-        )),
+/// The sibling the new binary is written to before the rename, removed on
+/// every path but the rename that consumes it. Creating it is the
+/// writability probe: it happens before anything is downloaded, so a
+/// refused update touches nothing but this one file, and the refusal names
+/// the directory the user has to make writable or the installer they
+/// should use instead. `create_new` means an existing file under the name
+/// is an error, never something written through.
+struct Stage {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Stage {
+    fn create(target: &Path) -> io::Result<(Stage, fs::File)> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = target.parent().ok_or_else(|| {
+            io::Error::other(format!("{} has no parent directory", target.display()))
+        })?;
+        let path = dir.join(format!(".tog.update.{}", unique_suffix()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&path)
+        {
+            Ok(file) => Ok((Stage { path, armed: true }, file)),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot write to {} ({error}); tog is installed there. Make that directory \
+                     writable, or install a copy you own:\n  curl -fsSL \
+                     https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh",
+                    dir.display()
+                ),
+            )),
+        }
+    }
+
+    /// The rename took the file: nothing left to remove.
+    fn consumed(mut self) {
+        self.armed = false;
     }
 }
 
-/// The digest `install.sh` reads: the first token of the `.sha256` file.
+impl Drop for Stage {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The digest `install.sh` reads, read the same way: the text before the
+/// first space, and the line ending dropped. The digest is compared as
+/// written, lower-case hex, because that is what `sha256sum` and `shasum`
+/// print and what the installer compares against.
 fn parse_sha256(text: &str, asset: &str) -> io::Result<String> {
     let digest = text
-        .split_whitespace()
+        .split(' ')
         .next()
         .unwrap_or("")
-        .to_ascii_lowercase();
-    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("the checksum file for {asset} does not hold a sha256; refusing to install an unverified binary"),
@@ -250,9 +348,10 @@ fn parse_sha256(text: &str, asset: &str) -> io::Result<String> {
     Ok(digest)
 }
 
-/// `<binary> --version`, so a download that does not run on this machine
-/// is refused before it replaces one that does.
-fn smoke_test(binary: &Path) -> io::Result<String> {
+/// `<binary> --version`, so a download that does not run on this machine,
+/// or that is not the release it was published as, is refused before it
+/// replaces a binary that works.
+fn smoke_test(binary: &Path, expected: Version) -> io::Result<String> {
     let output = Command::new(binary)
         .arg("--version")
         .env("NO_COLOR", "1")
@@ -273,6 +372,16 @@ fn smoke_test(binary: &Path) -> io::Result<String> {
             ),
         ));
     }
+    let reported = text.split(' ').nth(1).and_then(Version::parse);
+    if reported != Some(expected) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the downloaded tog says it is {}, not {expected} (printed {text:?}); the release's asset does not match its tag, and the current binary is untouched",
+                reported.map_or_else(|| "no version".to_string(), |v| v.to_string())
+            ),
+        ));
+    }
     Ok(text)
 }
 
@@ -285,10 +394,11 @@ pub fn run(platform: Platform) -> io::Result<i32> {
             format!("cannot read the latest release ({error}); releases: {RELEASES_PAGE}"),
         )
     })?;
-    let current = Version::running();
+    let current = Version::running()?;
     if release.version == current {
         ui::note(&format!(
-            "{running} is the latest release ({}); nothing to do",
+            "{running} is at the latest release's version ({}); nothing to do \
+             (releases are compared by version, not by commit)",
             release.tag
         ));
         return Ok(0);
@@ -314,8 +424,8 @@ pub fn run(platform: Platform) -> io::Result<i32> {
     };
 
     // Refuse before downloading when the rename at the end cannot happen.
-    let stage = stage_path(&target)?;
-    let staged = (|| -> io::Result<String> {
+    let (stage, mut stage_file) = Stage::create(&target)?;
+    let installed = (|| -> io::Result<()> {
         let scratch = Scratch::new()?;
         ui::note(&format!("downloading {} ({asset})", release.tag));
         let expected = parse_sha256(
@@ -332,30 +442,41 @@ pub fn run(platform: Platform) -> io::Result<i32> {
                 format!("{asset} did not contain a 'tog' binary"),
             ));
         }
-        fs::copy(&binary, &stage).map_err(|error| {
-            io::Error::new(error.kind(), format!("write {}: {error}", stage.display()))
+        // Written through the handle `create_new` opened, so the bytes go
+        // to the file that was created and to nothing a later rename of
+        // the name could point at; synced so the rename below publishes
+        // a complete file even across a power cut.
+        let mut source = fs::File::open(&binary)?;
+        io::copy(&mut source, &mut stage_file).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("write {}: {error}", stage.path.display()),
+            )
         })?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&stage, fs::Permissions::from_mode(0o755))?;
-        }
-        smoke_test(&stage)
-    })();
-    let installed = match staged {
-        Ok(installed) => installed,
-        Err(error) => {
-            let _ = fs::remove_file(&stage);
-            return Err(error);
-        }
-    };
+        stage_file.sync_all()?;
+        // The handle must be closed before the file is executed: Linux
+        // refuses to run a file that is open for writing.
+        drop(source);
+        Ok(())
+    })()
+    .and_then(|()| {
+        drop(stage_file);
+        smoke_test(&stage.path, release.version)
+    })?;
     // Rename over the running binary: the process keeps its open inode,
     // and no moment exists where the path holds a half-written file.
-    if let Err(error) = fs::rename(&stage, &target) {
-        let _ = fs::remove_file(&stage);
-        return Err(io::Error::new(
+    fs::rename(&stage.path, &target).map_err(|error| {
+        io::Error::new(
             error.kind(),
             format!("cannot replace {}: {error}", target.display()),
-        ));
+        )
+    })?;
+    stage.consumed();
+    // Best effort: make the directory entry durable too.
+    if let Some(dir) = target.parent() {
+        if let Ok(dir) = fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
     }
     ui::note(&format!(
         "updated {running} -> {installed} at {}",
@@ -377,7 +498,7 @@ mod tests {
         assert!(Version::parse("0.2.0.1").is_none());
         assert!(Version::parse("latest").is_none());
         assert!(Version::parse("v0.10.0") > Version::parse("v0.9.9"));
-        assert_eq!(Version::running().to_string(), cli::VERSION);
+        assert_eq!(Version::running().unwrap().to_string(), cli::VERSION);
     }
 
     #[test]
@@ -418,7 +539,12 @@ mod tests {
             parse_sha256(&format!("{hex}  tog-x.tar.gz\n"), "x").unwrap(),
             hex
         );
-        assert_eq!(parse_sha256(&hex.to_ascii_uppercase(), "x").unwrap(), hex);
+        assert_eq!(parse_sha256(&format!("{hex}\r\n"), "x").unwrap(), hex);
+        // Same rules as install.sh's `cut -d' ' -f1`: upper-case hex, a
+        // tab, or leading whitespace is not a digest sha256sum wrote.
+        assert!(parse_sha256(&hex.to_ascii_uppercase(), "x").is_err());
+        assert!(parse_sha256(&format!(" {hex}"), "x").is_err());
+        assert!(parse_sha256(&format!("{hex}\tfile"), "x").is_err());
         assert!(parse_sha256("", "x").is_err());
         assert!(parse_sha256("deadbeef", "x").is_err());
     }

@@ -237,7 +237,7 @@ fn the_same_or_an_older_release_leaves_the_binary_alone() {
     for (tag, word) in [
         (
             format!("v{}", env!("CARGO_PKG_VERSION")),
-            "is the latest release",
+            "is at the latest release's version",
         ),
         ("v0.0.1".to_string(), "is newer than the latest release"),
     ] {
@@ -305,6 +305,13 @@ fn a_bad_download_never_touches_the_binary() {
                 ..Release::newer()
             },
             "does not identify itself",
+        ),
+        (
+            Release {
+                binary: Some("tog 1.0.0 (wrong asset)"),
+                ..Release::newer()
+            },
+            "says it is 1.0.0, not 99.0.0",
         ),
         (
             Release {
@@ -463,7 +470,7 @@ fn doctor_reports_the_build_and_whether_a_release_is_newer() {
     let stdout = text(&out.stdout);
     assert!(
         stdout.starts_with(&format!(
-            "ok    version      {running}; the latest release is v{}\n",
+            "ok    version      {running}; the latest release is v{} (same version; releases are compared by version, not by commit)\n",
             env!("CARGO_PKG_VERSION")
         )),
         "{stdout}"

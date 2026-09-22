@@ -43,9 +43,10 @@ pub const BUILD_DATE: &str = env!("TOG_BUILD_DATE");
 /// What `tog --version` prints, without the newline: `tog 0.1.0 (7688cfd
 /// 2026-09-21)`. The crate version alone cannot say whether a binary is
 /// stale, because every local build of the same crate version prints the
-/// same number; the commit and its date can. `install.sh` and the
-/// self-update compare this whole line, so a rebuild of the same version
-/// from a newer commit counts as a different build.
+/// same number; the commit and its date can. `install.sh` prints this
+/// whole line when it replaces a binary; `update --self` and `doctor`
+/// compare the crate version only, because a release does not name the
+/// commit it was built from.
 pub fn version_line() -> String {
     match (BUILD_COMMIT, BUILD_DATE) {
         ("unknown", "unknown") => format!("tog {VERSION} (unknown build)"),

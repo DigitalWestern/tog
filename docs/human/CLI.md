@@ -228,11 +228,14 @@ when this build already is that version or newer, and otherwise downloads
 `tog-<triple>.tar.gz` and its `.sha256` from the release, verifies the
 digest, extracts the binary to a sibling of the running one, runs its
 `--version`, and renames it over the running binary, which keeps working
-because it holds its open file. The writability probe comes first: when the
-binary's directory cannot be written, the refusal names the directory and
-the installer, and nothing is downloaded. It takes no other argument. The
-asset names and the checksum rule are `install.sh`'s, so the two never
-disagree about what a release is. `TOG_RELEASE_MANIFEST` names another
+because it holds its open file. The writability probe runs before anything
+is downloaded: when the binary's directory cannot be written, the refusal
+names the directory and the installer. The downloaded binary must report the
+release's version, so a mislabeled asset is refused too. It takes no other
+argument. A release is compared by version only, because a release does not
+name the commit it was built from: a local build of the same crate version
+is "at the latest release's version" and stays. The asset names and the
+checksum rule are `install.sh`'s, so the two read a release the same way. `TOG_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
