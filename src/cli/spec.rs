@@ -52,7 +52,10 @@ pub const COMMANDS: &[Spec] = &[
 Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
 (.venv, node_modules, .tog/...). A bare 'tog' inside a project does the
-same. A found manifest with no dependencies syncs an interpreter-only
+same, and 'tog run', 'tog env' and 'tog <script>' sync on their own
+whenever the project is not synced or its inputs changed, so typing
+'sync' is for a sync with options, or a sync with nothing to run after
+it. A found manifest with no dependencies syncs an interpreter-only
 environment. It takes no package name: adding a dependency is
 'tog add <package>'.
 
@@ -185,7 +188,13 @@ project has a package.json and <command> names one of its scripts, the
 script runs (pre/name/post, npm environment, exit code passed through) and
 wins over a same-named executable on PATH; 'tog <script>' is the short
 form when the script name is not a tog command. Everything after
-<command> is passed through unchanged.",
+<command> is passed through unchanged.
+
+The environment is the one the project's inputs describe: when nothing is
+synced yet, or 'tog status' would say a manifest or lock changed, the
+project is synced first (one line on stderr says why) and then the command
+runs. A sync that would refuse refuses here too, in its own words. A
+directory with no manifest has nothing to sync and exits 1 saying so.",
         options: &[HELP_OPTION],
         words: &[],
     },
@@ -215,9 +224,11 @@ variable the environment removes is printed as 'unset NAME' ('set -e NAME'
 for fish), and $PATH is kept at the end of the new PATH rather than
 expanded, so the same line can be evaled twice.
 
-It needs a synced environment in this directory or an ancestor: without one
-nothing is printed and it exits 1, naming 'tog sync'. A package.json script
-named 'env' is reached with 'tog run env': a built-in always wins.",
+Like 'run', it syncs first when the project is not synced or its inputs
+changed; that narration goes to stderr, so stdout still carries only the
+environment. A directory with no manifest prints nothing and exits 1
+saying so. A package.json script named 'env' is reached with
+'tog run env': a built-in always wins.",
         options: &[
             (
                 "--shell <bash|zsh|fish>",

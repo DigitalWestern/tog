@@ -502,8 +502,13 @@ fn fmt_reports_ecosystem_and_project_errors_offline() {
     assert!(text(&out.stderr).contains("fmt for python is not implemented yet"));
 }
 
+/// A package.json `fmt` script wins over rustfmt, and like every script it
+/// is run through `tog run`, which syncs a never-synced project first. The
+/// second manifest pins a CPython no catalog has, so that sync refuses
+/// offline, before any download: the evidence is the sync line, not a
+/// realized Node.
 #[test]
-fn fmt_script_precedence_does_not_try_rustfmt_without_a_projection() {
+fn fmt_script_precedence_syncs_instead_of_trying_rustfmt() {
     let home = TempDir::new("fmt-script-home");
     let project = TempDir::new("fmt-script-project");
     std::fs::write(
@@ -511,15 +516,28 @@ fn fmt_script_precedence_does_not_try_rustfmt_without_a_projection() {
         r#"{"name":"p","scripts":{"fmt":"sh -c 'echo script-fmt; exit 7'"}}"#,
     )
     .unwrap();
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
+    )
+    .unwrap();
     let out = tog(&project.0, &home.0, &["fmt"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("command 'fmt'"), "{stderr}");
+    assert!(stderr.contains("syncing first: "), "{stderr}");
+    assert!(stderr.contains("node not synced"), "{stderr}");
+    assert!(stderr.contains("no pinned CPython"), "{stderr}");
     assert!(
         !stderr.contains("script-fmt"),
-        "script unexpectedly ran: {stderr}"
+        "script ran without an environment: {stderr}"
     );
-    assert!(!home.0.join("store/objects").is_dir());
+    assert!(!stderr.contains("rust toolchain"), "{stderr}");
+    // Opening the store creates its directories; nothing was realized in it.
+    let objects = home.0.join("store/objects");
+    assert!(
+        !objects.is_dir() || std::fs::read_dir(&objects).unwrap().next().is_none(),
+        "an object was realized offline"
+    );
     assert!(!project.0.join(".tog/closures/rustfmt.json").exists());
 }
 
@@ -572,16 +590,19 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     );
     assert!(!project.0.join("script-ran.txt").exists());
 
-    // Without --eco the script still wins (it needs a projection, so it stops
-    // at `tog run fmt`'s diagnostic rather than reaching rustfmt).
+    // Without --eco the script still wins. It runs through `tog run`, which
+    // syncs the never-synced project first; only that path says so, and the
+    // pinned channel stops that sync offline, at selection, as it did the
+    // Rust path above.
     let out = tog(&project.0, &home.0, &["fmt", "--check"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("command 'fmt'"),
+        stderr.contains("syncing first: ") && stderr.contains("node not synced"),
         "script no longer wins: {stderr}"
     );
-    assert!(!stderr.contains("rust toolchain"), "{stderr}");
+    assert!(!stderr.contains("script-fmt"), "{stderr}");
+    assert!(!project.0.join("script-ran.txt").exists());
     // Opening the store creates its directories; nothing was realized in it.
     let objects = home.0.join("store/objects");
     assert!(
@@ -640,20 +661,55 @@ fn directory_option_changes_where_the_command_runs() {
 }
 
 #[test]
-fn run_passes_arguments_through_and_needs_a_projection() {
+fn run_passes_arguments_through_and_needs_a_project() {
     let home = TempDir::new("run");
     let project = TempDir::new("run-project");
     // Flags after the program are the program's: tog does not parse
-    // them, so the only error is the missing projection.
+    // them, so the only error is the missing project. With no manifest
+    // there is nothing to sync, and the message says what it looked for
+    // rather than sending the user to a `tog sync` that would say the same.
     let out = tog(&project.0, &home.0, &["run", "python", "--help"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("no environment projected here"), "{stderr}");
-    assert!(stderr.contains("tog sync"), "{stderr}");
+    assert!(stderr.contains("no manifest to sync one from"), "{stderr}");
+    assert!(stderr.contains("PROJECT INPUTS"), "{stderr}");
+    assert!(!stderr.contains("syncing first"), "{stderr}");
     // `--` reaches the same place with a program literally named `-h`.
     let out = tog(&project.0, &home.0, &["run", "--", "-h"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("no environment projected here"));
+}
+
+/// A project that has a manifest but no projection is synced before the
+/// command runs, and the sync's own refusal is the command's failure.
+/// Offline: the manifest pins a CPython no catalog has, so the sync stops
+/// at selection, before the store is written or anything is fetched.
+#[test]
+fn run_and_env_sync_a_project_before_reading_it() {
+    let home = TempDir::new("autosync");
+    let project = TempDir::new("autosync-project");
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
+    )
+    .unwrap();
+    for args in [&["run", "python", "--version"][..], &["env"]] {
+        let out = tog(&project.0, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains("tog: syncing first: python not synced"),
+            "{args:?}: {stderr}"
+        );
+        assert!(stderr.contains("no pinned CPython"), "{args:?}: {stderr}");
+        // The old advice would send them to the command that just ran.
+        assert!(
+            !stderr.contains("run `tog sync` first"),
+            "{args:?}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}: {}", text(&out.stdout));
+    }
 }
 
 /// `tog env` prints the environment `tog run` would give a child, so the
@@ -665,14 +721,14 @@ fn env_prints_the_run_environment_as_shell_lines() {
     let home = TempDir::new("env-home");
     let project = TempDir::new("env-project");
 
-    // Outside a projection there is nothing to print, and stdout stays
+    // Outside a project there is nothing to print, and stdout stays
     // empty: a shell evaling this must not get half an environment.
     let out = tog(&project.0, &home.0, &["env"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("no environment projected here"), "{stderr}");
-    assert!(stderr.contains("tog sync"), "{stderr}");
+    assert!(stderr.contains("no manifest to sync one from"), "{stderr}");
 
     let object = project.0.join("env-object");
     std::fs::create_dir_all(object.join("bin")).unwrap();
@@ -922,11 +978,21 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
         r#"{"name": "p", "scripts": {"dev": "echo hi", "build": "echo built"}}"#,
     )
     .unwrap();
-    // A script name resolves to `run`: the only failure is the missing
-    // projection, which is a runtime error (1), not a usage error (2).
+    // A never-synced project is synced before the script runs. The
+    // second manifest pins a CPython no catalog has, so that sync refuses
+    // offline, before anything is fetched; the point here is only that
+    // `run` was reached and syncs, a runtime error (1), not a usage error (2).
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
+    )
+    .unwrap();
     let out = tog(&project.0, &home.0, &["dev", "--port", "3000"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("no environment projected here"));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("syncing first: "), "{stderr}");
+    assert!(stderr.contains("node not synced"), "{stderr}");
+    assert!(stderr.contains("no pinned CPython"), "{stderr}");
     // A built-in verb always wins over a same-named script.
     let out = tog(&project.0, &home.0, &["build"]);
     assert_eq!(out.status.code(), Some(1));

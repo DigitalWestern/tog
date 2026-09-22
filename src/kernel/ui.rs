@@ -161,7 +161,14 @@ pub fn warning(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("tog: {}: {message}", paint("warning", YELLOW));
+    eprint!("{}", warning_line(message));
+}
+
+/// The text `warning` prints, newline included, for a caller that writes
+/// to a handle of its own (the maintenance narration holds a locked
+/// stderr) and must still look like every other advisory.
+pub fn warning_line(message: &str) -> String {
+    format!("tog: {}: {message}\n", paint("warning", YELLOW))
 }
 
 /// Progress narration.
