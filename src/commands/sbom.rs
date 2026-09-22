@@ -6,6 +6,7 @@
 
 use crate::commands::shared::project_dir;
 use crate::kernel::cyclonedx::err;
+use crate::kernel::ui;
 use crate::tailors;
 use serde_json::{json, Value};
 use std::fs;
@@ -114,7 +115,7 @@ pub fn run(output: Option<&Path>) -> io::Result<()> {
     match output {
         Some(path) => {
             std::fs::write(path, text + "\n")?;
-            eprintln!("tog: SBOM written to {}", path.display());
+            ui::note(&format!("SBOM written to {}", path.display()));
         }
         None => println!("{text}"),
     }

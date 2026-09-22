@@ -84,12 +84,12 @@ impl PythonSelection {
     pub fn selection_message(&self) -> String {
         if let Some(raw) = &self.explicit_request {
             format!(
-                "tog: python {} selected (.python-version \"{}\" from .python-version)",
+                "python {} selected (.python-version \"{}\" from .python-version)",
                 self.pin.version, raw
             )
         } else {
             format!(
-                "tog: python {} selected (requires-python \"{}\" from {})",
+                "python {} selected (requires-python \"{}\" from {})",
                 self.pin.version,
                 self.constraint.as_deref().unwrap_or("*"),
                 self.constraint_source
@@ -101,10 +101,10 @@ impl PythonSelection {
 
     pub fn emit_warnings(&self) {
         for warning in &self.warnings {
-            eprintln!("{warning}");
+            crate::kernel::ui::warning(warning);
         }
         if !self.is_default() {
-            eprintln!("{}", self.selection_message());
+            crate::kernel::ui::note(&self.selection_message());
         }
     }
 }
@@ -201,7 +201,7 @@ pub fn locked(
         .collect();
     if !violated.is_empty() {
         warnings.push(format!(
-            "tog: cpython {} from tog-toolchain.toml does not satisfy {}; honoring the lock \
+            "cpython {} from tog-toolchain.toml does not satisfy {}; honoring the lock \
              (change the declaration, then run `tog update --toolchain python`)",
             pin.version,
             violated.join(", ")
@@ -299,7 +299,7 @@ pub fn select_python_with_inputs(
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
-                "tog: .python-version \"{}\" violates declared Python constraint {}; honoring explicit request",
+                ".python-version \"{}\" violates declared Python constraint {}; honoring explicit request",
                 explicit.raw, declared
             ));
         }

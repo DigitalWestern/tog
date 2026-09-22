@@ -470,9 +470,9 @@ fn resolve_uv_package<'a>(
             ),
         ));
     }
-    eprintln!(
-        "tog: uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
-    );
+    crate::kernel::ui::warning(&format!(
+        "uv.lock has no package variant compatible with the host for {name}; falling back to uv resolution"
+    ));
     Ok(None)
 }
 
@@ -521,7 +521,10 @@ fn locked_from_uv_package(
         })
         .collect();
     let Some((file, _)) = pypi::select_file(&candidates, tag, platform, glibc) else {
-        eprintln!("tog: uv.lock has no file compatible with the host for {}; falling back to uv resolution", package.name);
+        crate::kernel::ui::warning(&format!(
+            "uv.lock has no file compatible with the host for {}; falling back to uv resolution",
+            package.name
+        ));
         return None;
     };
     let kind = package

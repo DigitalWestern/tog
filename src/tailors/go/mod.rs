@@ -24,6 +24,7 @@ use crate::kernel::toolchain::{
     ArtifactRow, ArtifactSpec, Bundle, Catalog, Component, LegacyEvidence, Selected, Source,
 };
 use crate::kernel::types::Identity;
+use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -717,7 +718,7 @@ fn tidy_gate(
     }
     // Out-of-sync manifest: run the ecosystem's resolver, the same
     // delegated mutation as uv pip compile / cargo generate-lockfile.
-    eprintln!("tog: go.mod/go.sum need updating; resolving with the store go mod tidy...");
+    ui::note("go.mod/go.sum need updating; resolving with the store go mod tidy...");
     let out = run_go(
         store,
         go_obj,
@@ -756,7 +757,7 @@ fn download_closure(
     if !gosum.is_empty() {
         fs::write(work.join("go.sum"), gosum)?;
     }
-    eprintln!("tog: computing Go module closure with the store toolchain...");
+    ui::note("computing Go module closure with the store toolchain...");
     run_go(
         store,
         go_obj,
@@ -1348,7 +1349,7 @@ pub fn build_sandboxed(
             let dest = project_dir.join(entry.file_name());
             fs::rename(entry.path(), &dest)
                 .or_else(|_| fs::copy(entry.path(), &dest).map(|_| ()))?;
-            eprintln!("tog: built {}", dest.display());
+            ui::note(&format!("built {}", dest.display()));
         }
         Ok(())
     });

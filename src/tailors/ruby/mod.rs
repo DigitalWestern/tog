@@ -19,6 +19,7 @@ use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
+use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -699,7 +700,7 @@ pub fn plan_ruby(
     }
     let lock_path = project_dir.join("Gemfile.lock");
     if !lock_path.is_file() {
-        eprintln!("tog: no Gemfile.lock; resolving with the store bundler...");
+        ui::note("no Gemfile.lock; resolving with the store bundler...");
         let scratch = store.stage()?;
         let out = run_ruby(store, ruby_obj, project_dir, &scratch, &["bundle", "lock"])?;
         let _ = crate::kernel::store::remove_tree(&scratch);

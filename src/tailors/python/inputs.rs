@@ -120,9 +120,9 @@ pub fn read_plan(
             let Some(mut fallback) = manifest::dynamic_requirements_fallback(dir)? else {
                 return Err(error);
             };
-            eprintln!(
-                "tog: setup.py metadata probe failed; using the requirements directory convention: {error}"
-            );
+            ui::warning(&format!(
+                "setup.py metadata probe failed; using the requirements directory convention: {error}"
+            ));
             fallback.python = manifest.python.clone();
             manifest = fallback;
         }
@@ -135,7 +135,7 @@ pub fn read_plan(
     if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
         manifest.provenance.push_str(" (empty manifest)");
     }
-    eprintln!("tog: python inputs: {}", manifest.provenance);
+    ui::note(&format!("python inputs: {}", manifest.provenance));
     let input = manifest.input.clone();
     let source = manifest.requirements_text();
     let resolver_source = manifest.resolver_text();
@@ -211,10 +211,10 @@ pub fn read_plan(
             Ok(_) => source,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) => {
-                eprintln!(
-                    "tog: requirements.txt is pinned but not directly \
+                ui::warning(&format!(
+                    "requirements.txt is pinned but not directly \
                      consumable ({e}); re-locking for this platform with uv..."
-                );
+                ));
                 locked_requirements(
                     platform,
                     dir,
@@ -375,7 +375,9 @@ pub fn locked_requirements(
             return Ok(lock);
         }
     }
-    eprintln!("tog: {input} is not hash-pinned; resolving with the store uv...");
+    ui::note(&format!(
+        "{input} is not hash-pinned; resolving with the store uv..."
+    ));
     // Store-pinned uv, not host uv: a bare machine needs only tog.
     let uv = python::realize_uv(store, platform, selected)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);

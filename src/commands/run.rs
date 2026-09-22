@@ -280,7 +280,7 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
             .filter(|key| key.to_string_lossy().starts_with("npm_"))
             .collect();
         for (event, script) in steps {
-            eprintln!("tog: > {event}: {script}");
+            crate::kernel::ui::note(&format!("> {event}: {script}"));
             let mut step = std::process::Command::new("/bin/sh");
             step.arg("-c").arg(script).current_dir(&dir);
             for (key, value) in &envs {

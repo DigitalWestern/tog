@@ -194,8 +194,53 @@ pub(crate) fn sync_preflighted(
         return Err(no_inputs());
     }
     print_exception_summary(dir)?;
+    print_habits_notice(&ctx.store);
     print_signing_notice(&ctx.store);
     Ok(())
+}
+
+fn print_habits_notice(store: &store::Store) {
+    if let Some(message) = habits_notice(|| first_habits_notice(store)) {
+        crate::kernel::ui::note(message);
+    }
+}
+
+/// How a read-only environment is used, said once per store.
+///
+/// A pip or npm user arrives with habits this projection cannot serve:
+/// there is nothing to activate and nothing to install into. `tog run`
+/// refuses those commands by name when they are typed, but the first sync
+/// is the moment to say which verbs replace them, before anything is typed.
+fn habits_notice(first_for_this_store: impl FnOnce() -> bool) -> Option<&'static str> {
+    first_for_this_store().then_some(
+        "this environment is read-only: there is no activate script and no pip or npm \
+         install into it. Run things with 'tog run <command>' or 'tog <script>', change \
+         dependencies with 'tog add <package>' and 'tog remove <package>', and give a \
+         shell the environment with eval \"$(tog env)\". Said once per store",
+    )
+}
+
+/// Claim the once-per-store habits notice, the way `first_signing_notice`
+/// claims its own: the marker's creation is the claim, so two concurrent
+/// syncs say it once between them, and a store that cannot be written stays
+/// quiet rather than nagging every sync.
+fn first_habits_notice(store: &store::Store) -> bool {
+    claim_habits_notice(store, crate::kernel::ui::quiet())
+}
+
+/// The claim with the quiet decision passed in, so a test can exercise the
+/// rule without silencing the test binary's stderr: `--quiet` drops the line
+/// on the way out, and the user would have spent their one showing on a run
+/// that could not display it.
+fn claim_habits_notice(store: &store::Store, quiet: bool) -> bool {
+    if quiet {
+        return false;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(store.root.join("habits-notice"))
+        .is_ok()
 }
 
 fn print_signing_notice(store: &store::Store) {
@@ -390,6 +435,45 @@ mod tests {
         };
         assert!(first_signing_notice(&store));
         assert!(!first_signing_notice(&store));
+    }
+
+    /// A pip or npm user's habits stop working the moment an environment is
+    /// projected, so the first sync in a store names the verbs that replace
+    /// them and every sync after it stays quiet.
+    #[test]
+    fn the_habits_note_is_said_once_per_store_and_never_under_quiet() {
+        let said = habits_notice(|| true).expect("the first sync says it");
+        assert!(said.contains("read-only"), "{said}");
+        assert!(said.contains("no activate script"), "{said}");
+        assert!(said.contains("tog run <command>"), "{said}");
+        assert!(said.contains("tog add <package>"), "{said}");
+        assert!(said.contains("tog env"), "{said}");
+        assert!(said.contains("Said once per store"), "{said}");
+        assert!(habits_notice(|| false).is_none());
+
+        // The slot is a real once-per-store claim, not a coin flip.
+        let temp = TempDir::new();
+        let store = store::Store {
+            root: temp.0.clone(),
+        };
+        assert!(claim_habits_notice(&store, false));
+        assert!(!claim_habits_notice(&store, false));
+
+        // Quiet would drop the line on the way out, so it never spends the
+        // showing: a fresh store is left unclaimed for a loud run.
+        let quiet_temp = TempDir::new();
+        let quiet_store = store::Store {
+            root: quiet_temp.0.clone(),
+        };
+        assert!(!claim_habits_notice(&quiet_store, true));
+        assert!(!quiet_store.root.join("habits-notice").exists());
+        assert!(claim_habits_notice(&quiet_store, false));
+
+        // A store that cannot be written stays quiet rather than nagging.
+        let unwritable = store::Store {
+            root: temp.0.join("no/such/store"),
+        };
+        assert!(!claim_habits_notice(&unwritable, false));
     }
 
     /// `tog sync --strict` does not refuse recorded exceptions; it fails

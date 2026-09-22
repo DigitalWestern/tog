@@ -4,6 +4,7 @@
 
 use crate::kernel::signing::{self, KeySet};
 use crate::kernel::store::Store;
+use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -558,7 +559,7 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
             ));
         }
         let kind = canonical_kind(kind);
-        eprintln!("tog: exception {kind}: {subject}: {detail}");
+        ui::warning(&format!("exception {kind}: {subject}: {detail}"));
         frame.exceptions.push(Exception {
             kind: kind.into(),
             subject: subject.into(),

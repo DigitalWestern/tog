@@ -13,6 +13,7 @@ use crate::kernel::toolchain::{
     Selected,
 };
 use crate::kernel::types::Identity;
+use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -657,10 +658,10 @@ fn resolve_channel(
     if channel == "stable" {
         let pin = newest_pin(platform)?;
         if effects {
-            eprintln!(
-                "tog: {} resolves stable to pinned Rust {pin}",
+            ui::note(&format!(
+                "{} resolves stable to pinned Rust {pin}",
                 path.display()
-            );
+            ));
         }
         return Ok(pin);
     }

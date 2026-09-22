@@ -13,6 +13,7 @@ use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
 use crate::kernel::store::{fsync_directory, rename_at, ProjectionBase, ProjectionRef, Store};
+use crate::kernel::ui;
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -887,11 +888,11 @@ pub fn backup_real_dir(path: &Path, env_obj: &Path) -> io::Result<Option<PathBuf
             ),
         )
     })?;
-    eprintln!(
-        "tog: moved existing {} to {} (delete it once you're happy)",
+    ui::warning(&format!(
+        "moved existing {} to {} (delete it once you're happy)",
         path.display(),
         dest.display()
-    );
+    ));
     Ok(Some(dest))
 }
 
@@ -1046,11 +1047,11 @@ pub fn move_reserved_backup(path: &Path, destination: &Path) -> io::Result<()> {
     })?;
     source_dir.sync_all()?;
     backups_dir.sync_all()?;
-    eprintln!(
-        "tog: moved existing {} to {} (delete it once you're happy)",
+    ui::warning(&format!(
+        "moved existing {} to {} (delete it once you're happy)",
         path.display(),
         destination.display()
-    );
+    ));
     Ok(())
 }
 

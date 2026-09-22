@@ -70,7 +70,12 @@ with what each one locks, is in 'tog help sync'.
 
 - **stdout is results, stderr is narration.** `plan`, `sbom`, `store path`,
   and the `--json` forms write parseable output to stdout and nothing else;
-  progress keeps the `tog:` prefix on stderr. `gc` narrates, so every line
+  narration stays on stderr with a `tog:` prefix, and the prefix says which
+  kind it is: progress is `tog: <what is happening>`, an advisory you may
+  want to act on — a fallback, a lock disagreement, a recorded policy
+  exception — is `tog: warning: <what happened>`, and a failure is
+  `tog: error: <what failed>`. `--quiet` silences the first two and never
+  the third. `gc` narrates, so every line
   it prints — registered, forgot, would free, freed, cleanup skipped — is
   stderr and `--quiet` silences all of it.
 - **`--json` is a promise about both streams.** With `--json`, stdout
