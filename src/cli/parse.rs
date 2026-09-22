@@ -7,14 +7,14 @@ use super::spec::{
     SYNC_ALIASES, TOOLCHAIN_ALIAS, TOOLCHAIN_WORDS,
 };
 use super::{
-    Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, ToolchainUpdate, UsageError, VERSION,
+    Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, ToolchainUpdate, UsageError,
 };
 
 const VERSION_WORDS: [&str; 3] = ["-V", "--version", "version"];
 const HELP_WORDS: [&str; 3] = ["-h", "--help", "help"];
 
 fn version_text() -> String {
-    format!("tog {VERSION}\n")
+    format!("{}\n", super::version_line())
 }
 
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
@@ -447,6 +447,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     let mut dev = false;
     let mut no_sync = false;
     let mut toolchain = false;
+    let mut self_update = false;
     let mut positional = Vec::new();
     let mut passthrough = false;
     for arg in args {
@@ -460,6 +461,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             "-h" | "--help" => return Ok(None),
             "--no-sync" => no_sync = true,
             "--toolchain" if name == "update" => toolchain = true,
+            "--self" if name == "update" => self_update = true,
             "--dev" | "-D" if matches!(name, "add" | "remove") => dev = true,
             other if other.starts_with('-') && other.len() > 1 => return Err(reject(name, other)),
             other => {
@@ -473,6 +475,26 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
                 positional.push(other.to_string());
             }
         }
+    }
+    if self_update {
+        // `--self` updates tog itself and nothing in the project, so a
+        // package, `--toolchain`, or `--no-sync` beside it has no meaning.
+        let stray = if toolchain {
+            Some("--toolchain".to_string())
+        } else if no_sync {
+            Some("--no-sync".to_string())
+        } else {
+            positional.first().map(|word| format!("'{word}'"))
+        };
+        if let Some(stray) = stray {
+            return Err(UsageError::new(
+                format!(
+                    "update --self replaces the tog binary and takes nothing else; drop {stray}"
+                ),
+                Some("update"),
+            ));
+        }
+        return Ok(Some(Command::SelfUpdate));
     }
     if toolchain {
         return parse_update_toolchain(&positional, no_sync).map(Some);
@@ -1290,7 +1312,11 @@ mod tests {
             &["version"],
             &["help", "version"],
         ] {
-            assert_eq!(printed(words), format!("tog {VERSION}\n"), "{words:?}");
+            assert_eq!(
+                printed(words),
+                format!("{}\n", super::super::version_line()),
+                "{words:?}"
+            );
         }
         for spec in COMMANDS {
             assert_eq!(
@@ -1616,6 +1642,27 @@ mod tests {
             .contains("takes an ecosystem name, not a package"));
         assert!(message(&["update", "--toolchain", "python", "node"])
             .contains("takes an ecosystem name, not a package"));
+        // `--self` is a third verb wearing the word: nothing goes with it.
+        assert_eq!(command(&["update", "--self"]), Command::SelfUpdate);
+        for (words, stray) in [
+            (&["update", "--self", "serde"][..], "'serde'"),
+            (&["update", "serde", "--self"], "'serde'"),
+            (&["update", "--self", "--toolchain"], "--toolchain"),
+            (&["update", "--toolchain", "--self"], "--toolchain"),
+            (&["update", "--self", "--no-sync"], "--no-sync"),
+        ] {
+            let text = message(words);
+            assert!(
+                text.contains("update --self replaces the tog binary") && text.contains(stray),
+                "{words:?}: {text}"
+            );
+        }
+        for name in ["add", "remove"] {
+            assert!(
+                message(&[name, "--self", "six"]).contains("unknown option '--self'"),
+                "{name}"
+            );
+        }
         // `--toolchain` is not an option of the dependency verbs.
         assert_eq!(
             message(&["add", "--toolchain"]),
@@ -2041,7 +2088,10 @@ mod tests {
             message(&["--quite", "plan"]),
             "unknown option '--quite'; did you mean '--quiet'?"
         );
-        assert_eq!(printed(&["-V"]), format!("tog {VERSION}\n"));
+        assert_eq!(
+            printed(&["-V"]),
+            format!("{}\n", super::super::version_line())
+        );
         assert!(run(&["-v", "plan"]).options.verbose);
         assert_eq!(
             command(&["run", "pytest", "-q"]),

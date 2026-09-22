@@ -17,7 +17,7 @@ EVERYDAY:
   sync         set up the environment(s) from the locks; aliases: install, i
   add          add a dependency, re-lock, sync
   remove       remove a dependency, re-lock, sync
-  update       update dependencies, or --toolchain, and sync
+  update       update dependencies, --toolchain, or --self (tog itself)
   run          run a command or package.json script in the environment(s)
   env          print the environment as shell exports (for eval or direnv)
   x            run a tool without adding it as a dependency (like npx / uvx)
@@ -221,6 +221,22 @@ refused with both roots named. Ecosystem choice, cheapest rung first:
    never guesses from the bare name.
 
 Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
+
+**update --self** updates tog itself and touches no project, store, or key.
+It reads GitHub's latest release (one request), stops with "nothing to do"
+when this build already is that version or newer, and otherwise downloads
+`tog-<triple>.tar.gz` and its `.sha256` from the release, verifies the
+digest, extracts the binary to a sibling of the running one, runs its
+`--version`, and renames it over the running binary, which keeps working
+because it holds its open file. The writability probe runs before anything
+is downloaded: when the binary's directory cannot be written, the refusal
+names the directory and the installer. The downloaded binary must report the
+release's version, so a mislabeled asset is refused too. It takes no other
+argument. A release is compared by version only, because a release does not
+name the commit it was built from: a local build of the same crate version
+is "at the latest release's version" and stays. The asset names and the
+checksum rule are `install.sh`'s, so the two read a release the same way. `TOG_RELEASE_MANIFEST` names another
+manifest URL (the tests use `file://`); nothing checks in the background.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
 mix. It re-reads the declarative toolchain sources, selects the newest
@@ -534,9 +550,18 @@ either position); the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`, `rustfmt`.
 **plan** prints what `sync` would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
-platform, store, sandbox, host C toolchain, and realized toolchains, each
-line `ok`/`warn`/`fail` (lowercase, in text and in JSON) with the fix;
-exit 1 on any fail.
+this build against the newest release (the first row, `warn` with `run 'tog
+update --self'` when one is newer, `ok` with `not checked` when the manifest
+is unreachable: offline is not unhealthy), then platform, store, sandbox,
+host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
+(lowercase, in text and in JSON) with the fix; exit 1 on any fail.
+
+**--version** prints `tog <crate version> (<short commit> <commit date>)`,
+stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);
+outside a checkout the parenthesis says `unknown build`. Two binaries of the
+same crate version built from different commits print different lines, which
+is what makes "is this binary stale?" answerable and what a bug report
+should quote.
 
 ### Gating a pull request with sync and audit
 

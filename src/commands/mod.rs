@@ -18,6 +18,7 @@ pub(crate) mod ls;
 pub(crate) mod plan;
 pub(crate) mod run;
 pub(crate) mod sbom;
+pub(crate) mod selfupdate;
 pub(crate) mod shared;
 pub(crate) mod status;
 pub(crate) mod store;
@@ -141,6 +142,11 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     }
     // Real subcommands validate the host once before any store-touching work.
     let platform = Platform::host()?;
+    // `update --self` needs the host (to pick the release asset) and
+    // nothing else: no project, no store, no signing key.
+    if let SelfUpdate = command {
+        return selfupdate::run(platform);
+    }
     // A package.json `fmt` script is deliberately resolved before opening the
     // store. This preserves the cheap script path for a non-Rust project.
     if let Fmt {
@@ -272,7 +278,8 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         | Doctor { .. }
         | Keygen { .. }
         | Ls { .. }
-        | Audit { .. } => {
+        | Audit { .. }
+        | SelfUpdate => {
             unreachable!("handled above")
         }
     }

@@ -480,6 +480,7 @@ every tailor and the kernel):
     keygen.rs       tog keygen: a closure-signing key and its policy table
     deps.rs         add / remove / update, delegated to each ecosystem's tool
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
+    selfupdate.rs   tog update --self, and doctor's version row (release lookup)
     x.rs            tog x: run a registry tool without adding it to a project
 
 Kernel (`src/kernel/`, ecosystem-agnostic):

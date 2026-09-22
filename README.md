@@ -95,6 +95,20 @@ That removes the binary, `~/.tog/env`, the completions, and the PATH blocks
 it added. It does not remove the store: it prints its path and size and the
 `rm -rf` that would, because the store is downloaded data, not the program.
 
+To update later, ask the binary itself:
+
+```sh
+tog update --self
+```
+
+It reads the newest release from GitHub, stops when this build already is
+that version, and otherwise downloads the binary for your machine, checks
+the sha256 the release publishes, and renames it over the running one. It
+refuses, naming the directory, when that directory is not writable. `tog
+doctor` says when a newer release exists (one request; "not checked" when
+offline), and `tog --version` prints the commit and its date, so a stale
+binary can be told from a current one. Nothing checks in the background.
+
 From source, with a Rust toolchain (`cargo install` puts the binary in
 `~/.cargo/bin`, which rustup already added to PATH):
 
@@ -124,8 +138,9 @@ tog build                   # sandboxed Cargo build (network denied)
 tog status                  # is the projection still current with the lock?
 tog update --toolchain      # re-select the runtimes and rewrite tog-toolchain.toml
 tog gc --dry-run            # preview unreferenced store/cache cleanup
-tog doctor                  # host prerequisites, sandbox, store, free space
-tog --version
+tog doctor                  # host prerequisites, sandbox, store, free space, newer release?
+tog update --self           # replace this binary with the newest release
+tog --version               # tog 0.1.0 (7688cfd 2026-09-21): crate version, commit, date
 ```
 
 `tog <script>` is the short form of `tog run <script>` for any package.json
