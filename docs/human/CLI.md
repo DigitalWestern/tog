@@ -79,10 +79,10 @@ with what each one locks, is in 'tog help sync'.
   `tog: warning: <what happened>`, and every warning is followed by
   `tog:     fix: <command>`, the one command that resolves it, ready to
   paste; a line with nothing for you to do is progress, not a warning. A
-  failure is `tog: error: <what failed>`. `--quiet` silences the first two and never the third. `gc`
-  narrates, so every line
-  it prints — registered, forgot, would free, freed, cleanup skipped — is
-  stderr and `--quiet` silences all of it.
+  failure is `tog: error: <what failed>`. `--quiet` silences the first two
+  and never the third. `gc` narrates, so every line it prints — registered,
+  forgot, would free, freed, cleanup skipped — is stderr and `--quiet`
+  silences all of it.
 - **`--json` is a promise about both streams.** With `--json`, stdout
   carries the JSON document and nothing else, narration stays on stderr,
   and a failure is one JSON object on stderr: `{"error":"<message>"}`.
@@ -108,7 +108,8 @@ with what each one locks, is in 'tog help sync'.
 - **Network failures say what happened**: offline, DNS, proxy, https-only,
   or the server's status, with the URL named once. Not ureq's words.
 - **Color** only on a tty stderr, only for `error:`/`warning:` and
-  `fix:`/`synced:` words (`fix:` is green, like `synced:`); `--no-color` or `NO_COLOR` turns it off, and stdout never gets it.
+  `fix:`/`synced:` words (`fix:` is green, like `synced:`); `--no-color` or
+  `NO_COLOR` turns it off, and stdout never gets it.
 - **Global options work before or after the command.** `-C <dir>`, `-q`,
   `-v` and `--no-color` mean the same thing in either position (`tog ls -v`
   and `tog -v ls` are the same command), except where the rest of the line

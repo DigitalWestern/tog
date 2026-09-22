@@ -2,6 +2,7 @@
 //! additive upgrades under the exclusive lease, never a deletion permission.
 
 use super::*;
+use crate::kernel::ui::{FIX_PREFIX, WARNING_PREFIX};
 
 // ===========================================================================
 // Automatic maintenance and legacy migration.
@@ -133,10 +134,10 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
     Ok(report)
 }
 
-// The prefixes every automatic-maintenance advisory carries before color
-// is applied. Kept plain so the deferral marker compares the same bytes
-// whether stderr was a terminal or a pipe.
-use crate::kernel::ui::{FIX_PREFIX, WARNING_PREFIX};
+// `WARNING_PREFIX` and `FIX_PREFIX` (from `ui`) are the plain prefixes every
+// automatic-maintenance advisory carries before color is applied, so the
+// deferral marker compares the same bytes whether stderr was a terminal or
+// a pipe.
 
 /// The one command that resolves every deferral: it is the long form of the
 /// maintenance that was just deferred.
