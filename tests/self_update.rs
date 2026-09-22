@@ -436,8 +436,13 @@ fn doctor_reports_the_build_and_whether_a_release_is_newer() {
         format!("warn  version      {running}; v99.0.0 is out (run 'tog update --self')"),
         "{stdout}"
     );
-    // A stale binary is a warning, not a failure: the host is healthy.
-    assert!(!stdout.contains("failed."), "{stdout}");
+    // A stale binary is a warning, not a failure. Other rows may fail on
+    // the host running this (the Ubuntu 22.04 sandbox, issue #87), so only
+    // the version row is judged.
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("fail  version")),
+        "{stdout}"
+    );
     let out = run(&binary, &home.0, &manifest, &["doctor", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["checks"][0]["name"], "version");
