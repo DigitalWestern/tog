@@ -5,10 +5,9 @@
 //! here, because it decides *how* the command runs, not what it sees.
 
 use crate::comforter;
-use crate::commands::shared::{child_status_code, projected_root};
+use crate::commands::shared::{self, child_status_code, projected_root};
 use crate::kernel::context::Context;
 use crate::kernel::supervise;
-use crate::tailors;
 use crate::tailors::node;
 use std::io;
 
@@ -247,12 +246,9 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
             "package.json scripts are not run under a .NET projection (MSBuild belongs in the sandbox: use `tog build dotnet`)",
         ));
     }
-    let mut prefix: Vec<String> = Vec::new();
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
-    for tailor in tailors::registry() {
-        prefix.extend(tailor.run_env(ctx, &dir, &cwd, cmd, &mut command)?);
-    }
+    let mut prefix = shared::projected_env(ctx, &dir, &cwd, cmd, &mut command)?;
     if prefix.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -280,7 +276,7 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
             .filter(|key| key.to_string_lossy().starts_with("npm_"))
             .collect();
         for (event, script) in steps {
-            eprintln!("tog: > {event}: {script}");
+            crate::kernel::ui::note(&format!("> {event}: {script}"));
             let mut step = std::process::Command::new("/bin/sh");
             step.arg("-c").arg(script).current_dir(&dir);
             for (key, value) in &envs {

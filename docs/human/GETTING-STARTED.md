@@ -259,6 +259,13 @@ tog update                # re-lock within the manifest's constraints
 `--json` is there on `status`, `ls`, `audit`, `doctor` and `plan` for when
 something other than a person reads the answer.
 
+If typing `tog run` before everything gets old, `eval "$(tog env)"` puts the
+environment in the current shell, and
+`echo 'eval "$(tog env)"' > .envrc && direnv allow` scopes it to this
+directory instead; for VS Code and PyCharm, [EDITORS.md](EDITORS.md) has the
+interpreter path and the two editor buttons that cannot work against a
+read-only projection.
+
 ## 7. When it goes wrong
 
 Two you will hit first.

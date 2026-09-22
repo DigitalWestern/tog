@@ -1016,11 +1016,10 @@ fn link_package_bins(staged: &Path, packages: &[(NpmPackage, PathBuf)]) -> io::R
                 // Real graphs collide (playwright + @playwright/test both
                 // declare `playwright`). npm keeps the first hoisted claim;
                 // plan order is sorted, so first-wins is deterministic.
-                eprintln!(
-                    "tog: warning: bin {bin_name:?} already claimed; \
-                     skipping the one from {}",
+                crate::kernel::ui::warning(&format!(
+                    "bin {bin_name:?} already claimed; skipping the one from {}",
                     p.path
-                );
+                ));
                 continue;
             }
             std::os::unix::fs::symlink(&link_target, &link)?;
@@ -1404,7 +1403,10 @@ fn apply_artifact_policy(
         Err(error) => {
             // A provisioning failure is not fatal: the install script still
             // runs and fails loudly on its own if it needs the artifact.
-            eprintln!("tog: {}: could not provision its artifact: {error}", p.name);
+            crate::kernel::ui::warning(&format!(
+                "{}: could not provision its artifact: {error}",
+                p.name
+            ));
             crate::kernel::policy::record(
                 crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
                 &format!("{}@{}", p.name, p.version),
@@ -1451,7 +1453,7 @@ fn run_package_phases(
     activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<()> {
     for (phase, script) in phases {
-        eprintln!("tog: {} {}: {phase} (sandboxed)", p.name, p.version);
+        crate::kernel::ui::note(&format!("{} {}: {phase} (sandboxed)", p.name, p.version));
         let envs_phase: Vec<(String, String)> = envs
             .iter()
             .cloned()

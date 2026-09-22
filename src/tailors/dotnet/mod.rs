@@ -19,6 +19,7 @@ use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
+use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -834,7 +835,7 @@ pub fn plan_dotnet(
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
     let (mut csproj, mut lock_path) = preflight(project_dir, &sdk_version)?;
     if !lock_path.is_file() {
-        eprintln!("tog: no packages.lock.json; resolving with the store SDK...");
+        ui::note("no packages.lock.json; resolving with the store SDK...");
         let scratch = store.stage()?;
         let config = scratch.join("nuget.config");
         fs::write(
@@ -1118,7 +1119,9 @@ pub fn realize_packages(
             .ok_or_else(|| err("plan has no target framework"))?,
     )?;
     if plan.targets.len() > 1 {
-        eprintln!("tog: synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}");
+        ui::warning(&format!(
+            "synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}"
+        ));
     }
     fs::write(
         verifier.join("tog-verifier.csproj"),
@@ -1514,10 +1517,10 @@ fn publish_output(
             // The publish itself succeeded; rolling back here could lose
             // BOTH versions (the old tree may be partially deleted). Keep
             // the new output and report the leftover.
-            eprintln!(
-                "tog: warning: previous output left at {} ({e}); remove it manually",
+            ui::warning(&format!(
+                "previous output left at {} ({e}); remove it manually",
                 old.display()
-            );
+            ));
         }
     }
     Ok(output)
@@ -1648,7 +1651,7 @@ pub fn build_sandboxed(
         }
     };
     let _ = crate::kernel::store::remove_tree(&scratch);
-    eprintln!("tog: built into {}", output.display());
+    ui::note(&format!("built into {}", output.display()));
     Ok(())
 }
 

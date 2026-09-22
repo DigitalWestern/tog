@@ -74,6 +74,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         "plan" => parse_plan(rest)?,
         "build" => parse_passthrough(rest, "build")?,
         "run" => parse_passthrough(rest, "run")?,
+        "env" => parse_env(rest)?,
         "sbom" => parse_sbom(rest)?,
         "add" | "remove" | "update" => parse_deps(rest, name)?,
         "x" => parse_x(rest)?,
@@ -968,11 +969,52 @@ fn parse_store(args: &[String]) -> Result<Option<Command>, UsageError> {
     Ok(Some(command))
 }
 
+/// One shell vocabulary for the two commands that take one, so
+/// `tog completions <shell>` and `tog env --shell <shell>` cannot come to
+/// disagree about what a shell is or how a typo is answered.
+fn named_shell(word: &str, command: &'static str) -> Result<Shell, UsageError> {
+    match word {
+        "bash" => Ok(Shell::Bash),
+        "zsh" => Ok(Shell::Zsh),
+        "fish" => Ok(Shell::Fish),
+        other => Err(UsageError::new(
+            with_suggestion(
+                format!("unsupported shell '{other}' (bash, zsh, or fish)"),
+                other,
+                SHELL_WORDS.iter().copied(),
+            ),
+            Some(command),
+        )),
+    }
+}
+
+/// `env [--shell <bash|zsh|fish>]`. No `--shell` leaves the choice to the
+/// command, which reads `$SHELL`; the grammar never looks at the host.
+fn parse_env(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let mut shell = None;
+    let mut index = 0;
+    while let Some(arg) = args.get(index).map(String::as_str) {
+        match arg {
+            "-h" | "--help" => return Ok(None),
+            // A mistyped flag (`--shell --json`) is a usage error, not a
+            // shell name, by the same rule every value-taking option uses.
+            "--shell" => {
+                let value = separate_value(args, index, "env: --shell", Some("env"), "a shell")?;
+                shell = Some(named_shell(value, "env")?);
+                index += 1;
+            }
+            _ if arg.starts_with("--shell=") => {
+                shell = Some(named_shell(&arg["--shell=".len()..], "env")?);
+            }
+            other => return Err(reject("env", other)),
+        }
+        index += 1;
+    }
+    Ok(Some(Command::Env { shell }))
+}
+
 fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
     let shell = match args.first().map(String::as_str) {
-        Some("bash") => Shell::Bash,
-        Some("zsh") => Shell::Zsh,
-        Some("fish") => Shell::Fish,
         Some("-h" | "--help") => return Ok(None),
         None => {
             return Err(UsageError::new(
@@ -980,16 +1022,7 @@ fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
                 Some("completions"),
             ))
         }
-        Some(other) => {
-            return Err(UsageError::new(
-                with_suggestion(
-                    format!("unsupported shell '{other}' (bash, zsh, or fish)"),
-                    other,
-                    SHELL_WORDS.iter().copied(),
-                ),
-                Some("completions"),
-            ))
-        }
+        Some(word) => named_shell(word, "completions")?,
     };
     if let Some(extra) = args.get(1) {
         return Err(UsageError::new(
@@ -1857,6 +1890,60 @@ mod tests {
             "gc: unknown option '--dryrun'; did you mean '--dry-run'?"
         );
         assert_eq!(message(&["gc", "now"]), "gc: unexpected argument 'now'");
+    }
+
+    /// `env` takes one optional shell and nothing else. No `--shell` is
+    /// `None` here on purpose: the default reads `$SHELL`, which the
+    /// grammar may not look at.
+    #[test]
+    fn env_takes_a_shell_and_nothing_else() {
+        assert_eq!(command(&["env"]), Command::Env { shell: None });
+        assert_eq!(
+            command(&["env", "--shell", "fish"]),
+            Command::Env {
+                shell: Some(Shell::Fish)
+            }
+        );
+        assert_eq!(
+            command(&["env", "--shell=zsh"]),
+            Command::Env {
+                shell: Some(Shell::Zsh)
+            }
+        );
+        // The same vocabulary and the same typo answer as `completions`.
+        assert_eq!(
+            message(&["env", "--shell", "powershell"]),
+            "unsupported shell 'powershell' (bash, zsh, or fish)"
+        );
+        assert_eq!(
+            message(&["env", "--shell", "fis"]),
+            "unsupported shell 'fis' (bash, zsh, or fish); did you mean 'fish'?"
+        );
+        assert_eq!(message(&["env", "--shell"]), "env: --shell needs a shell");
+        assert_eq!(
+            message(&["env", "extra"]),
+            "env: unexpected argument 'extra'"
+        );
+        assert_eq!(
+            message(&["env", "--shel", "fish"]),
+            "env: unknown option '--shel'; did you mean '--shell'?"
+        );
+        assert!(printed(&["env", "-h"]).starts_with("tog env — "));
+        assert_eq!(printed(&["env", "--help"]), printed(&["help", "env"]));
+        // Not a pass-through verb: a global option works on either side.
+        for words in [&["-q", "env"][..], &["env", "-q"]] {
+            assert_eq!(
+                run(words),
+                Invocation {
+                    options: Options {
+                        quiet: true,
+                        ..Options::default()
+                    },
+                    command: Command::Env { shell: None },
+                },
+                "{words:?}"
+            );
+        }
     }
 
     #[test]

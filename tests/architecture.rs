@@ -6,9 +6,10 @@
 //! may wire the whole crate together. Size budgets (layering rule 5) are
 //! reported, not enforced, so drift is visible in `cargo test` output.
 //!
-//! Three housekeeping rules are enforced the same way: a test that sets
+//! Four housekeeping rules are enforced the same way: a test that sets
 //! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
-//! than cite plan documents or review rounds, and `docs/agent/` holds only
+//! than cite plan documents or review rounds, narration goes through
+//! `kernel::ui` rather than a raw `eprintln!`, and `docs/agent/` holds only
 //! its two files.
 
 use std::fs;
@@ -481,6 +482,55 @@ fn comment_text(line: &str) -> Option<&str> {
         i += 1;
     }
     None
+}
+
+/// Narration has one vocabulary: `kernel::ui` prints `tog:` for progress and
+/// `tog: warning:` for an advisory, and it is the module `--quiet` and
+/// `--no-color` are implemented in. A raw `eprintln!` elsewhere in `src/`
+/// bypasses that distinction, so the user cannot tell a fallback from a
+/// phase. Test modules are exempt: a skip message is for whoever ran the
+/// suite, not for a user.
+///
+/// Only `eprintln!` is a line of tog's own narration. `eprint!` is the
+/// verbatim pass-through of a subprocess's captured output and of an
+/// already-rendered usage error, neither of which takes a `tog:` prefix.
+#[test]
+fn narration_goes_through_kernel_ui() {
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || relative == "src/kernel/ui.rs" {
+            continue;
+        }
+        for (index, line) in outside_test_modules(&text).lines().enumerate() {
+            if line.contains("eprintln!") {
+                violations.push(format!("{relative}:{}: {}", index + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "stderr written outside kernel::ui (use ui::note for progress, \
+         ui::warning for an advisory, ui::error for a failure):\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The part of a file before its first `#[cfg(test)]` module. Unlike
+/// `non_test`, this finds a test module under any name (`mod tests`,
+/// `mod patch_snapshot_tests`), which is what a scan for test-only output
+/// needs; a `#[cfg(test)]` helper `fn` is not a module and does not cut.
+fn outside_test_modules(text: &str) -> &str {
+    let mut rest = text;
+    let mut consumed = 0;
+    while let Some(index) = rest.find("#[cfg(test)]\n") {
+        let after = &rest[index + "#[cfg(test)]\n".len()..];
+        if after.starts_with("mod ") || after.starts_with("pub mod ") {
+            return &text[..consumed + index];
+        }
+        consumed += index + "#[cfg(test)]\n".len();
+        rest = after;
+    }
+    text
 }
 
 /// `docs/agent/` is two files. Ledgers, review reports, and evidence dumps

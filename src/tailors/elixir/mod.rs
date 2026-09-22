@@ -19,6 +19,7 @@ use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
+use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -1431,7 +1432,7 @@ pub fn plan_elixir(
     let lock_path = project_dir.join("mix.lock");
     let scratch = store.stage()?;
     if !lock_path.is_file() {
-        eprintln!("tog: no mix.lock; resolving with the store mix (network, unsandboxed)...");
+        ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
         let out = run_mix(
             store,
             beam_obj,

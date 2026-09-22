@@ -94,9 +94,9 @@ pub fn load_cargo_inputs(
 }
 
 pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> io::Result<()> {
-    eprintln!(
-        "tog: no Cargo.lock; generating it with the store Rust toolchain \
-         (network allowed, unsandboxed)..."
+    ui::note(
+        "no Cargo.lock; generating it with the store Rust toolchain \
+         (network allowed, unsandboxed)...",
     );
     let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
     command

@@ -524,12 +524,12 @@ fn remove_sync_duplicate_links(project_dir: &Path, store: &Store, home: &Path) {
             .unwrap_or(false);
         if is_ours {
             let _ = fs::remove_file(&p);
-            eprintln!("tog: removed stale sync-duplicate symlink {name:?}");
+            crate::kernel::ui::warning(&format!("removed stale sync-duplicate symlink {name:?}"));
         } else {
-            eprintln!(
-                "tog: warning: {name:?} looks like a cloud-sync duplicate \
-                 of node_modules; consider removing it"
-            );
+            crate::kernel::ui::warning(&format!(
+                "{name:?} looks like a cloud-sync duplicate of node_modules; \
+                 consider removing it"
+            ));
         }
     }
 }

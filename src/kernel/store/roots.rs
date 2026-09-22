@@ -3,6 +3,7 @@
 //! registry file operations.
 
 use super::*;
+use crate::kernel::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootEntry {
@@ -1313,9 +1314,9 @@ pub(super) fn unresolvable(result: io::Result<()>, mode: ImportMode) -> io::Resu
         Err(error) => match mode {
             ImportMode::Strict => Err(error),
             ImportMode::DropUnresolvable => {
-                eprintln!(
-                    "tog: dropping a historical closure reference this store cannot resolve: {error}"
-                );
+                ui::warning(&format!(
+                    "dropping a historical closure reference this store cannot resolve: {error}"
+                ));
                 Ok(false)
             }
         },

@@ -30,14 +30,14 @@ pub fn ensure_npm_lock(
     }
     for other in ["bun.lock", "bun.lockb"] {
         if dir.join(other).exists() {
-            eprintln!(
-                "tog: note: {other} found; generating package-lock.json via npm \
+            ui::warning(&format!(
+                "{other} found; generating package-lock.json via npm \
                  (versions resolve fresh — they may differ from {other})"
-            );
+            ));
             break;
         }
     }
-    eprintln!("tog: no package-lock.json; resolving with the store npm...");
+    ui::note("no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
     // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
     // The npm that writes this lock is the one bundled in the Node the
