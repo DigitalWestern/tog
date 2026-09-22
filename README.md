@@ -34,6 +34,7 @@ CLI never prints them; they are defined in
 | [STATUS.md](STATUS.md) | where the project is, what is next |
 | [docs/human/ARCHITECTURE.md](docs/human/ARCHITECTURE.md) | how it works |
 | [docs/human/CLI.md](docs/human/CLI.md) | the command surface (spec) |
+| [docs/human/EDITORS.md](docs/human/EDITORS.md) | VS Code and PyCharm setup |
 | [docs/human/LIMITATIONS.md](docs/human/LIMITATIONS.md) | what it honestly cannot do |
 | [FOLLOW-UPS.md](FOLLOW-UPS.md) | the to-do list and open decisions |
 | [docs/agent/DESIGNS.md](docs/agent/DESIGNS.md) | designed but unbuilt work (for agents) |
@@ -112,10 +113,11 @@ unrelated crate. Releases are built by
 
 ```sh
 cd your-project     # an EXISTING project works as-is:
-tog             # realize + project -> ./.venv and/or ./node_modules
-tog run python app.py       # run inside the projected env(s)
+tog             # set up ./.venv and/or ./node_modules from the lockfiles
+tog run python app.py       # run one command inside the environment(s)
 tog dev                     # a package.json script, without the 'run'
 tog test --watch            # same; every later argument is the script's
+eval "$(tog env)"           # or put the environment in this whole shell
 tog add requests            # add a dependency with the ecosystem's own tool
 tog x ruff check .          # run a tool without adding it (like uvx / npx)
 tog build                   # sandboxed Cargo build (network denied)
@@ -132,6 +134,13 @@ build` is the sandboxed build and never a script called build. Use `tog run
 build` for that one. Arguments go to the script unchanged, so there is no
 npm-style `--` separator to remember: `tog test --watch`, not
 `tog test -- --watch`.
+
+`tog env` prints the environment as shell exports instead of running one
+command in it. For a whole directory rather than a whole shell, hand it to
+direnv: `echo 'eval "$(tog env)"' > .envrc && direnv allow`. Editors need
+the same thing plus one interpreter path —
+[docs/human/EDITORS.md](docs/human/EDITORS.md) has both, and says which of
+their package-install buttons will not work against a read-only projection.
 
 Full command reference: [docs/human/CLI.md](docs/human/CLI.md), or
 `tog help <command>`. Exit status: 0 success, 1 command failed, 2

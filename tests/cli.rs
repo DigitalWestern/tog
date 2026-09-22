@@ -656,6 +656,101 @@ fn run_passes_arguments_through_and_needs_a_projection() {
     assert!(text(&out.stderr).contains("no environment projected here"));
 }
 
+/// `tog env` prints the environment `tog run` would give a child, so the
+/// shell that evals it sees exactly what a tog-run command sees. Offline:
+/// the `.venv` symlink and a closure record are the whole projection the
+/// Python tailor reads, the same fixture `status` is tested against.
+#[test]
+fn env_prints_the_run_environment_as_shell_lines() {
+    let home = TempDir::new("env-home");
+    let project = TempDir::new("env-project");
+
+    // Outside a projection there is nothing to print, and stdout stays
+    // empty: a shell evaling this must not get half an environment.
+    let out = tog(&project.0, &home.0, &["env"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("no environment projected here"), "{stderr}");
+    assert!(stderr.contains("tog sync"), "{stderr}");
+
+    let object = project.0.join("env-object");
+    std::fs::create_dir_all(object.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&object, project.0.join(".venv")).unwrap();
+    let platform = tog::kernel::platform::Platform::host().unwrap();
+    let closures = project.0.join(".tog/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    std::fs::write(
+        closures.join("python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": platform.triple(),
+            "projected_at": 1,
+            "body": {
+                "env_object": object,
+                "python": {"version": "3.12.14"},
+                "plan": {"packages": []},
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // The command reads the cwd the kernel resolves, not the fixture path.
+    let venv = project.0.canonicalize().unwrap().join(".venv");
+
+    let out = tog(&project.0, &home.0, &["env"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("export PATH='"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{}/bin", venv.display())),
+        "{stdout}"
+    );
+    // The inherited PATH is referenced, not frozen into the line.
+    assert!(stdout.contains(":\"$PATH\"\n"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("export VIRTUAL_ENV='{}'\n", venv.display())),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("export PYTHONDONTWRITEBYTECODE='1'\n"),
+        "{stdout}"
+    );
+    // Every line is a shell statement: no narration reaches stdout.
+    for line in stdout.lines() {
+        assert!(
+            line.starts_with("export ") || line.starts_with("unset "),
+            "not a shell line: {line}"
+        );
+    }
+
+    // `--shell` decides, whatever $SHELL says.
+    let out = tog_env(
+        &project.0,
+        &home.0,
+        &["env", "--shell", "fish"],
+        &[("SHELL", "/bin/bash")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("set -gx PATH '"), "{stdout}");
+    assert!(stdout.contains(" $PATH\n"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("set -gx VIRTUAL_ENV '{}'\n", venv.display())),
+        "{stdout}"
+    );
+
+    // With no `--shell`, $SHELL chooses, and a shell tog does not speak
+    // gets POSIX exports rather than a refusal.
+    for (shell, first_word) in [("/usr/bin/fish", "set"), ("/bin/nu", "export")] {
+        let out = tog_env(&project.0, &home.0, &["env"], &[("SHELL", shell)]);
+        assert_eq!(out.status.code(), Some(0), "{shell}");
+        let stdout = text(&out.stdout);
+        assert!(stdout.starts_with(first_word), "{shell}: {stdout}");
+    }
+}
+
 #[test]
 fn store_path_honors_the_store_variable() {
     let home = TempDir::new("store");

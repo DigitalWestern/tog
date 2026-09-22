@@ -24,6 +24,27 @@ pub(crate) fn projected_root(cwd: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// What a projection under `dir` contributes to a child environment: the
+/// PATH prefixes every tailor wants ahead of the inherited PATH, with the
+/// variables it sets and removes applied to `command`. `cwd` is where the
+/// user ran from and `cmd` the command line, which some ecosystems refuse.
+///
+/// `tog run` spawns that command and `tog env` prints it. Both go through
+/// here so neither can drift from what a projection really is.
+pub(crate) fn projected_env(
+    ctx: &crate::kernel::context::Context,
+    dir: &Path,
+    cwd: &Path,
+    cmd: &[String],
+    command: &mut std::process::Command,
+) -> io::Result<Vec<String>> {
+    let mut prefix = Vec::new();
+    for tailor in crate::tailors::registry() {
+        prefix.extend(tailor.run_env(ctx, dir, cwd, cmd, command)?);
+    }
+    Ok(prefix)
+}
+
 /// What toolchain resolution needs to know about each detected ecosystem:
 /// its shipped catalog, and what a closure written before the lock existed
 /// proves. A closure that already records a `toolchain` body key was

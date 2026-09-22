@@ -154,9 +154,13 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   `tog run pip ...` and `tog run activate` are refused with the verb that replaces them
   (`tog add`, `tog run <command>`) rather than left to report a missing file, but **no pip
   shim and no `activate` script are planned**: a shim that accepted `pip install` would have
-  to either mutate a read-only store object or silently rewrite the manifest, and a shell
-  activation would make the environment ambient, which is the property tog exists to remove.
-  A per-shell activation (`tog shell`) is a feature, not a fix, and is not built.
+  to either mutate a read-only store object or silently rewrite the manifest, and an
+  `activate` script inside the projection would have to be written into a read-only object.
+  For a shell, `tog env` prints the environment as exports and `eval "$(tog env)"` applies
+  it; that environment is then **ambient** for that shell — every later command sees it,
+  tog's or not, and it outlives a `cd` out of the project. direnv is the way to scope it back
+  to a directory (`echo 'eval "$(tog env)"' > .envrc && direnv allow`), which is why tog
+  prints the environment instead of activating anything itself.
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
