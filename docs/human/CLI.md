@@ -76,7 +76,8 @@ the program's status through. Which files tog reads per ecosystem:
   syntax error in someone's session). Narration stays on stderr with a
   `tog:` prefix, and the prefix says which kind it is: progress is
   `tog: <what is happening>`, an advisory you may want to act on (a
-  fallback, a lock disagreement, a recorded policy exception) is
+  fallback, a directory moved aside, unsigned closures under a policy that
+  checks signatures) is
   `tog: warning: <what happened>`, and every warning is followed by
   `tog:     fix: <command>`, the one command that resolves it, ready to
   paste; a line with nothing for you to do is progress, not a warning. A

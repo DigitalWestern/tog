@@ -321,9 +321,20 @@ fn print_signing_notice(store: &store::Store) {
     // Claim the once-per-store slot only when the answer could depend on
     // it, so a signed sync does not burn it.
     let first = || !signed && !matters && first_signing_notice(store);
-    if let Some((message, fix)) = signing_notice(signed, matters, first) {
-        crate::kernel::ui::warning(message, fix);
+    if let Some((message, fix)) =
+        signing_notice(signed, matters, first, default_signing_key().is_file())
+    {
+        crate::kernel::ui::warning(message, &fix);
     }
+}
+
+/// Where the fix line tells a solo user to keep a key: next to the store's
+/// default home, so the same path works on every machine they set up.
+fn default_signing_key() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    home.unwrap_or_else(|| PathBuf::from("~"))
+        .join(".tog")
+        .join("signing.key")
 }
 
 /// What to say about unsigned closures, if anything.
@@ -332,32 +343,44 @@ fn print_signing_notice(store: &store::Store) {
 /// saying once per store, not as the last line of every sync. It stays on
 /// every sync only where a `[signing]` table proves someone is checking
 /// signatures: there an unsigned closure is a finding, not a preference.
+///
+/// The fix is the whole way out, not half of it: a key has to exist and
+/// `TOG_SIGNING_KEY` has to name it. `keygen` refuses to overwrite a key,
+/// so when the default one is already there the fix is only the export.
+/// Under a policy that names trusted keys a fresh key would not be
+/// trusted, so that fix names the key file the policy trusts instead.
 fn signing_notice(
     signed: bool,
     signing_in_policy: bool,
     first_for_this_store: impl FnOnce() -> bool,
-) -> Option<(&'static str, &'static str)> {
+    default_key_exists: bool,
+) -> Option<(&'static str, String)> {
     if signed {
         return None;
     }
     if signing_in_policy {
         return Some((
             "closures written unsigned while this policy declares [signing] trusted keys: \
-             'tog audit' will report them outdated; make a key, then export \
-             TOG_SIGNING_KEY=<key file>",
-            KEYGEN_FIX,
+             'tog audit' will report them outdated until TOG_SIGNING_KEY names a key the \
+             policy trusts",
+            "export TOG_SIGNING_KEY=<key file this policy trusts>".to_string(),
         ));
     }
+    let fix = if default_key_exists {
+        format!("export TOG_SIGNING_KEY={DEFAULT_KEY}")
+    } else {
+        format!("tog keygen {DEFAULT_KEY} && export TOG_SIGNING_KEY={DEFAULT_KEY}")
+    };
     first_for_this_store().then_some((
         "closures are written unsigned, which is fine until you want 'tog audit' to vouch \
-         for them; make a key, then export TOG_SIGNING_KEY=<key file>. Said once per store",
-        KEYGEN_FIX,
+         for them; the fix sets a key for this shell, and a shell profile keeps it. Said \
+         once per store",
+        fix,
     ))
 }
 
-/// The first half of the signing fix: a key has to exist before
-/// `TOG_SIGNING_KEY` can name one.
-const KEYGEN_FIX: &str = "tog keygen ~/.tog/signing.key";
+/// How the fix line spells `default_signing_key()`: the shell expands `~`.
+const DEFAULT_KEY: &str = "~/.tog/signing.key";
 
 /// Claim the once-per-store signing notice. The marker's creation is the
 /// claim (`create_new`), so two concurrent syncs print it once between
@@ -396,8 +419,10 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
             total += value["body"]["exceptions"].as_array().map_or(0, Vec::len);
         }
     }
-    if let Some((message, fix)) = exception_summary(total) {
-        crate::kernel::ui::warning(&message, fix);
+    match exception_summary(total, policy::signing_configured()) {
+        Some((message, Some(fix))) => crate::kernel::ui::warning(&message, fix),
+        Some((message, None)) => crate::kernel::ui::note(&message),
+        None => {}
     }
     Ok(())
 }
@@ -405,12 +430,24 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
 /// A count and where to read it. The line this replaces advised `tog sync
 /// --strict`, which does not refuse the recorded exceptions: it fails the
 /// sync that recorded them, undoing the work that just finished.
-fn exception_summary(total: usize) -> Option<(String, &'static str)> {
+///
+/// It is a warning with `tog audit` as its fix only where an audit gate is
+/// configured (a `[signing]` table with trusted keys): `audit` refuses to
+/// run without one, and unsigned closures are not judged, so without a
+/// gate there is nothing to type and the count is progress.
+fn exception_summary(total: usize, gate: bool) -> Option<(String, Option<&'static str>)> {
     (total > 0).then(|| {
-        (
-            format!("{total} policy exception(s) recorded in .tog/closures/*.json"),
-            "tog audit",
-        )
+        let message = format!("{total} policy exception(s) recorded in .tog/closures/*.json");
+        if gate {
+            (message, Some("tog audit"))
+        } else {
+            (
+                format!(
+                    "{message}; a policy with [signing] trusted keys makes 'tog audit' judge them"
+                ),
+                None,
+            )
+        }
     })
 }
 
@@ -493,22 +530,32 @@ mod tests {
     #[test]
     fn the_signing_notice_is_once_per_store_unless_a_policy_asks_for_signatures() {
         // Signed: nothing to say, and the once-per-store slot is untouched.
-        assert!(signing_notice(true, false, || panic!("slot claimed")).is_none());
-        assert!(signing_notice(true, true, || panic!("slot claimed")).is_none());
+        assert!(signing_notice(true, false, || panic!("slot claimed"), false).is_none());
+        assert!(signing_notice(true, true, || panic!("slot claimed"), false).is_none());
 
         let (unsigned, fix) =
-            signing_notice(false, false, || true).expect("the first sync says it");
+            signing_notice(false, false, || true, false).expect("the first sync says it");
         assert!(unsigned.contains("once per store"), "{unsigned}");
-        assert!(unsigned.contains("TOG_SIGNING_KEY"), "{unsigned}");
-        assert_eq!(fix, "tog keygen ~/.tog/signing.key");
-        assert!(signing_notice(false, false, || false).is_none());
+        assert_eq!(
+            fix,
+            "tog keygen ~/.tog/signing.key && export TOG_SIGNING_KEY=~/.tog/signing.key"
+        );
+        // A key that already exists must not be overwritten: the fix is
+        // then only the export.
+        let (_, fix) = signing_notice(false, false, || true, true).unwrap();
+        assert_eq!(fix, "export TOG_SIGNING_KEY=~/.tog/signing.key");
+        assert!(signing_notice(false, false, || false, false).is_none());
 
         // A [signing] table means someone reads signatures: say it every
-        // time, whatever the once-per-store slot holds.
+        // time, whatever the once-per-store slot holds, and a fresh key
+        // would not be one the policy trusts.
         let (policy_cares, policy_fix) =
-            signing_notice(false, true, || false).expect("a policy wants signing");
+            signing_notice(false, true, || false, true).expect("a policy wants signing");
         assert!(policy_cares.contains("[signing]"), "{policy_cares}");
-        assert_eq!(policy_fix, "tog keygen ~/.tog/signing.key");
+        assert_eq!(
+            policy_fix,
+            "export TOG_SIGNING_KEY=<key file this policy trusts>"
+        );
 
         // The slot is a real once-per-store claim, not a coin flip.
         let temp = TempDir::new();
@@ -562,12 +609,18 @@ mod tests {
     /// the sync that recorded them. The summary must not advise it.
     #[test]
     fn the_exception_summary_counts_and_points_at_a_read_command() {
-        assert_eq!(exception_summary(0), None);
-        let (line, fix) = exception_summary(3).unwrap();
+        assert_eq!(exception_summary(0, true), None);
+        assert_eq!(exception_summary(0, false), None);
+        let (line, fix) = exception_summary(3, true).unwrap();
         assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
         assert!(line.contains(".tog/closures/*.json"), "{line}");
-        assert_eq!(fix, "tog audit");
+        assert_eq!(fix, Some("tog audit"));
         assert!(!line.contains("--strict"), "{line}");
+        // Without a gate `tog audit` refuses to run, so there is nothing to
+        // type: the count is progress and names what would change that.
+        let (line, fix) = exception_summary(3, false).unwrap();
+        assert_eq!(fix, None);
+        assert!(line.contains("[signing]"), "{line}");
     }
 
     /// Sync ends by registering the project as a GC root, so a path no

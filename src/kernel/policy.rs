@@ -559,10 +559,10 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
             ));
         }
         let kind = canonical_kind(kind);
-        ui::warning(
-            &format!("exception {kind}: {subject}: {detail}"),
-            "tog audit",
-        );
+        // The record itself is progress: what to do about it depends on
+        // whether a policy gate exists, which the end-of-sync summary
+        // (`commands::sync::exception_summary`) knows and this frame does not.
+        ui::note(&format!("exception {kind}: {subject}: {detail}"));
         frame.exceptions.push(Exception {
             kind: kind.into(),
             subject: subject.into(),
