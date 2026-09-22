@@ -1,5 +1,5 @@
-//! The toolchain lock as a user meets it: `tog sync` writing and honoring
-//! `tog-toolchain.toml`, `tog sync --frozen` validating one without touching
+//! The toolchain lock as a user meets it: `tog` writing and honoring
+//! `tog-toolchain.toml`, `tog --frozen` validating one without touching
 //! anything, `tog update --toolchain` replacing one, and `tog status`
 //! reporting what the committed file says about the project.
 //!
@@ -694,7 +694,7 @@ fn exact_statuses() {
     assert_eq!(value["ecosystems"][0]["state"], "unchecked");
     assert_eq!(
         value["ecosystems"][0]["detail"],
-        "toolchain not recorded by this sync; run 'tog sync' once"
+        "toolchain not recorded by this sync; run 'tog' once"
     );
 
     // The lock this projection was synced against is gone.
@@ -705,11 +705,11 @@ fn exact_statuses() {
     let value: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
     assert_eq!(
         value["ecosystems"][0]["detail"][0],
-        "tog-toolchain.toml (missing; run 'tog sync' to create it)"
+        "tog-toolchain.toml (missing; run 'tog' to create it)"
     );
     let prose = text(&fixture.tog(&["status"]).stdout);
     assert!(
-        prose.contains("changed     tog-toolchain.toml (missing; run 'tog sync' to create it)"),
+        prose.contains("changed     tog-toolchain.toml (missing; run 'tog' to create it)"),
         "{prose}"
     );
 }

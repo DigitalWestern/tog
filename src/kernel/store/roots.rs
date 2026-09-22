@@ -944,7 +944,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run sync in that project"
+                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run 'tog' in that project"
                 ),
             )
         })?;
@@ -969,7 +969,7 @@ pub(super) fn parse_root_entry(key: &str, path: &Path, bytes: &[u8]) -> io::Resu
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run sync in that project"
+                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run 'tog' in that project"
                 ),
             )
         })?;

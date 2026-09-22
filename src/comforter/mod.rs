@@ -400,7 +400,7 @@ fn write_closure_inner(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is a symlink; remove it and run tog sync again",
+                    "{} is a symlink; remove it and run 'tog' again",
                     project.path().join(&closure_path).display()
                 ),
             ))
@@ -409,7 +409,7 @@ fn write_closure_inner(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is a {} where the closure belongs; remove it and run tog sync again",
+                    "{} is a {} where the closure belongs; remove it and run 'tog' again",
                     project.path().join(&closure_path).display(),
                     match kind {
                         Entry::Directory => "directory",
@@ -680,13 +680,13 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
     let text = fs::read_to_string(&path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("read {}: {e}; run `tog sync` first", path.display()),
+            format!("read {}: {e}; run `tog` first", path.display()),
         )
     })?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse {}: {e}; run `tog sync` first", path.display()),
+            format!("parse {}: {e}; run `tog` first", path.display()),
         )
     })?;
     if let Some(recorded) = v["platform"].as_str() {
@@ -695,7 +695,7 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "{}: closure was projected on {recorded}; this host is {}; run `tog sync` here",
+                    "{}: closure was projected on {recorded}; this host is {}; run `tog` here",
                     path.display(),
                     host.triple()
                 ),
@@ -709,7 +709,7 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{}: unknown closure schema/ecosystem; re-run `tog sync`",
+                "{}: unknown closure schema/ecosystem; re-run `tog`",
                 path.display()
             ),
         ));
@@ -821,7 +821,7 @@ pub fn closure_object(
     let bad = |msg: &str| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("closure {key}: {msg}; run `tog sync` first"),
+            format!("closure {key}: {msg}; run `tog` first"),
         )
     };
     let id = closure[key]["id"]
@@ -1714,7 +1714,7 @@ mod closure_platform_tests {
         .unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
         assert!(
-            error.to_string().contains("run tog sync again"),
+            error.to_string().contains("run 'tog' again"),
             "the refusal does not say what to do: {error}"
         );
         assert_eq!(fs::read(&outside).unwrap(), b"untouched");

@@ -748,7 +748,7 @@ fn python(
                 "dependencies live in install_requires here: remove {} from setup.cfg / setup.py, then 'tog'",
                 names.join(", ")
             ),
-            Verb::Update => "install_requires projects re-lock on every 'tog sync' (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'tog'".to_string(),
+            Verb::Update => "install_requires projects re-lock on every sync (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'tog'".to_string(),
         })),
         PyShape::RequirementsDir => Err(other(format!(
             "dependencies live under requirements/ here: edit the file that applies (requirements/common.txt, base.txt, ...) to {} {}, then 'tog'",

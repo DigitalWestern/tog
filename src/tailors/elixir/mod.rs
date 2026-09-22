@@ -1515,7 +1515,7 @@ pub fn plan_elixir(
     validate_plan(&plan)?;
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
-        return Err(err("mix.lock changed while planning; re-run tog sync"));
+        return Err(err("mix.lock changed while planning; re-run 'tog'"));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
 }

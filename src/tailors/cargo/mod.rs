@@ -1638,7 +1638,7 @@ pub fn build_sandboxed(
     let target = project_child_dir(&project_dir, "target")?;
     let cargo_bin = rust_obj.join("bin/cargo");
     if !cargo_bin.is_file() || !vendor_obj.is_dir() {
-        return Err(err("cargo environment is incomplete; run `tog sync` first"));
+        return Err(err("cargo environment is incomplete; run `tog` first"));
     }
 
     let store_tmp = rust_obj

@@ -763,7 +763,7 @@ fn run_passes_arguments_through_and_needs_a_project() {
     // Flags after the program are the program's: tog does not parse
     // them, so the only error is the missing project. With no manifest
     // there is nothing to sync, and the message says what it looked for
-    // rather than sending the user to a `tog sync` that would say the same.
+    // rather than sending the user to a `tog` that would say the same.
     let out = tog(&project.0, &home.0, &["run", "python", "--help"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
@@ -805,10 +805,7 @@ fn run_and_env_sync_a_project_before_reading_it() {
             );
             assert!(stderr.contains("no pinned CPython"), "{args:?}: {stderr}");
             // The old advice would send them to the command that just ran.
-            assert!(
-                !stderr.contains("run `tog sync` first"),
-                "{args:?}: {stderr}"
-            );
+            assert!(!stderr.contains("run `tog` first"), "{args:?}: {stderr}");
             assert!(out.stdout.is_empty(), "{args:?}: {}", text(&out.stdout));
         }
     }
@@ -994,12 +991,15 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
             &["run", "source", ".venv/bin/activate"],
             "no activate script",
         ),
-        // install/ci install the lockfile, so `tog sync` replaces them.
+        // install/ci install the lockfile, so `tog` replaces them.
         (
             &["run", "npm", "install", "is-odd"],
-            "'tog sync' rebuilds node_modules",
+            "'tog' sets node_modules up from the lockfile",
         ),
-        (&["run", "npm", "ci"], "'tog sync' rebuilds node_modules"),
+        (
+            &["run", "npm", "ci"],
+            "'tog' sets node_modules up from the lockfile",
+        ),
         (&["run", "yarn", "add", "is-odd"], "node_modules"),
         // Bare yarn and bare bun install.
         (&["run", "yarn"], "node_modules"),
@@ -1120,13 +1120,13 @@ fn inspect_verbs_offline() {
     assert!(text(&out.stderr).contains("no project in"));
     let out = tog(&project.0, &home.0, &["ls"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("nothing synced here; run 'tog sync' first"));
+    assert!(text(&out.stderr).contains("nothing synced here; run 'tog' first"));
 
     std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let out = tog(&project.0, &home.0, &["status"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stdout).contains("python  not synced  run 'tog sync'"),
+        text(&out.stdout).contains("python  not synced  run 'tog'"),
         "{}",
         text(&out.stdout)
     );

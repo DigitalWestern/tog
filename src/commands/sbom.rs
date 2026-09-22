@@ -64,7 +64,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
     };
     entries.sort();
     if entries.is_empty() {
-        return Err(err("no closures found; run `tog sync` first"));
+        return Err(err("no closures found; run `tog` first"));
     }
     let mut components = Vec::new();
     let mut exception_properties = Vec::new();

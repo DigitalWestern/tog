@@ -73,10 +73,7 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "{:?}: {error}; run 'tog sync'",
-                    entry.path().to_string_lossy()
-                ),
+                format!("{:?}: {error}; run 'tog'", entry.path().to_string_lossy()),
             )
         })?;
         out.push(ClosureFile {
@@ -139,7 +136,7 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
             Some(name) if !closures(dir)?.is_empty() => {
                 format!("no {name} closure here; 'tog ls' lists what is synced")
             }
-            _ => "nothing synced here; run 'tog sync' first".to_string(),
+            _ => "nothing synced here; run 'tog' first".to_string(),
         };
         return Err(io::Error::new(io::ErrorKind::NotFound, message));
     }
@@ -249,7 +246,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
         };
         // A lock verdict that a writable sync would refuse (stale rows, no
         // section) is reported first: the closure may also say a source
-        // changed, but "run 'tog sync'" would only reach the refusal, and
+        // changed, but "run 'tog'" would only reach the refusal, and
         // the lock's line names the verb that moves it. Otherwise the
         // closure state decides, and only a `Synced` closure is downgraded
         // to what the lock has to add.
@@ -280,7 +277,7 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
 /// file's digest alone — so `tog status` predicts the next sync rather than
 /// having a second opinion about staleness.
 /// What the toolchain lock adds to a status row, and whether a plain
-/// `tog sync` would stop at it: a missing lock is created by the next
+/// sync would stop at it: a missing lock is created by the next
 /// writable sync and a changed bundle is re-projected by it, but stale
 /// rows and a missing section are only moved by `tog update --toolchain`.
 struct LockVerdict {
@@ -309,9 +306,7 @@ fn toolchain_lock_state(
     let root = ProjectRoot::open(dir)?;
     let Some(lock) = ToolchainLock::read_via(&root)? else {
         return Ok(LockVerdict::changed(
-            vec![format!(
-                "{LOCK_PATH} (missing; run 'tog sync' to create it)"
-            )],
+            vec![format!("{LOCK_PATH} (missing; run 'tog' to create it)")],
             false,
         ));
     };
@@ -344,16 +339,14 @@ fn toolchain_lock_state(
     // answer every other unrecorded field gets.
     let Some(recorded) = body["toolchain"]["bundle_id"].as_str() else {
         return Ok(Some(LockVerdict {
-            state: State::Unchecked(
-                "toolchain not recorded by this sync; run 'tog sync' once".into(),
-            ),
+            state: State::Unchecked("toolchain not recorded by this sync; run 'tog' once".into()),
             refuses_sync: false,
         }));
     };
     if recorded != section.bundle_id() {
         return Ok(LockVerdict::changed(
             vec![format!(
-                "{LOCK_PATH} (toolchain changed since the last sync; run 'tog sync')"
+                "{LOCK_PATH} (toolchain changed since the last sync; run 'tog')"
             )],
             false,
         ));
@@ -421,9 +414,9 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
     for row in rows {
         let line = match &row.state {
             State::Synced => format!("synced      ({})", row.summary),
-            State::NotSynced => "not synced  run 'tog sync'".to_string(),
+            State::NotSynced => "not synced  run 'tog'".to_string(),
             // A toolchain-lock finding already carries its own next step,
-            // and it is not always `tog sync`, so it is printed as written
+            // and it is not always the bare `tog`, so it is printed as written
             // rather than wrapped in the dependency-input sentence.
             State::Changed(files)
                 if !files.is_empty() && files.iter().all(|file| file.starts_with(LOCK_PATH)) =>
@@ -431,14 +424,14 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                 format!("changed     {}", files.join(", "))
             }
             State::Changed(files) => format!(
-                "changed     {} since the last sync; run 'tog sync'",
+                "changed     {} since the last sync; run 'tog'",
                 files.join(", ")
             ),
             State::ProjectionMissing(what) => {
-                format!("missing     {what} is not the synced projection; run 'tog sync'")
+                format!("missing     {what} is not the synced projection; run 'tog'")
             }
             State::ForeignPlatform(platform) => {
-                format!("elsewhere   last synced on {platform}, not on this host; run 'tog sync'")
+                format!("elsewhere   last synced on {platform}, not on this host; run 'tog'")
             }
             State::Unchecked(why) => format!("unchecked   {why}"),
         };
@@ -473,7 +466,7 @@ fn verdict(rows: &[EcosystemStatus]) -> String {
     if rows.iter().any(|row| row.word() == "unchecked") {
         out.push_str(
             "unchecked: this closure predates the recording tog needs to compare it,\n\
-             so it is not a pass; run 'tog sync' once to make it checkable.\n",
+             so it is not a pass; run 'tog' once to make it checkable.\n",
         );
     }
     if rows.iter().any(|row| row.word() == "foreign-platform") {
@@ -672,7 +665,7 @@ fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
         Ok(toolchains) if toolchains.is_empty() => checks.push(check(
             "toolchains",
             Level::Ok,
-            "none realized yet; the first 'tog sync' downloads what the project needs",
+            "none realized yet; the first 'tog' downloads what the project needs",
         )),
         Ok(toolchains) => checks.push(check("toolchains", Level::Ok, toolchains.join(", "))),
         Err(error) => checks.push(check("toolchains", Level::Warn, error.to_string())),
@@ -809,7 +802,7 @@ fn project_check(dir: &Path, checks: &mut Vec<Check>) {
                     )
                 } else {
                     format!(
-                        "{} found; not synced yet: {} (run 'tog sync')",
+                        "{} found; not synced yet: {} (run 'tog')",
                         found.join(", "),
                         unsynced.join(", ")
                     )
@@ -1050,7 +1043,7 @@ mod tests {
         let empty = TempDir::new("ls-empty");
         let error = ls(&empty.0, None, false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("run 'tog sync' first"));
+        assert!(error.to_string().contains("run 'tog' first"));
         let error = ls(&temp.0, Some("python"), false, false);
         assert!(error.is_ok());
         let missing = {
@@ -1163,7 +1156,7 @@ mod tests {
         assert_eq!(
             rows[2].state,
             State::Unchecked(
-                "recorded Go version is missing; run 'tog sync' once to record the selected toolchain"
+                "recorded Go version is missing; run 'tog' once to record the selected toolchain"
                     .into()
             )
         );
@@ -1332,7 +1325,7 @@ mod tests {
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
             State::Changed(vec![
-                "tog-toolchain.toml (toolchain changed since the last sync; run 'tog sync')".into()
+                "tog-toolchain.toml (toolchain changed since the last sync; run 'tog')".into()
             ])
         );
 
@@ -1343,7 +1336,7 @@ mod tests {
         fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
-            State::Unchecked("toolchain not recorded by this sync; run 'tog sync' once".into())
+            State::Unchecked("toolchain not recorded by this sync; run 'tog' once".into())
         );
         assert!(!status(platform, dir).unwrap()[0].is_synced());
 
@@ -1354,24 +1347,22 @@ mod tests {
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
             State::Changed(vec![
-                "tog-toolchain.toml (missing; run 'tog sync' to create it)".into()
+                "tog-toolchain.toml (missing; run 'tog' to create it)".into()
             ])
         );
         // The lock line is printed as written: its next step is not always
-        // `tog sync`, so the dependency-input sentence is not appended.
+        // the bare `tog`, so the dependency-input sentence is not appended.
         let rows = status(platform, dir).unwrap();
         let line = render_status(dir, &rows, false).unwrap();
         assert!(
-            line.contains(
-                "changed     tog-toolchain.toml (missing; run 'tog sync' to create it)\n"
-            ),
+            line.contains("changed     tog-toolchain.toml (missing; run 'tog' to create it)\n"),
             "{line}"
         );
         let value: Value = serde_json::from_str(&render_status(dir, &rows, true).unwrap()).unwrap();
         assert_eq!(value["ecosystems"][0]["state"], "changed");
         assert_eq!(
             value["ecosystems"][0]["detail"][0],
-            "tog-toolchain.toml (missing; run 'tog sync' to create it)"
+            "tog-toolchain.toml (missing; run 'tog' to create it)"
         );
     }
 
@@ -1400,7 +1391,7 @@ mod tests {
         );
         assert_eq!(status(platform, dir).unwrap()[0].state, State::Synced);
         fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
-        // "run 'tog sync'" would only reach the stale-lock refusal, so the
+        // "run 'tog'" would only reach the stale-lock refusal, so the
         // lock's line, with the verb that moves it, is the one reported.
         let State::Changed(rows) = &status(platform, dir).unwrap()[0].state else {
             panic!("a moved toolchain source did not report the lock");
@@ -1503,7 +1494,7 @@ mod tests {
         assert!(detail.contains("a real directory"), "{detail}");
         assert!(detail.contains("install tool"), "{detail}");
         let line = render_status(project, &rows, false).unwrap();
-        assert!(line.contains("run 'tog sync'"), "{line}");
+        assert!(line.contains("run 'tog'"), "{line}");
     }
 
     #[test]
@@ -1666,7 +1657,7 @@ mod tests {
         );
         assert_eq!(
             detail("toolchains").detail,
-            "none realized yet; the first 'tog sync' downloads what the project needs"
+            "none realized yet; the first 'tog' downloads what the project needs"
         );
         assert_eq!(detail("policy").level, Level::Ok);
         assert!(
@@ -1677,7 +1668,7 @@ mod tests {
         assert_eq!(detail("project").level, Level::Ok);
         assert_eq!(
             detail("project").detail,
-            "go found; not synced yet: go (run 'tog sync')"
+            "go found; not synced yet: go (run 'tog')"
         );
 
         let text = render_doctor(&checks, false).unwrap();

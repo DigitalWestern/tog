@@ -574,7 +574,10 @@ mod tests {
             "the two labels must line up"
         );
         assert_eq!(advisory_line("x"), format!("{WARNING_PREFIX}x\n"));
-        assert_eq!(fix_line("tog sync"), format!("{FIX_PREFIX}tog sync\n"));
+        assert_eq!(
+            fix_line("tog --fresh"),
+            format!("{FIX_PREFIX}tog --fresh\n")
+        );
     }
 
     #[test]

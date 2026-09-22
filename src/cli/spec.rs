@@ -414,7 +414,7 @@ loosen what the machine or project policy says. Per closure, the first that
 applies: bad-signature (tampered or malformed; find out who changed it),
 untrusted (signed by a key the trusted set does not contain), outdated
 (unsigned, or predates input, platform, or exception recording; run
-'tog sync' once under a trusted key, then commit), stale (its inputs
+'tog' once under a trusted key, then commit), stale (its inputs
 changed since the sync, the same check 'tog status' makes), denied
 (each denied exception's kind, subject, and detail, plus a count of
 permitted ones by kind), unknown (a kind this binary cannot judge), or
@@ -562,7 +562,7 @@ store from any host.",
 Writes a new Ed25519 signing key to <path> (created exclusively, mode 0600;
 an existing file or symlink is refused, never overwritten) and prints the
 public key on stdout as the [signing] policy table to paste into the
-machine policy. Set TOG_SIGNING_KEY=<path> where 'tog sync' and
+machine policy. Set TOG_SIGNING_KEY=<path> where 'tog' and
 'tog fmt' run so every closure they write is signed; 'tog audit'
 accepts only records signed by a key the machine policy trusts. Keep the
 key outside the checkout, the store, and any sandbox read root; a job that

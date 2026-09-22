@@ -885,7 +885,7 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "cached object {id} carries exception(s): {}; tog sync --fresh will not help; rebuild the object under a permissive policy or fix the cause",
+            "cached object {id} carries exception(s): {}; 'tog --fresh' will not help; rebuild the object under a permissive policy or fix the cause",
             denied_kinds.join(", ")
         ),
     ))

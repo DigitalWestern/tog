@@ -104,7 +104,7 @@ pub fn collect_with_activity<W: Write>(
         return Err(io::Error::other(
             "refusing to sweep: the project-root registry is not initialized; register existing "
                 .to_string()
-                + "projects with `tog gc --register <dir>...` or run `tog sync` in each "
+                + "projects with `tog gc --register <dir>...` or run `tog` in each "
                 + "project",
         ));
     }

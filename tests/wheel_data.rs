@@ -74,7 +74,7 @@ fn greenlet_headers_are_installed_and_importable() {
         .unwrap_or_else(|| temp.0.join("store"));
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
 
-    assert_ok(tog(&binary, &project, &store, &["sync"]), "tog sync");
+    assert_ok(tog(&binary, &project, &store, &["sync"]), "sync alias");
 
     let closure: serde_json::Value =
         serde_json::from_slice(&std::fs::read(project.join(".tog/closures/python.json")).unwrap())

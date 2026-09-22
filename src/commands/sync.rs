@@ -1,5 +1,6 @@
-//! `tog sync`: preflight every detected ecosystem, then plan, realize,
-//! and project each one through the tailor registry.
+//! The bare `tog` (hidden alias `sync`): preflight every detected
+//! ecosystem, then plan, realize, and project each one through the tailor
+//! registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode, ProjectToolchain};
 use crate::commands::shared::{ecosystem_inputs, no_inputs, projected_root};
@@ -48,7 +49,7 @@ pub fn preflight_sync(
     Ok((present, toolchain))
 }
 
-/// `tog sync` from the command line: load policy and preflight every
+/// The bare `tog` from the command line: load policy and preflight every
 /// ecosystem before the store is opened. A refused request (an unpinned
 /// patch, a path no root record can hold) must leave no trace: no store
 /// tree created, no maintenance sweep, no lease taken.
@@ -82,7 +83,7 @@ pub(crate) fn run_in_mode(
     let ctx = Context::open(platform, true)?;
     let moved = |detail: String| {
         io::Error::other(format!(
-            "{}: {detail} while waiting for the store; run 'tog sync' again",
+            "{}: {detail} while waiting for the store; run 'tog' again",
             dir.display()
         ))
     };
@@ -427,7 +428,7 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// A count and where to read it. The line this replaces advised `tog sync
+/// A count and where to read it. The line this replaces advised `tog
 /// --strict`, which does not refuse the recorded exceptions: it fails the
 /// sync that recorded them, undoing the work that just finished.
 ///
@@ -605,7 +606,7 @@ mod tests {
         assert!(!claim_habits_notice(&unwritable, false));
     }
 
-    /// `tog sync --strict` does not refuse recorded exceptions; it fails
+    /// `tog --strict` does not refuse recorded exceptions; it fails
     /// the sync that recorded them. The summary must not advise it.
     #[test]
     fn the_exception_summary_counts_and_points_at_a_read_command() {
