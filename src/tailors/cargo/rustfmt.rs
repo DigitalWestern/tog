@@ -270,7 +270,7 @@ pub fn ensure_rustfmt(
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "rustfmt was paired with an unexpected Rust object; run `tog sync` first",
+            "rustfmt was paired with an unexpected Rust object; run `tog` first",
         ));
     }
     let identity = identity_from(platform, &row.version, row.digest.hex(), &rust_object)?;

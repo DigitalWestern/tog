@@ -145,7 +145,7 @@ impl Tailor for Elixir {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "elixir closure projection is not the expected forest path; \
-                     run `tog sync` first",
+                     run `tog` first",
                 ));
             }
             prefix.push(beam.join("elixir/bin").to_string_lossy().into_owned());
@@ -157,7 +157,7 @@ impl Tailor for Elixir {
             let fingerprint = closure["beam_fingerprint"].as_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "elixir closure records no toolchain fingerprint; run `tog sync`",
+                    "elixir closure records no toolchain fingerprint; run `tog`",
                 )
             })?;
             let (prefixes, remove, set) = elixir::run_env(

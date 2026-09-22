@@ -34,7 +34,7 @@ const NODE_INSTALL_VERBS: &[&str] = &[
 ];
 
 /// The npm-family verbs that install the lockfile rather than change it.
-/// The advice differs: `tog sync` replaces these, not `tog add`.
+/// The advice differs: the bare `tog` replaces these, not `tog add`.
 const NODE_REINSTALL_VERBS: &[&str] = &["install", "i", "ci"];
 
 /// The pip subcommands that try to write into the environment. Reading
@@ -173,13 +173,13 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
                 format!("{program} {verb}")
             };
             // `install` and `ci` install what the lockfile already says, so
-            // the verb that replaces them is `tog sync`, not `tog add`.
+            // what replaces them is the bare `tog`, not `tog add`.
             let advice = if bare_install || NODE_REINSTALL_VERBS.contains(&verb) {
-                "'tog sync' rebuilds node_modules from the lockfile; to change what is in it, \
+                "'tog' sets node_modules up from the lockfile ('tog --fresh' rebuilds it); to change what is in it, \
                  'tog add <package>', 'tog remove <package>', 'tog update'"
             } else {
                 "edit dependencies through tog instead: 'tog add <package>', \
-                 'tog remove <package>', 'tog update'; 'tog sync' rebuilds node_modules"
+                 'tog remove <package>', 'tog update'; 'tog --fresh' rebuilds node_modules"
             };
             Some(format!(
                 "'{invocation}' would replace the node_modules projection with a real directory \
@@ -404,11 +404,14 @@ mod tests {
 
         let npm = refusal(&["npm", "install", "is-odd"]).expect("npm install is refused");
         assert!(npm.contains("node_modules"), "{npm}");
-        // `install` and `ci` install the lockfile: `tog sync` replaces them.
-        assert!(npm.contains("'tog sync' rebuilds node_modules"), "{npm}");
+        // `install` and `ci` install the lockfile: the bare `tog` replaces them.
+        assert!(
+            npm.contains("'tog' sets node_modules up from the lockfile"),
+            "{npm}"
+        );
         assert!(refusal(&["npm", "ci"])
             .unwrap()
-            .contains("'tog sync' rebuilds node_modules"));
+            .contains("'tog' sets node_modules up from the lockfile"));
         // `add`/`remove` change the lockfile: `tog add`/`tog remove` do.
         let add = refusal(&["pnpm", "add", "is-odd"]).expect("pnpm add is refused");
         assert!(add.starts_with("'pnpm add' would replace"), "{add}");

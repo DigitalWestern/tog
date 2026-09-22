@@ -21,6 +21,10 @@
 //!   `usage()` after a sync that succeeded, so the first word a newcomer
 //!   types also shows them the rest), into the help outside one, and an
 //!   unknown first word into a package.json script run when one matches.
+//!   A bare `tog` with `--frozen`, `--fresh` or `--strict` is decided here:
+//!   it is `sync` with those flags, and no help follows it. `sync`,
+//!   `install` and `i` still parse as that command but are never listed,
+//!   completed, or suggested (`Group::Bare`).
 //!
 //! Exit status contract: 0 success, 1 the command failed, 2 usage error.
 
@@ -268,6 +272,8 @@ impl UsageError {
 
 pub fn render_usage_error(message: &str, command: Option<&str>) -> String {
     let hint = match command {
+        // The bare form's hidden name is not what its help is called.
+        Some("sync") => "Run 'tog help setup' for usage.".to_string(),
         Some(name) => format!("Run 'tog help {name}' for usage."),
         None => "Run 'tog --help' for usage.".to_string(),
     };
@@ -287,6 +293,11 @@ pub enum Group {
     Everyday,
     Inspect,
     Maintain,
+    /// The bare `tog`. Its flags and help live under the hidden name
+    /// `sync` (aliases `install`, `i`), which still parses so a pip or npm
+    /// reflex and existing CI keep working, but is never listed,
+    /// completed, or suggested.
+    Bare,
 }
 
 /// Static description of one command: drives parsing suggestions, the help

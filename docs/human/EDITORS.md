@@ -83,5 +83,5 @@ tog update              # re-lock within the manifest's constraints
 ```
 
 `tog status` reports a projection something has written over, and the next
-`tog sync` moves it aside — saying where it went — and re-projects, so a
+sync moves it aside — saying where it went — and re-projects, so a
 misfired button is recoverable.

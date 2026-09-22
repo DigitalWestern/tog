@@ -283,7 +283,7 @@ fn closure_runtime(store: &crate::kernel::store::Store, dir: &Path) -> io::Resul
     if closure["runtime_object"]["id"].as_str().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "node closure predates runtime recording; run `tog sync`",
+            "node closure predates runtime recording; run `tog`",
         ));
     }
     comforter::toolchain::runtime_object(store, &closure, "bin/node")
@@ -329,7 +329,7 @@ fn replaced_by_a_real_directory(node_modules: &Path) -> bool {
 }
 
 /// The `State` detail for that case. Reads as one sentence inside the
-/// status line's "{what} is not the synced projection; run 'tog sync'".
+/// status line's "{what} is not the synced projection; run 'tog'".
 pub(crate) fn replaced_projection_detail(name: &str) -> String {
     format!("{name} (a real directory an install tool wrote over the projection)")
 }
@@ -479,7 +479,7 @@ mod tests {
         let error = closure_runtime(&store, &dir).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "node closure predates runtime recording; run `tog sync`"
+            "node closure predates runtime recording; run `tog`"
         );
 
         // Leave the fixture removable.

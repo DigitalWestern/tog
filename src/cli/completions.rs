@@ -1,7 +1,9 @@
 //! Shell completions, generated from the command table.
 
-use super::parse::{all_command_words, command_flags, option_spellings, GLOBAL_FLAGS};
-use super::spec::COMMANDS;
+use super::parse::{
+    all_command_words, command_flags, help_words, option_spellings, GLOBAL_FLAGS, SETUP_FLAGS,
+};
+use super::spec::listed;
 use super::Shell;
 
 /// The one-liner every shell uses to read script names out of package.json.
@@ -29,21 +31,18 @@ fn bash_completions() -> String {
          esac\n    done\n    if [[ -z \"$cmd\" ]]; then\n        if [[ \"$cur\" == -* ]]; then\n            ",
     );
     out.push_str(&format!(
-        "COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )\n",
-        GLOBAL_FLAGS.join(" ")
+        "COMPREPLY=( $(compgen -W \"{} {}\" -- \"$cur\") )\n",
+        GLOBAL_FLAGS.join(" "),
+        SETUP_FLAGS.join(" ")
     ));
     out.push_str(&format!(
         "        else\n            COMPREPLY=( $(compgen -W \"{} $(_tog_scripts)\" -- \"$cur\") )\n        fi\n        return\n    fi\n    case \"$cmd\" in\n",
         all_command_words().join(" ")
     ));
-    for spec in COMMANDS {
+    for spec in listed() {
         let mut words: Vec<&str> = spec.words.to_vec();
         words.extend(command_flags(spec));
-        let pattern = if spec.name == "sync" {
-            "sync|install|i".to_string()
-        } else {
-            spec.name.to_string()
-        };
+        let pattern = spec.name;
         match spec.name {
             "run" => out.push_str(
                 "        run)\n            if [[ $i -eq $((COMP_CWORD - 1)) ]]; then\n                \
@@ -64,7 +63,7 @@ fn bash_completions() -> String {
     }
     out.push_str(&format!(
         "        help) COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") ) ;;\n        *) COMPREPLY=() ;;\n    esac\n}}\n\ncomplete -F _tog tog\n",
-        COMMANDS.iter().map(|spec| spec.name).collect::<Vec<_>>().join(" ")
+        help_words().join(" ")
     ));
     out
 }
@@ -83,20 +82,16 @@ fn zsh_completions() -> String {
     );
     out.push_str(SCRIPTS_PIPELINE);
     out.push_str(")\"})\n    (( ${#scripts} )) && _describe -t scripts 'package.json script' scripts\n}\n\n_tog() {\n    local -a commands\n    commands=(\n");
-    for spec in COMMANDS {
+    for spec in listed() {
         out.push_str(&format!(
             "        '{}:{}'\n",
             spec.name,
             zsh_quote(spec.summary)
         ));
     }
-    out.push_str("        'install:alias for sync'\n        'help:show help for a command'\n        'version:print the version'\n    )\n    local curcontext=\"$curcontext\" state line\n    _arguments -C \\\n        '(-C --directory)'{-C,--directory}'[run as if started in <dir>]:directory:_files -/' \\\n        '(-q --quiet)'{-q,--quiet}'[no narration]' \\\n        '(-v --verbose)'{-v,--verbose}'[show every decision and subprocess]' \\\n        '--no-color[plain output]' \\\n        '(-h --help)'{-h,--help}'[print help]' \\\n        '(-V --version)'{-V,--version}'[print the version]' \\\n        '1: :->command' \\\n        '*:: :->args'\n    case $state in\n        command)\n            _describe -t commands 'tog command' commands\n            _tog_scripts\n            ;;\n        args)\n            case $words[1] in\n");
-    for spec in COMMANDS {
-        let pattern = if spec.name == "sync" {
-            "sync|install|i".to_string()
-        } else {
-            spec.name.to_string()
-        };
+    out.push_str("        'help:show help for a command'\n        'version:print the version'\n    )\n    local curcontext=\"$curcontext\" state line\n    _arguments -C \\\n        '(-C --directory)'{-C,--directory}'[run as if started in <dir>]:directory:_files -/' \\\n        '(-q --quiet)'{-q,--quiet}'[no narration]' \\\n        '(-v --verbose)'{-v,--verbose}'[show every decision and subprocess]' \\\n        '--no-color[plain output]' \\\n        '(-h --help)'{-h,--help}'[print help]' \\\n        '(-V --version)'{-V,--version}'[print the version]' \\\n        '--frozen[CI: check the locks are current without writing them]' \\\n        '--fresh[rebuild .venv / node_modules from scratch]' \\\n        '--strict[refuse every policy exception]' \\\n        '1: :->command' \\\n        '*:: :->args'\n    case $state in\n        command)\n            _describe -t commands 'tog command' commands\n            _tog_scripts\n            ;;\n        args)\n            case $words[1] in\n");
+    for spec in listed() {
+        let pattern = spec.name;
         if spec.name == "run" {
             out.push_str("                run)\n                    if (( CURRENT == 2 )); then\n                        _tog_scripts\n                        _command_names -e\n                    else\n                        _files\n                    fi\n                    ;;\n");
             continue;
@@ -122,7 +117,7 @@ fn zsh_completions() -> String {
     }
     out.push_str(&format!(
         "                help)\n                    _values 'command' {}\n                    ;;\n                *)\n                    _files\n                    ;;\n            esac\n            ;;\n    esac\n}}\n\n_tog \"$@\"\n",
-        COMMANDS.iter().map(|spec| spec.name).collect::<Vec<_>>().join(" ")
+        help_words().join(" ")
     ));
     out
 }
@@ -145,6 +140,19 @@ fn fish_completions() -> String {
         ("", "no-color", "plain output", false),
         ("h", "help", "print help", false),
         ("V", "version", "print the version", false),
+        (
+            "",
+            "frozen",
+            "CI: check the locks are current without writing them",
+            false,
+        ),
+        (
+            "",
+            "fresh",
+            "rebuild .venv / node_modules from scratch",
+            false,
+        ),
+        ("", "strict", "refuse every policy exception", false),
     ];
     for (short, long, description, takes_value) in globals {
         let mut line = String::from("complete -c tog -n '__fish_use_subcommand'");
@@ -158,25 +166,20 @@ fn fish_completions() -> String {
         line.push_str(&format!(" -d '{}'\n", fish_quote(description)));
         out.push_str(&line);
     }
-    for spec in COMMANDS {
+    for spec in listed() {
         out.push_str(&format!(
             "complete -c tog -n '__fish_use_subcommand' -a {} -d '{}'\n",
             spec.name,
             fish_quote(spec.summary)
         ));
     }
-    out.push_str("complete -c tog -n '__fish_use_subcommand' -a install -d 'alias for sync'\n");
     out.push_str(
         "complete -c tog -n '__fish_use_subcommand' -a help -d 'show help for a command'\n",
     );
     out.push_str("complete -c tog -n '__fish_use_subcommand' -a version -d 'print the version'\n");
     out.push_str("complete -c tog -n '__fish_use_subcommand' -a '(__tog_scripts)' -d 'package.json script'\n");
-    for spec in COMMANDS {
-        let seen = if spec.name == "sync" {
-            "sync install i".to_string()
-        } else {
-            spec.name.to_string()
-        };
+    for spec in listed() {
+        let seen = spec.name;
         for (flag, description) in spec.options {
             for spelling in option_spellings(flag) {
                 let (kind, name) = if let Some(long) = spelling.strip_prefix("--") {
@@ -209,11 +212,7 @@ fn fish_completions() -> String {
     }
     out.push_str(&format!(
         "complete -c tog -n '__fish_seen_subcommand_from help' -a '{}'\n",
-        COMMANDS
-            .iter()
-            .map(|spec| spec.name)
-            .collect::<Vec<_>>()
-            .join(" ")
+        help_words().join(" ")
     ));
     out
 }
@@ -226,7 +225,7 @@ mod tests {
     fn completions_cover_every_command_and_option() {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let script = completions(shell);
-            for spec in COMMANDS {
+            for spec in listed() {
                 assert!(script.contains(spec.name), "{shell:?} lacks {}", spec.name);
                 for flag in command_flags(spec) {
                     // fish spells `--json` as `-l json` and `-o` as `-s o`.
@@ -249,11 +248,21 @@ mod tests {
                     );
                 }
             }
-            assert!(script.contains("install"), "{shell:?} lacks the sync alias");
+            // The bare form's flags complete at the top level; its hidden
+            // name and aliases are never offered.
+            for flag in SETUP_FLAGS {
+                assert!(script.contains(&flag[2..]), "{shell:?} lacks {flag}");
+            }
+            assert!(script.contains("inputs"), "{shell:?} lacks 'help inputs'");
             assert!(
                 script.contains("package.json"),
                 "{shell:?} lacks script completion"
             );
+        }
+        // The bare form's hidden name and aliases are never offered.
+        for word in ["sync", "install", "i"] {
+            assert!(!all_command_words().contains(&word), "offers '{word}'");
+            assert!(!help_words().contains(&word), "help offers '{word}'");
         }
         assert!(completions(Shell::Bash).ends_with("complete -F _tog tog\n"));
         assert!(completions(Shell::Zsh).starts_with("#compdef tog\n"));

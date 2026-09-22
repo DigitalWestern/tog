@@ -372,7 +372,7 @@ impl Store {
         let result = crate::kernel::policy::check_exception_set(id, &winner).and_then(|_| {
             if winner != candidate {
                 return Err(io::Error::other(format!(
-                    "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run sync"
+                    "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run 'tog'"
                 )));
             }
             Ok((dest.to_path_buf(), winner))
@@ -687,7 +687,7 @@ pub(super) fn validate_cached_dependency_evidence(
     let winner_cache = cache;
     if objects != candidate.objects || winner_cache != candidate_cache {
         return Err(io::Error::other(format!(
-            "object {id} was published concurrently with different dependency evidence; winner objects: {objects:?}, staged objects: {:?}, winner cache: {winner_cache:?}, staged cache: {candidate_cache:?}; re-run sync",
+            "object {id} was published concurrently with different dependency evidence; winner objects: {objects:?}, staged objects: {:?}, winner cache: {winner_cache:?}, staged cache: {candidate_cache:?}; re-run 'tog'",
             candidate.objects
         )));
     }

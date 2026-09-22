@@ -315,7 +315,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         let err = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
             .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
-        assert!(err.to_string().contains("tog sync --fresh will not help"));
+        assert!(err.to_string().contains("'tog --fresh' will not help"));
         return;
     }
     let dir = std::env::temp_dir().join(format!("tog-permissive-npm-{}", std::process::id()));
@@ -509,7 +509,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 
     let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
     let synced = tog(binary, project, &store_root, &["sync", "--strict"]);
-    assert_success(&synced, "tog sync --strict");
+    assert_success(&synced, "tog --strict");
 
     let closure = comforter::read_closure(project, "node").unwrap();
     let package_paths: Vec<&str> = closure["packages"]

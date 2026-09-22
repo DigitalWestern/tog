@@ -164,13 +164,13 @@ program's status through.
 
 Policy is permissive by default; `.tog/policy.toml` can tighten it
 (`deny = ["install-script-failed", "git-dependency"]`), or
-`tog sync --strict` denies every exception.
+`tog --strict` denies every exception.
 
-You never install Python or Node yourself: `tog sync` materializes
+You never install Python or Node yourself: a bare `tog` materializes
 pinned, verified toolchains into the store and wires `.venv` /
 `node_modules` to them. Your first sync writes `tog-toolchain.toml` next to
 your manifests, naming the exact runtime per ecosystem; commit it, and
-everyone who syncs the repo afterwards gets that runtime. `tog sync
+everyone who syncs the repo afterwards gets that runtime. `tog
 --frozen` checks the file instead of writing one, and `tog update
 --toolchain` is the only thing that moves a locked runtime. A project with both lockfiles gets both
 ecosystems from one sync. Resolution belongs to the ecosystem's own
@@ -241,7 +241,7 @@ Three things to know before you adopt this.
 - A closure is one file per ecosystem, not one per platform, and it records
   the platform it was synced on, so a mixed Mac and Linux team overwrites
   one record with the other; the loser reads `elsewhere` in `tog status`.
-- Every sync rewrites the record's `projected_at`, so a local `tog sync`
+- Every sync rewrites the record's `projected_at`, so a local sync
   dirties the committed file even when nothing about the environment
   changed.
 
@@ -256,7 +256,7 @@ cached half of `.tog/` are ignored; the closures and the project policy are
 committed. Each host keeps its own store; toolchain and environment object
 ids include the platform triple, so a shared store never reuses a Mac object
 on Linux — only the artifact cache is common, because artifacts are
-content-addressed. After switching machines, run `tog sync` once; it is a
+content-addressed. After switching machines, run `tog` once; it is a
 cache hit if that host has seen the lock.
 
 ## License

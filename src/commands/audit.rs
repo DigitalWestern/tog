@@ -362,12 +362,12 @@ fn freshness(
 }
 
 /// The command that rewrites a closure: `tog fmt` for the rustfmt
-/// record, which a sync never touches, and `tog sync` for every other.
+/// record, which a sync never touches, and the bare `tog` for every other.
 fn refresh(ecosystem: &str) -> &'static str {
     if ecosystem == "rustfmt" {
         "tog fmt"
     } else {
-        "tog sync"
+        "tog"
     }
 }
 
@@ -404,7 +404,7 @@ fn check_name(closure: &ClosureFile) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .tog/closures is refused, not judged: remove it or run 'tog sync'",
+                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .tog/closures is refused, not judged: remove it or run 'tog'",
                 closure.path.to_string_lossy(),
                 closure.ecosystem
             ),
@@ -529,7 +529,7 @@ pub fn audit_under(
     if closures.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("nothing synced in {}; run 'tog sync' first", dir.display()),
+            format!("nothing synced in {}; run 'tog' first", dir.display()),
         ));
     }
     let present = inspect::detected(dir)?;
@@ -832,7 +832,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     }
     for ecosystem in &report.missing {
         out.push_str(&format!(
-            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'tog sync' under a trusted key, then commit\n",
+            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'tog' under a trusted key, then commit\n",
             "missing"
         ));
     }
@@ -1674,7 +1674,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("run 'tog sync', then audit again (permitted: no exceptions)"),
+            text.contains("run 'tog', then audit again (permitted: no exceptions)"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
@@ -1765,8 +1765,7 @@ mod tests {
         assert_eq!(
             inspect::closure_state(host(), dir, &closures[0]).unwrap(),
             State::Unchecked(
-                "inputs were not recorded by this sync; run 'tog sync' once to enable checks"
-                    .into()
+                "inputs were not recorded by this sync; run 'tog' once to enable checks".into()
             )
         );
         let verdicts = judge(dir, &permissive(), &closures);
@@ -2116,7 +2115,7 @@ mod tests {
         let empty = TempDir::new("empty");
         let error = audit(host(), &empty.0, None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("run 'tog sync' first"));
+        assert!(error.to_string().contains("run 'tog' first"));
         // No trusted set anywhere in the chain: refused before any record
         // is read, so the gate cannot be misconfigured into judging.
         drop(_machine);
@@ -2320,7 +2319,7 @@ mod tests {
             let text = render(dir, &report, false).unwrap();
             assert!(
                 text.contains(&format!(
-                    "python  outdated      closure {record}: no signature; run 'tog sync' once under a trusted key, then commit (not evaluated)\n"
+                    "python  outdated      closure {record}: no signature; run 'tog' once under a trusted key, then commit (not evaluated)\n"
                 )),
                 "{text}"
             );
@@ -2585,7 +2584,7 @@ mod tests {
         assert!(!report.passes());
         let text = render(dir, &report, false).unwrap();
         assert!(
-            text.contains("cargo    missing       no closure for the cargo inputs found here; run 'tog sync' under a trusted key, then commit\n"),
+            text.contains("cargo    missing       no closure for the cargo inputs found here; run 'tog' under a trusted key, then commit\n"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();

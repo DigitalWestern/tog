@@ -225,14 +225,14 @@ pub fn resolve(
         match &mode {
             Mode::Frozen => {
                 return Err(invalid(
-                    "tog-toolchain.toml is missing and --frozen never creates it; run `tog sync` \
+                    "tog-toolchain.toml is missing and --frozen never creates it; run `tog` \
                      (or `tog update --toolchain`) once without --frozen and commit the file",
                 ))
             }
             Mode::Writable if strict => {
                 return Err(invalid(
                     "tog-toolchain.toml is missing and strict policy never creates it; run \
-                     `tog sync` (or `tog update --toolchain`) once and commit the file",
+                     `tog` (or `tog update --toolchain`) once and commit the file",
                 ))
             }
             Mode::ReadOnly => {
@@ -452,7 +452,7 @@ pub fn recheck_before_publication() -> io::Result<()> {
             };
             if changed {
                 return Err(invalid(format!(
-                    "project toolchain inputs changed during sync ({} {}); run `tog sync` again",
+                    "project toolchain inputs changed during sync ({} {}); run `tog` again",
                     row.path.display(),
                     row.field
                 )));

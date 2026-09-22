@@ -936,7 +936,7 @@ pub fn plan_dotnet(
     let now = fs::read_to_string(&lock_path)?;
     if now != lock {
         return Err(err(
-            "packages.lock.json changed while planning; re-run tog sync",
+            "packages.lock.json changed while planning; re-run 'tog'",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))

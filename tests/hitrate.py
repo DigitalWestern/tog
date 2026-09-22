@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hit-rate measurement: does `tog sync` work, zero
+"""Hit-rate measurement: does `tog` work, zero
 config, on a random popular real project?
 
     python3 tests/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
@@ -393,7 +393,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print planned commands without touching disk or network")
     ap.add_argument("--keep", action="store_true", help="retain failed clones under WORK/failures")
     ap.add_argument("--strict", action="store_true",
-                    help="run `tog sync --strict`: a repo that needs any policy exception fails as policy_denied")
+                    help="run `tog --strict`: a repo that needs any policy exception fails as policy_denied")
     a = ap.parse_args()
 
     manifests = {

@@ -15,7 +15,7 @@
 # `strict` is deliberately not set. strict = true refuses every exception
 # kind, including the routine ones listed at the bottom, and would turn most
 # real projects red for reasons that are not security findings. Deny by
-# kind instead; use `tog sync --strict` or TOG_STRICT=1 for a
+# kind instead; use `tog --strict` or TOG_STRICT=1 for a
 # one-off fully strict build.
 
 deny = [
@@ -102,7 +102,7 @@ deny = [
 # file can only remove keys from that table, never add one, and without the
 # table at machine scope the gate is not configured (exit 2). Generate a key
 # on the signing machine with `tog keygen <path>`, set
-# TOG_SIGNING_KEY=<path> where `tog sync` runs, and paste the table
+# TOG_SIGNING_KEY=<path> where `tog` runs, and paste the table
 # it prints here:
 #
 # [signing]

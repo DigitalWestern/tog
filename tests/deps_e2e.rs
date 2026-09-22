@@ -873,7 +873,7 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         "pnpm workspace root remove",
     );
     installed_unchanged("workspace root remove");
-    // `tog sync` projects its own node_modules over the user's install
+    // `tog` projects its own node_modules over the user's install
     // (moving the existing directory aside, and saying so); that is sync's
     // documented behaviour, not the delegate's, so the snapshot ends here.
     assert_ok(

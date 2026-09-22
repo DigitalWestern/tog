@@ -111,7 +111,7 @@ pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> 
             e.kind(),
             format!(
                 "could not run store Cargo to generate Cargo.lock: {e}; \
-                     use `tog sync` after fixing the project or network"
+                     run `tog` after fixing the project or network"
             ),
         )
     })?;

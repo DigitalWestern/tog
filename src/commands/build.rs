@@ -51,9 +51,18 @@ pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
             }
         }
     };
+    // A build against inputs the lock no longer describes is the bug the
+    // sync-on-the-way-in exists to prevent, so when the ecosystem being
+    // built is stale or never synced the project is synced first, as `run`
+    // does: that sync may write a lock, like `cargo build` updating
+    // Cargo.lock. CI that must not write one runs `tog --frozen` first,
+    // and this check then finds nothing to do. Only the built ecosystem's
+    // row decides, so an unrelated one that is stale cannot block it.
+    crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()))?;
     let root = tailor.build_root(&cwd)?;
     policy::init(&root, false)?;
-    // A build honors the committed lock and never creates one.
+    // The build itself honors the lock the sync above left and never
+    // writes one.
     let held = ProjectRoot::open(&root)?;
     let toolchain = project_toolchain::resolve(
         &held,

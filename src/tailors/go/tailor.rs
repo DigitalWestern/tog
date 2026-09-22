@@ -258,7 +258,7 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
         State::Unchecked(reason) if changed.is_empty() => {
             if recorded_version.is_empty() {
                 return Ok(State::Unchecked(format!(
-                    "{reason}; recorded Go version is missing; run 'tog sync' once to record the selected toolchain"
+                    "{reason}; recorded Go version is missing; run 'tog' once to record the selected toolchain"
                 )));
             }
             return Ok(State::Unchecked(reason));
@@ -271,7 +271,7 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
     }
     if recorded_version.is_empty() {
         return Ok(State::Unchecked(
-            "recorded Go version is missing; run 'tog sync' once to record the selected toolchain"
+            "recorded Go version is missing; run 'tog' once to record the selected toolchain"
                 .into(),
         ));
     }

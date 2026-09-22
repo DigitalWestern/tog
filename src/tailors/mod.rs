@@ -41,7 +41,7 @@ pub struct ClosureListing {
     pub packages: Vec<PackageRow>,
 }
 
-/// What `tog sync` asks of one tailor: the flags that change how it works
+/// What a sync asks of one tailor: the flags that change how it works
 /// and the toolchain it must use. `frozen` never reaches a tailor that is
 /// allowed to write project inputs; the caller skips `prepare` entirely.
 pub struct SyncRequest<'a> {
@@ -116,7 +116,7 @@ pub trait Tailor: Sync {
     /// each plan's key order stays exactly what its producer serializes).
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>>;
 
-    /// `tog sync`: plan, realize, project, and narrate with
+    /// A sync: plan, realize, project, and narrate with
     /// `ui::synced`. Returns whether anything was synced.
     fn sync(
         &self,

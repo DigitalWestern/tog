@@ -267,7 +267,7 @@ other.
 Sync records recoverable verification gaps in each closure and continues;
 `.tog/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
-are only added. `TOG_STRICT=1` or `tog sync --strict` denies every
+are only added. `TOG_STRICT=1` or `tog --strict` denies every
 exception. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the

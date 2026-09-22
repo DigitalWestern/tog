@@ -13,7 +13,7 @@ use std::path::Path;
 pub fn run(path: &Path) -> io::Result<i32> {
     let public = signing::generate(path)?;
     ui::note(&format!(
-        "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set TOG_SIGNING_KEY={} where 'tog sync' runs",
+        "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set TOG_SIGNING_KEY={} where 'tog' runs",
         path.display(),
         path.display()
     ));

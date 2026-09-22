@@ -455,7 +455,7 @@ the marker does not exist.
 
 ### Lifecycle and concurrency
 
-On the first writable `tog sync` with no lock, selection runs against the
+On the first writable sync with no lock, selection runs against the
 shipped catalog, stderr names the selected runtimes and the created
 `tog-toolchain.toml`, and the file is published by the shared publication
 rule above — descriptor-relative `O_EXCL`/`O_NOFOLLOW` temp in the held project

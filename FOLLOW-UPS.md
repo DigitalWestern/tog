@@ -21,14 +21,6 @@ by position.
    offline replay test (`tests/toolchain_lock.rs`) proves the lock answers
    without the catalog, not that two stores realize the same objects (#136).
 
-2. **Stop advertising `sync` (#143).** The cargo model: no verb brings the
-   environment current, because every verb that needs it does that on the
-   way in. `--frozen`, `--fresh` and `--strict` move onto the bare `tog`,
-   `sync`/`install`/`i` become hidden aliases, `build` and `x` gain the
-   `ensure_current` check `run` uses, and the seventy "run 'tog sync'"
-   strings say `tog`. Decide on purpose whether `build` syncing first is
-   wanted.
-
 ## Decisions waiting on the owner
 
 - **Help after every bare `tog` (#145).** Since #142 a successful sync is
@@ -46,7 +38,7 @@ by position.
 - **A shared system store at `/opt/tog/store`:** decide, or defer
   explicitly.
 - **First outside target.** Cheapest visible artifact: a GitHub Action
-  running `tog sync` under the company policy plus `tog sbom`, which
+  running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
   namespaces are allowed there.
 - **Is `skipped-optional` an exception at all?** An optional dependency

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use super::spec::{
-    canonical_name, help, spec, toolchain_section, usage, COMMANDS, LS_WORDS, SHELL_WORDS,
-    SYNC_ALIASES, TOOLCHAIN_ALIAS, TOOLCHAIN_WORDS,
+    canonical_name, help, inputs, listed, spec, toolchain_section, usage, HELP_TOPICS, LS_WORDS,
+    SHELL_WORDS, TOOLCHAIN_ALIAS, TOOLCHAIN_WORDS,
 };
 use super::{
     Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, ToolchainUpdate, UsageError,
@@ -19,16 +19,28 @@ fn version_text() -> String {
 
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let mut options = Options::default();
+    // `--frozen`, `--fresh` and `--strict` belong to the bare `tog`, so
+    // they are read here, ahead of any verb, and a verb other than the
+    // hidden `sync` after them is refused.
+    let mut setup: Vec<String> = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         if HELP_WORDS.contains(&arg) {
-            return help_topic(args.get(index + 1).map(String::as_str)).map(Parsed::Print);
+            // `tog --frozen --help` asks about the bare form's flags.
+            let topic = args.get(index + 1).map(String::as_str);
+            let topic = topic.or_else(|| (!setup.is_empty()).then_some("setup"));
+            return help_topic(topic).map(Parsed::Print);
         }
         if VERSION_WORDS.contains(&arg) {
             return Ok(Parsed::Print(version_text()));
         }
         if let Some(used) = global_flag(args, index, &mut options, None)? {
             index += used;
+            continue;
+        }
+        if SETUP_FLAGS.contains(&arg) {
+            setup.push(arg.to_string());
+            index += 1;
             continue;
         }
         if arg.starts_with('-') {
@@ -39,6 +51,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                 "--no-color",
                 "--help",
                 "--version",
+                "--frozen",
+                "--fresh",
+                "--strict",
             ];
             return Err(UsageError::new(
                 with_suggestion(
@@ -52,10 +67,27 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         break;
     }
     let Some(word) = args.get(index).map(String::as_str) else {
-        return Ok(Parsed::Implicit(options));
+        if setup.is_empty() {
+            return Ok(Parsed::Implicit(options));
+        }
+        // With a flag the sync is deliberate, so it runs as a command: no
+        // help after it, and outside a project it fails like any sync.
+        return match parse_sync(&setup)? {
+            Some(command) => Ok(Parsed::Run(Invocation { options, command })),
+            None => unreachable!("setup holds only the three setup flags"),
+        };
     };
     let name = canonical_name(word);
-    let rest = args[index + 1..].to_vec();
+    if let Some(flag) = setup.first().filter(|_| name != "sync") {
+        return Err(UsageError::new(
+            format!("{flag} belongs to the bare 'tog'; run 'tog {flag}' on its own"),
+            None,
+        ));
+    }
+    let mut rest = args[index + 1..].to_vec();
+    if name == "sync" {
+        rest.splice(0..0, setup);
+    }
     // A global option is the same option wherever it appears, so every
     // command whose grammar owns its arguments accepts one after the verb
     // too. `run` and `build` hand everything after the verb to the program;
@@ -94,10 +126,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                 message: with_suggestion(
                     format!("unknown command '{other}'"),
                     other,
-                    COMMANDS
-                        .iter()
-                        .map(|spec| spec.name)
-                        .chain(["help", "version"]),
+                    listed().map(|spec| spec.name).chain(["help", "version"]),
                 ),
             });
         }
@@ -233,12 +262,16 @@ fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
         None => Ok(usage()),
         Some(name) if HELP_WORDS.contains(&name) => Ok(usage()),
         Some(name) if VERSION_WORDS.contains(&name) => Ok(version_text()),
+        Some("setup") => Ok(help(spec("sync").expect("the bare form's entry"))),
+        Some("inputs") => Ok(inputs()),
         Some(name) => spec(name).map(help).ok_or_else(|| {
             UsageError::new(
                 with_suggestion(
                     format!("no help for '{name}': not a tog command"),
                     name,
-                    COMMANDS.iter().map(|spec| spec.name),
+                    listed()
+                        .map(|spec| spec.name)
+                        .chain(HELP_TOPICS.iter().copied()),
                 ),
                 None,
             )
@@ -271,11 +304,11 @@ fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
 }
 
 /// `tog install requests` is the first thing a pip or npm user types, and
-/// `install` is an alias for `sync`, which takes no package. Name the verb
-/// that does instead of rejecting the word.
+/// `install` is a hidden alias of the bare `tog`, which takes no package.
+/// Name the verb that does instead of rejecting the word.
 fn sync_takes_no_package(package: &str) -> String {
     format!(
-        "sync: unexpected argument '{package}'; sync realizes what the project already declares \
+        "unexpected argument '{package}'; 'tog' sets up what the project already declares \
          — to add a dependency run 'tog add {package}'"
     )
 }
@@ -1193,13 +1226,22 @@ pub(super) fn command_flags(spec: &Spec) -> Vec<&'static str> {
 }
 
 pub(super) fn all_command_words() -> Vec<&'static str> {
-    COMMANDS
-        .iter()
+    listed()
         .map(|spec| spec.name)
-        .chain(SYNC_ALIASES.iter().copied())
         .chain(["help", "version"])
         .collect()
 }
+
+/// What `tog help <word>` completes: every listed command and the topics.
+pub(super) fn help_words() -> Vec<&'static str> {
+    listed()
+        .map(|spec| spec.name)
+        .chain(HELP_TOPICS.iter().copied())
+        .collect()
+}
+
+/// The bare `tog`'s own flags; see `Group::Bare`.
+pub(super) const SETUP_FLAGS: &[&str] = &["--frozen", "--fresh", "--strict"];
 
 pub(super) const GLOBAL_FLAGS: &[&str] = &[
     "-C",
@@ -1218,6 +1260,7 @@ pub(super) const GLOBAL_FLAGS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::super::render_usage_error;
+    use super::super::spec::COMMANDS;
     use super::*;
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -1277,13 +1320,11 @@ mod tests {
                 message: "unknown command 'dev'".into(),
             })
         );
+        // The bare form's hidden name is never suggested.
+        assert_eq!(message(&["snyc"]), "unknown command 'snyc'");
         assert_eq!(
-            message(&["snyc"]),
-            "unknown command 'snyc'; did you mean 'sync'?"
-        );
-        assert_eq!(
-            message(&["sy"]),
-            "unknown command 'sy'; did you mean 'sync'?"
+            message(&["stauts"]),
+            "unknown command 'stauts'; did you mean 'status'?"
         );
         assert_eq!(
             message(&["gcc"]),
@@ -1294,7 +1335,10 @@ mod tests {
             render_usage_error("unknown command 'deploy'", None),
             "tog: error: unknown command 'deploy'\nRun 'tog --help' for usage.\n"
         );
-        assert_eq!(message(&["--fresh", "sync"]), "unknown option '--fresh'");
+        assert_eq!(
+            message(&["--frsh"]),
+            "unknown option '--frsh'; did you mean '--fresh'?"
+        );
         assert_eq!(
             message(&["--dir", "x", "sync"]),
             "unknown option '--dir'; did you mean '--directory'?"
@@ -1333,14 +1377,19 @@ mod tests {
             );
             assert_eq!(printed(&[spec.name, "-h"]), help(spec), "{} -h", spec.name);
         }
-        assert_eq!(printed(&["help", "install"]), help(spec("sync").unwrap()));
-        assert_eq!(printed(&["i", "--help"]), help(spec("sync").unwrap()));
+        let bare = help(spec("sync").unwrap());
+        assert!(bare.starts_with("tog — "), "{bare}");
+        assert_eq!(printed(&["help", "setup"]), bare);
+        assert_eq!(printed(&["help", "install"]), bare);
+        assert_eq!(printed(&["i", "--help"]), bare);
+        assert_eq!(printed(&["help", "inputs"]), super::super::spec::inputs());
+        assert!(message(&["help", "input"]).contains("did you mean 'inputs'?"));
         assert_eq!(
             printed(&["gc", "--dry-run", "--help"]),
             help(spec("gc").unwrap())
         );
         assert_eq!(printed(&["-C", "/tmp", "--help"]), usage());
-        assert!(message(&["help", "snyc"]).contains("did you mean 'sync'?"));
+        assert!(message(&["help", "stauts"]).contains("did you mean 'status'?"));
     }
 
     #[test]
@@ -1398,9 +1447,54 @@ mod tests {
         assert_eq!(
             parse(&argv(&["sync", "now"])).unwrap_err().render(),
             format!(
-                "tog: error: {}\nRun 'tog help sync' for usage.\n",
+                "tog: error: {}\nRun 'tog help setup' for usage.\n",
                 sync_takes_no_package("now")
             )
+        );
+    }
+
+    /// The three flags belong to the bare `tog`: with one, the invocation
+    /// is a sync command rather than the implicit form, so no help follows
+    /// it and a directory with no project fails like any sync.
+    #[test]
+    fn the_bare_form_takes_the_setup_flags() {
+        assert_eq!(
+            command(&["--frozen"]),
+            Command::Sync {
+                fresh: false,
+                strict: false,
+                frozen: true
+            }
+        );
+        let invocation = run(&["-q", "--strict", "-C", "/tmp", "--fresh"]);
+        assert_eq!(
+            invocation.command,
+            Command::Sync {
+                fresh: true,
+                strict: true,
+                frozen: false
+            }
+        );
+        assert!(invocation.options.quiet);
+        assert_eq!(invocation.options.directory, Some(PathBuf::from("/tmp")));
+        // Ahead of a hidden alias the flags join its own.
+        assert_eq!(
+            command(&["--frozen", "install", "--strict"]),
+            Command::Sync {
+                fresh: false,
+                strict: true,
+                frozen: true
+            }
+        );
+        assert_eq!(
+            printed(&["--frozen", "--help"]),
+            help(spec("sync").unwrap())
+        );
+        // Ahead of any other verb they mean nothing, so they are refused.
+        let error = parse(&argv(&["--frozen", "run", "pytest"])).unwrap_err();
+        assert_eq!(
+            error.message,
+            "--frozen belongs to the bare 'tog'; run 'tog --frozen' on its own"
         );
     }
 
@@ -2258,16 +2352,16 @@ mod tests {
 
     #[test]
     fn suggestions_are_conservative() {
-        let commands = || COMMANDS.iter().map(|spec| spec.name);
-        assert_eq!(suggest("sync", commands()), Some("sync"));
-        assert_eq!(suggest("SYNC", commands()), Some("sync"));
+        let commands = || listed().map(|spec| spec.name);
+        assert_eq!(suggest("status", commands()), Some("status"));
+        assert_eq!(suggest("STATUS", commands()), Some("status"));
         assert_eq!(suggest("s", commands()), None);
         assert_eq!(suggest("gcx", commands()), Some("gc"));
         assert_eq!(suggest("gxc", commands()), None);
         assert_eq!(suggest("-q", ["-h", "-v"].into_iter()), None);
         assert_eq!(suggest("stor", commands()), Some("store"));
         assert_eq!(suggest("bulid", commands()), Some("build"));
-        assert_eq!(suggest("snyc", commands()), Some("sync"));
+        assert_eq!(suggest("snyc", commands()), None);
         assert_eq!(suggest("deploy", commands()), None);
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
