@@ -694,21 +694,27 @@ fn run_and_env_sync_a_project_before_reading_it() {
         "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
     )
     .unwrap();
-    for args in [&["run", "python", "--version"][..], &["env"]] {
-        let out = tog(&project.0, &home.0, args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-        let stderr = text(&out.stderr);
-        assert!(
-            stderr.contains("tog: syncing first: python not synced"),
-            "{args:?}: {stderr}"
-        );
-        assert!(stderr.contains("no pinned CPython"), "{args:?}: {stderr}");
-        // The old advice would send them to the command that just ran.
-        assert!(
-            !stderr.contains("run `tog sync` first"),
-            "{args:?}: {stderr}"
-        );
-        assert!(out.stdout.is_empty(), "{args:?}: {}", text(&out.stdout));
+    // From a subdirectory too: the manifest above is the project.
+    let nested = project.0.join("src");
+    std::fs::create_dir_all(&nested).unwrap();
+    for cwd in [&project.0, &nested] {
+        for args in [&["run", "python", "--version"][..], &["env"]] {
+            let out = tog(cwd, &home.0, args);
+            assert_eq!(out.status.code(), Some(1), "{args:?} in {}", cwd.display());
+            let stderr = text(&out.stderr);
+            assert!(
+                stderr.contains("tog: syncing first: python not synced"),
+                "{args:?} in {}: {stderr}",
+                cwd.display()
+            );
+            assert!(stderr.contains("no pinned CPython"), "{args:?}: {stderr}");
+            // The old advice would send them to the command that just ran.
+            assert!(
+                !stderr.contains("run `tog sync` first"),
+                "{args:?}: {stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{args:?}: {}", text(&out.stdout));
+        }
     }
 }
 

@@ -7,7 +7,7 @@
 //! `std::process::Command` turned into shell syntax.
 
 use crate::cli::Shell;
-use crate::commands::shared::{projected_env, projected_root};
+use crate::commands::shared::projected_env;
 use crate::kernel::context::Context;
 use std::io;
 
@@ -20,11 +20,15 @@ type Variable = (String, Option<String>);
 pub fn run(ctx: &Context, shell: Option<Shell>) -> io::Result<i32> {
     let shell = shell.unwrap_or_else(shell_from_environment);
     let cwd = ctx.project_dir();
-    let dir = projected_root(&cwd);
     // What is printed is the environment the inputs describe, as `run`
-    // gives it: a missing or stale projection is synced first, on stderr,
-    // so stdout still carries the environment or nothing at all.
-    crate::commands::sync::ensure_current(ctx, &dir)?;
+    // gives it: a missing or stale projection is synced first. Everything
+    // that sync and its children print is sent to stderr for the duration,
+    // so stdout still carries the environment or nothing at all: this
+    // output is evaled by a shell, and a package manager's summary in it
+    // would be executed.
+    let dir = crate::kernel::ui::with_stdout_on_stderr(|| {
+        crate::commands::sync::ensure_current(ctx, &cwd)
+    })?;
     // Never spawned: the tailors' contribution is read back off it. A
     // program that does not exist is therefore the honest placeholder.
     let mut carrier = std::process::Command::new("");

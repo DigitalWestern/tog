@@ -261,8 +261,10 @@ project is synced first, with one `tog: syncing first: <ecosystem>
 same sync a bare `tog` runs, so a sync that would refuse (a stale toolchain
 lock, a denied exception) refuses here in its own words before anything
 runs. One sync per command, never a second look: a state a sync does not
-clear costs a sync per command, not a loop. A directory with no manifest has
-nothing to sync and exits 1 saying so.
+clear costs a sync per command, not a loop. From a subdirectory of a
+never-synced project the nearest ancestor with a manifest is the project;
+once synced, the nearest `.tog/closures/` decides, as before. A directory
+with no manifest above it has nothing to sync and exits 1 saying so.
 
 A projection is a symlink into an immutable store object, so the commands
 that would *mutate* one are refused with the verb that replaces them, before

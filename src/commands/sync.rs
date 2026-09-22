@@ -2,7 +2,7 @@
 //! and project each one through the tailor registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode, ProjectToolchain};
-use crate::commands::shared::{ecosystem_inputs, no_inputs};
+use crate::commands::shared::{ecosystem_inputs, no_inputs, projected_root};
 use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -11,7 +11,7 @@ use crate::kernel::store;
 use crate::tailors::{self, SyncRequest, Tailor};
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Check every detected ecosystem can sync, touching no store. Returns the
 /// tailors it checked, so the sync runs exactly those, and the toolchain
@@ -140,8 +140,8 @@ fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool) -> io::Result<()
     sync_preflighted(ctx, dir, &present, &mut toolchain, fresh, &Mode::Writable)
 }
 
-/// Sync first when the environment under `dir` is not the one its inputs
-/// describe, so the caller reads a current projection.
+/// Sync first when the environment for `cwd` is not the one its inputs
+/// describe, and return the root whose projection the caller should read.
 ///
 /// `tog run`, `tog env` and a delegated `tog fmt` script all want the
 /// environment the project's inputs describe. Refusing with "run `tog
@@ -156,18 +156,41 @@ fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool) -> io::Result<()
 /// One sync per command, and no second look: a state a sync does not
 /// clear costs a sync per command, which is the habit this replaces, and
 /// never a loop.
-pub(crate) fn ensure_current(ctx: &Context, dir: &Path) -> io::Result<()> {
-    let rows = crate::commands::inspect::status(ctx.platform, dir)?;
+///
+/// The root is found again after the sync rather than assumed: a Cargo
+/// workspace member syncs and projects at the workspace root, so the
+/// projection to read is not always the directory that was synced.
+pub(crate) fn ensure_current(ctx: &Context, cwd: &Path) -> io::Result<PathBuf> {
+    let dir = sync_root(cwd)?;
+    let rows = crate::commands::inspect::status(ctx.platform, &dir)?;
     let stale: Vec<String> = rows
         .iter()
         .filter(|row| !row.is_synced())
         .map(stale_reason)
         .collect();
-    if stale.is_empty() {
-        return Ok(());
+    if !stale.is_empty() {
+        crate::kernel::ui::note(&format!("syncing first: {}", stale.join("; ")));
+        run_in(ctx, &dir, false, false)?;
     }
-    crate::kernel::ui::note(&format!("syncing first: {}", stale.join("; ")));
-    run_in(ctx, dir, false, false)
+    Ok(projected_root(cwd))
+}
+
+/// The directory a command's sync belongs to: the nearest projected
+/// ancestor, as `run` has always found it, and otherwise the nearest
+/// ancestor with a manifest, so `tog run` from `src/` of a never-synced
+/// project finds the project. The projected walk comes first, so a nested
+/// package.json under an already-synced root (a docs site) keeps
+/// belonging to that root.
+fn sync_root(cwd: &Path) -> io::Result<PathBuf> {
+    if let Some(projected) = cwd.ancestors().find(|d| d.join(".tog/closures").is_dir()) {
+        return Ok(projected.to_path_buf());
+    }
+    for dir in cwd.ancestors() {
+        if !crate::commands::inspect::detected(dir)?.is_empty() {
+            return Ok(dir.to_path_buf());
+        }
+    }
+    Ok(cwd.to_path_buf())
 }
 
 /// Why one ecosystem is about to be synced, in the words `tog status`
@@ -715,14 +738,22 @@ mod tests {
             "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
         )
         .unwrap();
+        let nested = project.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let ctx = Context::open_in(Platform::host().unwrap(), &bare, false).unwrap();
 
-        ensure_current(&ctx, &bare).expect("a directory with no manifest is left alone");
+        let root = ensure_current(&ctx, &bare).expect("a directory with no manifest is left alone");
+        assert_eq!(root, bare);
         assert!(!bare.join(".tog").exists());
 
         let error = ensure_current(&ctx, &project).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
+        // From a subdirectory the manifest above is the project.
+        let error = ensure_current(&ctx, &nested).unwrap_err();
+        assert!(error.to_string().contains("no pinned CPython"), "{error}");
+        assert_eq!(sync_root(&nested).unwrap(), project);
+        assert_eq!(sync_root(&bare).unwrap(), bare);
     }
 
     #[test]
