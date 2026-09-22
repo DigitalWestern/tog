@@ -160,7 +160,9 @@ each locked plan into the store, and projects it (`.venv`, `node_modules`,
 `.tog/...`); a manifest with no dependencies syncs an interpreter-only
 environment, and `--fresh` drops project-local caches and rebuilds. It takes
 no package name: `tog install requests` is a usage error that names
-`tog add requests`.
+`tog add requests`. `run`, `env` and `tog <script>` sync on their own when
+the project is not synced or its inputs changed (see **run**), so the verb
+is typed for a sync with options, or a sync with nothing to run after it.
 
 The first writable sync of a project with no toolchain lock selects a
 runtime per ecosystem, writes `tog-toolchain.toml` at the project root, and
@@ -250,6 +252,20 @@ and `tog test -- --watch` passes a literal `--` as well. Completion offers
 the package.json script names as first words whenever a package.json is
 present, which is where most people find the shorthand.
 
+The environment is the one the project's inputs describe. Before the
+command runs, `run` makes the same check `status` prints, offline: when
+nothing is synced yet, a manifest or lock changed since the last sync, the
+projection is gone, or the closure was synced on another platform, the
+project is synced first, with one `tog: syncing first: <ecosystem>
+<state>` line on stderr saying why, and then the command runs. It is the
+same sync a bare `tog` runs, so a sync that would refuse (a stale toolchain
+lock, a denied exception) refuses here in its own words before anything
+runs. One sync per command, never a second look: a state a sync does not
+clear costs a sync per command, not a loop. From a subdirectory of a
+never-synced project the nearest ancestor with a manifest is the project;
+once synced, the nearest `.tog/closures/` decides, as before. A directory
+with no manifest above it has nothing to sync and exits 1 saying so.
+
 A projection is a symlink into an immutable store object, so the commands
 that would *mutate* one are refused with the verb that replaces them, before
 the projection is even looked up:
@@ -287,8 +303,10 @@ sh; fish gets `set -gx PATH <dir>... $PATH` and `set -e NAME`. The default
 is the basename of `$SHELL` when that is one of the three and bash
 otherwise, so a shell tog does not speak gets the form most likely to work
 rather than a refusal; an unrecognized `--shell` value is a usage error with
-a suggestion, exactly like `completions`. Outside a projection nothing is
-printed and it exits 1 naming `tog sync`.
+a suggestion, exactly like `completions`. Like `run`, it syncs first when
+the project is not synced or its inputs changed; that narration is stderr,
+so stdout still carries the environment or nothing at all. Outside a
+project nothing is printed and it exits 1 saying there is no manifest.
 
 ```sh
 eval "$(tog env)"        # this shell, until it exits

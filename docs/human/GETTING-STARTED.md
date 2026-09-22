@@ -282,12 +282,20 @@ for a specific verb in the same directory — `tog plan`, say — is a command
 that failed rather than a malformed one, and exits 1.)
 
 ```
-$ tog run python --version
-tog: error: no environment projected here for command 'python'; run `tog sync` first
+$ cd ../api && tog run python --version
+tog: syncing first: python changed (requirements.txt)
+tog: python inputs: requirements.txt
+synced: .venv -> /tmp/tog-demo/store/objects/9b1c0e7d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e-env-3.12.14
+Python 3.12.14
 ```
 
-A manifest exists, but nothing has been synced yet, or the projection was
-deleted. Run `tog`.
+Not an error, though it used to be one. A manifest exists but nothing was
+synced yet, or `requirements.txt` changed since the last sync: `tog run`
+(and `tog env`, and `tog <script>`) syncs first, says so in one line, and
+runs the command. It is the same sync a bare `tog` runs, so anything that
+sync would refuse is refused here in the same words. In a directory with no
+manifest, `tog run` fails like `tog plan` does, exit 1, saying there is no
+manifest to sync from.
 
 For anything else: `tog doctor` first, `-v` second. Verbose mode prints
 every decision and every subprocess command line, which is what a bug report

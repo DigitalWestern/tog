@@ -5,7 +5,8 @@
 //! here, because it decides *how* the command runs, not what it sees.
 
 use crate::comforter;
-use crate::commands::shared::{self, child_status_code, projected_root};
+use crate::commands::shared::{self, child_status_code};
+use crate::commands::sync;
 use crate::kernel::context::Context;
 use crate::kernel::supervise;
 use crate::tailors::node;
@@ -205,7 +206,12 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
     // Walk up from cwd to the nearest projected root, so `tog run`
     // works from workspace subdirectories like npm run does.
     let cwd = ctx.project_dir();
-    let dir = projected_root(&cwd);
+    // The environment the command runs in is the one the project's inputs
+    // describe, so a missing or stale projection is synced here rather than
+    // reported, and the root to read is the one that sync leaves behind.
+    // Outside a project this finds nothing to sync and the refusal below
+    // explains.
+    let dir = sync::ensure_current(ctx, &cwd)?;
     let (node_projected, _) = node::tailor::projected_node_modules(&dir, &cwd);
     let package_json = if node_projected {
         comforter::read_closure(&dir, "node")?;
@@ -253,8 +259,10 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "no environment projected here for command '{}'; run `tog sync` first",
-                cmd[0]
+                "no environment projected here for command '{}', and no manifest to sync one \
+                 from in {} (see PROJECT INPUTS in 'tog --help')",
+                cmd[0],
+                dir.display()
             ),
         ));
     }

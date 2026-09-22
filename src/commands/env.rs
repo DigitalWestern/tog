@@ -7,7 +7,7 @@
 //! `std::process::Command` turned into shell syntax.
 
 use crate::cli::Shell;
-use crate::commands::shared::{projected_env, projected_root};
+use crate::commands::shared::projected_env;
 use crate::kernel::context::Context;
 use std::io;
 
@@ -15,12 +15,20 @@ use std::io;
 type Variable = (String, Option<String>);
 
 /// Print the environment of the nearest projected root, in `shell` syntax,
-/// on stdout. Exit 1 with the same next step `run` gives when there is no
-/// environment here to print.
+/// on stdout, syncing it first when `run` would. Exit 1 with the same
+/// explanation `run` gives when there is no project here at all.
 pub fn run(ctx: &Context, shell: Option<Shell>) -> io::Result<i32> {
     let shell = shell.unwrap_or_else(shell_from_environment);
     let cwd = ctx.project_dir();
-    let dir = projected_root(&cwd);
+    // What is printed is the environment the inputs describe, as `run`
+    // gives it: a missing or stale projection is synced first. Everything
+    // that sync and its children print is sent to stderr for the duration,
+    // so stdout still carries the environment or nothing at all: this
+    // output is evaled by a shell, and a package manager's summary in it
+    // would be executed.
+    let dir = crate::kernel::ui::with_stdout_on_stderr(|| {
+        crate::commands::sync::ensure_current(ctx, &cwd)
+    })?;
     // Never spawned: the tailors' contribution is read back off it. A
     // program that does not exist is therefore the honest placeholder.
     let mut carrier = std::process::Command::new("");
@@ -28,7 +36,11 @@ pub fn run(ctx: &Context, shell: Option<Shell>) -> io::Result<i32> {
     if prefix.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "no environment projected here; run `tog sync` first",
+            format!(
+                "no environment projected here, and no manifest to sync one from in {} (see \
+                 PROJECT INPUTS in 'tog --help')",
+                dir.display()
+            ),
         ));
     }
     print!("{}", render(shell, &prefix, &variables(&carrier)));

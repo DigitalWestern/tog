@@ -44,9 +44,11 @@ pub fn migrate_metadata<W: Write>(
 /// the sweep, which refuses on unresolved evidence regardless.
 pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result<MigrationReport> {
     let Some(activity) = store.try_activity_exclusive()? else {
-        writeln!(
-            out,
-            "metadata maintenance deferred: a Tog job is using this store"
+        out.write_all(
+            crate::kernel::ui::warning_line(
+                "metadata maintenance deferred: a Tog job is using this store",
+            )
+            .as_bytes(),
         )?;
         return Ok(MigrationReport::default());
     };
@@ -55,23 +57,30 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
     // next command either: printed unconditionally, the same paragraph would
     // precede every single invocation forever. The marker below turns it
     // into news — printed when it first appears and whenever it changes.
+    //
+    // The narration itself is the short form (`automatic`): a person who
+    // typed `tog run dev` gets one line per record that needs a decision
+    // and one summary, not the migration's own accounting. The full
+    // accounting is what `tog gc --migrate-metadata` prints.
     let mut buffer: Vec<u8> = Vec::new();
     let (report, deferral) =
         match migrate_metadata_locked(store, &activity, false, &mut buffer, true) {
             Ok((report, _)) if report.unresolved == 0 => {
                 if !buffer.is_empty() {
-                    out.write_all(&buffer)?;
+                    write_advisories(out, &buffer)?;
                 }
                 clear_deferral_marker(store)?;
                 return Ok(report);
             }
             Ok((report, _)) => {
-                writeln!(
-                    buffer,
-                    "metadata maintenance deferred: {} record(s) remain unresolved; GC \
-                     stays blocked until they are resolved",
-                    report.unresolved
-                )?;
+                buffer.extend_from_slice(
+                    plain_warning_line(&format!(
+                        "metadata maintenance deferred: {} store record(s) unresolved, so \
+                         'tog gc' cannot sweep; 'tog gc --migrate-metadata' explains each",
+                        report.unresolved
+                    ))
+                    .as_bytes(),
+                );
                 (report, buffer)
             }
             Err(error) => {
@@ -79,15 +88,22 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
                 // shared job from using an otherwise valid cached projection. The
                 // destructive path stays fail-closed, and the explicit migration
                 // command still surfaces this error.
-                writeln!(
-                    buffer,
-                    "metadata maintenance deferred: {error}; retry after resolving the record"
-                )?;
+                buffer.extend_from_slice(
+                    plain_warning_line(&format!("metadata maintenance deferred: {error}"))
+                        .as_bytes(),
+                );
                 (MigrationReport::default(), buffer)
             }
         };
+    // `--quiet` points stderr at /dev/null: nothing below would be seen, so
+    // the once-per-store showing is not spent on it.
+    if crate::kernel::ui::quiet() {
+        return Ok(report);
+    }
     // A byte-for-byte comparison, not a "have we warned before" flag: the
     // moment the store's problems change, the operator sees the new list.
+    // The compared text is the plain form; color is added on the way out,
+    // so a terminal and a pipe agree about what has been seen.
     let marker = deferral_marker(store);
     if fs::read(&marker).ok().as_deref() == Some(deferral.as_slice()) {
         return Ok(report);
@@ -96,17 +112,42 @@ pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result
     // operator has already seen exactly this text", so it must not be
     // written until the text has actually reached them: a marker written
     // before a failing write would silence the warning on every later run.
-    out.write_all(&deferral)?;
+    write_advisories(out, &deferral)?;
     // We hold the exclusive lease, so this write should not fail. If it
     // does, say nothing about printing once — the claim would be false.
     let recorded = write_deferral_marker(store, &marker, &deferral).is_ok();
     if recorded {
-        writeln!(
-            out,
-            "this warning is shown once per store; `tog gc --migrate-metadata` repeats it"
+        out.write_all(
+            crate::kernel::ui::warning_line(
+                "this warning is shown once per store; 'tog gc --migrate-metadata' repeats it",
+            )
+            .as_bytes(),
         )?;
     }
     Ok(report)
+}
+
+/// The prefix every automatic-maintenance advisory carries before color is
+/// applied. Kept plain so the deferral marker compares the same bytes
+/// whether stderr was a terminal or a pipe.
+const WARNING_PREFIX: &str = "tog: warning: ";
+
+/// One advisory line in the plain form the deferral marker stores.
+fn plain_warning_line(message: &str) -> String {
+    format!("{WARNING_PREFIX}{message}\n")
+}
+
+/// Print captured plain advisories the way `ui::warning` prints them, the
+/// word colored on a terminal. A line without the prefix (an upgrade
+/// count) is written as it is.
+fn write_advisories<W: Write>(out: &mut W, text: &[u8]) -> io::Result<()> {
+    for line in String::from_utf8_lossy(text).lines() {
+        match line.strip_prefix(WARNING_PREFIX) {
+            Some(message) => out.write_all(crate::kernel::ui::warning_line(message).as_bytes())?,
+            None => writeln!(out, "{line}")?,
+        }
+    }
+    Ok(())
 }
 
 /// Where the last deferral text is remembered. A plain file at the store
@@ -170,6 +211,23 @@ pub(super) fn migrate_metadata_locked<W: Write>(
     let mut report = MigrationReport::default();
     for (file, reason) in &unusable {
         let stem = file.strip_suffix(".json").unwrap_or(file);
+        if automatic {
+            // One line, one decision: the id to drop, or the file to
+            // restore. The reason is kept because it is what a backup or a
+            // bug report needs.
+            let advice = if store::is_object_id(stem) {
+                format!("'tog gc --drop-object {stem}' drops it and the next sync rebuilds it")
+            } else {
+                format!("delete meta/{file} by hand or restore it from a backup")
+            };
+            out.write_all(
+                plain_warning_line(&format!(
+                    "store record meta/{file} is unusable ({reason}); {advice}"
+                ))
+                .as_bytes(),
+            )?;
+            continue;
+        }
         let advice = if store::is_object_id(stem) {
             format!(
                 "Drop it with `tog gc --drop-object {stem}` (the next sync that needs the \
@@ -203,24 +261,23 @@ pub(super) fn migrate_metadata_locked<W: Write>(
             .iter()
             .filter(|(_, record)| record.evidence == crate::kernel::objmeta::Evidence::Legacy)
             .count();
+        report.unresolved += held;
+        // The automatic caller prints its own one-line summary; the
+        // accounting below is for the person who asked for it.
+        if automatic {
+            return Ok((report, BTreeMap::new()));
+        }
         writeln!(
             out,
             "metadata migration held: {} unusable record(s) must be resolved before legacy \
              records can be proven",
             unusable.len()
         )?;
-        report.unresolved += held;
         writeln!(
             out,
             "metadata migration: 0 upgraded, {} unresolved{}",
             report.unresolved,
-            if dry_run {
-                " (dry run)"
-            } else if automatic {
-                " (deferred)"
-            } else {
-                ""
-            }
+            if dry_run { " (dry run)" } else { "" }
         )?;
         return Ok((report, BTreeMap::new()));
     }
@@ -279,6 +336,16 @@ pub(super) fn migrate_metadata_locked<W: Write>(
         upgrades.insert(id.clone(), upgraded_record(record, deps)?);
     }
     for (id, reason) in &unresolved {
+        if automatic {
+            out.write_all(
+                plain_warning_line(&format!(
+                    "store record for object {id} cannot be migrated ({reason}); \
+                     'tog gc --drop-object {id}' drops it and the next sync rebuilds it"
+                ))
+                .as_bytes(),
+            )?;
+            continue;
+        }
         writeln!(
             out,
             "metadata migration unresolved: object {id} — {reason}. The record keeps its \
@@ -301,18 +368,24 @@ pub(super) fn migrate_metadata_locked<W: Write>(
             report.upgraded += 1;
         }
     }
+    if automatic {
+        // A silent upgrade that succeeded is worth one line; a deferral is
+        // summarized by the caller.
+        if report.unresolved == 0 && report.upgraded != 0 {
+            writeln!(
+                out,
+                "tog: store metadata upgraded for {} object(s)",
+                report.upgraded
+            )?;
+        }
+        return Ok((report, upgrades));
+    }
     writeln!(
         out,
         "metadata migration: {} upgraded, {} unresolved{}",
         report.upgraded,
         report.unresolved,
-        if dry_run {
-            " (dry run)"
-        } else if automatic && report.unresolved != 0 {
-            " (deferred)"
-        } else {
-            ""
-        }
+        if dry_run { " (dry run)" } else { "" }
     )?;
     Ok((report, upgrades))
 }

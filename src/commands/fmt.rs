@@ -58,15 +58,8 @@ pub fn run(
                     .is_some();
             if is_script {
                 ui::trace("'fmt' is a package.json script: running it");
-                // `run` only executes package scripts in a projected
-                // environment. Preserve that early, store-free refusal for a
-                // package that has a script but has never been synced.
-                if !script_root.join(".tog/closures").is_dir() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "no environment projected here for command 'fmt'; run `tog sync` first",
-                    ));
-                }
+                // `run` syncs a package that has never been synced before
+                // it runs the script, so there is nothing to refuse here.
                 let mut command = vec!["fmt".to_string()];
                 if check {
                     command.push("--check".into());

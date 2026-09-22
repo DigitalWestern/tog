@@ -111,6 +111,49 @@ pub fn quiet() -> bool {
     settings().quiet
 }
 
+/// Run `job` with fd 1 pointed at fd 2, so whatever it or any child it
+/// spawns prints reaches stderr, then put fd 1 back. `tog env` syncs
+/// before it prints and its stdout is evaled by a shell: a package
+/// manager's summary there would be executed as commands.
+pub fn with_stdout_on_stderr<T>(job: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    with_fd_pointed_at(io::stdout().as_raw_fd(), io::stderr().as_raw_fd(), job)
+}
+
+/// The mechanism, over any two descriptors so it can be tested against a
+/// pipe. Rust's own stdout buffer is flushed first, so nothing written
+/// before the swap comes out after it on the wrong side.
+fn with_fd_pointed_at<T>(
+    fd: i32,
+    target: i32,
+    job: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    io::stdout().flush()?;
+    // SAFETY: plain duplication of descriptors this process owns. The
+    // saved copy is close-on-exec so no child inherits the real stdout,
+    // and it is closed here on every path.
+    let saved = unsafe { libc::dup(fd) };
+    if saved < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let swapped = unsafe {
+        libc::fcntl(saved, libc::F_SETFD, libc::FD_CLOEXEC) >= 0 && libc::dup2(target, fd) >= 0
+    };
+    if !swapped {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(saved) };
+        return Err(error);
+    }
+    let result = job();
+    io::stdout().flush()?;
+    let restored = unsafe { libc::dup2(saved, fd) } >= 0;
+    let restore_error = io::Error::last_os_error();
+    unsafe { libc::close(saved) };
+    match (result, restored) {
+        (Ok(_), false) => Err(restore_error),
+        (result, _) => result,
+    }
+}
+
 pub fn verbose() -> bool {
     settings().verbose
 }
@@ -161,7 +204,14 @@ pub fn warning(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("tog: {}: {message}", paint("warning", YELLOW));
+    eprint!("{}", warning_line(message));
+}
+
+/// The text `warning` prints, newline included, for a caller that writes
+/// to a handle of its own (the maintenance narration holds a locked
+/// stderr) and must still look like every other advisory.
+pub fn warning_line(message: &str) -> String {
+    format!("tog: {}: {message}\n", paint("warning", YELLOW))
 }
 
 /// Progress narration.
@@ -349,6 +399,48 @@ fn shell_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child spawned inside the job inherits the redirected descriptor,
+    /// and the descriptor is put back afterwards, on the error path too.
+    #[test]
+    fn a_job_and_its_children_print_to_the_redirected_descriptor() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_end, write_end) = (fds[0], fds[1]);
+        let child = || {
+            std::process::Command::new("sh")
+                .args(["-c", "echo redirected-marker"])
+                .status()
+                .map(|_| ())
+        };
+        with_fd_pointed_at(io::stdout().as_raw_fd(), write_end, child).unwrap();
+        let error = with_fd_pointed_at(io::stdout().as_raw_fd(), write_end, || {
+            child()?;
+            Err::<(), _>(io::Error::other("job failed"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "job failed");
+        unsafe { libc::close(write_end) };
+        let mut captured = String::new();
+        // SAFETY: the read end is ours; File takes ownership and closes it.
+        let mut reader = unsafe { File::from_raw_fd(read_end) };
+        io::Read::read_to_string(&mut reader, &mut captured).unwrap();
+        // The test harness writes its own progress to fd 1 meanwhile, so
+        // the pipe holds those lines too; the two markers are what matters.
+        assert_eq!(
+            captured.matches("redirected-marker\n").count(),
+            2,
+            "{captured}"
+        );
+        // fd 1 is stdout again: a child sees a descriptor that is not the
+        // (now closed) pipe.
+        let after = std::process::Command::new("sh")
+            .args(["-c", "echo after >&1"])
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&after.stdout), "after\n");
+    }
 
     #[test]
     fn shell_words_quote_only_when_needed() {

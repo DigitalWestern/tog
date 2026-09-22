@@ -2,7 +2,7 @@
 //! and project each one through the tailor registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode, ProjectToolchain};
-use crate::commands::shared::{ecosystem_inputs, no_inputs};
+use crate::commands::shared::{ecosystem_inputs, no_inputs, projected_root};
 use crate::kernel::context::{self, Context};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -11,7 +11,7 @@ use crate::kernel::store;
 use crate::tailors::{self, SyncRequest, Tailor};
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Check every detected ecosystem can sync, touching no store. Returns the
 /// tailors it checked, so the sync runs exactly those, and the toolchain
@@ -130,9 +130,81 @@ fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
 /// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
-    let dir = ctx.project_dir();
-    let (present, mut toolchain) = preflight(ctx.platform, &dir, strict, Mode::Writable)?;
-    sync_preflighted(ctx, &dir, &present, &mut toolchain, fresh, &Mode::Writable)
+    run_in(ctx, &ctx.project_dir(), fresh, strict)
+}
+
+/// The same sync of one named directory: the projected root a command
+/// found by walking up, which is not always the process cwd.
+fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool) -> io::Result<()> {
+    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, Mode::Writable)?;
+    sync_preflighted(ctx, dir, &present, &mut toolchain, fresh, &Mode::Writable)
+}
+
+/// Sync first when the environment for `cwd` is not the one its inputs
+/// describe, and return the root whose projection the caller should read.
+///
+/// `tog run`, `tog env` and a delegated `tog fmt` script all want the
+/// environment the project's inputs describe. Refusing with "run `tog
+/// sync` first" made the user type the one thing tog already knew to do.
+/// The check is the one `tog status` prints: offline, reading the closure
+/// records and hashing the inputs they name, and it is what decides, so
+/// `status` and this never disagree about staleness. A directory with no
+/// manifest is left alone and the caller's own message says what is
+/// missing. A sync that would refuse (a stale toolchain lock, a denied
+/// exception) refuses here in its own words, before the command runs.
+///
+/// One sync per command, and no second look: a state a sync does not
+/// clear costs a sync per command, which is the habit this replaces, and
+/// never a loop.
+///
+/// The root is found again after the sync rather than assumed: a Cargo
+/// workspace member syncs and projects at the workspace root, so the
+/// projection to read is not always the directory that was synced.
+pub(crate) fn ensure_current(ctx: &Context, cwd: &Path) -> io::Result<PathBuf> {
+    let dir = sync_root(cwd)?;
+    let rows = crate::commands::inspect::status(ctx.platform, &dir)?;
+    let stale: Vec<String> = rows
+        .iter()
+        .filter(|row| !row.is_synced())
+        .map(stale_reason)
+        .collect();
+    if !stale.is_empty() {
+        crate::kernel::ui::note(&format!("syncing first: {}", stale.join("; ")));
+        run_in(ctx, &dir, false, false)?;
+    }
+    Ok(projected_root(cwd))
+}
+
+/// The directory a command's sync belongs to: the nearest projected
+/// ancestor, as `run` has always found it, and otherwise the nearest
+/// ancestor with a manifest, so `tog run` from `src/` of a never-synced
+/// project finds the project. The projected walk comes first, so a nested
+/// package.json under an already-synced root (a docs site) keeps
+/// belonging to that root.
+fn sync_root(cwd: &Path) -> io::Result<PathBuf> {
+    if let Some(projected) = cwd.ancestors().find(|d| d.join(".tog/closures").is_dir()) {
+        return Ok(projected.to_path_buf());
+    }
+    for dir in cwd.ancestors() {
+        if !crate::commands::inspect::detected(dir)?.is_empty() {
+            return Ok(dir.to_path_buf());
+        }
+    }
+    Ok(cwd.to_path_buf())
+}
+
+/// Why one ecosystem is about to be synced, in the words `tog status`
+/// uses: the ecosystem, its state, and the files or platform behind it.
+fn stale_reason(row: &crate::commands::inspect::EcosystemStatus) -> String {
+    use crate::comforter::status::State;
+    let detail = match &row.state {
+        State::Synced | State::NotSynced => String::new(),
+        State::Changed(files) => format!(" ({})", files.join(", ")),
+        State::ProjectionMissing(what) => format!(" ({what})"),
+        State::ForeignPlatform(platform) => format!(" (last synced on {platform})"),
+        State::Unchecked(_) => String::new(),
+    };
+    format!("{} {}{detail}", row.ecosystem, row.word().replace('-', " "))
 }
 
 fn preflight(
@@ -590,6 +662,98 @@ mod tests {
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         std::os::unix::fs::symlink(&victim, project.join(".ruby-version")).unwrap();
         preflight_sync(Platform::host().unwrap(), &project, Mode::Writable).unwrap();
+    }
+
+    /// The reason line is the `status` vocabulary with the detail that
+    /// names the file or platform behind it, so the sync a command starts
+    /// on its own says why in the same words `tog status` would.
+    #[test]
+    fn stale_reasons_name_the_state_and_what_is_behind_it() {
+        use crate::comforter::status::State;
+        let row = |ecosystem: &str, state: State| crate::commands::inspect::EcosystemStatus {
+            ecosystem: ecosystem.into(),
+            state,
+            summary: String::new(),
+        };
+        assert_eq!(
+            stale_reason(&row("node", State::NotSynced)),
+            "node not synced"
+        );
+        assert_eq!(
+            stale_reason(&row(
+                "python",
+                State::Changed(vec!["requirements.txt".into(), "pyproject.toml".into()])
+            )),
+            "python changed (requirements.txt, pyproject.toml)"
+        );
+        assert_eq!(
+            stale_reason(&row(
+                "node",
+                State::ProjectionMissing("node_modules".into())
+            )),
+            "node projection missing (node_modules)"
+        );
+        assert_eq!(
+            stale_reason(&row(
+                "python",
+                State::ForeignPlatform("aarch64-apple-darwin".into())
+            )),
+            "python foreign platform (last synced on aarch64-apple-darwin)"
+        );
+        assert_eq!(
+            stale_reason(&row(
+                "go",
+                State::Unchecked("inputs were not recorded".into())
+            )),
+            "go unchecked"
+        );
+    }
+
+    /// `ensure_current` is a no-op where there is no manifest, so the
+    /// calling command's own message explains; where a manifest exists and
+    /// nothing is synced, it is the sync that runs, refusals included.
+    #[test]
+    fn ensure_current_syncs_a_project_and_leaves_a_bare_directory_alone() {
+        // Same lock order as `failed_tailor_sync_clears_its_unpublished_exceptions`.
+        let _env_lock = policy::test_env_lock();
+        let temp = TempDir::new();
+        let home = temp.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _policy_env = PolicyEnv::enter(&home);
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _store_lock = store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        let bare = temp.0.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        // A CPython no catalog has: the sync stops at selection, offline,
+        // which is proof enough that it was started.
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
+        )
+        .unwrap();
+        let nested = project.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let _store_env = StoreEnv::enter(&temp.0.join("store"));
+        let ctx = Context::open_in(Platform::host().unwrap(), &bare, false).unwrap();
+
+        let root = ensure_current(&ctx, &bare).expect("a directory with no manifest is left alone");
+        assert_eq!(root, bare);
+        assert!(!bare.join(".tog").exists());
+
+        let error = ensure_current(&ctx, &project).unwrap_err();
+        assert!(error.to_string().contains("no pinned CPython"), "{error}");
+        // From a subdirectory the manifest above is the project.
+        let error = ensure_current(&ctx, &nested).unwrap_err();
+        assert!(error.to_string().contains("no pinned CPython"), "{error}");
+        assert_eq!(sync_root(&nested).unwrap(), project);
+        assert_eq!(sync_root(&bare).unwrap(), bare);
     }
 
     #[test]
