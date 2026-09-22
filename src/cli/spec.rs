@@ -45,44 +45,26 @@ pub const SYNC_ALIASES: &[&str] = &["install", "i"];
 pub const COMMANDS: &[Spec] = &[
     Spec {
         name: "sync",
-        group: Group::Everyday,
-        summary: "set up the environment(s) from the locks; aliases: install, i",
-        usage: "tog sync [--fresh] [--strict] [--frozen]   (aliases: install, i)",
+        group: Group::Bare,
+        summary: "set up the environment(s) from the lockfiles",
+        usage: "tog [--frozen] [--fresh] [--strict]",
         description: "\
 Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
-(.venv, node_modules, .tog/...). A bare 'tog' inside a project does the
-same and then prints this help; outside a project it prints the help and
-exits 0. 'tog run', 'tog env' and 'tog <script>' sync on their own
-whenever the project is not synced or its inputs changed, so typing
-'sync' is for a sync with options, a sync with nothing to run after it,
-or a sync with no help after it. A found manifest with no dependencies
-syncs an interpreter-only environment. It takes no package name: adding a
-dependency is 'tog add <package>'.
+(.venv, node_modules, .tog/...), then prints the command list. Outside a
+project it prints the command list and exits 0. No other verb is needed
+to get here: 'tog run', 'tog env', 'tog build' and 'tog <script>' do the
+same first whenever the project is not set up or its inputs changed. With
+--frozen, --fresh or --strict the command list is not printed, so a CI
+log ends with the result. A found manifest with no dependencies sets up
+an interpreter-only environment. Adding a dependency is
+'tog add <package>'. Which files are read per ecosystem: 'tog help inputs'.
 
-PROJECT INPUTS (any combination; each ecosystem found here is synced):
-  python   requirements.txt, pyproject.toml, setup.cfg/setup.py,
-           requirements/*; ranged inputs are locked into a hash-pinned
-           requirements.lock.txt, and a Poetry/uv lockfile is imported
-           when compatible. .python-version selects the interpreter: X.Y
-           takes the newest pinned patch, X.Y.Z must be an exact pinned
-           build, and with neither the newest pinned build is taken once
-           and then recorded in tog-toolchain.toml.
-  node     package-lock.json (v2/v3), pnpm-lock.yaml (v9, v6 importer
-           shape also accepted), yarn.lock (Yarn classic v1)
-  cargo    Cargo.toml, Cargo.lock; a missing lock is written by the
-           store Cargo
-  go       go.mod, go.sum; the closure is computed by the store Go
-  ruby     Gemfile, Gemfile.lock; a missing lock is resolved by store
-           bundler
-  elixir   mix.exs, mix.lock; a missing lock is resolved by store mix
-  dotnet   *.csproj with packages.lock.json (the lock is mandatory)
-
-TOOLCHAIN: the first writable sync writes tog-toolchain.toml at the project
-root, naming the exact runtime per ecosystem; commit it. Later syncs honor
-it and never reselect. A source file that disagrees with the lock
-(.python-version, .node-version, go.mod, rust-toolchain.toml, .ruby-version,
-.tool-versions, global.json) stops the sync and names
+TOOLCHAIN: the first writable setup writes tog-toolchain.toml at the
+project root, naming the exact runtime per ecosystem; commit it. Later
+runs honor it and never reselect. A source file that disagrees with the
+lock (.python-version, .node-version, go.mod, rust-toolchain.toml,
+.ruby-version, .tool-versions, global.json) stops tog and names
 'tog update --toolchain', which is the only way to move a locked runtime.
 
 --frozen never modifies project inputs, tog-toolchain.toml, or the catalog
@@ -94,9 +76,9 @@ recorded in .tog/closures/*.json and summarized at the end; --strict, a
 TOG_STRICT=1 environment, or a .tog/policy.toml deny list refuses
 them instead.",
         examples: &[
-            ("tog", "sync this project; the bare form also prints this help"),
-            ("tog sync --frozen", "CI: check the locks are current without writing them"),
-            ("tog sync --fresh", "rebuild .venv / node_modules from scratch"),
+            ("tog", "set up this project, then show the command list"),
+            ("tog --frozen", "CI: check the locks are current without writing them"),
+            ("tog --fresh", "rebuild .venv / node_modules from scratch"),
         ],
         options: &[
             ("--fresh", "rebuild the projection, dropping project-local caches"),
@@ -627,7 +609,7 @@ START HERE:
 const ENVIRONMENT: &str = "\
 ENVIRONMENT:
   TOG_STORE           store root (default ~/.tog/store)
-  TOG_STRICT=1        refuse every policy exception, like 'sync --strict'
+  TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
   TOG_POLICY          policy file used instead of ~/.tog/policy.toml
   TOG_SIGNING_KEY     key file; every command that writes a closure signs it
   NO_COLOR            plain output, like --no-color
@@ -638,7 +620,49 @@ pub fn spec(name: &str) -> Option<&'static Spec> {
     COMMANDS.iter().find(|spec| spec.name == name)
 }
 
-/// `install` and `i` are `sync`.
+/// The commands a person is shown: the help's command list, completions,
+/// and "did you mean" suggestions. The bare form's hidden entry is not one.
+pub fn listed() -> impl Iterator<Item = &'static Spec> {
+    COMMANDS.iter().filter(|spec| spec.group != Group::Bare)
+}
+
+/// The help topics that are not commands: `setup` is the bare `tog`,
+/// `inputs` the per-ecosystem file table.
+pub const HELP_TOPICS: &[&str] = &["setup", "inputs"];
+
+/// The file table a sync reads, per ecosystem. Reference material, so it
+/// has a topic of its own rather than a place on the first screen.
+pub fn inputs() -> String {
+    "\
+tog inputs — which files tog reads, per ecosystem
+
+Every ecosystem found in the project directory is set up; any combination
+works.
+
+  python   requirements.txt, pyproject.toml, setup.cfg/setup.py,
+           requirements/*; ranged inputs are locked into a hash-pinned
+           requirements.lock.txt, and a Poetry/uv lockfile is imported
+           when compatible. .python-version selects the interpreter: X.Y
+           takes the newest pinned patch, X.Y.Z must be an exact pinned
+           build, and with neither the newest pinned build is taken once
+           and then recorded in tog-toolchain.toml.
+  node     package-lock.json (v2/v3), pnpm-lock.yaml (v9, v6 importer
+           shape also accepted), yarn.lock (Yarn classic v1)
+  cargo    Cargo.toml, Cargo.lock; a missing lock is written by the
+           store Cargo
+  go       go.mod, go.sum; the closure is computed by the store Go
+  ruby     Gemfile, Gemfile.lock; a missing lock is resolved by store
+           bundler
+  elixir   mix.exs, mix.lock; a missing lock is resolved by store mix
+  dotnet   *.csproj with packages.lock.json (the lock is mandatory)
+
+tog-toolchain.toml at the project root pins the runtime per ecosystem;
+'tog help setup' says how it is written and moved.
+"
+    .to_string()
+}
+
+/// `install` and `i` are `sync`, the hidden name of the bare `tog`.
 pub fn canonical_name(name: &str) -> &str {
     if SYNC_ALIASES.contains(&name) {
         "sync"
@@ -661,21 +685,29 @@ own arguments):
   -V, --version          print the version
 ";
 
+/// The bare form's own options, on the first screen because a bare `tog`
+/// is the only way to spell them.
+const SETUP_OPTIONS: &str = "\
+SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
+  --frozen    CI: check the locks are current without writing them
+  --fresh     rebuild .venv / node_modules from scratch
+  --strict    refuse every policy exception (same as TOG_STRICT=1)
+";
+
 /// Top-level help: what the three shapes of argv mean, the four commands to
-/// start with, the command list by group, the global options, and the
-/// environment. The lockfile table is reference material and lives in
-/// `tog help sync`, which names every file per ecosystem.
+/// start with, the command list by group, the bare form's options, the
+/// global options, and the environment. The lockfile table is reference
+/// material and lives in `tog help inputs`.
 pub fn usage() -> String {
     let mut text = format!(
         "tog {VERSION} — one command for every package manager\n\n\
          USAGE:\n  \
-         tog                        sync this project, then show this help\n  \
+         tog                        set up this project, then show this help\n  \
          tog <command> [<args>...]  run a command ('tog help <command>' explains it)\n  \
          tog <script> [<args>...]   run a package.json script (like 'npm run')\n\n"
     );
     text.push_str(START_HERE);
-    let width = COMMANDS
-        .iter()
+    let width = listed()
         .map(|spec| spec.name.len())
         .max()
         .unwrap_or(0)
@@ -686,7 +718,7 @@ pub fn usage() -> String {
         (Group::Maintain, "MAINTAIN"),
     ] {
         text.push_str(&format!("\n{title}:\n"));
-        for spec in COMMANDS.iter().filter(|spec| spec.group == group) {
+        for spec in listed().filter(|spec| spec.group == group) {
             text.push_str(&format!("  {:width$}  {}\n", spec.name, spec.summary));
         }
         if group == Group::Maintain {
@@ -697,13 +729,15 @@ pub fn usage() -> String {
         }
     }
     text.push('\n');
+    text.push_str(SETUP_OPTIONS);
+    text.push('\n');
     text.push_str(GLOBAL_OPTIONS);
     text.push('\n');
     text.push_str(ENVIRONMENT);
     text.push_str(
         "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass\n\
          the program's status through. Which files tog reads per ecosystem:\n\
-         'tog help sync'. Full reference: docs/human/CLI.md.\n",
+         'tog help inputs'. Full reference: docs/human/CLI.md.\n",
     );
     text
 }
@@ -745,6 +779,7 @@ fn global_option_note(name: &str) -> &'static str {
             "Global options (-C, -q, -v, --no-color) go before the command: every\n\
              argument after it belongs to the program.\n"
         }
+        "sync" => "Global options (-C, -q, -v, --no-color) go anywhere on the line.\n",
         "fmt" | "x" => {
             "Global options (-C, -q, -v, --no-color) go before the command or\n\
              ahead of the tool's own arguments.\n"
@@ -758,9 +793,14 @@ fn global_option_note(name: &str) -> &'static str {
 /// OPTIONS because a working line teaches the shape faster than a flag
 /// list, and DETAILS gives the prose a heading to skip past.
 pub fn help(spec: &Spec) -> String {
+    let title = if spec.group == Group::Bare {
+        "tog".to_string()
+    } else {
+        format!("tog {}", spec.name)
+    };
     let mut text = format!(
-        "tog {} — {}\n\nUSAGE:\n  {}\n\nEXAMPLES:\n",
-        spec.name, spec.summary, spec.usage
+        "{title} — {}\n\nUSAGE:\n  {}\n\nEXAMPLES:\n",
+        spec.summary, spec.usage
     );
     let width = spec
         .examples
@@ -806,13 +846,20 @@ mod tests {
             assert!(text.contains(title), "usage lacks {title}");
         }
         for spec in COMMANDS {
-            assert!(
-                text.contains(&format!("  {}", spec.name)),
-                "usage lacks {}",
+            let listed = spec.group != Group::Bare;
+            assert_eq!(
+                text.contains(&format!("\n  {} ", spec.name)),
+                listed,
+                "usage and {}",
                 spec.name
             );
             let help = help(spec);
-            assert!(help.starts_with(&format!("tog {} — ", spec.name)));
+            let title = if listed {
+                format!("tog {} — ", spec.name)
+            } else {
+                "tog — ".to_string()
+            };
+            assert!(help.starts_with(&title), "{}", spec.name);
             assert!(help.contains(spec.usage));
             // Option descriptions are wrapped into their column, so the
             // comparison is on words, not on the line breaks between them.
@@ -825,8 +872,13 @@ mod tests {
             }
         }
         assert!(text.contains("TOG_STORE"));
-        // The lockfile table moved to 'tog help sync'; the top level says so.
-        assert!(text.contains("'tog help sync'"));
+        // The lockfile table lives in 'tog help inputs'; the top level says
+        // so, and names the bare form's flags and where they are explained.
+        assert!(text.contains("'tog help inputs'"));
+        assert!(text.contains("'tog help setup'"));
+        for flag in ["--frozen", "--fresh", "--strict"] {
+            assert!(text.contains(&format!("\n  {flag} ")), "usage lacks {flag}");
+        }
         assert!(text.contains("tog <script> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
     }
@@ -957,13 +1009,13 @@ mod tests {
         }
     }
 
-    /// The everyday verbs come first in their group, and the aliases are
-    /// on the screen that lists the commands.
+    /// The everyday verbs come first in their group, and the bare form's
+    /// hidden name and aliases are not on the screen that lists the commands.
     #[test]
     fn the_command_list_leads_with_the_everyday_verbs() {
         let text = usage();
         let position = |needle: &str| text.find(needle).expect(needle);
-        assert!(position("  sync") < position("  fmt"));
+        assert!(position("  add") < position("  fmt"));
         assert!(position("  doctor") < position("  audit"));
         assert!(position("EVERYDAY:") < position("INSPECT:"));
         // The four commands to start with come before the full table, and
@@ -971,8 +1023,11 @@ mod tests {
         assert!(position("START HERE:") < position("EVERYDAY:"));
         assert!(position("EVERYDAY:") < position("OPTIONS ("));
         assert!(position("OPTIONS (") < position("ENVIRONMENT:"));
-        for alias in SYNC_ALIASES {
-            assert!(text.contains(*alias), "the command list hides '{alias}'");
+        for word in std::iter::once(&"sync").chain(SYNC_ALIASES) {
+            assert!(
+                !text.contains(&format!("\n  {word} ")),
+                "the command list shows '{word}'"
+            );
         }
     }
 }
