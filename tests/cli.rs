@@ -88,15 +88,64 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// A bare `tog` where there is nothing to sync is a request for
+/// orientation, not a mistake: the help goes to stdout, the one line that
+/// says why goes to stderr, and the status is 0.
 #[test]
-fn no_arguments_prints_usage_and_exits_2() {
+fn no_arguments_outside_a_project_prints_the_help_and_exits_0() {
     let home = TempDir::new("noargs");
     let out = tog(&home.0, &home.0, &[]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("USAGE:"), "{stdout}");
+    assert!(stdout.contains("START HERE:"), "{stdout}");
+    assert!(stdout.contains("  sync"), "{stdout}");
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("USAGE:"), "{stderr}");
-    assert!(stderr.contains("  sync"), "{stderr}");
+    assert!(stderr.starts_with("tog: no project in "), "{stderr}");
+    assert!(
+        stderr.contains("nothing to sync, so here is the help"),
+        "{stderr}"
+    );
+}
+
+/// `-q` silences narration, not the answer. There is nothing else for this
+/// invocation to print, so the help still goes to stdout; only the line on
+/// stderr that explains it is dropped.
+#[test]
+fn quiet_outside_a_project_keeps_the_help_and_drops_the_note() {
+    let home = TempDir::new("noargs-quiet");
+    let out = tog(&home.0, &home.0, &["-q"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("START HERE:"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+}
+
+/// The help follows a sync that worked. A sync that failed has already
+/// said why, and a screen of help under an error buries it.
+#[test]
+fn a_bare_tog_whose_sync_fails_prints_no_help() {
+    let home = TempDir::new("bare-fail-home");
+    let project = TempDir::new("bare-fail-project");
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    // An unreadable signing key refuses before the store is opened: the
+    // cheapest offline sync failure the suite has.
+    let out = tog_env(
+        &project.0,
+        &home.0,
+        &[],
+        &[("TOG_SIGNING_KEY", "/nonexistent/signing.key")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("TOG_SIGNING_KEY"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -107,6 +156,7 @@ fn help_goes_to_stdout_and_exits_0() {
         assert_eq!(out.status.code(), Some(0), "{args:?}");
         assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
         let stdout = text(&out.stdout);
+        assert!(stdout.contains("START HERE:"), "{args:?}: {stdout}");
         assert!(stdout.contains("EVERYDAY:"), "{args:?}: {stdout}");
         assert!(stdout.contains("TOG_STORE"), "{args:?}: {stdout}");
     }
@@ -115,6 +165,10 @@ fn help_goes_to_stdout_and_exits_0() {
         assert_eq!(out.status.code(), Some(0), "{args:?}");
         let stdout = text(&out.stdout);
         assert!(stdout.starts_with("tog sync — "), "{args:?}: {stdout}");
+        // Every command screen leads with what it looks like in use and
+        // keeps the prose behind a heading a reader can skip to.
+        assert!(stdout.contains("EXAMPLES:"), "{args:?}: {stdout}");
+        assert!(stdout.contains("DETAILS:"), "{args:?}: {stdout}");
         assert!(stdout.contains("--fresh"), "{args:?}: {stdout}");
         assert!(stdout.contains("--frozen"), "{args:?}: {stdout}");
         assert!(
@@ -855,16 +909,6 @@ fn store_path_honors_the_store_variable() {
 }
 
 // --- bare `tog`, aliases, the script shortcut, inspect verbs ---
-
-#[test]
-fn bare_tog_outside_a_project_prints_usage() {
-    let home = TempDir::new("bare");
-    let out = tog(&home.0, &home.0, &[]);
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = text(&out.stderr);
-    assert!(stderr.starts_with("tog: no project in "), "{stderr}");
-    assert!(stderr.contains("USAGE:"), "{stderr}");
-}
 
 #[test]
 fn install_alias_reaches_sync() {

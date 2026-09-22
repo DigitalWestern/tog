@@ -87,8 +87,8 @@ until you hand tog a key, `tog audit` is the only command that minds, and
 the line is said once per store rather than on every sync — you will not see
 it again below.
 
-Inside a project, a bare `tog` means `tog sync`, so from here on it is one
-word.
+Inside a project, a bare `tog` syncs and then prints the help screen, so
+from here on it is one word.
 
 Run something in it:
 

@@ -127,7 +127,7 @@ unrelated crate. Releases are built by
 
 ```sh
 cd your-project     # an EXISTING project works as-is:
-tog             # set up ./.venv and/or ./node_modules from the lockfiles
+tog             # set up ./.venv and/or ./node_modules from the lockfiles, then show the help
 tog run python app.py       # run one command inside the environment(s)
 tog dev                     # a package.json script, without the 'run'
 tog test --watch            # same; every later argument is the script's
@@ -158,8 +158,9 @@ the same thing plus one interpreter path —
 their package-install buttons will not work against a read-only projection.
 
 Full command reference: [docs/human/CLI.md](docs/human/CLI.md), or
-`tog help <command>`. Exit status: 0 success, 1 command failed, 2
-usage error; `run` passes the program's status through.
+`tog help <command>`, which opens with worked examples of that command.
+Exit status: 0 success, 1 command failed, 2 usage error; `run` passes the
+program's status through.
 
 Policy is permissive by default; `.tog/policy.toml` can tighten it
 (`deny = ["install-script-failed", "git-dependency"]`), or
