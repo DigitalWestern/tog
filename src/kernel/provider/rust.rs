@@ -467,10 +467,10 @@ struct ToolchainSpec {
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 ///
 /// This is the pre-lock answer, and the only callers left are the ones that
-/// have no project selection to honor: the Python sdist build of a project
-/// whose toolchain lock names no Rust, which builds a vendored Rust crate out
-/// of a store scratch directory that is nobody's tog project, and `tog deps`,
-/// which reports on a project it never syncs.
+/// have no project selection to honor, such as `tog deps`, which reports on
+/// a project it never syncs. The Python sdist build of a project whose lock
+/// names no Rust uses [`resolve_toolchain_within`] instead: its tree is a
+/// store scratch directory that is nobody's tog project.
 /// Every entry point that is handed a [`Selected`] takes the version from it
 /// instead (`toolchain.version("rustc")`), so the lock decides the toolchain
 /// and the file only contributes the components below.
@@ -494,7 +494,23 @@ pub fn toolchain_file_components(
     platform: Platform,
     project_dir: &Path,
 ) -> io::Result<Vec<String>> {
-    let Some((path, legacy)) = nearest_toolchain_file(project_dir) else {
+    components_of(platform, nearest_toolchain_file(project_dir, None))
+}
+
+/// `toolchain_file_components` for a tree that is not a project: an
+/// unpacked sdist in store scratch. Only a file inside `root` counts. A
+/// file above it belongs to whoever owns the store's parent directories
+/// (`$HOME`, a repository the store sits in) and must not reach a build
+/// whose identity names only the sdist.
+pub fn toolchain_file_components_within(
+    platform: Platform,
+    root: &Path,
+) -> io::Result<Vec<String>> {
+    components_of(platform, nearest_toolchain_file(root, Some(root)))
+}
+
+fn components_of(platform: Platform, found: Option<(PathBuf, bool)>) -> io::Result<Vec<String>> {
+    let Some((path, legacy)) = found else {
         return Ok(Vec::new());
     };
     match read_toolchain_file(&path, legacy)? {
@@ -519,7 +535,15 @@ pub fn resolve_toolchain_choice(
     platform: Platform,
     project_dir: &Path,
 ) -> io::Result<ToolchainChoice> {
-    resolve_toolchain_with(platform, project_dir, true)
+    resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), true)
+}
+
+/// `resolve_toolchain` for an unpacked sdist: only a toolchain file inside
+/// `root` is read, for the reason `toolchain_file_components_within` gives.
+/// With none, the newest pin, whatever lies above the store.
+pub fn resolve_toolchain_within(platform: Platform, root: &Path) -> io::Result<&'static str> {
+    resolve_toolchain_with(platform, nearest_toolchain_file(root, Some(root)), true)
+        .map(|choice| choice.version)
 }
 
 /// The choice `resolve_toolchain_choice` would make, without its effects: no
@@ -529,16 +553,16 @@ pub fn resolve_toolchain_quiet(
     platform: Platform,
     project_dir: &Path,
 ) -> io::Result<ToolchainChoice> {
-    resolve_toolchain_with(platform, project_dir, false)
+    resolve_toolchain_with(platform, nearest_toolchain_file(project_dir, None), false)
 }
 
 fn resolve_toolchain_with(
     platform: Platform,
-    project_dir: &Path,
+    found: Option<(PathBuf, bool)>,
     effects: bool,
 ) -> io::Result<ToolchainChoice> {
     let _ = rust_pins(platform)?;
-    let Some((path, legacy)) = nearest_toolchain_file(project_dir) else {
+    let Some((path, legacy)) = found else {
         return Ok(ToolchainChoice {
             version: newest_pin(platform)?,
             unavailable: Vec::new(),
@@ -564,8 +588,9 @@ fn resolve_toolchain_with(
 }
 
 /// The nearest rustup-style toolchain file at or above `project_dir`, and
-/// whether it is the legacy `rust-toolchain` spelling.
-fn nearest_toolchain_file(project_dir: &Path) -> Option<(PathBuf, bool)> {
+/// whether it is the legacy `rust-toolchain` spelling. With a `ceiling`, the
+/// search stops there instead of at the filesystem root.
+fn nearest_toolchain_file(project_dir: &Path, ceiling: Option<&Path>) -> Option<(PathBuf, bool)> {
     let mut dir = project_dir;
     loop {
         let legacy = dir.join("rust-toolchain");
@@ -575,6 +600,9 @@ fn nearest_toolchain_file(project_dir: &Path) -> Option<(PathBuf, bool)> {
         let toml = dir.join("rust-toolchain.toml");
         if toml.exists() {
             return Some((toml, false));
+        }
+        if ceiling == Some(dir) {
+            return None;
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent,

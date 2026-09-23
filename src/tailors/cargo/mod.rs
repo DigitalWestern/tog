@@ -777,6 +777,50 @@ checksum = "{hash_b}"
         assert!(plan_cargo(&package_lock(&duplicate, 4), "1.96.1").is_err());
     }
 
+    /// An unpacked sdist reads only its own toolchain file. The store's
+    /// scratch directory sits under `$HOME` or wherever `TOG_STORE` points, so
+    /// a file above the sdist is someone else's: a `~/rust-toolchain` naming
+    /// nightly must not fail every Rust sdist build, and its components must
+    /// not be recorded against one.
+    #[test]
+    fn an_sdist_ignores_toolchain_files_above_its_root() {
+        use crate::kernel::provider::rust::{
+            resolve_toolchain_within, toolchain_file_components_within,
+        };
+        let _exception_guard = exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let temp = TempDir::new("tog-sdist-toolchain");
+        let sdist = temp.path().join("store/tmp/work/source");
+        fs::create_dir_all(&sdist).unwrap();
+        fs::write(temp.path().join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
+        fs::write(
+            temp.path().join("store/rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"miri\"]\n",
+        )
+        .unwrap();
+
+        // The project search climbs to the stray files.
+        let climbed =
+            crate::kernel::provider::rust::resolve_toolchain_quiet(platform, &sdist).unwrap();
+        assert_eq!(climbed.unavailable, vec!["miri".to_string()]);
+        assert!(resolve_toolchain(platform, temp.path()).is_err());
+        crate::kernel::policy::clear();
+
+        assert_eq!(
+            resolve_toolchain_within(platform, &sdist).unwrap(),
+            RUST_VERSION
+        );
+        assert!(toolchain_file_components_within(platform, &sdist)
+            .unwrap()
+            .is_empty());
+        assert!(crate::kernel::policy::pending().is_empty());
+
+        // The sdist's own file is still read.
+        fs::write(sdist.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
+        assert!(resolve_toolchain_within(platform, &sdist).is_err());
+    }
+
     #[test]
     fn resolves_toolchain_files_and_pins() {
         let _exception_guard = exception_guard();

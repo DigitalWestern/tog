@@ -590,11 +590,11 @@ fn rust_plan_inputs(
         // and records the components tog does not provide; its channel is
         // not read, because the lock already answered it.
         Some(selected) => {
-            crate::kernel::provider::rust::toolchain_file_components(platform, source)?;
+            crate::kernel::provider::rust::toolchain_file_components_within(platform, source)?;
             selected.clone()
         }
         None => crate::kernel::provider::rust::shipped_selection(
-            crate::kernel::provider::rust::resolve_toolchain(platform, source)?,
+            crate::kernel::provider::rust::resolve_toolchain_within(platform, source)?,
         )?,
     };
     let rust_version = rust.version("rustc")?.to_string();
