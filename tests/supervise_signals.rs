@@ -384,8 +384,21 @@ fn spawn_harness(
     pty: Option<&Pty>,
     fifo: Option<&Path>,
 ) -> Harness {
+    spawn_harness_with(scenario, store, pty, fifo, |_| {})
+}
+
+/// `spawn_harness` with a hook that adjusts the command first, for cases
+/// whose subject is state the supervisor inherits across exec.
+fn spawn_harness_with(
+    scenario: &str,
+    store: &TempStore,
+    pty: Option<&Pty>,
+    fifo: Option<&Path>,
+    configure: impl FnOnce(&mut Command),
+) -> Harness {
     let exe = std::env::current_exe().unwrap();
     let mut command = Command::new(exe);
+    configure(&mut command);
     let (scenario, inner) = match scenario.split_once(':') {
         Some((outer, inner)) => (outer, Some(inner)),
         None => (scenario, None),
@@ -545,6 +558,12 @@ fn supervisor_harness() {
     let Ok(scenario) = std::env::var("TOG_SUPERVISE_SCENARIO") else {
         return;
     };
+    // A probe run as a supervised child, not a supervisor: it reports the
+    // SIGCHLD disposition it was exec'd with and needs no store.
+    if scenario == "report-sigchld" {
+        say(&format!("CHILD_SIGCHLD {}", sigchld_disposition()));
+        std::process::exit(0);
+    }
     let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
     let store = Store {
         root: root.canonicalize().unwrap(),
@@ -571,6 +590,42 @@ fn code_of(status: ExitStatus) -> i32 {
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
         .unwrap_or(1)
+}
+
+/// The calling process's SIGCHLD disposition, in the words the markers use.
+fn sigchld_disposition() -> &'static str {
+    // SAFETY: zeroed is a valid output slot that sigaction fills.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new action only queries the current one.
+    let queried = unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut action) };
+    assert_eq!(queried, 0, "{}", std::io::Error::last_os_error());
+    let nocldwait = action.sa_flags & libc::SA_NOCLDWAIT != 0;
+    match action.sa_sigaction {
+        libc::SIG_IGN => "ignored",
+        libc::SIG_DFL if nocldwait => "default-nocldwait",
+        libc::SIG_DFL => "default",
+        _ if nocldwait => "handler-nocldwait",
+        _ => "handler",
+    }
+}
+
+extern "C" fn inherited_sigchld_handler(_: libc::c_int) {}
+
+/// Installs a SIGCHLD handler with `SA_NOCLDWAIT`, which asks the kernel to
+/// reap children as they exit just as `SIG_IGN` does. A handler cannot
+/// survive exec, so this one is set by the harness itself.
+fn set_sigchld_nocldwait() {
+    // SAFETY: zeroed is followed by sigemptyset; the handler is a no-op.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_NOCLDWAIT;
+        action.sa_sigaction = inherited_sigchld_handler as *const () as usize;
+        assert_eq!(
+            libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()),
+            0
+        );
+    }
 }
 
 fn tog_command(args: &[&str]) -> Command {
@@ -844,6 +899,39 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             let mut command = shell("dd if=/dev/zero bs=1048576 count=4 2>/dev/null");
             let output = supervise::output(&mut command, activity).unwrap();
             say(&format!("BYTES {}", output.stdout.len()));
+            0
+        }
+        // SIGCHLD as the supervisor found it: `sigchld-ignored` inherited
+        // SIG_IGN across exec, `sigchld-nocldwait` sets a handler with
+        // SA_NOCLDWAIT here. Either way the kernel would reap the children
+        // itself unless the session takes SIGCHLD over.
+        "sigchld-ignored" | "sigchld-nocldwait" => {
+            if scenario == "sigchld-nocldwait" {
+                set_sigchld_nocldwait();
+            }
+            say(&format!("INHERITED {}", sigchld_disposition()));
+            match supervise::status(&mut shell("exit 42"), activity) {
+                Ok(status) => say(&format!("STATUS {}", code_of(status))),
+                Err(error) => say(&format!("STATUS_ERR {error}")),
+            }
+            match supervise::output(&mut shell("printf out; exit 43"), activity) {
+                Ok(output) => say(&format!(
+                    "OUTPUT {} {}",
+                    code_of(output.status),
+                    String::from_utf8_lossy(&output.stdout)
+                )),
+                Err(error) => say(&format!("OUTPUT_ERR {error}")),
+            }
+            let mut probe = Command::new(std::env::current_exe().unwrap());
+            probe
+                .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
+                .env("TOG_SUPERVISE_SCENARIO", "report-sigchld");
+            match supervise::status(&mut probe, activity) {
+                Ok(status) => say(&format!("PROBE {}", code_of(status))),
+                Err(error) => say(&format!("PROBE_ERR {error}")),
+            }
+            say(&format!("AFTER {}", sigchld_disposition()));
+            say("DONE");
             0
         }
         other => panic!("unknown scenario {other}"),
@@ -1262,6 +1350,66 @@ fn captured_output_larger_than_a_pipe_buffer_does_not_deadlock() {
     let store = TempStore::new("large-output");
     let mut harness = spawn_harness("large-output", &store, None, None);
     harness.markers.wait_for("BYTES 4194304");
+    assert_eq!(harness.finish().code(), Some(0));
+    store.wait_until_free();
+}
+
+/// A supervisor started with SIGCHLD ignored still reports its child's exit
+/// status. POSIX lets the kernel reap the children of a process that
+/// ignores SIGCHLD, so without the session's own handler `try_wait` finds no
+/// child (ECHILD) and the status is lost. The child still execs with the
+/// SIG_IGN tog inherited, and tog has it back once the session ends.
+#[test]
+fn inherited_sigchld_ignore_still_reports_the_exit_status() {
+    let store = TempStore::new("sigchld-ignored");
+    let mut harness = spawn_harness_with("sigchld-ignored", &store, None, None, |command| {
+        // SAFETY: signal only touches the post-fork child, and an ignored
+        // disposition survives exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::signal(libc::SIGCHLD, libc::SIG_IGN) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    });
+    harness.markers.wait_for("DONE");
+    let text = harness.markers.text();
+    assert!(text.contains("INHERITED ignored"), "{text}");
+    assert!(text.contains("STATUS 42"), "{text}");
+    assert!(text.contains("OUTPUT 43 out"), "{text}");
+    assert!(
+        text.contains("CHILD_SIGCHLD ignored"),
+        "the child did not get the inherited SIG_IGN back: {text}"
+    );
+    assert!(text.contains("PROBE 0"), "{text}");
+    assert!(
+        text.contains("AFTER ignored"),
+        "the session did not restore the inherited SIG_IGN: {text}"
+    );
+    assert_eq!(harness.finish().code(), Some(0));
+    store.wait_until_free();
+}
+
+/// The same with a SIGCHLD handler that sets `SA_NOCLDWAIT`, the other way a
+/// parent can ask the kernel to reap its children. The child sees SIG_DFL,
+/// which is what exec makes of any inherited handler.
+#[test]
+fn inherited_sigchld_nocldwait_still_reports_the_exit_status() {
+    let store = TempStore::new("sigchld-nocldwait");
+    let mut harness = spawn_harness("sigchld-nocldwait", &store, None, None);
+    harness.markers.wait_for("DONE");
+    let text = harness.markers.text();
+    assert!(text.contains("INHERITED handler-nocldwait"), "{text}");
+    assert!(text.contains("STATUS 42"), "{text}");
+    assert!(text.contains("OUTPUT 43 out"), "{text}");
+    assert!(text.contains("CHILD_SIGCHLD default"), "{text}");
+    assert!(text.contains("PROBE 0"), "{text}");
+    assert!(
+        text.contains("AFTER handler-nocldwait"),
+        "the session did not restore the inherited SA_NOCLDWAIT handler: {text}"
+    );
     assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
 }

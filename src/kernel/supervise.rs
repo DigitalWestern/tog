@@ -37,11 +37,13 @@ const SIGNALS: [libc::c_int; SIGNAL_COUNT] = [
     libc::SIGINT,
     libc::SIGHUP,
     libc::SIGQUIT,
-    // SIGCHLD is handled purely to wake the supervisor: it carries no
-    // forwarding semantics, it only makes the wait event-driven instead of
-    // a timer. An inherited SIG_IGN is preserved like every other signal
-    // here, so delivery is not guaranteed; `child_events` records whether
-    // it actually is, and the wait falls back to a timeout when it is not.
+    // SIGCHLD wakes the supervisor: it carries no forwarding semantics, it
+    // only makes the wait event-driven instead of a timer. Unlike the other
+    // signals here it is handled even when inherited as SIG_IGN, because an
+    // ignored SIGCHLD makes the kernel auto-reap the child and its exit
+    // status is lost (`Session::install`). A SIGCHLD blocked by the
+    // inherited mask still cannot reach the handler; `child_events` records
+    // that, and the wait falls back to a timeout then.
     libc::SIGCHLD,
 ];
 
@@ -293,7 +295,16 @@ impl Session {
                 action: old,
                 installed: false,
             });
-            if ignored {
+            // An inherited SIG_IGN is kept for TERM/INT/HUP/QUIT: whoever
+            // started tog asked for it not to be interrupted by them. SIGCHLD
+            // is the exception. With SIGCHLD ignored (or SA_NOCLDWAIT set,
+            // which the replacement below also clears) the kernel reaps the
+            // child itself, `try_wait` fails with ECHILD, and the exit status
+            // tog exists to report is gone. The handler replaces it for the
+            // session only: `prepare_child` hands the child the inherited
+            // SIG_IGN back and teardown restores the saved action, so neither
+            // the child nor tog after the session sees a difference.
+            if ignored && number != libc::SIGCHLD {
                 continue;
             }
             if number == libc::SIGCHLD {
@@ -346,8 +357,11 @@ impl Session {
     }
 
     /// The child must never exec with the supervisor's temporary handlers or
-    /// a caller's accidentally inherited blocked signal mask. The post-fork
-    /// hook is restricted to libc signal operations.
+    /// a caller's accidentally inherited blocked signal mask. Every signal
+    /// goes back to what tog inherited: SIG_IGN stays ignored (including a
+    /// SIGCHLD the session handled anyway), and anything else becomes
+    /// SIG_DFL, which is what exec would make of an inherited handler. The
+    /// post-fork hook is restricted to libc signal operations.
     fn prepare_child(&self, command: &mut Command) {
         let actions: Vec<(libc::c_int, bool)> = self
             .old_actions
@@ -464,10 +478,9 @@ impl Session {
                     // to discover. A signal arriving between the check above
                     // and this call still wakes it, because the handler writes
                     // the pipe after setting the flag and nothing drains it in
-                    // between. When SIGCHLD is ignored or blocked by the
-                    // inherited disposition, no such wakeup exists and the
-                    // former timeout is the only thing that would notice the
-                    // exit, so keep it.
+                    // between. When SIGCHLD is blocked by the inherited
+                    // mask, no such wakeup exists and the former timeout is
+                    // the only thing that would notice the exit, so keep it.
                     if self.child_events { -1 } else { 100 },
                 )
             };

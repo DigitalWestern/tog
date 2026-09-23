@@ -52,7 +52,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (at-least-once). Parent-only INT/QUIT/HUP are caught and waited on after startup, not
   forwarded — terminal process-group delivery (`^C`) is the supported path. A cancellation
   across the spawn boundary is never dropped. `128 + signal` is a shell-visible exit code, not
-  a wait status.
+  a wait status. An inherited ignored SIGCHLD (`SIG_IGN` or `SA_NOCLDWAIT`) is overridden while
+  a child is supervised, so its exit status is not auto-reaped away; the child still execs with
+  the inherited `SIG_IGN`.
 - **A sync addresses the project by pathname.** It checks the project directory's
   identity before and after waiting for the store lease and refuses if it changed, but a
   same-user process that renames the directory and puts another project at the same path
