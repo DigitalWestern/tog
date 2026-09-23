@@ -232,6 +232,18 @@ pub fn locked(
     })
 }
 
+/// The project's interpreter request, read and parsed without choosing a
+/// pin: `.python-version` and every stated constraint must be well-formed
+/// on any host. Selection against this host's pins is
+/// `select_python_with_inputs`.
+pub fn check_project_inputs(dir: &Path) -> io::Result<()> {
+    let inputs = collect_project_inputs(dir)?;
+    for constraint in &inputs.constraints {
+        crate::tailors::python::pep440::SpecifierSet::parse(&constraint.text, &constraint.source)?;
+    }
+    Ok(())
+}
+
 pub fn select_python_with_inputs(
     platform: Platform,
     inputs: &PythonInputs,

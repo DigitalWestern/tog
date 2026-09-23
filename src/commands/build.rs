@@ -59,9 +59,10 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool, strict: bool) -> io::Re
     // whose implicit sync runs frozen (or `tog --frozen` first, and this
     // check then finds nothing to do). Only the built ecosystem's
     // row decides, and only it is host preflighted, prepared and realized;
-    // the toolchain lock still covers the whole project, so an unrelated
-    // ecosystem blocks the build only when its lock section is stale, not
-    // when this host cannot run it or its install fails (see
+    // the input check and the toolchain lock still cover the whole project,
+    // so an unrelated ecosystem blocks the build only when its version
+    // request is malformed or its lock section is stale, not when this host
+    // cannot run it or its install fails (see
     // `sync::ensure_current_for`).
     crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()), frozen, strict)?;
     let root = tailor.build_root(&cwd)?;

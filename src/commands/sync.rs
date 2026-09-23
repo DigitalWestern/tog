@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 /// ecosystem it builds and nothing else).
 ///
 /// The scope decides host preflight and realization. It never narrows the
-/// toolchain lock: resolution always covers every detected ecosystem, so
-/// the lock `commit` publishes is never truncated and a stale section
-/// anywhere in the project still refuses.
+/// input check or the toolchain lock: every detected ecosystem's inputs
+/// must be well-formed and resolution always covers all of them, so the
+/// lock `commit` publishes is never truncated or minted from a malformed
+/// request, and a stale section anywhere in the project still refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope<'a> {
     All,
@@ -43,8 +44,9 @@ impl Scope<'_> {
 ///
 /// Host preflight runs for the tailors `scope` covers only: whether this
 /// host can run an ecosystem the caller is not going to realize says
-/// nothing about the one it is. The toolchain lock is resolved for every
-/// detected ecosystem whatever the scope (see `Scope`).
+/// nothing about the one it is. Inputs are checked and the toolchain lock
+/// is resolved for every detected ecosystem whatever the scope (see
+/// `Scope`).
 ///
 /// Resolution happens here, before the store is opened: a stale or
 /// unresolvable toolchain must refuse without creating a store tree, taking
@@ -68,20 +70,36 @@ pub fn preflight_sync(
     if present.is_empty() {
         return Err(no_inputs());
     }
+    let toolchain = preflight_detected(platform, dir, &present, mode, scope)?;
+    Ok((present, toolchain))
+}
+
+/// `preflight_sync` past detection: the input check and lock resolution
+/// for every tailor in `present`, host preflight for the ones `scope`
+/// covers.
+fn preflight_detected(
+    platform: Platform,
+    dir: &Path,
+    present: &[&dyn Tailor],
+    mode: Mode,
+    scope: Scope<'_>,
+) -> io::Result<ProjectToolchain> {
     // The declarative inputs and the lock are read through the held root
     // descriptor, so a tampered input or lock fails closed here. Only
     // detected ecosystems are consulted, so a stray symlink for an ecosystem
     // the project does not use cannot stop its sync.
     let root = ProjectRoot::open(dir)?;
-    // Host support first: an ecosystem that cannot run here at all says so
+    for tailor in present {
+        tailor.check_inputs(dir)?;
+    }
+    // Host support next: an ecosystem that cannot run here at all says so
     // in its own words, before selection reports the same project as
     // unsatisfiable in the catalog's words.
     for tailor in present.iter().filter(|tailor| scope.covers(**tailor)) {
         tailor.preflight(platform, dir)?;
     }
-    let inputs = ecosystem_inputs(dir, &present)?;
-    let toolchain = project_toolchain::resolve(&root, platform, inputs, mode, policy::strict())?;
-    Ok((present, toolchain))
+    let inputs = ecosystem_inputs(dir, present)?;
+    project_toolchain::resolve(&root, platform, inputs, mode, policy::strict())
 }
 
 /// The bare `tog` from the command line: load policy and preflight every
@@ -213,9 +231,10 @@ pub(crate) fn ensure_current(
 /// runs is scoped to it (`Scope::Only`): only the built ecosystem is host
 /// preflighted, prepared and realized, so an unrelated one this host
 /// cannot run, or whose install fails (offline, a broken install script),
-/// does not stop the build. The toolchain lock is still resolved for all
-/// of them, so the committed lock stays whole and an unrelated ecosystem
-/// whose lock section is stale refuses as before.
+/// does not stop the build. Inputs are still checked and the toolchain
+/// lock resolved for all of them, so the committed lock stays whole and an
+/// unrelated ecosystem whose version request is malformed or whose lock
+/// section is stale refuses as before.
 pub(crate) fn ensure_current_for(
     ctx: &Context,
     cwd: &Path,
@@ -955,6 +974,143 @@ mod tests {
         // An unknown name scopes to nothing, which fails closed downstream
         // (`sync_preflighted` refuses an empty slice).
         assert!(scope_to(present, Scope::Only("cobol")).is_empty());
+    }
+
+    /// The Python tailor on a host it cannot run on: every method is the
+    /// real one except host preflight, which refuses. The shipped pin
+    /// tables cover the same CPythons on every platform, so no real input
+    /// produces a host-only refusal on the test's own host.
+    struct HostlessPython;
+
+    impl HostlessPython {
+        fn real() -> &'static dyn Tailor {
+            tailors::by_id("python").unwrap()
+        }
+    }
+
+    impl Tailor for HostlessPython {
+        fn id(&self) -> &'static str {
+            "python"
+        }
+        fn detect(&self, dir: &Path) -> io::Result<bool> {
+            Self::real().detect(dir)
+        }
+        fn check_inputs(&self, dir: &Path) -> io::Result<()> {
+            Self::real().check_inputs(dir)
+        }
+        fn preflight(&self, _platform: Platform, _dir: &Path) -> io::Result<()> {
+            Err(io::Error::other("CPython: no build for this host"))
+        }
+        fn plan(
+            &self,
+            ctx: &Context,
+            dir: &Path,
+            toolchain: &crate::kernel::toolchain::Selected,
+        ) -> io::Result<Option<String>> {
+            Self::real().plan(ctx, dir, toolchain)
+        }
+        fn sync(
+            &self,
+            ctx: &Context,
+            dir: &Path,
+            request: &SyncRequest,
+            attribution: &mut policy::Attribution,
+        ) -> io::Result<bool> {
+            Self::real().sync(ctx, dir, request, attribution)
+        }
+        fn listing(&self, ecosystem: &str, body: &serde_json::Value) -> tailors::ClosureListing {
+            Self::real().listing(ecosystem, body)
+        }
+        fn closure_state(
+            &self,
+            platform: Platform,
+            dir: &Path,
+            ecosystem: &str,
+            body: &serde_json::Value,
+        ) -> io::Result<crate::comforter::status::State> {
+            Self::real().closure_state(platform, dir, ecosystem, body)
+        }
+        fn sbom_components(
+            &self,
+            ecosystem: &str,
+            body: &serde_json::Value,
+            out: &mut Vec<serde_json::Value>,
+        ) -> io::Result<()> {
+            Self::real().sbom_components(ecosystem, body, out)
+        }
+        fn toolchain_catalog(&self) -> io::Result<crate::kernel::toolchain::Catalog> {
+            Self::real().toolchain_catalog()
+        }
+        fn legacy_toolchain_evidence(
+            &self,
+            ecosystem: &str,
+            platform: Option<Platform>,
+            body: &serde_json::Value,
+        ) -> crate::kernel::toolchain::LegacyEvidence {
+            Self::real().legacy_toolchain_evidence(ecosystem, platform, body)
+        }
+    }
+
+    /// Host preflight follows the scope (#159); the input check and lock
+    /// resolution do not. A Cargo build beside a Python project this host
+    /// cannot run resolves both lock sections, while every other sync still
+    /// refuses on the host, and a malformed Python request refuses whatever
+    /// the scope.
+    #[test]
+    fn host_preflight_follows_the_scope_and_the_input_check_does_not() {
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let platform = Platform::host().unwrap();
+        let present: [&dyn Tailor; 2] = [&HostlessPython, tailors::by_id("cargo").unwrap()];
+
+        let error = preflight_detected(platform, &project, &present, Mode::Writable, Scope::All)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no build for this host"),
+            "{error}"
+        );
+
+        let toolchain = preflight_detected(
+            platform,
+            &project,
+            &present,
+            Mode::Writable,
+            Scope::Only("cargo"),
+        )
+        .unwrap();
+        toolchain.get("python").unwrap();
+        toolchain.get("rust").unwrap();
+
+        std::fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = 3\n",
+        )
+        .unwrap();
+        let error = preflight_detected(
+            platform,
+            &project,
+            &present,
+            Mode::Writable,
+            Scope::Only("cargo"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires-python must be a string"),
+            "{error}"
+        );
     }
 
     #[test]

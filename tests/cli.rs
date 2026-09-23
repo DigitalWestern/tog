@@ -1133,57 +1133,85 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     );
 }
 
-/// `tog build cargo` host-preflights the ecosystem it builds only (#159):
-/// a Python project beside it that fails its own host preflight does not
-/// stop the build, while the bare `tog` still refuses on it. The toolchain
-/// lock the build's sync publishes keeps both sections.
+/// `tog build cargo` host-preflights only the ecosystem it builds (#159),
+/// but every detected ecosystem's toolchain inputs are still checked: a
+/// malformed Python request refuses the Cargo build rather than being
+/// read as no request and locked as if absent.
 #[test]
-fn build_skips_an_unrelated_ecosystems_host_preflight() {
-    let home = TempDir::new("build-preflight");
-    let project = TempDir::new("build-preflight-project");
+fn build_refuses_an_unrelated_ecosystems_malformed_toolchain_input() {
+    let home = TempDir::new("build-inputs");
+    let project = TempDir::new("build-inputs-project");
     std::fs::write(
         project.0.join("Cargo.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
-    // A target no pinned Rust has: the cargo sync refuses on it offline,
-    // before any toolchain is fetched, which is how this test sees the
-    // build's own sync was reached.
-    std::fs::write(
-        project.0.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"stable\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
-    )
-    .unwrap();
-    // Python's host preflight refuses a non-string requires-python. The
-    // toolchain-input reader skips it, so lock resolution still selects
-    // a CPython: only the host preflight fails.
     std::fs::write(
         project.0.join("pyproject.toml"),
         "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = 3\n",
     )
     .unwrap();
 
-    let out = tog(&project.0, &home.0, &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let stderr = text(&out.stderr);
-    assert!(
-        stderr.contains("requires-python must be a string"),
-        "{stderr}"
-    );
-    assert!(!project.0.join("tog-toolchain.toml").exists());
+    for args in [&[][..], &["build", "cargo"]] {
+        let out = tog(&project.0, &home.0, args);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains("requires-python must be a string"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!project.0.join("tog-toolchain.toml").exists(), "{args:?}");
+        assert!(
+            !project.0.join(".tog/closures").exists(),
+            "{args:?}: a closure was written"
+        );
+    }
+}
 
+/// Lock resolution stays whole under the build's narrowed sync (#159): with
+/// both sections committed and only Python's toolchain input changed, a
+/// Cargo build that needs a sync refuses on the stale Python section and
+/// leaves the committed lock byte for byte as it was.
+#[test]
+fn build_refuses_an_unrelated_stale_lock_section_and_keeps_the_lock() {
+    let home = TempDir::new("build-stale");
+    let project = TempDir::new("build-stale-project");
+    std::fs::write(
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.0.join(".python-version"), "3.12\n").unwrap();
+    let out = tog(&project.0, &home.0, &["update", "--toolchain", "--no-sync"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let lock = std::fs::read(project.0.join("tog-toolchain.toml")).unwrap();
+    let committed = String::from_utf8_lossy(&lock);
+    assert!(committed.contains("[toolchain.python]"), "{committed}");
+    assert!(committed.contains("[toolchain.rust]"), "{committed}");
+
+    std::fs::write(project.0.join(".python-version"), "3.13\n").unwrap();
     let out = tog(&project.0, &home.0, &["build", "cargo"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("syncing first: cargo"), "{stderr}");
-    assert!(!stderr.contains("requires-python"), "{stderr}");
     assert!(
-        stderr.contains("\"wasm32-unknown-unknown\" is unsupported"),
+        stderr.contains("tog-toolchain.toml is stale for python"),
         "{stderr}"
     );
-    let lock = std::fs::read_to_string(project.0.join("tog-toolchain.toml")).unwrap();
-    assert!(lock.contains("[toolchain.python]"), "{lock}");
-    assert!(lock.contains("[toolchain.rust]"), "{lock}");
+    assert_eq!(
+        std::fs::read(project.0.join("tog-toolchain.toml")).unwrap(),
+        lock
+    );
 }
 
 #[test]

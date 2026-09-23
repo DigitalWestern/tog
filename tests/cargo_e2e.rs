@@ -295,10 +295,12 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     assert!(lock.contains("[toolchain.rust]"), "{lock}");
 
     let output = tog_with_tmp(&binary, &project, &store, &tmp, &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "the python install was expected to fail\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        "the python install was expected to fail\nstderr:\n{stderr}"
     );
+    // The failure is the missing package, not something unrelated.
+    assert!(stderr.contains("tog-no-such-package-158"), "{stderr}");
     assert!(!closures.join("python.json").exists());
 }

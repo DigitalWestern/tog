@@ -427,7 +427,8 @@ unrelated environment this host cannot run, or whose install fails
 (offline, a broken install script), does not stop the build. The toolchain
 lock is still resolved for the whole project, so `tog-toolchain.toml` keeps
 every ecosystem's section, and an unrelated ecosystem whose lock section is
-stale still refuses before the build. The build
+stale, or whose version request is malformed (a non-string
+`requires-python`), still refuses before the build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.
