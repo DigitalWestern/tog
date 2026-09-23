@@ -1031,21 +1031,26 @@ fn tailor_words() -> Vec<String> {
 }
 
 /// Does a string literal name one of `words`: the whole literal, or, in a
-/// path-shaped literal, one component up to its first dot
-/// (`.tog/closures/dotnet.json`)? Prose that mentions a name is neither.
+/// literal without whitespace (a name or path, not prose), one `/`
+/// component up to its first dot (`.tog/closures/dotnet.json`,
+/// `python.json`)? Prose that mentions a name is not a match.
 fn names_a_word(literal: &str, words: &[String]) -> bool {
     let named = |text: &str| words.iter().any(|word| word == text);
     named(literal)
-        || (literal.contains('/')
+        || (!literal.chars().any(char::is_whitespace)
             && literal
                 .split('/')
                 .any(|part| named(part.split('.').next().unwrap_or(part))))
 }
 
-/// Per-function counts of string literals in `text` that name one of
-/// `words` (`names_a_word`), outside `#[cfg(test)]` items.
-fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<(String, String, usize)> {
-    let mut counts: Vec<(String, String, usize)> = Vec::new();
+/// One naming site kind: (file, function, literal as written, count).
+type LiteralSite = (String, String, String, usize);
+
+/// Counts of string literals in `text` that name one of `words`
+/// (`names_a_word`), per function and literal, outside `#[cfg(test)]`
+/// items.
+fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<LiteralSite> {
+    let mut counts: Vec<LiteralSite> = Vec::new();
     for (token, owner) in production_tokens(text) {
         let Token::Str(literal) = &token else {
             continue;
@@ -1055,36 +1060,50 @@ fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<(String, S
         }
         match counts
             .iter_mut()
-            .find(|(_, function, _)| *function == owner)
+            .find(|(_, function, text, _)| *function == owner && text == literal)
         {
-            Some(entry) => entry.2 += 1,
-            None => counts.push((relative.to_string(), owner, 1)),
+            Some(entry) => entry.3 += 1,
+            None => counts.push((relative.to_string(), owner, literal.clone(), 1)),
         }
     }
     counts
 }
 
-/// The command-file functions that still name a tailor by string, with how
-/// many times, each row owned by the open issue that removes it. The table
-/// only shrinks: the counts must match exactly, so the fix that removes a
-/// literal also removes its row, and a new literal fails even in a listed
-/// function.
-const TAILOR_NAMING_DEBT: &[(&str, &str, usize)] = &[
+/// The command-file literals that still name a tailor, per function and
+/// literal, with how many times, each row owned by the open issue that
+/// removes it. The table only shrinks: the counts must match exactly, so
+/// the fix that removes a literal also removes its row, and a new literal
+/// fails even in a listed function, including a different name swapped in
+/// for a listed one.
+const TAILOR_NAMING_DEBT: &[(&str, &str, &str, usize)] = &[
     // #61: add/remove/update are per-ecosystem code in the command until
     // `Tailor::edit_manifest` exists; `Eco` is its hand-written table.
-    ("src/commands/deps.rs", "cargo_delegate", 2),
-    ("src/commands/deps.rs", "elixir_delegate", 1),
-    ("src/commands/deps.rs", "go_delegate", 1),
-    ("src/commands/deps.rs", "name", 7),
-    ("src/commands/deps.rs", "node", 4),
-    ("src/commands/deps.rs", "prefix", 4),
-    ("src/commands/deps.rs", "registry", 1),
-    ("src/commands/deps.rs", "ruby_delegate", 1),
-    ("src/commands/deps.rs", "uv_command", 1),
+    ("src/commands/deps.rs", "cargo_delegate", "bin/cargo", 1),
+    ("src/commands/deps.rs", "cargo_delegate", "cargo", 1),
+    ("src/commands/deps.rs", "elixir_delegate", "elixir", 1),
+    ("src/commands/deps.rs", "go_delegate", "go", 1),
+    ("src/commands/deps.rs", "go_delegate", "go.mod", 1),
+    ("src/commands/deps.rs", "go_delegate", "go.sum", 1),
+    ("src/commands/deps.rs", "name", "cargo", 1),
+    ("src/commands/deps.rs", "name", "dotnet", 1),
+    ("src/commands/deps.rs", "name", "elixir", 1),
+    ("src/commands/deps.rs", "name", "go", 1),
+    ("src/commands/deps.rs", "name", "node", 1),
+    ("src/commands/deps.rs", "name", "python", 1),
+    ("src/commands/deps.rs", "name", "ruby", 1),
+    ("src/commands/deps.rs", "node", "bin/npm", 1),
+    ("src/commands/deps.rs", "node", "node", 3),
+    ("src/commands/deps.rs", "prefix", "cargo", 1),
+    ("src/commands/deps.rs", "prefix", "go", 1),
+    ("src/commands/deps.rs", "prefix", "npm", 1),
+    ("src/commands/deps.rs", "prefix", "py", 1),
+    ("src/commands/deps.rs", "registry", "npm", 1),
+    ("src/commands/deps.rs", "ruby_delegate", "ruby", 1),
+    ("src/commands/deps.rs", "uv_command", "python", 1),
     // #169: the Corepack/pnpm delegate path `deps` uses to realize pnpm.
-    ("src/commands/x.rs", "node_cache_root", 1),
-    ("src/commands/x.rs", "realize_node_tool", 4),
-    ("src/commands/x.rs", "verify_corepack_hash", 1),
+    ("src/commands/x.rs", "node_cache_root", "node", 1),
+    ("src/commands/x.rs", "realize_node_tool", "node", 4),
+    ("src/commands/x.rs", "verify_corepack_hash", "node", 1),
 ];
 
 /// A command reaches an ecosystem through the `Tailor` trait and the
@@ -1092,19 +1111,31 @@ const TAILOR_NAMING_DEBT: &[(&str, &str, usize)] = &[
 /// in `src/commands/` is a branch or lookup the import scan above cannot
 /// see, and it drifts back into tailor-specific code (layering rule 3).
 /// Text that merely mentions a tailor inside a longer message is not a
-/// match; only a literal that *is* the name counts.
+/// match; only a literal that *is* the name, or names it as a path
+/// component, counts.
 #[test]
 fn commands_do_not_name_tailors_by_string() {
     let words = tailor_words();
-    let mut found: Vec<(String, String, usize)> = all_sources()
+    let mut found: Vec<LiteralSite> = all_sources()
         .into_iter()
         .filter(|(relative, _)| relative.starts_with("src/commands/"))
         .flat_map(|(relative, text)| literal_sites(&relative, &text, &words))
         .collect();
     found.sort();
+    let mut expected: Vec<LiteralSite> = TAILOR_NAMING_DEBT
+        .iter()
+        .map(|(file, function, literal, count)| {
+            (
+                file.to_string(),
+                function.to_string(),
+                literal.to_string(),
+                *count,
+            )
+        })
+        .collect();
+    expected.sort();
     assert_eq!(
-        found,
-        expected_sites(TAILOR_NAMING_DEBT),
+        found, expected,
         "a command names a tailor by string ({words:?}); ask the tailor through a \
          `Tailor` or `RegistryTool` method instead (or, when a row's issue lands, \
          delete the row)"
@@ -1112,24 +1143,35 @@ fn commands_do_not_name_tailors_by_string() {
 }
 
 /// The literal scan reads string contents through every spelling and skips
-/// comments, char literals and test-only items.
+/// comments, char literals, prose and test-only items.
 #[test]
 fn the_literal_scan_sees_every_spelling() {
     let words = vec!["node".to_string(), "py".to_string()];
-    let text = "fn plain() { f(\"node\"); }\n\
+    let text = "fn plain() { f(\"node\"); f(\"node\"); }\n\
         fn raw() { f(r#\"node\"#); f(r\"py\"); }\n\
         fn byte() { f(b\"py\"); }\n\
         fn escaped() { f(\"say \\\"node\\\"\"); f(\"node:\"); }\n\
         fn comment() { // \"node\"\n /* \"py\" */ f('n'); }\n\
-        fn path() { f(\".tog/closures/node.json\"); f(\"node_modules/.bin\"); f(\"run node x\"); }\n\
+        fn path() { f(\".tog/closures/node.json\"); f(\"node.json\"); \
+            f(\"node_modules/.bin\"); f(\"run node.js x\"); }\n\
         #[cfg(test)]\nfn test_only() { f(\"node\"); }";
+    let site = |function: &str, literal: &str, count: usize| {
+        (
+            "f.rs".to_string(),
+            function.to_string(),
+            literal.to_string(),
+            count,
+        )
+    };
     assert_eq!(
         literal_sites("f.rs", text, &words),
         [
-            ("f.rs".to_string(), "plain".to_string(), 1),
-            ("f.rs".to_string(), "raw".to_string(), 2),
-            ("f.rs".to_string(), "byte".to_string(), 1),
-            ("f.rs".to_string(), "path".to_string(), 1),
+            site("plain", "node", 2),
+            site("raw", "node", 1),
+            site("raw", "py", 1),
+            site("byte", "py", 1),
+            site("path", ".tog/closures/node.json", 1),
+            site("path", "node.json", 1),
         ]
     );
 }
