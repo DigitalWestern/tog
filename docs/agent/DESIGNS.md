@@ -1266,222 +1266,224 @@ realization hits the same wall.
    every live child directly, however many there are. The redesign must not
    give children their own groups: that cuts them off from `^C` and breaks
    `terminal_stop_and_continue_covers_the_whole_group`.
-5. Outside a session tog's inherited dispositions apply, so TERM kills it
-   (`spawn_failure_restores_dispositions`). Children exec with the
-   inherited dispositions and the spawning thread's mask (`prepare_child`).
-6. SIGCHLD makes the wait event-driven for a lone supervisor. An inherited
-   `SIG_IGN` is kept, and the wait falls back to a bounded poll.
+5. Outside a session tog behaves as its inherited dispositions say, so a
+   TERM kills it (`spawn_failure_restores_dispositions`). Children exec
+   with the inherited dispositions and the spawning thread's mask
+   (`prepare_child`).
+6. SIGCHLD makes the wait event-driven for a lone supervisor.
 
-**Mechanism: a refcounted handler, global counters, and a bounded wait.**
-`sigaction` is process-wide and can only be shared, so sessions become
-registrations in one registry instead of owners of the dispositions. Two
-review rounds against a dispatcher thread with per-session wake pipes found
-bugs in the dispatcher's lifecycle, in wake-pipe inheritance across
-concurrent forks, and in a spawn gate that could wait unboundedly. This
-design drops both. Correctness never depends on a wakeup. A wakeup only
-shortens latency.
+**Mechanism: handlers installed once, one packed counter, a bounded
+wait.** `sigaction` is process-wide and can only be shared, so sessions
+become registrations instead of owners of the dispositions. Three review
+rounds shaped this. A dispatcher thread with per-session wake pipes failed
+open when the thread died, leaked wake fds into concurrent forks, and
+needed a spawn gate that could wait unboundedly. Restoring dispositions
+when the last session ends left a window: a handler already running on
+another thread could count a TERM after the final check, and preemption
+makes that window unbounded. This design has neither. Correctness never
+depends on a wakeup, and the handlers never come off.
 
-- *Process-lifetime state*, created at the first install and never closed
-  or reset: monotonic atomic counters `TERM_RECEIVED`, `INT_RECEIVED`,
-  `HUP_RECEIVED`, `QUIT_RECEIVED`, `CHLD_RECEIVED`; and one CLOEXEC
-  self-pipe, both ends nonblocking. The handler does only a `fetch_add`
-  and one `write` to that pipe. The fd is never closed, so the handler
-  never writes into a reused descriptor. Linux creates it with
-  `pipe2(O_CLOEXEC | O_NONBLOCK)`. macOS uses `pipe` then `fcntl`, once
-  per process. A child forked in that window can inherit the pipe. The
-  worst it can do is read wake bytes, which costs tog one tick of latency,
-  never a signal. So the window needs no gate.
-- *Registry* (`Mutex<Registry>`): the live-slot count, the saved
-  dispositions, and `term_orphaned: bool`. Every critical section is
-  bounded bookkeeping: register, deregister, or the install or restore of
-  five `sigaction`s. It is never held across a child's lifetime, a `poll`,
-  or any blocking syscall, which is what separates it from the rejected
+- *`SESSION_TERM`*, one `AtomicU64`: the high 32 bits count live
+  sessions, and the low 32 bits count TERMs received (wrapping; only
+  differences are used). The handler's TERM path does one `fetch_add(1)`
+  and gets back, in the same atomic step, whether any session was live.
+  Registering is `fetch_add(1 << 32)`, and deregistering is `fetch_sub(1 <<
+  32)`, and each returns the TERM count at that exact instant. So every
+  TERM is linearized either before the last deregistration, where a
+  session accounts for it, or after it, where the handler itself handles
+  it. There is no window. `INT_RECEIVED`, `HUP_RECEIVED`,
+  `QUIT_RECEIVED`, and `CHLD_RECEIVED` stay plain monotonic counters,
+  because none of them is re-raised by a session.
+- *Handlers, installed once.* The first `Session::new` in the process
+  records each signal's inherited `sigaction` in a static and installs the
+  handler for TERM/INT/HUP/QUIT/CHLD with `SA_RESTART`. The handler stays
+  for the life of the process. A signal inherited as `SIG_IGN` is left
+  alone, as today, except SIGCHLD (next bullet). With no live session, the
+  handler emulates the inherited disposition for TERM/INT/HUP/QUIT. For
+  `SIG_DFL` it resets that signal to `SIG_DFL` with `sigaction` and calls
+  `raise`, and the signal is delivered with its default action when the
+  handler returns. For an inherited function handler it calls the saved
+  function, passing `siginfo` through when the saved action had
+  `SA_SIGINFO`; other saved flags are not emulated. `sigaction`, `raise`,
+  and atomics are async-signal-safe. Because nothing is ever uninstalled,
+  there is no restore, no rollback, and no replay. If one `sigaction` of
+  the first install fails, the handlers already installed are harmless
+  with no session live, so `Session::new` returns the named error and the
+  next call installs the rest.
+- *SIGCHLD is always handled while tog supervises.* An inherited
+  `SIG_IGN` (or `SA_NOCLDWAIT`) makes the kernel auto-reap children, so
+  `try_wait` gets `ECHILD` and the exit status is lost. That is a bug in
+  today's code, which keeps the ignore. The install therefore replaces an
+  ignored SIGCHLD too. The child still gets the inherited `SIG_IGN` back
+  in `prepare_child`, so what the tool sees is unchanged. Tog's
+  unsupervised `Command::status` sites benefit the same way.
+- *Global pipe.* One self-pipe, both ends nonblocking, created at the
+  first install and never closed. The handler writes one byte after
+  counting, so it never writes into a reused descriptor. Linux creates it
+  with `pipe2(O_CLOEXEC | O_NONBLOCK)`. macOS has no `pipe2`, so it uses
+  `pipe` then `fcntl`, once per process, and a child forked by another
+  thread in that window can inherit both ends. With the read end it can
+  drain wake bytes, which costs a session one tick. With the write end it
+  can send spurious wakes, which cost one `try_wait` each. Neither can
+  lose or forge a signal, because signals live in the counters. The
+  window is accepted and documented, not gated.
+- *Registry* (`Mutex<Registry>`): the first-install state and
+  `term_orphaned: bool`. It is held only for the first install and for
+  deregistration bookkeeping. It is never held across a child's lifetime,
+  a `poll`, or a blocking syscall, which separates it from the rejected
   blocking lock. The handler never touches it.
-- *Slot*, one per session and owned by its thread: `child_pid`; one cursor
-  per signal (the `*_RECEIVED` value already accounted for); an
-  `unconsumed_terms` count; and `old_mask`, the registering thread's own
-  mask (`pthread_sigmask` query), used only for its child. Nothing else
-  can see a slot, so it needs no atomics and no `Arc`.
-- *Waiting.* The wait loop keeps its shape: `try_wait`, reconcile, forward,
-  then `poll` the global pipe plus the session's own output fds with a
-  20 ms timeout, and drain the global pipe on wake. Every session drains
-  the pipe, so with two or more live sessions one can take a byte meant
-  for another. The loser notices on its next tick. With one session,
-  nobody else drains, so a SIGCHLD or TERM wakes it immediately, as today.
-  An inherited `SIG_IGN` SIGCHLD just means the tick finds the exit.
-  Today's `child_events` flag and 100 ms fallback go away.
-- *Reconciling.* The session compares each global counter with its
-  cursor, then advances the cursor. INT/HUP/QUIT deltas are only used by
-  the pre-spawn rejection. Because every signal has its own cursor, an old
-  INT is never reported twice. A TERM delta is added to
-  `unconsumed_terms`. It is consumed by forwarding that many TERMs to
-  `child_pid` while the child is unreaped, or by `reject_pending_before_spawn`
-  turning it into `Interrupted`. After `clear_child`, a TERM stays
-  unconsumed.
-- *Install and restore.* Registering into an empty registry does this
-  under the lock:
-  1. Snapshot all five counters.
-  2. Install the handler for the five signals, adding `SA_RESTART`. The
-     handler now stays installed longer, and unrelated threads (other
-     tests, the sandbox stderr relay) should not see more `EINTR`. `poll`
-     returns `EINTR` regardless and the loop retries.
-  3. Give the snapshot to the first slot as its cursors, so a TERM caught
-     between the first `sigaction` and registration is that slot's.
-
-  Later registrants take the current counters as cursors. Every signal
-  counted before them belongs to slots that already exist, and those slots
-  reconcile it. If any `sigaction` fails, the completed ones are restored in
-  reverse order and the slot is not registered. Then, for each of
-  TERM/INT/HUP/QUIT whose counter moved past the snapshot, tog sends itself
-  that signal once, now under the restored disposition, and `Session::new`
-  returns the named error. Deregistering the last slot restores the
-  dispositions, so guarantee 5 holds between operations. Today's
-  block-and-restore of the signal mask during install goes: blocking one
-  thread never stopped delivery to another. The only state the handler
-  touches exists before the first `sigaction`.
+- *Slot*, owned by its session's thread: `child_pid`; one cursor per
+  signal (the TERM cursor comes from the registering `fetch_add`);
+  `unconsumed_terms`; and `old_mask` (`pthread_sigmask` query), used only
+  for its child.
+- *Waiting and reconciling.* The loop keeps its shape: `try_wait`, then
+  reconcile the counters against the cursors, then forward, then `poll`
+  the global pipe plus the session's output fds with a 20 ms timeout, and
+  drain the pipe on wake. INT/HUP/QUIT deltas only feed the pre-spawn
+  rejection. Each signal has its own cursor, so an old INT is never
+  reported twice. A TERM delta goes into `unconsumed_terms`. It is
+  consumed by forwarding that many TERMs to the unreaped `child_pid`, or
+  by `reject_pending_before_spawn` turning it into `Interrupted`. After
+  `clear_child`, it stays unconsumed. With two or more sessions, one can
+  drain a byte meant for another, and the loser notices on its next tick.
+  A lone session is woken at once, as today.
 
 **Ordering and races.**
-- *Signal before a session registers.* The new slot's cursors are read
-  under the lock, so that signal is not the new slot's. It is reconciled
-  by the slots that existed when it was counted, or by the last-slot rule
-  below if there were none.
+- *Signal before a session registers.* The session's cursors come from the
+  registering `fetch_add`, with the other counters read just after it, so
+  that signal is not the new session's. It belongs to sessions that were
+  already live, or it was handled as inherited if none were. An
+  INT/HUP/QUIT counted in the gap between those two reads is attributed to
+  the new session, which errs toward rejecting a spawn.
 - *Registered but not spawned, or spawned but not published.* Unchanged.
   `reject_pending_before_spawn` reconciles and rejects. A TERM counted
   after that check stays unconsumed with `child_pid == -1`, and
   `publish_child` reconciles and forwards it.
-- *Session drop and the re-raise rule.* The leaving slot reconciles once
-  more under the lock. If `unconsumed_terms > 0`, it sets
-  `term_orphaned`, and that flag is never cleared by another slot. If A was
-  already reaped and draining when TERM 1 arrived, TERM 1 is orphaned even
-  when B forwards the same TERM 1 to its own child. Order does not matter.
-  When the last slot leaves, it restores the dispositions and then
-  re-raises one TERM, under the inherited disposition, if either
-  `term_orphaned` is set or `TERM_RECEIVED` has passed its cursor (a TERM
-  that no slot saw). Then it clears `term_orphaned`. A TERM that every
-  slot consumed does not re-raise. The parent-TERM case stays exit 45, not
-  death by TERM. This closes an edge the current code has: a TERM between
-  reap and teardown (for example `output` still draining pipes after
-  `clear_child`) is zeroed by `teardown`, and tog carries on to its next
-  step. Residual: a handler already running on another CPU when
-  `sigaction` restores can increment after the check. That window is a few
-  instructions, far narrower than today's.
-- *Concurrent first install and last restore.* Both run under the lock. A
-  registrant racing the last deregistration waits for a bounded number of
-  `sigaction` calls, then sees an empty registry and reinstalls.
-- *Panics and poison.* The lock is recovered with `into_inner`. Every
-  critical section leaves the registry consistent between steps. A
+- *Session drop and the re-raise rule.* The leaving session reconciles,
+  then under the registry lock sets `term_orphaned` if `unconsumed_terms >
+  0`, which no other session can clear. Then it deregisters with the
+  `fetch_sub`. Suppose that `fetch_sub` returns a live count of one (it was
+  the last), and either `term_orphaned` is set or the returned TERM count
+  has passed its cursor (a TERM no session saw). It then clears the flag
+  and sends itself one TERM, which meets the handler with no session live
+  and so gets the inherited behavior. Order does not matter: if A was
+  already reaped and draining when TERM 1 arrived, TERM 1 is orphaned
+  even when B forwards it to its own child. A TERM every session consumed
+  does not re-raise, so the parent-TERM case still exits 45. This closes
+  an edge the current code has: a TERM between reap and teardown (for
+  example `output` still draining after `clear_child`) is zeroed today,
+  and tog carries on. An INT/HUP/QUIT that arrives during a session is
+  caught and not forwarded, as documented today.
+- *Panics and poison.* The lock is recovered with `into_inner`. A
   panicking session still runs `Drop`, which deregisters.
-- *fork.* `pre_exec` touches only copied signal values, never the registry,
-  so forking while another thread holds the lock is safe.
+- *fork.* `pre_exec` touches only copied signal values, never shared
+  state, so forking while another thread holds the lock is safe.
+
+**Other code that installs handlers.** Tog installs no other handlers.
+Code that calls `sigaction` for one of these signals before tog's first
+session is recorded as inherited. Tog chains to it with no session live
+and supersedes it while a session is live, the same precedence as today.
+Code that installs its own handler after that replaces tog's for good, and
+supervision then silently stops forwarding that signal. Today's code
+reinstalls on every session. The implementation adds a debug assertion at
+each registration that the TERM disposition still points at tog's
+handler, so a test that installs its own handler fails loudly. The
+harness scenarios install nothing but the job-control shell's
+`SIGTTOU` ignore, which is outside this set.
 
 **Latency and CPU trade-off.** A lone session keeps today's event-driven
-reaping, but it now also wakes every 20 ms while its child runs. Each tick
-is one `poll` return, one `waitpid(WNOHANG)`, and five atomic loads, a few
-microseconds, so an hour-long build pays roughly 180,000 no-op wakeups.
-With concurrent sessions, a reap or a TERM forward can lag by up to one
-tick. The tick only bounds latency when sessions compete for a wake byte,
-so it can be raised without affecting correctness. 20 ms keeps
-`concurrent_reap_latency_stays_event_driven` well inside its bound. The
-rejected dispatcher design had zero idle wakeups. It paid for them with a
-thread, per-session pipes, an fd-inheritance problem, and a lifecycle
-that could fail open.
+reaping, but also wakes every 20 ms while its child runs. Each tick is one
+`poll` return, one `waitpid(WNOHANG)`, and five atomic loads: a few
+microseconds, about 180,000 no-op wakeups per build-hour. With concurrent
+sessions, a reap or a forward can lag by up to one tick. The tick only
+bounds latency when sessions compete for a wake byte, so it can be raised
+without affecting correctness.
 
-**macOS vs Linux.** One implementation. `sigaction`, `poll`,
+**macOS vs Linux.** One implementation. `sigaction`, `raise`, `poll`,
 `pthread_sigmask`, and `waitpid` behave the same on both. There are two
 splits: the existing `__errno_location`/`__error`, and `pipe2` versus
-`pipe` + `fcntl` for the one global pipe, which is harmless as explained
-above. `signalfd` (Linux) and `sigwait` were considered and rejected. Both
-need the signals blocked in every thread, including libtest's threads,
-which exist before tog's code runs. Both also leave the mask blocked
-outside sessions and hand children a blocked mask unless every spawn
-undoes it. kqueue `EVFILT_SIGNAL` (macOS) adds a platform split for no
-gain.
+`pipe` + `fcntl` for the one global pipe, covered above. `signalfd`
+(Linux) and `sigwait` need the signals blocked in every thread, including
+libtest's threads, which exist before tog's code runs. They were rejected.
+kqueue `EVFILT_SIGNAL` (macOS) adds a platform split for no gain.
 
 **What changes for callers.** The busy error disappears. `Session::new`
-fails only on the first pipe creation or a failed first install (rolled
-back, signals replayed), each as a named `io::Error`. No caller matches
-the busy error: the only other `WouldBlock` users are the activity and
-policy locks. Public signatures (`status`, `status_with_stderr`,
-`output`, `*_owned`) do not change. `SUPERVISION_TEST_LOCK` is deleted
-from all 17 files, and the lock-order comments in `commands/sync.rs`,
-`commands/inspect.rs`, and `kernel/policy.rs` drop "supervision". The
-`--test-threads=1` row leaves `docs/human/LIMITATIONS.md`. The
-implementation PR first checks which `--ignored` targets still need single
-threading for another reason (env or store locks) and names those instead
-of keeping a blanket row. ARCHITECTURE.md's "Each process supervises at
-most one awaited store-consuming child" becomes "each operation supervises
-its own awaited child". The LIMITATIONS "three edges" row gains the
-reap-boundary re-raise.
+fails only on the first pipe creation or a failed `sigaction`, each as a
+named `io::Error`. No caller matches the busy error: the only other
+`WouldBlock` users are the activity and policy locks. Public signatures do
+not change. `SUPERVISION_TEST_LOCK` is deleted from all 17 files, and the
+lock-order comments in `commands/sync.rs`, `commands/inspect.rs`, and
+`kernel/policy.rs` drop "supervision". The `--test-threads=1` row leaves
+`docs/human/LIMITATIONS.md`, after the implementation PR checks which
+`--ignored` targets still need single threading for another reason and
+names those. ARCHITECTURE.md's "Each process supervises at most one
+awaited store-consuming child" becomes "each operation supervises its own
+awaited child". The LIMITATIONS "three edges" row gains the reap-boundary
+re-raise and the SIGCHLD change.
 
 **Tests for the implementation PR.** Each new integration case goes in
 `tests/supervise_signals.rs` with its own harness scenario, so it owns its
-process's dispositions, and synchronizes on FIFOs and markers, not sleeps.
-Failpoints are read from `TOG_SUPERVISE_FAILPOINT` only under
-`cfg(debug_assertions)`, so the integration binaries reach them and
-release builds do not. A `pause-after-sigaction-<k>` failpoint blocks on
-a FIFO so the case can signal at an exact install step.
+process's dispositions. Cases synchronize on FIFOs and markers, not
+sleeps. Test-only knobs are read from `TOG_SUPERVISE_FAILPOINT` and
+`TOG_SUPERVISE_TICK_MS`, and only under `cfg(debug_assertions)`.
 - `concurrent_sessions_each_supervise_their_own_child`: two threads, both
-  children provably running at once (each writes the FIFO before the
-  other exits), both exit codes right. Replaces
+  children provably running at once, both exit codes right. Replaces
   `a_second_supervisory_session_is_refused_rather_than_queued`, which is
   deleted.
-- `parent_term_reaches_every_live_child`: two live sessions, one TERM to
-  the harness; both trapping children print `CHILD_TERM` and exit 45, and
-  the harness exits 45 (no re-raise).
+- `parent_term_reaches_every_live_child`: two live sessions, one TERM; both
+  trapping children exit 45, and the harness exits 45 (no re-raise).
 - `terminal_interrupt_reaches_every_concurrent_child` (PTY, `^C`): each of
-  two trapping children sees INT exactly once, which also pins that no
-  forwarding was added.
-- `a_session_registered_after_term_does_not_inherit_it`: A's child is
-  inside its TERM trap (marker), then the harness starts B, whose child
-  exits 0.
+  two trapping children sees INT exactly once.
+- `a_session_registered_after_term_does_not_inherit_it`: A's child is in
+  its TERM trap, then B starts, and B's child exits 0.
 - `an_old_int_is_not_reported_to_a_later_session`, plus the HUP and QUIT
-  variants: A sees the signal. After A's child exits, B registers, an
+  variants: after A has seen the signal and ended, B registers, an
   unrelated SIGCHLD wakes it, and B still spawns normally.
-- `handler_installed_while_any_session_lives`: the harness reads
-  `sigaction(SIGTERM)` before, during two overlapping sessions, after the
-  first ends, and after the last. It is a harness scenario because sibling
-  unit tests hold sessions at random times once the lock is gone.
-- `dispositions_restore_only_when_the_last_session_ends`: A and B live, A
-  ends; TERM is still caught and forwarded to B's TERM-ignoring child. B
-  ends, and TERM kills the harness.
+- `dispositions_act_as_inherited_whenever_no_session_is_live`: for each of
+  TERM/INT/HUP/QUIT, once with an inherited `SIG_DFL` (the harness dies of
+  that signal) and once with an inherited recording handler (the handler
+  runs once, and the harness continues). Run after a session has ended.
+- `a_term_during_first_install_acts_as_inherited`: a `pause-after-sigaction-k`
+  failpoint blocks on a FIFO for k = 1..5. TERM is sent, then released.
+  The harness dies of SIGTERM, because no session was live yet.
+- `a_failed_first_install_leaves_signals_behaving_as_inherited`: fail
+  `sigaction` k for each k, then check inherited behavior as above, and
+  that the next session installs the rest and supervises normally.
 - `term_after_reap_but_before_the_pipes_close_is_not_swallowed`: an
   `output` child writes its pid to a file, leaves a grandchild holding
   stdout open on a FIFO read, and exits. The case waits until the child is
-  reaped (`kill(pid, 0)` fails), sends TERM, then releases the FIFO. The
+  reaped (`kill(pid, 0)` fails), sends TERM, and releases the FIFO. The
   harness must die of SIGTERM. Under the current code it returns normally.
 - `a_term_orphaned_by_one_session_reraises_though_another_consumed_it`: A
-  and B are both registered before the TERM. A's child is reaped while A
-  drains pipes, and B's child is live. One TERM goes to the harness, and
-  B's child gets it. Both sessions end, in each order across two runs, and
-  the harness dies of SIGTERM both times.
-- `term_during_first_install_reaches_the_first_child`: pause after
-  `sigaction` k (k = 1..4), send TERM, release. The first child receives
-  it, or the spawn is rejected as `Interrupted`. It is never lost.
-- `term_during_a_rolled_back_install_is_replayed`: pause after `sigaction`
-  1, send TERM, then fail `sigaction` 2. The harness dies of SIGTERM under
-  its restored disposition. A second run with the harness ignoring TERM
-  shows the replay is ignored too, and all five dispositions are the
-  inherited ones.
-- `failed_first_install_restores_every_disposition`: fail `sigaction` k
-  for each k. All five dispositions come back inherited, and the next
-  session installs cleanly.
-- `concurrent_reap_latency_stays_event_driven`: the reap-latency scenario
-  on two threads at once, with the same 2.4 s bound per thread.
+  and B both registered, A's child reaped while A drains, B's child live.
+  One TERM. Both end, in each order across two runs, and the harness dies
+  of SIGTERM both times.
+- `inherited_sigchld_ignore_still_reports_the_exit_status` (Linux and
+  macOS): the harness sets SIGCHLD to `SIG_IGN`, and separately to a
+  handler with `SA_NOCLDWAIT`, before its first session. A child's `exit
+  42` comes back as 42, and the child itself sees SIGCHLD ignored.
+- `a_lone_session_is_woken_by_the_signal_not_the_tick`: with
+  `TOG_SUPERVISE_TICK_MS=60000`, 15 children of 105 ms finish in under
+  2.4 s, which only a pipe wake can do. The existing
+  `a_child_exit_wakes_the_supervisor_without_waiting_for_a_poll_tick`
+  adopts this knob.
+- `concurrent_reap_latency_is_bounded_by_the_tick`: two threads, default
+  tick, 15 children each, each thread under 2.4 s.
 - `session_churn_loses_no_exit_and_leaks_no_descriptor` (Linux): 8 threads
   x 50 short children with distinct exit codes. Every code comes back, and
   `/proc/self/fd` has the same count before and after. The baseline is
-  taken after one warm-up session, so the global pipe is already counted.
+  taken after one warm-up session.
+- `the_global_pipe_reaches_no_child_spawned_after_install` (both OSes, via
+  `/proc/self/fd` or `lsof -p`): children spawned during session churn
+  hold no end of the pipe. The one-time macOS creation window is
+  documented, not tested.
 - **macOS gate.** `tests/supervise_signals.rs` must pass on macOS before
-  the implementation merges. That covers everything except the
-  `/proc`-based assertions, which stay `cfg(target_os = "linux")`. The PR
-  records the macOS run and its pass count.
-- Every existing case stays and must pass unchanged, including
-  `a_child_exit_wakes_the_supervisor_without_waiting_for_a_poll_tick` (a
-  lone session is still event-driven),
-  `term_across_the_spawn_boundary_is_never_lost`, and
-  `repeated_parent_term_is_forwarded_every_time`. The offline suite must
-  also pass 20 consecutive runs with `SUPERVISION_TEST_LOCK` gone, to
-  flush out any shared state the lock was serializing by accident.
+  the implementation merges. Everything except the `/proc` assertions
+  runs there. The PR records the run and its pass count.
+- Every existing case stays and must pass unchanged. The exception is
+  `spawn_failure_restores_dispositions`, whose "handler outlived its
+  session" check now means "TERM behaves as inherited". The offline suite
+  must pass 20 consecutive runs with `SUPERVISION_TEST_LOCK` gone.
 
 **Rejected, and why they stay rejected.**
 - *Hard rejection enforced in tests* (treat any concurrent session as a
@@ -1501,6 +1503,12 @@ a FIFO so the case can signal at an exact install step.
   gate, and that the only portable gate (an `RwLock` around `spawn`) can
   wait unboundedly on a stalled `pre_exec`. The bounded wait above has
   none of those parts.
+- *Restoring dispositions when the last session ends* (this design's
+  second draft). A handler already running on another thread can count a
+  TERM after the last session's final check, so the TERM is lost. Once
+  handlers are uninstalled, nothing can see that late count. Installing
+  once and emulating the inherited disposition in the handler removes the
+  window, the rollback, and the replay.
 
 ---
 
