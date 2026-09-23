@@ -676,9 +676,9 @@ pub fn canonical_name(name: &str) -> &str {
 /// The global options, with the heading carrying the rule about where they
 /// may appear: a note under the block was read as a footnote and missed.
 const GLOBAL_OPTIONS: &str = "\
-OPTIONS (before or after the command; after 'run' or 'build' everything
-belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
-own arguments):
+OPTIONS (before or after the command; after 'run', 'build' or a script name
+everything belongs to the program, and 'fmt' and 'x' take them only ahead of
+the tool's own arguments):
   -C, --directory <dir>  run as if tog had been started in <dir>
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line

@@ -170,9 +170,11 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         check,
         ref ecosystem,
         ref args,
+        frozen,
+        strict,
     } = command
     {
-        return fmt::run(platform, check, ecosystem.as_deref(), args);
+        return fmt::run(platform, check, ecosystem.as_deref(), args, frozen, strict);
     }
     // `sync` preflights (policy, pins, root registrability) before opening
     // the store, so a refused request touches nothing.
