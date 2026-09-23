@@ -27,10 +27,10 @@ by position.
   followed by the full help screen, which can scroll the sync result away.
   Watch daily use; the candidates are a short footer, the full screen only
   when nothing needed syncing, or leaving it.
-- **`--frozen` and `--strict` on every command (#149).** Since #143 they
-  go on the bare `tog` only, so CI is `tog --frozen`, then `tog build`.
-  Recommended: make both global and have them govern every implicit sync,
-  like `cargo build --locked`; `--fresh` stays bare-only.
+- **A build still refuses on an unrelated ecosystem's host preflight or
+  stale lock section (#159).** #155 narrowed the build's sync to realizing
+  the built ecosystem; preflight and lock resolution stay whole-project.
+  Recommended: preflight the built ecosystem only, keep the lock whole.
 - **Fix lines that explain rather than resolve (#146).** Two of the 28
   `fix:` lines are diagnostics (`setup.py egg_info`, `tog audit`).
   Decided 2026-09-23: add a second `next:` label with the same alignment;
@@ -65,19 +65,19 @@ by position.
   unsigned setup. Decided 2026-09-23: both an unsigned mode of `audit`
   and exceptions in `tog status`; then the exception summary can name a
   real fix again. Stays open until both land.
+- **`--strict`/`--frozen` before `add`/`remove`/`update` (#157).** Accepted
+  since #154, but the sync after the manifest edit ignores both.
+  Recommended: thread `strict`; refuse `--frozen` ahead of those verbs.
+- **End-to-end test for the build's narrowed sync (#158).** #155 covers
+  the filter only; two ecosystems with one failing install is by hand.
+  Needs #147, or an ignored case until then.
+- **Per-command help footers omit `--frozen`/`--strict` (#160).** The
+  "Global options (-C, -q, -v, --no-color)" lines in `src/cli/spec.rs`.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so "bare `tog`, then the
   help" and anything else that runs after a successful sync is verified by
   hand. That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
-- **A build can be blocked by an unrelated ecosystem (#150).** When the
-  built ecosystem is stale, `tog build` runs the whole-project sync, and a
-  Python or Node side that cannot sync stops a Cargo build. Recommended:
-  keep resolving the toolchain lock for every ecosystem, but realize only
-  the built one.
-- **"sync:" prefix after a hidden alias (#151).** `tog install --fersh`
-  still says `sync: unknown option`. Recommended: drop the prefix, so it
-  reads like `tog --fersh`.
 - **`tog audit` does not read the toolchain lock.** `status` reports a
   missing or stale `tog-toolchain.toml` and a closure built from another
   bundle; `audit` reuses only the per-record `closure_state`, so a gate that
