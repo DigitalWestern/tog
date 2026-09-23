@@ -252,3 +252,88 @@ fn dependency_edit_exception_is_not_published_to_cargo_closure() {
         );
     }
 }
+
+/// The build's sync is scoped to the ecosystem it builds (#158): beside a
+/// Python project whose install cannot succeed, `tog build` still syncs
+/// and builds the Cargo project, realizes nothing for Python, and the
+/// toolchain lock it publishes keeps both sections. The bare `tog`, which
+/// syncs everything, still fails on the Python install.
+#[test]
+#[ignore]
+fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
+    let temp = TempDir::new();
+    let project = temp.0.join("cargo-hello");
+    copy_tree(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-hello"),
+        &project,
+    );
+    // No index has this package, so Python's lock generation fails.
+    std::fs::write(
+        project.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
+         dependencies = [\"tog-no-such-package-158\"]\n",
+    )
+    .unwrap();
+    let tmp = temp.0.join("tmp");
+    std::fs::create_dir_all(tmp.join("home")).unwrap();
+    let store = temp.0.join("store");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+
+    let output = tog_with_tmp(&binary, &project, &store, &tmp, &["build"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_ok(output, "build beside a failing python project");
+    assert!(stderr.contains("syncing first: cargo"), "{stderr}");
+    assert!(project.join("target/debug/cargo-hello").is_file());
+    assert_cargo_closure(&project, &store);
+    let closures = project.join(".tog/closures");
+    assert!(
+        !closures.join("python.json").exists(),
+        "the build realized the python environment"
+    );
+    let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+    assert!(lock.contains("[toolchain.python]"), "{lock}");
+    assert!(lock.contains("[toolchain.rust]"), "{lock}");
+
+    // Cargo is synced now, so the next build runs no sync; the whole
+    // project is still checked. A changed Python toolchain input (stale
+    // lock section) or a malformed one refuses, and the lock is untouched.
+    let pyproject = std::fs::read_to_string(project.join("pyproject.toml")).unwrap();
+    std::fs::write(project.join(".python-version"), "3.13\n").unwrap();
+    for (label, expected) in [
+        (
+            "stale python section",
+            "tog-toolchain.toml is stale for python",
+        ),
+        ("malformed requires-python", "invalid"),
+    ] {
+        if label.starts_with("malformed") {
+            std::fs::remove_file(project.join(".python-version")).unwrap();
+            std::fs::write(
+                project.join("pyproject.toml"),
+                pyproject.replace("[project]\n", "[project]\nrequires-python = \"invalid\"\n"),
+            )
+            .unwrap();
+        }
+        let output = tog_with_tmp(&binary, &project, &store, &tmp, &["build", "cargo"]);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(!output.status.success(), "{label}: build succeeded");
+        assert!(!stderr.contains("syncing first"), "{label}: {stderr}");
+        assert!(stderr.contains(expected), "{label}: {stderr}");
+        assert_eq!(
+            std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap(),
+            lock,
+            "{label}: the lock changed"
+        );
+    }
+    std::fs::write(project.join("pyproject.toml"), &pyproject).unwrap();
+
+    let output = tog_with_tmp(&binary, &project, &store, &tmp, &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "the python install was expected to fail\nstderr:\n{stderr}"
+    );
+    // The failure is the missing package, not something unrelated.
+    assert!(stderr.contains("tog-no-such-package-158"), "{stderr}");
+    assert!(!closures.join("python.json").exists());
+}

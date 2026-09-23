@@ -98,28 +98,55 @@ pub fn read_python_version(bytes: &[u8]) -> Option<String> {
     Some(line)
 }
 
-/// `pyproject.toml`: `[project] requires-python = ">=3.12"`.
-pub fn read_pyproject_requires_python(bytes: &[u8]) -> Option<String> {
-    toml_document(bytes)?
-        .get("project")?
-        .get("requires-python")?
-        .as_str()
-        .map(str::to_string)
+fn malformed(message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("pyproject.toml: {message}"),
+    )
+}
+
+/// `pyproject.toml`: `[project] requires-python = ">=3.12"`. A value that
+/// is present but not a string is refused, as Python's own input check
+/// refuses it, rather than recorded as absent: a lock must not read a
+/// malformed request as no request.
+pub fn read_pyproject_requires_python(bytes: &[u8]) -> io::Result<Option<String>> {
+    let Some(value) = toml_document(bytes)
+        .as_ref()
+        .and_then(|document| document.get("project")?.get("requires-python").cloned())
+    else {
+        return Ok(None);
+    };
+    match value {
+        toml::Value::String(text) => Ok(Some(text)),
+        _ => Err(malformed("requires-python must be a string")),
+    }
 }
 
 /// `pyproject.toml`: `[tool.poetry.dependencies] python = "^3.9"`, or the
-/// table spelling `python = { version = "^3.9" }`.
-pub fn read_pyproject_poetry_python(bytes: &[u8]) -> Option<String> {
-    let python = toml_document(bytes)?
-        .get("tool")?
-        .get("poetry")?
-        .get("dependencies")?
-        .get("python")?
-        .clone();
+/// table spelling `python = { version = "^3.9" }`. Any other shape is
+/// refused, as Python's own input check refuses it.
+pub fn read_pyproject_poetry_python(bytes: &[u8]) -> io::Result<Option<String>> {
+    let Some(python) = toml_document(bytes).as_ref().and_then(|document| {
+        document
+            .get("tool")?
+            .get("poetry")?
+            .get("dependencies")?
+            .get("python")
+            .cloned()
+    }) else {
+        return Ok(None);
+    };
     match python {
-        toml::Value::String(text) => Some(text),
-        toml::Value::Table(table) => table.get("version")?.as_str().map(str::to_string),
-        _ => None,
+        toml::Value::String(text) => Ok(Some(text)),
+        toml::Value::Table(table) => match table.get("version") {
+            Some(toml::Value::String(text)) => Ok(Some(text.clone())),
+            _ => Err(malformed(
+                "[tool.poetry.dependencies].python table needs a string version",
+            )),
+        },
+        _ => Err(malformed(
+            "[tool.poetry.dependencies].python must be a string or table",
+        )),
     }
 }
 
@@ -260,9 +287,19 @@ fn row_for(
     field: &str,
     parse: impl Fn(&[u8]) -> Option<String>,
 ) -> io::Result<InputRow> {
+    checked_row_for(root, path, field, |bytes| Ok(parse(bytes)))
+}
+
+/// `row_for` for a reader that can refuse a malformed value outright.
+fn checked_row_for(
+    root: &ProjectRoot,
+    path: &str,
+    field: &str,
+    parse: impl Fn(&[u8]) -> io::Result<Option<String>>,
+) -> io::Result<InputRow> {
     match root.read_file(Path::new(path))? {
         None => Ok(InputRow::missing(path, field)),
-        Some(bytes) => match parse(&bytes) {
+        Some(bytes) => match parse(&bytes)? {
             Some(value) => Ok(InputRow::present(path, field, value, &bytes)),
             None => Ok(InputRow::present_without_value(path, field, &bytes)),
         },
@@ -276,13 +313,13 @@ pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>
     let rows = match ecosystem {
         "python" => vec![
             row_for(root, ".python-version", "version", read_python_version)?,
-            row_for(
+            checked_row_for(
                 root,
                 "pyproject.toml",
                 "project.requires-python",
                 read_pyproject_requires_python,
             )?,
-            row_for(
+            checked_row_for(
                 root,
                 "pyproject.toml",
                 "tool.poetry.dependencies.python",
@@ -427,13 +464,36 @@ mod tests {
     #[test]
     fn python_pyproject_readers_find_each_field() {
         let bytes = b"[project]\nrequires-python = \">=3.12\"\n\n[tool.poetry.dependencies]\npython = \"^3.9\"\n";
-        assert_eq!(read_pyproject_requires_python(bytes), Some(">=3.12".into()));
-        assert_eq!(read_pyproject_poetry_python(bytes), Some("^3.9".into()));
+        let read = |bytes: &[u8]| read_pyproject_requires_python(bytes).unwrap();
+        let poetry = |bytes: &[u8]| read_pyproject_poetry_python(bytes).unwrap();
+        assert_eq!(read(bytes), Some(">=3.12".into()));
+        assert_eq!(poetry(bytes), Some("^3.9".into()));
         let table = b"[tool.poetry.dependencies]\npython = { version = \"^3.9\" }\n";
-        assert_eq!(read_pyproject_poetry_python(table), Some("^3.9".into()));
-        assert_eq!(read_pyproject_requires_python(b"[project]\n"), None);
-        assert_eq!(read_pyproject_poetry_python(b"[project]\n"), None);
-        assert_eq!(read_pyproject_requires_python(b"not toml ["), None);
+        assert_eq!(poetry(table), Some("^3.9".into()));
+        assert_eq!(read(b"[project]\n"), None);
+        assert_eq!(poetry(b"[project]\n"), None);
+        assert_eq!(read(b"not toml ["), None);
+    }
+
+    /// A field that is there but malformed is refused in the words Python's
+    /// input check uses, never recorded as absent.
+    #[test]
+    fn python_pyproject_readers_refuse_a_malformed_field() {
+        let error =
+            read_pyproject_requires_python(b"[project]\nrequires-python = 3\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires-python must be a string"),
+            "{error}"
+        );
+        for bytes in [
+            &b"[tool.poetry.dependencies]\npython = 3\n"[..],
+            b"[tool.poetry.dependencies]\npython = { version = 3 }\n",
+            b"[tool.poetry.dependencies]\npython = {}\n",
+        ] {
+            assert!(read_pyproject_poetry_python(bytes).is_err());
+        }
     }
 
     #[test]

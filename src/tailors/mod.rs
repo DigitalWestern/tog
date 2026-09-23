@@ -94,7 +94,20 @@ pub trait Tailor: Sync {
     /// `sync`, `plan`, `status`, `deps`, and `fmt` all use.
     fn detect(&self, dir: &Path) -> io::Result<bool>;
 
-    /// Before any store-touching work: host support and toolchain pin.
+    /// Before any store-touching work, for every detected ecosystem
+    /// whatever the command is about: are the declarative toolchain inputs
+    /// well-formed? Host-independent, so a malformed request refuses on
+    /// every machine and every command, including a build of another
+    /// ecosystem, rather than being read as no request. Most ecosystems'
+    /// inputs are checked by the lock's own readers and need nothing here.
+    fn check_inputs(&self, _dir: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Before any store-touching work, for the ecosystems the command will
+    /// realize: can this host run this ecosystem, and does this tog pin a
+    /// toolchain for it here? Runs after `check_inputs`, so it may assume
+    /// well-formed inputs.
     fn preflight(&self, platform: Platform, dir: &Path) -> io::Result<()>;
 
     /// Host-side preparation that must precede planning for every

@@ -34,6 +34,13 @@ impl Tailor for Python {
         Ok(&python::registry_tool::PythonTool)
     }
 
+    /// A `.python-version`, `requires-python`, or Poetry `python` that does
+    /// not parse refuses here, on every command, before any lock is read
+    /// or written from it.
+    fn check_inputs(&self, dir: &Path) -> io::Result<()> {
+        pyselect::check_project_inputs(dir)
+    }
+
     /// Host support and a pinned interpreter for the request this project
     /// states, before the store is opened. Selection proper happens in the
     /// kernel a moment later, from the same rows; this runs first so an
