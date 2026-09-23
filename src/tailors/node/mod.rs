@@ -2039,6 +2039,153 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// With complete object ids the strict path runs, and the durable
+    /// root/2 record `project_node_env_recorded` publishes names exactly the
+    /// environment object, the Node runtime object, the native library
+    /// object the environment was built against, the forest it projected
+    /// and the backup of the user's real `node_modules`: nothing inferred
+    /// from the closure JSON, nothing missing.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        use std::os::unix::fs::PermissionsExt;
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tog-npm-closure-refs-{nonce}"));
+        let store_root = root.join("home/store");
+        for sub in [
+            "objects",
+            "meta",
+            "cache/sha256",
+            "tmp",
+            "roots",
+            "forests",
+            "backups",
+        ] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let selected = shipped_selection().unwrap();
+        let env_id = format!("{}-npm-env-0", "1".repeat(40));
+        let runtime_id = format!("{}-node-0", "2".repeat(40));
+        let native_id = format!("{}-native-libs-0", "3".repeat(40));
+        fs::create_dir_all(store.object_path(&env_id).join("node_modules/c")).unwrap();
+        fs::write(
+            store
+                .object_path(&env_id)
+                .join("node_modules/c/package.json"),
+            "{}",
+        )
+        .unwrap();
+        for (id, inputs) in [
+            (&env_id, serde_json::json!({ "native_libs": native_id })),
+            (&runtime_id, serde_json::json!({})),
+            (&native_id, serde_json::json!({})),
+        ] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "test", "name": id, "version": "0", "inputs": inputs},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        // A real node_modules the user made: it is moved into a store backup.
+        let project = root.join("project");
+        fs::create_dir_all(project.join("node_modules/left-pad")).unwrap();
+        let plan = NpmPlan {
+            node_version: selected.version("node").unwrap().to_string(),
+            packages: vec![NpmPackage {
+                path: "node_modules/c".into(),
+                name: "c".into(),
+                version: "1.0.0".into(),
+                url: "https://example.invalid/c.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                patch: None,
+                git: None,
+                optional: false,
+            }],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let runtime = store.object_path(&runtime_id);
+        project_node_env_recorded(
+            &project,
+            &store.object_path(&env_id),
+            Platform::host().unwrap(),
+            &plan,
+            &[],
+            false,
+            &[],
+            Some((&selected, runtime.as_path())),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let forest = fs::read_link(project.join("node_modules")).unwrap();
+        let backups: Vec<PathBuf> = fs::read_dir(store.root.join("backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(
+            record.objects,
+            std::collections::BTreeSet::from([env_id, runtime_id, native_id])
+        );
+        assert_eq!(
+            record.projections,
+            std::collections::BTreeSet::from([
+                store
+                    .projection_ref(crate::kernel::store::ProjectionBase::Forests, &forest)
+                    .unwrap(),
+                store
+                    .projection_ref(crate::kernel::store::ProjectionBase::Backups, &backups[0])
+                    .unwrap(),
+            ])
+        );
+
+        // `gc --register` rebuilds the same record from this closure alone,
+        // plus one reference the publisher never makes: the importer also
+        // follows the `projection_id` route that `node-forest/1` closures
+        // needed, and adds the forest's spelling in the legacy sibling
+        // namespace. That namespace is never swept, so the extra reference
+        // retains nothing; it is pinned here so a change to it is seen.
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        let mut expected = record.projections.clone();
+        let proj_id = forest.parent().unwrap();
+        expected.insert(
+            crate::kernel::store::ProjectionRef::new(
+                crate::kernel::store::ProjectionBase::LegacyForests,
+                vec![
+                    proj_id.parent().unwrap().file_name().unwrap().into(),
+                    proj_id.file_name().unwrap().into(),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(reimported.projections, expected);
+        let _ = crate::kernel::store::remove_tree(&root);
+    }
+
     #[test]
     fn stale_workspace_projection_is_removed_when_dependency_aligns() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();

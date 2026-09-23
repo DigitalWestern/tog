@@ -487,7 +487,7 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
         }
     }
     match exception_summary(total, policy::signing_configured()) {
-        Some((message, Some(fix))) => crate::kernel::ui::warning(&message, fix),
+        Some((message, Some(next))) => crate::kernel::ui::warning_next(&message, next),
         Some((message, None)) => crate::kernel::ui::note(&message),
         None => {}
     }
@@ -498,10 +498,12 @@ fn print_exception_summary(project_dir: &Path) -> io::Result<()> {
 /// --strict`, which does not refuse the recorded exceptions: it fails the
 /// sync that recorded them, undoing the work that just finished.
 ///
-/// It is a warning with `tog audit` as its fix only where an audit gate is
-/// configured (a `[signing]` table with trusted keys): `audit` refuses to
-/// run without one, and unsigned closures are not judged, so without a
-/// gate there is nothing to type and the count is progress.
+/// It is a warning with `tog audit` on its `next:` line only where an audit
+/// gate is configured (a `[signing]` table with trusted keys): `audit`
+/// refuses to run without one, and unsigned closures are not judged, so
+/// without a gate there is nothing to type and the count is progress.
+/// `next:`, not `fix:`: the audit says whether an exception matters under
+/// the policy, and the exception stays recorded either way.
 fn exception_summary(total: usize, gate: bool) -> Option<(String, Option<&'static str>)> {
     (total > 0).then(|| {
         let message = format!("{total} policy exception(s) recorded in .tog/closures/*.json");
@@ -678,15 +680,15 @@ mod tests {
     fn the_exception_summary_counts_and_points_at_a_read_command() {
         assert_eq!(exception_summary(0, true), None);
         assert_eq!(exception_summary(0, false), None);
-        let (line, fix) = exception_summary(3, true).unwrap();
+        let (line, next) = exception_summary(3, true).unwrap();
         assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
         assert!(line.contains(".tog/closures/*.json"), "{line}");
-        assert_eq!(fix, Some("tog audit"));
+        assert_eq!(next, Some("tog audit"));
         assert!(!line.contains("--strict"), "{line}");
         // Without a gate `tog audit` refuses to run, so there is nothing to
         // type: the count is progress and names what would change that.
-        let (line, fix) = exception_summary(3, false).unwrap();
-        assert_eq!(fix, None);
+        let (line, next) = exception_summary(3, false).unwrap();
+        assert_eq!(next, None);
         assert!(line.contains("[signing]"), "{line}");
     }
 

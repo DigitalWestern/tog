@@ -13,15 +13,20 @@ use crate::commands::sync;
 use crate::kernel::platform::Platform;
 use std::io;
 
-pub fn run(platform: Platform, update: &ToolchainUpdate, no_sync: bool) -> io::Result<()> {
-    // There is no `--strict` on this verb, so the flag is false and the
-    // policy chain decides strictness on its own. Reading `policy::strict()`
-    // here would be worse than wrong: it initializes the policy to the
-    // default before the project's chain has been loaded.
+pub fn run(
+    platform: Platform,
+    update: &ToolchainUpdate,
+    no_sync: bool,
+    strict: bool,
+) -> io::Result<()> {
+    // `strict` is the global `--strict`; without it the policy chain
+    // decides strictness on its own. Reading `policy::strict()` here would
+    // be worse than wrong: it initializes the policy to the default before
+    // the project's chain has been loaded.
     sync::run_in_mode(
         platform,
         false,
-        false,
+        strict,
         Mode::Update {
             only: update.ecosystem.clone(),
         },

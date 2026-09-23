@@ -717,3 +717,330 @@ fn an_ambiguous_or_partly_unknown_request_changes_no_record() {
         );
     }
 }
+
+/// A `root/2` record the sweep cannot trust takes the same refusal as an
+/// unreadable pathname record: the sweep's reader reports it on the entry,
+/// and the refusal names the key, the record, and `--forget`. Without that
+/// routing each shape would surface as its own parse error, with no key to
+/// forget, or would be skipped. Forgetting the key named in the refusal
+/// clears it.
+#[test]
+fn an_unusable_root2_record_is_refused_by_name_and_forgettable() {
+    for shape in [
+        "malformed-json",
+        "unknown-schema",
+        "key-mismatch",
+        "malformed-object-id",
+        "absolute-projection",
+        "unknown-field",
+        "uppercase-key",
+    ] {
+        let fixture = Fixture::new(shape);
+        let project = fixture.project("project", false);
+        let key = tog::kernel::store::Store::root_key(&project).unwrap();
+        let record = |key: &str, objects: serde_json::Value, projections: serde_json::Value| {
+            serde_json::json!({
+                "schema": "root/2",
+                "key": key,
+                "project_path": {"encoding": "utf8", "value": project.display().to_string()},
+                "objects": objects,
+                "projections": projections,
+                "updated": 1,
+            })
+        };
+        let objects = serde_json::json!([fixture.protected]);
+        fixture.record_as(
+            &key,
+            record(&key, objects.clone(), serde_json::json!([]))
+                .to_string()
+                .as_bytes(),
+        );
+
+        // Control: the well-formed record protects the aged object on its
+        // own, with no closure in the project.
+        let control = fixture.run(&["gc", "--keep-days=0"]);
+        assert!(control.status.success(), "{shape}: {}", stderr(&control));
+        assert!(
+            fixture.object().is_dir(),
+            "{shape}: control sweep deleted the object"
+        );
+
+        let mut named = key.clone();
+        let body = match shape {
+            "malformed-json" => b"{ \"schema\": \"root/2\", ".to_vec(),
+            "unknown-schema" => {
+                let mut value = record(&key, objects.clone(), serde_json::json!([]));
+                value["schema"] = "root/3".into();
+                value.to_string().into_bytes()
+            }
+            "key-mismatch" => record(&"f".repeat(40), objects.clone(), serde_json::json!([]))
+                .to_string()
+                .into_bytes(),
+            "malformed-object-id" => record(
+                &key,
+                serde_json::json!(["not-an-id"]),
+                serde_json::json!([]),
+            )
+            .to_string()
+            .into_bytes(),
+            "absolute-projection" => record(
+                &key,
+                objects.clone(),
+                serde_json::json!([{
+                    "base": "forests",
+                    "components": [{"encoding": "utf8", "value": "/etc"}],
+                }]),
+            )
+            .to_string()
+            .into_bytes(),
+            "unknown-field" => {
+                let mut value = record(&key, objects.clone(), serde_json::json!([]));
+                value["protects_everything"] = true.into();
+                value.to_string().into_bytes()
+            }
+            // An uppercase spelling of the key is still key-shaped, so it is
+            // read; its body names the lowercase key, so it is refused. A
+            // case-insensitive filesystem folds the two names into one file.
+            _ => {
+                named = key.to_ascii_uppercase();
+                record(&key, objects.clone(), serde_json::json!([]))
+                    .to_string()
+                    .into_bytes()
+            }
+        };
+        if shape == "uppercase-key" {
+            fs::remove_file(fixture.roots().join(&key)).unwrap();
+            fixture.record_as(&named, &body);
+            if fixture.roots().join(&key).exists() {
+                eprintln!("skipped {shape}: the registry filesystem is case-insensitive");
+                continue;
+            }
+        } else {
+            fixture.record_as(&key, &body);
+        }
+
+        for args in [
+            vec!["gc", "--project", "--keep-days=0"],
+            vec!["gc", "--dry-run", "--keep-days=0"],
+            vec!["gc", "--keep-days=0"],
+        ] {
+            let sweep = fixture.run(&args);
+            assert!(
+                !sweep.status.success(),
+                "{shape}: swept past an unusable record: {}",
+                stdout(&sweep)
+            );
+            let message = stderr(&sweep);
+            assert!(
+                message.contains("refusing to sweep")
+                    && message.contains("unusable registry record")
+                    && message.contains(&format!("--forget {named}")),
+                "{shape}: the refusal did not name the record and its key: {message}"
+            );
+        }
+        assert!(
+            fixture.object().is_dir(),
+            "{shape}: a refused sweep deleted the object"
+        );
+
+        let forget = fixture.run(&["gc", "--forget", &named]);
+        assert!(forget.status.success(), "{shape}: {}", stderr(&forget));
+        assert!(
+            fixture.record_names().is_empty(),
+            "{shape}: forgetting the named key left {:?}",
+            fixture.record_names()
+        );
+        let sweep = fixture.run(&["gc", "--keep-days=0"]);
+        assert!(sweep.status.success(), "{shape}: {}", stderr(&sweep));
+        assert!(
+            !fixture.object().exists(),
+            "{shape}: nothing protects the object any more, but it survived"
+        );
+    }
+}
+
+/// `gc --register` validates every closure before it replaces the record.
+/// One it cannot read (an unknown ecosystem or schema, bad JSON, no body)
+/// refuses the whole import and leaves the record that was there, pathname
+/// or durable, byte for byte.
+#[test]
+fn register_refuses_an_unknown_closure_and_keeps_the_old_record() {
+    let fixture = Fixture::new("register-unknown");
+    let project = fixture.project("project", true);
+    fixture.record(&project);
+    let extra = project.join(".tog/closures/extra.json");
+    let shapes = [
+        (
+            "unknown-ecosystem",
+            serde_json::json!({"schema": "closure/1", "ecosystem": "zig", "body": {}}).to_string(),
+        ),
+        (
+            "unknown-schema",
+            serde_json::json!({"schema": "closure/2", "ecosystem": "python", "body": {}})
+                .to_string(),
+        ),
+        (
+            "no-body",
+            serde_json::json!({"schema": "closure/1", "ecosystem": "python"}).to_string(),
+        ),
+        ("malformed-json", "{ \"schema\": ".to_string()),
+    ];
+    let register = || {
+        fixture.run(&[
+            OsStr::new("gc"),
+            OsStr::new("--register"),
+            project.as_os_str(),
+        ])
+    };
+
+    // Once over the pathname record, and once more after a clean import has
+    // replaced it with a durable one.
+    for generation in ["pathname", "durable"] {
+        let before = fixture.record_snapshot();
+        for (shape, contents) in &shapes {
+            fs::write(&extra, contents).unwrap();
+            let refused = register();
+            assert!(
+                !refused.status.success(),
+                "{generation}/{shape}: imported an unreadable closure: {}",
+                stderr(&refused)
+            );
+            assert!(
+                stderr(&refused).contains("cannot import closure"),
+                "{generation}/{shape}: {}",
+                stderr(&refused)
+            );
+            assert_eq!(
+                fixture.record_snapshot(),
+                before,
+                "{generation}/{shape}: the refused import changed the registry"
+            );
+        }
+        fs::remove_file(&extra).unwrap();
+        if generation == "pathname" {
+            let imported = register();
+            assert!(imported.status.success(), "{}", stderr(&imported));
+            assert_ne!(fixture.record_snapshot(), before, "nothing was imported");
+        }
+    }
+}
+
+/// Registration reads closure files and nothing else: it never runs a
+/// planner, a package manager, or anything the project ships. The tools a
+/// project could reach through those are planted on PATH and in the
+/// project, and none may run.
+#[test]
+fn register_runs_no_project_code() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("register-no-code");
+    let project = fixture.project("project", true);
+    let marker = fixture.base.join("ran");
+    let script = format!("#!/bin/sh\necho \"$0\" >> {}\n", marker.display());
+    let fake_bin = fixture.base.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    for tool in [
+        "sh", "bash", "python", "python3", "pip", "uv", "node", "npm", "npx", "pnpm", "yarn",
+        "cargo", "rustc", "go", "ruby", "gem", "bundle", "mix", "elixir", "erl", "dotnet", "git",
+        "make",
+    ] {
+        let path = fake_bin.join(tool);
+        fs::write(&path, &script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for (name, contents) in [
+        (
+            "setup.py",
+            format!("open('{}', 'a').write('setup.py')\n", marker.display()),
+        ),
+        (
+            "package.json",
+            serde_json::json!({
+                "name": "p",
+                "scripts": {"preinstall": format!("echo package.json >> {}", marker.display())},
+            })
+            .to_string(),
+        ),
+        (
+            "build.rs",
+            "fn main() { std::fs::write(\"ran\", \"\").unwrap(); }\n".into(),
+        ),
+        ("mix.exs", "File.write!(\"ran\", \"mix.exs\")\n".into()),
+        ("Gemfile", "File.write('ran', 'Gemfile')\n".into()),
+        (".envrc", format!("echo .envrc >> {}\n", marker.display())),
+    ] {
+        fs::write(project.join(name), contents).unwrap();
+    }
+
+    let register = Command::new(env!("CARGO_BIN_EXE_tog"))
+        .current_dir(&project)
+        .env("TOG_STORE", &fixture.store)
+        .env("HOME", &fixture.base)
+        .env("PATH", &fake_bin)
+        .env("NO_COLOR", "1")
+        .args([
+            OsStr::new("gc"),
+            OsStr::new("--register"),
+            project.as_os_str(),
+        ])
+        .output()
+        .unwrap();
+    assert!(register.status.success(), "{}", stderr(&register));
+    assert_eq!(fixture.record_names().len(), 1, "nothing was registered");
+    assert!(
+        !marker.exists() && !project.join("ran").exists(),
+        "registration ran project code: {}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
+}
+
+/// `--forget` removes the registry entry it was asked for. When that entry
+/// is a symlink, the link goes and whatever it points at stays: another
+/// file, the project itself, or another project's record.
+#[test]
+fn forget_registry_symlink_never_touches_its_target() {
+    for shape in ["file", "directory", "other-record"] {
+        let fixture = Fixture::new(&format!("forget-symlink-{shape}"));
+        let project = fixture.project("project", true);
+        let key = fixture.record(&project);
+        let link = fixture.roots().join(&key);
+        let other = fixture.project("other", true);
+        let other_key = fixture.record(&other);
+        let target = match shape {
+            "file" => {
+                let saved = fixture.base.join("saved-record");
+                fs::rename(&link, &saved).unwrap();
+                saved
+            }
+            "directory" => {
+                fs::remove_file(&link).unwrap();
+                project.clone()
+            }
+            _ => {
+                fs::remove_file(&link).unwrap();
+                fixture.roots().join(&other_key)
+            }
+        };
+        symlink(&target, &link).unwrap();
+        let target_bytes = fs::read(&target).ok();
+        let closure = project.join(".tog/closures/python.json");
+        let closure_bytes = fs::read(&closure).unwrap();
+
+        let forget = fixture.run(&["gc", "--forget", &key]);
+        assert!(forget.status.success(), "{shape}: {}", stderr(&forget));
+        assert!(
+            fs::symlink_metadata(&link).is_err(),
+            "{shape}: the link is still there"
+        );
+        assert!(
+            fs::symlink_metadata(&target).is_ok_and(|meta| !meta.file_type().is_symlink()),
+            "{shape}: the link's target was removed"
+        );
+        assert_eq!(
+            fs::read(&target).ok(),
+            target_bytes,
+            "{shape}: the link's target was changed"
+        );
+        assert_eq!(fs::read(&closure).unwrap(), closure_bytes, "{shape}");
+        assert_eq!(fixture.record_names(), vec![other_key], "{shape}");
+    }
+}

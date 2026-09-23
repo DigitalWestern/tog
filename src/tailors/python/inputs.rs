@@ -122,7 +122,7 @@ pub fn read_plan(
             };
             // The probe's error carries the sandbox log's last lines after
             // a marker; those go out as progress lines first, so the
-            // warning and its fix stay a pair.
+            // warning and its next line stay a pair.
             let text = error.to_string();
             let (reason, tail) = match text.split_once("last 20 lines:\n") {
                 Some((reason, tail)) => (reason.trim_end_matches("; ").to_string(), Some(tail)),
@@ -134,7 +134,9 @@ pub fn read_plan(
                     ui::note(&format!("  {line}"));
                 }
             }
-            ui::warning(
+            // `next:`, not `fix:`: re-running the probe by hand shows why
+            // it failed; it does not make it pass.
+            ui::warning_next(
                 &format!(
                     "setup.py metadata probe failed; using the requirements directory \
                      convention: {reason}"

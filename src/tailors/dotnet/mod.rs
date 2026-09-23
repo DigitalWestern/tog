@@ -1864,6 +1864,81 @@ mod tests {
         assert_eq!(body["plan"]["project"], "app.csproj");
     }
 
+    /// The durable root/2 record `project_dotnet_env` publishes names
+    /// exactly the SDK object and the packages object it was handed:
+    /// nothing inferred from the closure JSON, nothing missing.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("dotnet").unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "tog-dotnet-closure-refs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store_root = temp.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let sdk_id = format!("{}-dotnet-sdk-{SDK_VERSION}", "1".repeat(40));
+        let packages_id = format!("{}-packages-0", "2".repeat(40));
+        for id in [&sdk_id, &packages_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let plan = DotnetPlan {
+            sdk_version: SDK_VERSION.into(),
+            project: "app.csproj".into(),
+            targets: vec!["net9.0".into()],
+            packages: Vec::new(),
+        };
+        project_dotnet_env(
+            &project,
+            &store.object_path(&sdk_id),
+            &store.object_path(&packages_id),
+            &plan,
+            &"c".repeat(64),
+            &shipped_selection().unwrap(),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(
+            record.objects,
+            std::collections::BTreeSet::from([sdk_id, packages_id])
+        );
+        assert!(record.projections.is_empty(), "{:?}", record.projections);
+
+        // `gc --register` rebuilds the same record from this closure alone.
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        assert_eq!(reimported.projections, record.projections);
+        let _ = crate::kernel::store::remove_tree(&temp);
+    }
+
     #[test]
     fn dotnet_tmp_paths_are_platform_specific() {
         assert_eq!(

@@ -10,8 +10,8 @@
 //!
 //! What a pass proves: every closure file's canonical bytes carry a valid
 //! signature from a key the machine policy trusts; every detected ecosystem
-//! has its primary closure; each record is current for the inputs on disk;
-//! no recorded exception is denied or unknown. It does not prove the
+//! has its primary closure; each record is current for the inputs on disk
+//! and the committed toolchain lock; no recorded exception is denied or unknown. It does not prove the
 //! signer's sync was honest or safe to run.
 //!
 //! The rules that keep the answer honest, in evaluation order:
@@ -24,12 +24,16 @@
 //!   judged, because nothing in the record can be believed. The three stay
 //!   distinct because their fixes differ.
 //! - A verdict is only computed over a record that still describes the
-//!   project. Freshness reuses `inspect::closure_state`, the per-record
-//!   check behind `tog status`, applied to every closure file from its
-//!   own body: a closure whose inputs changed, whose projection is missing,
-//!   that was synced on another platform, or whose inputs are no longer
-//!   found here is reported `stale`; one that predates input, platform, or
-//!   exception recording is reported `outdated`. Neither passes.
+//!   project. Freshness reuses `inspect::locked_closure_state`, the check
+//!   behind `tog status`, applied to every closure file from its own body
+//!   and to the committed `tog-toolchain.toml` beside it: a closure whose
+//!   inputs changed, whose projection is missing, that was synced on
+//!   another platform, or whose inputs are no longer found here is reported
+//!   `stale`, and so is one whose toolchain lock is missing, has no section
+//!   for the ecosystem, has stale rows, or names a different bundle than
+//!   the one the closure was built from; one that predates input, platform,
+//!   toolchain, or exception recording is reported `outdated`. Neither
+//!   passes.
 //! - Every ecosystem detected in the directory must have its primary
 //!   closure: deleting a denied record is not a way past the gate.
 //! - The policy under test is the ordinary chain (`policy::load_with_sources`)
@@ -46,6 +50,7 @@ use crate::commands::shared::project_dir;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, Policy, PolicySource, SourceOrigin};
 use crate::kernel::signing::{self, KeySet, PublicKey, Verification};
+use crate::kernel::toolchain::lock::LOCK_PATH;
 use crate::kernel::ui;
 use crate::tailors;
 use serde_json::{json, Value};
@@ -59,10 +64,12 @@ use std::path::Path;
 pub enum Freshness {
     /// Recorded inputs match the files on disk and the projection is in place.
     Current,
-    /// Inputs changed, projection missing, or synced on another platform.
+    /// Inputs changed, projection missing, synced on another platform, or
+    /// the toolchain lock does not describe the record.
     Stale(String),
-    /// The record predates a field the gate needs (inputs, platform, or the
-    /// exception record); the detail names the refresh command.
+    /// The record predates a field the gate needs (inputs, platform,
+    /// toolchain, or the exception record); the detail names the refresh
+    /// command.
     Outdated(String),
     /// Not computed: the record is unsigned, untrusted, or tampered, so its
     /// contents cannot be believed.
@@ -356,7 +363,7 @@ fn freshness(
             refresh(&closure.ecosystem)
         )));
     }
-    Ok(freshness_from_state(inspect::closure_state(
+    Ok(freshness_from_state(inspect::locked_closure_state(
         platform, dir, closure,
     )?))
 }
@@ -377,6 +384,10 @@ fn freshness_from_state(state: State) -> Freshness {
     match state {
         State::Synced => Freshness::Current,
         State::NotSynced => Freshness::Stale("no closure for these inputs".into()),
+        // A toolchain-lock finding names its own next step, as in `status`.
+        State::Changed(files) if inspect::only_lock_findings(&files) => {
+            Freshness::Stale(files.join(", "))
+        }
         State::Changed(files) => {
             Freshness::Stale(format!("{} changed since the last sync", files.join(", ")))
         }
@@ -797,6 +808,11 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                     ),
                 };
                 match &verdict.freshness {
+                    // A toolchain-lock finding already names the verb that
+                    // moves the lock, which is not always the bare `tog`.
+                    Freshness::Stale(why) if why.starts_with(LOCK_PATH) => format!(
+                        "{word:<13} closure {record}: {why}, then audit again ({judged})"
+                    ),
                     Freshness::Stale(why) => format!(
                         "{word:<13} closure {record}: {why}; run '{refresh}', then audit again ({judged})"
                     ),
@@ -1080,15 +1096,21 @@ mod tests {
 
     /// `write_closure` with a chosen key (`None` writes unsigned) and an
     /// edit applied to the envelope after signing, for tampering tests.
+    /// A primary closure is written the way a lock-aware sync writes it:
+    /// with the matching `tog-toolchain.toml` beside it and the bundle id
+    /// recorded in its body.
     fn write_closure_with(
         dir: &Path,
         name: &str,
         ecosystem: &str,
         platform: Option<&str>,
-        body: Value,
+        mut body: Value,
         key: Option<&SigningKey>,
         after_signing: impl FnOnce(&mut Value),
     ) -> ClosureFile {
+        if body.is_object() {
+            body = inspect::with_toolchain_lock(dir, ecosystem, body);
+        }
         let closures = dir.join(".tog/closures");
         fs::create_dir_all(&closures).unwrap();
         let mut envelope = json!({
@@ -1705,6 +1727,137 @@ mod tests {
         assert!(
             text.contains("    denied   git-dependency  left-pad"),
             "{text}"
+        );
+    }
+
+    /// A gate that passes must not be running a toolchain the committed
+    /// lock no longer names: the audit reads the same lock verdicts
+    /// `status` reports, over a record that is otherwise current.
+    #[test]
+    fn a_closure_the_toolchain_lock_does_not_describe_never_audits_clean() {
+        use crate::kernel::fsroot::ProjectRoot;
+        use crate::kernel::toolchain::input;
+        use crate::kernel::toolchain::lock::ToolchainLock;
+        let temp = python_project("lock");
+        let dir = &temp.0;
+        // `write_closure` publishes the matching lock, so this starts clean.
+        let closures = [with_exceptions(dir, &[])];
+        assert_eq!(
+            judge(dir, &permissive(), &closures)[0].freshness,
+            Freshness::Current
+        );
+        let lock = fs::read(dir.join(LOCK_PATH)).unwrap();
+        let stale = |verdicts: &[Verdict], expected: &str| {
+            assert_eq!(
+                verdicts[0].freshness,
+                Freshness::Stale(expected.into()),
+                "{verdicts:?}"
+            );
+            assert!(!verdicts[0].passes());
+        };
+
+        // No lock at all: the next sync would create one.
+        fs::remove_file(dir.join(LOCK_PATH)).unwrap();
+        let verdicts = judge(dir, &permissive(), &closures);
+        stale(
+            &verdicts,
+            "tog-toolchain.toml (missing; run 'tog' to create it)",
+        );
+        // The lock line carries its own next step and is not wrapped in
+        // the dependency-input sentence.
+        let record = record(&verdicts[0]);
+        let text = render(dir, &report(permissive(), verdicts), false).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "python  stale         closure {record}: tog-toolchain.toml (missing; run 'tog' \
+                 to create it), then audit again (permitted: no exceptions)\n"
+            )
+        );
+        fs::write(dir.join(LOCK_PATH), &lock).unwrap();
+
+        // A toolchain source moved since the lock was written: only
+        // `tog update --toolchain` moves it, and the gate says so.
+        fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
+        let verdicts = judge(dir, &permissive(), &closures);
+        let Freshness::Stale(why) = &verdicts[0].freshness else {
+            panic!("{verdicts:?}");
+        };
+        assert!(why.starts_with("tog-toolchain.toml stale: "), "{why}");
+        assert!(why.contains("recorded absent, now 3.13.15"), "{why}");
+        assert!(
+            why.ends_with("run 'tog update --toolchain python'"),
+            "{why}"
+        );
+        assert!(!verdicts[0].passes());
+        let text = render(dir, &report(permissive(), verdicts), false).unwrap();
+        assert!(
+            text.contains("run 'tog update --toolchain python', then audit again"),
+            "{text}"
+        );
+        assert!(!text.contains("run 'tog', then audit again"), "{text}");
+        fs::remove_file(dir.join(".python-version")).unwrap();
+
+        // A lock that describes some other ecosystem but not this one.
+        let mut other = ToolchainLock::new(env!("CARGO_PKG_VERSION"));
+        let go = tailors::by_id("go").unwrap();
+        let root = ProjectRoot::open(dir).unwrap();
+        let go_rows = input::discover(&root, "go").unwrap();
+        let go_catalog = go.toolchain_catalog().unwrap();
+        let go_bundle = crate::kernel::toolchain::select_for(&go_catalog, "go", &go_rows).unwrap();
+        other.set_ecosystem("go", go_bundle, &go_rows).unwrap();
+        fs::write(dir.join(LOCK_PATH), other.canonical_bytes()).unwrap();
+        stale(
+            &judge(dir, &permissive(), &closures),
+            "tog-toolchain.toml (no [toolchain.python] section; run 'tog update --toolchain python')",
+        );
+        fs::write(dir.join(LOCK_PATH), &lock).unwrap();
+
+        // A signed record built from a different bundle than the lock names.
+        let rebuilt = |edit: fn(&mut Value)| {
+            [write_closure_with(
+                dir,
+                "python",
+                "python",
+                Some(host().triple()),
+                closures[0].body.clone(),
+                Some(test_key()),
+                |envelope| {
+                    edit(&mut envelope["body"]);
+                    test_key().sign(envelope).unwrap();
+                },
+            )]
+        };
+        let foreign = rebuilt(|body| {
+            body["toolchain"]["bundle_id"] = json!(format!("sha256:{}", "0".repeat(64)));
+        });
+        assert!(matches!(foreign[0].body["toolchain"]["bundle_id"].as_str(),
+                         Some(id) if id.ends_with(&"0".repeat(64))));
+        stale(
+            &judge(dir, &permissive(), &foreign),
+            "tog-toolchain.toml (toolchain changed since the last sync; run 'tog')",
+        );
+
+        // A record from before the bundle was recorded cannot be compared,
+        // which is the answer every other unrecorded field gets: outdated.
+        let unrecorded = rebuilt(|body| {
+            body.as_object_mut().unwrap().remove("toolchain");
+        });
+        let verdicts = judge(dir, &permissive(), &unrecorded);
+        assert_eq!(
+            verdicts[0].freshness,
+            Freshness::Outdated("toolchain not recorded by this sync; run 'tog' once".into()),
+            "{verdicts:?}"
+        );
+        assert!(!verdicts[0].passes());
+
+        // A closure whose own inputs changed still says so when the lock
+        // has nothing a plain sync would refuse over.
+        fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
+        fs::remove_file(dir.join(LOCK_PATH)).unwrap();
+        stale(
+            &judge(dir, &permissive(), &closures),
+            "requirements.txt changed since the last sync",
         );
     }
 
@@ -2643,6 +2796,7 @@ mod tests {
         let dir = &temp.0;
         let mut body = python_body(dir);
         body["exceptions"] = json!([]);
+        let body = inspect::with_toolchain_lock(dir, "python", body);
         let present = inspect::detected(dir).unwrap();
         let write = |edit: fn(&mut Value), sign_after: bool| {
             let mut envelope = json!({

@@ -679,4 +679,103 @@ mod tests {
 
         let _ = crate::kernel::store::remove_tree(&root);
     }
+
+    /// The durable root/2 record `tog fmt` publishes (the producer lives in
+    /// `tailor.rs`; the test sits here for the private identity helpers)
+    /// names exactly the Rust object and the rustfmt object it realized:
+    /// nothing inferred from the closure JSON, nothing missing. Both objects
+    /// are cache hits with stub `cargo` and `cargo-fmt` scripts, so nothing
+    /// is downloaded.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        use crate::tailors::Tailor;
+        use std::os::unix::fs::PermissionsExt;
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("rustfmt").unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "tog-rustfmt-closure-refs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_store = std::env::var_os("TOG_STORE");
+        std::env::set_var("TOG_STORE", root.join("store"));
+        let platform = Platform::host().unwrap();
+        let ctx = crate::kernel::context::Context::open(platform, false);
+        match previous_store {
+            Some(value) => std::env::set_var("TOG_STORE", value),
+            None => std::env::remove_var("TOG_STORE"),
+        }
+        let ctx = ctx.unwrap();
+        let store = ctx.store.clone();
+
+        let selected =
+            crate::kernel::toolchain::shipped(&cargo::toolchain_catalog().unwrap()).unwrap();
+        let rust_id = cargo::runtime_object_id(platform, &selected).unwrap();
+        let row = rustfmt_row(platform, &selected).unwrap();
+        let rustfmt_id = identity_from(
+            platform,
+            &row.version,
+            row.digest.hex(),
+            &store.object_path(&rust_id),
+        )
+        .unwrap()
+        .object_id();
+        // `cargo locate-project` names the invocation directory's manifest;
+        // `cargo-fmt` formats nothing and succeeds.
+        for (id, script, body) in [
+            (
+                &rust_id,
+                "cargo",
+                "#!/bin/sh\necho \"$(pwd -P)/Cargo.toml\"\n",
+            ),
+            (&rustfmt_id, "cargo-fmt", "#!/bin/sh\nexit 0\n"),
+        ] {
+            let object = store.object_path(id);
+            fs::create_dir_all(object.join("bin")).unwrap();
+            let bin = object.join("bin").join(script);
+            fs::write(&bin, body).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&json!({ "id": id, "exceptions": [] })).unwrap(),
+            )
+            .unwrap();
+        }
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // The root is published before the formatter runs, so the record is
+        // checked whatever the sandboxed stub run returns on this host.
+        let _ = cargo::tailor::Cargo.fmt(&ctx, &project, true, &[], &selected, &mut attribution);
+        attribution.finish(true).unwrap();
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(record.objects, BTreeSet::from([rust_id, rustfmt_id]));
+        assert!(record.projections.is_empty(), "{:?}", record.projections);
+
+        // `gc --register` rebuilds the same record from this closure alone.
+        // Registration takes the exclusive lease, so the context's shared
+        // one goes first.
+        drop(ctx);
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        assert_eq!(reimported.projections, record.projections);
+        let _ = crate::kernel::store::remove_tree(&root);
+    }
 }

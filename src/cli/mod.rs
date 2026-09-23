@@ -115,15 +115,20 @@ pub enum Command {
     Sbom {
         output: Option<PathBuf>,
     },
+    /// `strict` is `--strict` from either side of the verb: it governs the
+    /// sync that follows the edit. `--frozen` is refused ahead of `add`,
+    /// `remove` and `update`, which exist to write the lock.
     Add {
         specs: Vec<String>,
         dev: bool,
         no_sync: bool,
+        strict: bool,
     },
     Remove {
         names: Vec<String>,
         dev: bool,
         no_sync: bool,
+        strict: bool,
     },
     /// `update [<package>...]` re-locks dependencies; `update --toolchain
     /// [<ecosystem>]` re-selects the toolchain instead. The two never mix:
@@ -133,6 +138,7 @@ pub enum Command {
         names: Vec<String>,
         no_sync: bool,
         toolchain: Option<ToolchainUpdate>,
+        strict: bool,
     },
     /// `update --self`: replace this binary with the newest GitHub release.
     /// Its own variant rather than a third mode of `Update`: it needs no

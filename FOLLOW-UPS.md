@@ -31,10 +31,6 @@ by position.
   stale lock section (#159).** #155 narrowed the build's sync to realizing
   the built ecosystem; preflight and lock resolution stay whole-project.
   Recommended: preflight the built ecosystem only, keep the lock whole.
-- **Fix lines that explain rather than resolve (#146).** Two of the 28
-  `fix:` lines are diagnostics (`setup.py egg_info`, `tog audit`).
-  Decided 2026-09-23: add a second `next:` label with the same alignment;
-  user experience over label minimalism.
 - **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
   missing-lock generation run the ecosystem's own tool unsandboxed with
   network, outside what `tog audit` can see. Decided 2026-09-23: design
@@ -65,31 +61,14 @@ by position.
   unsigned setup. Decided 2026-09-23: both an unsigned mode of `audit`
   and exceptions in `tog status`; then the exception summary can name a
   real fix again. Stays open until both land.
-- **`--strict`/`--frozen` before `add`/`remove`/`update` (#157).** Accepted
-  since #154, but the sync after the manifest edit ignores both.
-  Recommended: thread `strict`; refuse `--frozen` ahead of those verbs.
 - **End-to-end test for the build's narrowed sync (#158).** #155 covers
   the filter only; two ecosystems with one failing install is by hand.
   Needs #147, or an ignored case until then.
-- **Per-command help footers omit `--frozen`/`--strict` (#160).** The
-  "Global options (-C, -q, -v, --no-color)" lines in `src/cli/spec.rs`.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so "bare `tog`, then the
   help" and anything else that runs after a successful sync is verified by
   hand. That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
-- **`tog audit` does not read the toolchain lock.** `status` reports a
-  missing or stale `tog-toolchain.toml` and a closure built from another
-  bundle; `audit` reuses only the per-record `closure_state`, so a gate that
-  passes `audit` can still be running a toolchain the lock no longer names.
-  Fold `inspect::toolchain_lock_state` into the audit freshness verdict; the
-  audit fixtures then need a lock beside each closure.
-- **Go's lockless resolver picks the lowest satisfying pin, selection the
-  newest.** `go::resolve_project_toolchain` (used by `doctor` and the Go
-  `status` row) keeps Go's minimum-version rule; the toolchain selector takes
-  the newest complete release satisfying `go.mod`. Identical with one pinned
-  Go; the day a second pin lands, `doctor` and `status` would name a version
-  `sync` does not use. Route both through the lock.
 
 - **npm regressions from the 2026-09-11 hit-rate run.** All four synced on
   2026-09-05 at the same pinned commits. Error text is in
@@ -139,12 +118,6 @@ by position.
   (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
   directory the path names at recheck time. Carry one held root from
   preflight through publication when the rest of sync does (#132, with #55).
-- **Missing GC tests.** 18 of the 26 tests the GC design named do not exist
-  by name. List in `docs/agent/DESIGNS.md` §5.
-- **GC mutation survivor: redundant root marking.** Removing the marking set
-  in the sweep is not observable, because `root_live` independently protects
-  the same objects. Either add a test that observes the marking set or
-  delete it as redundant.
 - **`deps` and `x` as `Tailor` methods.** `src/commands/deps.rs` and
   `src/commands/x.rs` are the only command files that still name a tailor
   (Python and Node). A `Tailor::edit_manifest` and a
@@ -191,10 +164,6 @@ by position.
   (2026-09-20) failed once the same way at `lock_import/mod.rs:1009`, the
   `policy::pending().len() == 1` assertion, although it holds
   `exception_guard`; so some other test records an exception without it.
-- **Independent review of `Store::roots_for_sweep`.** The one production
-  change in the 2026-09-10 macOS fix commit (`fb8b1d6`): unusable root
-  records are routed into the sweep's refusal. It was never reviewed by an
-  agent that did not write it.
 - **macOS arm64 gate. Last, by the owner's choice.** Run on the Mac:
   `cargo test`, `cargo test --test gc -- --ignored`,
   `cargo test --test cli audit`, and

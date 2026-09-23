@@ -164,6 +164,22 @@ impl Store {
     }
 }
 
+/// Test support for producer tests: drop `project`'s root record and rebuild
+/// it the way `gc --register` does, from the closures on disk alone. A
+/// producer test compares the result with the record it published directly,
+/// so a closure shape the importer cannot read back fails where it is made.
+/// The caller must not hold an activity lease: registration takes the
+/// exclusive one.
+#[cfg(test)]
+pub(crate) fn reimport_root_for_test(store: &Store, project: &Path) -> io::Result<RootRecord> {
+    let key = Store::root_key(project)?;
+    fs::remove_file(store.root.join("roots").join(&key))?;
+    store
+        .register_root_from_project(project)?
+        .record
+        .ok_or_else(|| io::Error::other("registration wrote no root/2 record"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,5 +716,416 @@ mod tests {
         let reason = entries[0].unusable.as_deref().expect("entry is unusable");
         assert!(reason.contains("unknown schema"), "{reason}");
         assert_eq!(entries[0].key, key);
+    }
+
+    /// A complete object named `name`, published through the real commit so
+    /// a closure import can validate it.
+    fn named_object(store: &Store, name: &str) -> String {
+        let mut identity = identity();
+        identity.name = name.into();
+        store
+            .commit_with_deps(&identity, &staged(store), &[], &ObjectDeps::new())
+            .unwrap();
+        identity.object_id()
+    }
+
+    fn store_in(temp: &TempDir) -> Store {
+        let root = temp.0.canonicalize().unwrap();
+        for sub in ["roots", "forests", "backups"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        Store { root }
+    }
+
+    /// Write one `closure/1` envelope into a project, as a producer would.
+    fn project_closure(project: &Path, ecosystem: &str, body: serde_json::Value) {
+        let closures = project.join(".tog/closures");
+        fs::create_dir_all(&closures).unwrap();
+        fs::write(
+            closures.join(format!("{ecosystem}.json")),
+            serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": ecosystem,
+                "body": body,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The `{"path", "id"}` shape most producers write for an object.
+    fn object_ref(store: &Store, id: &str) -> serde_json::Value {
+        serde_json::json!({"path": store.object_path(id), "id": id})
+    }
+
+    /// A projection reference is relative to a store-owned base. An absolute
+    /// or `..`-bearing one would let a record claim, and a sweep walk, any
+    /// path on the machine, so it is refused when built, when written, and
+    /// when read back.
+    #[test]
+    fn root2_rejects_absolute_projection() {
+        let temp = TempDir::new();
+        let store = store_in(&temp);
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let key = root_key(&project);
+
+        for components in [
+            vec![OsString::from("/etc")],
+            vec![OsString::from(".."), OsString::from("etc")],
+            vec![OsString::from("a/b")],
+            vec![OsString::from("")],
+            Vec::new(),
+        ] {
+            assert!(
+                ProjectionRef::new(ProjectionBase::Forests, components.clone()).is_err(),
+                "built a projection from {components:?}"
+            );
+            // The fields are public, so a writer can bypass `new`.
+            let record = RootRecord {
+                key: key.clone(),
+                project_path: project.clone(),
+                objects: BTreeSet::from([format!("{}-env", "a".repeat(40))]),
+                projections: BTreeSet::from([ProjectionRef {
+                    base: ProjectionBase::Forests,
+                    components: components.clone(),
+                }]),
+                updated: 1,
+            };
+            assert!(
+                store.register_root_record(record).is_err(),
+                "wrote a projection of {components:?}"
+            );
+            assert!(store.roots().unwrap().is_empty(), "a record was written");
+        }
+
+        // Producers name projections by path. One outside the store's own
+        // namespace, or climbing out of it, is refused.
+        for path in [
+            PathBuf::from("/etc/passwd"),
+            store.root.join("forests/../objects"),
+            store.root.join("../forests/escape"),
+        ] {
+            assert!(
+                store
+                    .projection_ref(ProjectionBase::Forests, &path)
+                    .is_err(),
+                "accepted projection {}",
+                path.display()
+            );
+        }
+
+        // A hand-written record is unusable, never a record that protects a
+        // path outside the store.
+        for component in ["/etc", "..", "."] {
+            fs::write(
+                store.root.join("roots").join(&key),
+                serde_json::json!({
+                    "schema": "root/2",
+                    "key": key,
+                    "project_path": {"encoding": "utf8", "value": project.display().to_string()},
+                    "objects": [],
+                    "projections": [{
+                        "base": "forests",
+                        "components": [{"encoding": "utf8", "value": component}],
+                    }],
+                    "updated": 1,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let (entries, _) = store.roots_for_sweep().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert!(
+                entries[0].unusable.is_some() && entries[0].record.is_none(),
+                "read a projection component {component:?} as usable"
+            );
+        }
+    }
+
+    /// A closure that names another store's object protects nothing here,
+    /// and a record claiming it would be protection nobody can check. Both
+    /// reference forms are refused at write, and nothing is registered.
+    #[test]
+    fn root2_rejects_cross_store_object() {
+        let ours = TempDir::new();
+        let theirs = TempDir::new();
+        let store = store_in(&ours);
+        let other = store_in(&theirs);
+        let foreign = named_object(&other, "foreign");
+
+        // The producer boundary.
+        let activity = store.activity(ActivityMode::Exclusive).unwrap();
+        let error = crate::comforter::ClosureRefs::new()
+            .object_path(&store, &activity, &other.object_path(&foreign))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("outside this store"), "{error}");
+        // The same id is not an object of this store either.
+        assert!(crate::comforter::ClosureRefs::new()
+            .object_id(&store, &activity, &foreign)
+            .is_err());
+        drop(activity);
+
+        // The importer, for both shapes a shipped closure uses.
+        for body in [
+            serde_json::json!({"env_object": other.object_path(&foreign)}),
+            serde_json::json!({"go_object": object_ref(&other, &foreign)}),
+        ] {
+            let project = ours.0.join("project");
+            let _ = fs::remove_dir_all(&project);
+            fs::create_dir_all(&project).unwrap();
+            project_closure(&project, "go", body.clone());
+            let error = store.root_record_from_project(&project).unwrap_err();
+            assert!(
+                error.to_string().contains("another store")
+                    || error.to_string().contains("does not belong"),
+                "{body}: {error}"
+            );
+            assert!(
+                store.register_root_from_project(&project).is_err(),
+                "{body}"
+            );
+            assert!(
+                store.roots().unwrap().is_empty(),
+                "{body}: a record was written"
+            );
+        }
+    }
+
+    /// Protection only grows. A second publication for the same project adds
+    /// its references to the record; it never replaces what an earlier
+    /// ecosystem or environment recorded, and neither does registration.
+    #[test]
+    fn root2_merge_is_a_union_never_a_replace() {
+        let temp = TempDir::new();
+        let store = store_in(&temp);
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let first = format!("{}-first", "a".repeat(40));
+        let second = format!("{}-second", "b".repeat(40));
+        let forest = |name: &str| {
+            ProjectionRef::new(ProjectionBase::Forests, vec![OsString::from(name)]).unwrap()
+        };
+
+        store
+            .register_root_parts_locked(
+                &project,
+                BTreeSet::from([first.clone()]),
+                BTreeSet::from([forest("one")]),
+            )
+            .unwrap();
+        let record = store
+            .register_root_parts_locked(
+                &project,
+                BTreeSet::from([second.clone()]),
+                BTreeSet::from([forest("two")]),
+            )
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(
+            record.objects,
+            BTreeSet::from([first.clone(), second.clone()])
+        );
+        assert_eq!(
+            record.projections,
+            BTreeSet::from([forest("one"), forest("two")])
+        );
+
+        // Registration imports the project's closures into the same union.
+        let third = named_object(&store, "third");
+        project_closure(
+            &project,
+            "ruby",
+            serde_json::json!({"ruby_object": object_ref(&store, &third)}),
+        );
+        let record = store
+            .register_root_from_project(&project)
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(record.objects, BTreeSet::from([first, second, third]));
+        assert_eq!(
+            record.projections,
+            BTreeSet::from([forest("one"), forest("two")])
+        );
+        assert_eq!(store.roots().unwrap().len(), 1);
+    }
+
+    /// `gc --register` over a project holding one closure per ecosystem at
+    /// once, each in its oldest, sparsest shape: bare object paths, the
+    /// `{"path", "id"}` pair, and a Node forest known only by the legacy
+    /// `projection_id` route, with no `forest_path`. Every object and
+    /// projection lands in one record. Each producer's current closure is
+    /// re-imported by its own `closure_refs_name_every_object_this_producer_created`
+    /// test; this one covers the legacy shapes and the cross-ecosystem union.
+    #[test]
+    fn register_imports_legacy_closure_bodies_of_every_ecosystem_together() {
+        let temp = TempDir::new();
+        let store = store_in(&temp);
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let mut expected = BTreeSet::new();
+        let mut object = |name: &str| {
+            let id = named_object(&store, name);
+            expected.insert(id.clone());
+            id
+        };
+        let python_env = object("python-env");
+        let node_env = object("node-env");
+        let (rust, vendor) = (object("rust"), object("vendor"));
+        let (go, modcache) = (object("go"), object("modcache"));
+        let (ruby, gems) = (object("ruby"), object("gems"));
+        let (beam, deps) = (object("beam"), object("deps"));
+        let (sdk, packages) = (object("sdk"), object("packages"));
+        let rustfmt = object("rustfmt");
+        let backup = store.root.join("backups/venv-backup");
+        let deps_projection = store
+            .root
+            .join("forests/0123456789abcdef")
+            .join(&deps)
+            .join("hex-deps");
+
+        for (ecosystem, body) in [
+            (
+                "python",
+                serde_json::json!({
+                    "env_object": store.object_path(&python_env),
+                    "native_libs": null,
+                    "backup_path": backup,
+                }),
+            ),
+            (
+                "node",
+                serde_json::json!({
+                    "env_object": store.object_path(&node_env),
+                    "projection_schema": "node-forest/2",
+                    "projection_id": "projection",
+                }),
+            ),
+            (
+                "cargo",
+                serde_json::json!({
+                    "rust_object": object_ref(&store, &rust),
+                    "vendor_object": object_ref(&store, &vendor),
+                }),
+            ),
+            (
+                "go",
+                serde_json::json!({
+                    "go_object": object_ref(&store, &go),
+                    "modcache_object": object_ref(&store, &modcache),
+                }),
+            ),
+            (
+                "ruby",
+                serde_json::json!({
+                    "ruby_object": object_ref(&store, &ruby),
+                    "gems_object": object_ref(&store, &gems),
+                }),
+            ),
+            (
+                "elixir",
+                serde_json::json!({
+                    "beam_object": object_ref(&store, &beam),
+                    "deps_object": object_ref(&store, &deps),
+                    "deps_projection": deps_projection,
+                }),
+            ),
+            (
+                "dotnet",
+                serde_json::json!({
+                    "sdk_object": object_ref(&store, &sdk),
+                    "packages_object": object_ref(&store, &packages),
+                }),
+            ),
+            (
+                "rustfmt",
+                serde_json::json!({
+                    "rust_object": object_ref(&store, &rust),
+                    "rustfmt_object": object_ref(&store, &rustfmt),
+                }),
+            ),
+        ] {
+            project_closure(&project, ecosystem, body);
+        }
+
+        let record = store
+            .register_root_from_project(&project)
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(record.objects, expected);
+        let projections: BTreeSet<PathBuf> = record
+            .projections
+            .iter()
+            .map(|projection| projection.path(&store))
+            .collect();
+        let node_forest = store
+            .root
+            .parent()
+            .unwrap()
+            .join("forests")
+            .join(short_project_key(&project))
+            .join("projection");
+        assert_eq!(
+            projections,
+            BTreeSet::from([backup, deps_projection, node_forest])
+        );
+    }
+
+    /// Keys hash the pathname's bytes. A UTF-8 pathname keeps the key every
+    /// earlier registry gave it; a pathname that is not UTF-8 is keyed by its
+    /// raw bytes, so it never collides with the UTF-8 path that displays the
+    /// same way (U+FFFD standing in for the bad byte).
+    #[test]
+    fn utf8_keys_unchanged_and_non_utf8_keys_distinct() {
+        use sha1::Digest as _;
+        let temp = TempDir::new();
+        let store = store_in(&temp);
+        let utf8 = temp.0.join("projekt-\u{e9}");
+        fs::create_dir_all(&utf8).unwrap();
+        let utf8 = utf8.canonicalize().unwrap();
+        let expected = hex::encode(sha1::Sha1::digest(utf8.to_str().unwrap().as_bytes()));
+        assert_eq!(Store::root_key(&utf8).unwrap(), expected);
+        assert_eq!(store.register_root(&utf8).unwrap().key, expected);
+
+        let lossy = PathBuf::from(format!("{}/project-\u{fffd}", store.root.display()));
+        let raw = PathBuf::from(OsString::from_vec(
+            [store.root.as_os_str().as_bytes(), b"/project-\xff"].concat(),
+        ));
+        assert_eq!(raw.to_string_lossy(), lossy.to_string_lossy());
+        assert_ne!(root_key(&lossy), root_key(&raw));
+
+        // APFS refuses non-UTF-8 file names (EILSEQ), so the registered pair
+        // is only observable on Linux.
+        #[cfg(target_os = "linux")]
+        {
+            let object = format!("{}-env", "c".repeat(40));
+            for path in [&lossy, &raw] {
+                fs::create_dir_all(path).unwrap();
+                store
+                    .register_root_record(RootRecord {
+                        key: root_key(path),
+                        project_path: path.clone(),
+                        objects: BTreeSet::from([object.clone()]),
+                        projections: BTreeSet::new(),
+                        updated: 1,
+                    })
+                    .unwrap();
+            }
+            let (entries, _) = store.roots_for_sweep().unwrap();
+            assert_eq!(entries.len(), 3, "{entries:?}");
+            for path in [&lossy, &raw] {
+                let found: Vec<_> = entries.iter().filter(|entry| &entry.path == path).collect();
+                assert_eq!(found.len(), 1, "{path:?} read back as {found:?}");
+                assert_eq!(found[0].key, root_key(path));
+                assert!(found[0].record.is_some(), "{found:?}");
+            }
+        }
     }
 }

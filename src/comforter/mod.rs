@@ -1425,6 +1425,238 @@ mod closure_platform_tests {
         let _ = fs::remove_dir_all(&project);
     }
 
+    fn unique_project(label: &str) -> PathBuf {
+        let project = std::env::temp_dir().join(format!(
+            "tog-closure-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&project).unwrap();
+        project.canonicalize().unwrap()
+    }
+
+    fn envelope(project: &Path, ecosystem: &str, body: serde_json::Value) {
+        let closures = project.join(".tog/closures");
+        fs::create_dir_all(&closures).unwrap();
+        fs::write(
+            closures.join(format!("{ecosystem}.json")),
+            serde_json::json!({"schema": "closure/1", "ecosystem": ecosystem, "body": body})
+                .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// An object reference is the store's own object path, exactly. A path
+    /// that merely ends in, or mentions, an object id names something else:
+    /// a copy, a file inside the object, or nothing at all. Neither the
+    /// producer boundary nor the registration importer may turn it into
+    /// protection.
+    #[test]
+    fn closure_refs_reject_a_bare_path_that_merely_contains_an_id() {
+        let store = test_store("bare-id-path");
+        let id = complete_object(&store, "bare-id");
+        let mentioned = complete_object(&store, "mentioned");
+        let elsewhere = std::env::temp_dir().join("tog-not-a-store");
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        for path in [
+            elsewhere.join(&id),
+            elsewhere.join("objects").join(&id),
+            store.object_path(&id).join("bin"),
+            store.root.join("cache").join(&id),
+            store.root.join("objects").join(format!("{id}-copy")),
+        ] {
+            let mut refs = ClosureRefs::new();
+            assert!(
+                refs.object_path(&store, &activity, &path).is_err(),
+                "accepted {}",
+                path.display()
+            );
+            assert!(refs.is_empty());
+        }
+        let mut refs = ClosureRefs::new();
+        refs.object_path(&store, &activity, &store.object_path(&id))
+            .unwrap();
+        assert_eq!(refs.into_record_parts().0, BTreeSet::from([id.clone()]));
+        drop(activity);
+
+        // Registration reads the same rule: only a store object path, or an
+        // `{"id", "path"}` pair naming one, is a reference. A string that
+        // happens to hold an id, bare or inside a relative path, is prose.
+        let project = unique_project("bare-id-import");
+        envelope(
+            &project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id),
+                "note": mentioned,
+                "relative": format!("objects/{mentioned}"),
+                "inside": store.object_path(&mentioned).join("bin/python").display().to_string(),
+            }),
+        );
+        // A path inside an object is refused outright, not read as the object.
+        assert!(store.root_record_from_project(&project).is_err());
+        envelope(
+            &project,
+            "python",
+            serde_json::json!({
+                "env_object": store.object_path(&id),
+                "note": mentioned,
+                "relative": format!("objects/{mentioned}"),
+            }),
+        );
+        let record = store.root_record_from_project(&project).unwrap();
+        assert_eq!(record.objects, BTreeSet::from([id]));
+        let _ = crate::kernel::store::remove_tree(&store.root);
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Publication writes the durable root record, then the visible closure.
+    /// A closure write that fails therefore leaves the record behind (extra
+    /// protection), never a closure without one. The closures directory is
+    /// made read-only so the closure write fails after the record write.
+    #[test]
+    fn publication_persists_the_record_before_the_closure() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root ignores the read-only closures directory");
+            return;
+        }
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let store = test_store("record-before-closure");
+        let project = unique_project("record-before-closure");
+        let id = complete_object(&store, "record-first");
+        let closures = project.join(".tog/closures");
+        fs::create_dir_all(&closures).unwrap();
+        fs::set_permissions(&closures, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let mut refs = ClosureRefs::new();
+        refs.object_id(&store, &activity, &id).unwrap();
+        let result = super::write_closure(
+            &project,
+            "python",
+            closure_test_body(&store),
+            &store,
+            &activity,
+            refs,
+            &mut attribution,
+        );
+        drop(activity);
+        fs::set_permissions(&closures, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            !closures.join("python.json").exists(),
+            "the closure was published"
+        );
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "the record was not written first: {error}");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(record.objects, BTreeSet::from([id]));
+        attribution.discard();
+        let _ = crate::kernel::store::remove_tree(&store.root);
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// A project still on a pathname-only record carries closures from every
+    /// ecosystem it was synced with. The first sync that publishes a durable
+    /// record imports all of them before it switches its own projection, so
+    /// resyncing Python never drops Node's protection. An import that fails
+    /// changes nothing: the pathname record stays as it was.
+    #[test]
+    fn sync_imports_all_legacy_ecosystems_before_switching_one() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let store = test_store("sync-imports-legacy");
+        let project = unique_project("sync-imports-legacy");
+        let old_python = complete_object(&store, "old-python-env");
+        let node = complete_object(&store, "node-env");
+        let new_python = complete_object(&store, "new-python-env");
+        envelope(
+            &project,
+            "python",
+            serde_json::json!({"env_object": store.object_path(&old_python)}),
+        );
+        envelope(
+            &project,
+            "node",
+            serde_json::json!({"env_object": store.object_path(&node)}),
+        );
+        let legacy = store.register_root(&project).unwrap();
+        let legacy_bytes = fs::read(&legacy.registry_path).unwrap();
+
+        // A closure the importer cannot read stops the switch before any
+        // record changes.
+        envelope(&project, "zig", serde_json::json!({}));
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let mut refs = ClosureRefs::new();
+        refs.object_id(&store, &activity, &new_python).unwrap();
+        let project_lock = store.project_lock(&project).unwrap();
+        let error = persist_root_for_refs_with_project_lock(
+            &project,
+            &store,
+            &activity,
+            &refs,
+            &project_lock,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("zig"), "{error}");
+        assert_eq!(fs::read(&legacy.registry_path).unwrap(), legacy_bytes);
+        fs::remove_file(project.join(".tog/closures/zig.json")).unwrap();
+
+        // The durable half of a Python resync, before its projection switch:
+        // the old Python and Node references are imported with the new one.
+        persist_root_for_refs_with_project_lock(&project, &store, &activity, &refs, &project_lock)
+            .unwrap();
+        let everything = BTreeSet::from([old_python.clone(), node.clone(), new_python.clone()]);
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(record.objects, everything);
+        let python = read_closure(&project, "python").unwrap();
+        assert_eq!(
+            python["env_object"],
+            serde_json::json!(store.object_path(&old_python)),
+            "the projection switched before the import"
+        );
+
+        // The visible switch keeps the union.
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        super::write_closure_with_project_lock(
+            &project,
+            "python",
+            serde_json::json!({"env_object": store.object_path(&new_python)}),
+            &store,
+            &activity,
+            refs,
+            &project_lock,
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+        drop(project_lock);
+        drop(activity);
+        let roots = store.roots().unwrap();
+        assert_eq!(roots[0].record.as_ref().unwrap().objects, everything);
+        let _ = crate::kernel::store::remove_tree(&store.root);
+        let _ = fs::remove_dir_all(&project);
+    }
+
     #[test]
     fn non_object_body_is_rejected_before_attribution_claim() {
         let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK

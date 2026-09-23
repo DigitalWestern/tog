@@ -2793,4 +2793,87 @@ exit 0
         assert_eq!(body["beam_fingerprint"], beam_fingerprint_for(&spec));
         assert_eq!(body["plan"]["otp_version"], OTP_VERSION);
     }
+
+    /// The durable root/2 record `project_elixir_env` publishes names
+    /// exactly the BEAM object, the deps object, and the writable deps
+    /// forest it cloned: nothing inferred from the closure JSON, nothing
+    /// missing.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("elixir").unwrap();
+        let temp = TempDir::new("closure-refs");
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots", "forests"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let beam_id = format!(
+            "{}-beam-{OTP_VERSION}-elixir{ELIXIR_VERSION}",
+            "1".repeat(40)
+        );
+        let deps_id = format!("{}-deps-0", "2".repeat(40));
+        fs::create_dir_all(store.object_path(&deps_id).join("jason")).unwrap();
+        fs::write(store.object_path(&deps_id).join("jason/mix.exs"), "").unwrap();
+        for id in [&beam_id, &deps_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let plan = ElixirPlan {
+            otp_version: OTP_VERSION.into(),
+            elixir_version: ELIXIR_VERSION.into(),
+            deps: Vec::new(),
+        };
+        let forest = project_elixir_env(
+            Platform::host().unwrap(),
+            &project,
+            &store.object_path(&beam_id),
+            &store.object_path(&deps_id),
+            &plan,
+            &"c".repeat(64),
+            false,
+            &shipped_selection().unwrap(),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        assert_eq!(
+            forest,
+            expected_projection(&store, &project, &store.object_path(&deps_id)).unwrap()
+        );
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(
+            record.objects,
+            std::collections::BTreeSet::from([beam_id, deps_id])
+        );
+        assert_eq!(
+            record.projections,
+            std::collections::BTreeSet::from([store
+                .projection_ref(crate::kernel::store::ProjectionBase::Forests, &forest)
+                .unwrap()])
+        );
+
+        // `gc --register` rebuilds the same record from this closure alone.
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        assert_eq!(reimported.projections, record.projections);
+    }
 }

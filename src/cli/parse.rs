@@ -181,6 +181,62 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             frozen: options.frozen,
             strict: options.strict,
         }),
+        // `add`, `remove` and `update` sync after their edit, so `--strict`
+        // governs that sync. `--frozen` cannot: these verbs exist to write
+        // the lock that `--frozen` only checks, so it is refused rather
+        // than accepted and ignored. (Their help still prints under it.)
+        Some(
+            Command::Add { .. }
+            | Command::Remove { .. }
+            | Command::Update { .. }
+            | Command::SelfUpdate,
+        ) if options.frozen => {
+            let name = match name {
+                "add" => "add",
+                "remove" => "remove",
+                _ => "update",
+            };
+            return Err(UsageError::new(
+                format!(
+                    "--frozen checks the lock without writing it, and '{name}' exists to \
+                     write it; run 'tog {name}' without --frozen"
+                ),
+                Some(name),
+            ));
+        }
+        Some(Command::Add {
+            specs,
+            dev,
+            no_sync,
+            ..
+        }) => Some(Command::Add {
+            specs,
+            dev,
+            no_sync,
+            strict: options.strict,
+        }),
+        Some(Command::Remove {
+            names,
+            dev,
+            no_sync,
+            ..
+        }) => Some(Command::Remove {
+            names,
+            dev,
+            no_sync,
+            strict: options.strict,
+        }),
+        Some(Command::Update {
+            names,
+            no_sync,
+            toolchain,
+            ..
+        }) => Some(Command::Update {
+            names,
+            no_sync,
+            toolchain,
+            strict: options.strict,
+        }),
         other => other,
     };
     let command = match command {
@@ -631,6 +687,8 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
         return parse_update_toolchain(&positional, no_sync).map(Some);
     }
 
+    // `strict` is filled in by `parse` after the match, from the global
+    // options on either side of the verb.
     match name {
         "add" if positional.is_empty() => Err(UsageError::new(
             "add: no package given (e.g. 'tog add requests', 'tog add npm:react@18')",
@@ -640,6 +698,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             specs: positional,
             dev,
             no_sync,
+            strict: false,
         })),
         "remove" if positional.is_empty() => {
             Err(UsageError::new("remove: no package given", Some("remove")))
@@ -648,11 +707,13 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             names: positional,
             dev,
             no_sync,
+            strict: false,
         })),
         _ => Ok(Some(Command::Update {
             names: positional,
             no_sync,
             toolchain: None,
+            strict: false,
         })),
     }
 }
@@ -675,6 +736,7 @@ fn parse_update_toolchain(positional: &[String], no_sync: bool) -> Result<Comman
         names: Vec::new(),
         no_sync,
         toolchain: Some(ToolchainUpdate { ecosystem }),
+        strict: false,
     })
 }
 
@@ -1648,6 +1710,63 @@ mod tests {
         assert_eq!(error.command, None);
     }
 
+    /// `add`, `remove` and `update` sync after their edit, so `--strict`
+    /// reaches that sync from either side of the verb. `--frozen` is refused:
+    /// these verbs exist to write the lock it only checks.
+    #[test]
+    fn dependency_verbs_take_strict_and_refuse_frozen() {
+        assert_eq!(
+            command(&["--strict", "add", "x"]),
+            Command::Add {
+                specs: argv(&["x"]),
+                dev: false,
+                no_sync: false,
+                strict: true,
+            }
+        );
+        assert_eq!(
+            command(&["remove", "x", "--strict"]),
+            Command::Remove {
+                names: argv(&["x"]),
+                dev: false,
+                no_sync: false,
+                strict: true,
+            }
+        );
+        assert_eq!(
+            command(&["--strict", "update", "--toolchain"]),
+            Command::Update {
+                names: vec![],
+                no_sync: false,
+                toolchain: Some(ToolchainUpdate { ecosystem: None }),
+                strict: true,
+            }
+        );
+        for words in [
+            &["--frozen", "add", "x"][..],
+            &["add", "x", "--frozen"],
+            &["--frozen", "remove", "x"],
+            &["--frozen", "update"],
+            &["update", "serde", "--frozen"],
+            &["--frozen", "update", "--toolchain"],
+            &["--frozen", "update", "--self"],
+        ] {
+            let error = parse(&argv(words)).unwrap_err();
+            let verb = words.iter().find(|word| !word.starts_with('-')).unwrap();
+            assert_eq!(
+                error.message,
+                format!(
+                    "--frozen checks the lock without writing it, and '{verb}' exists to write \
+                     it; run 'tog {verb}' without --frozen"
+                ),
+                "{words:?}"
+            );
+            assert_eq!(error.command, Some(*verb), "{words:?}");
+        }
+        // The help still prints under it.
+        assert!(printed(&["--frozen", "add", "--help"]).starts_with("tog add"));
+    }
+
     #[test]
     fn fmt_grammar_separates_tog_flags_from_tool_args() {
         assert_eq!(
@@ -1852,6 +1971,7 @@ mod tests {
                 specs: argv(&["requests>=2", "npm:react@18"]),
                 dev: true,
                 no_sync: true,
+                strict: false,
             }
         );
         assert!(message(&["add", "-D", "--", "-weird"])
@@ -1871,6 +1991,7 @@ mod tests {
                 names: argv(&["six"]),
                 dev: false,
                 no_sync: true,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1879,6 +2000,7 @@ mod tests {
                 names: argv(&["six"]),
                 dev: true,
                 no_sync: false,
+                strict: false,
             }
         );
         assert_eq!(message(&["remove"]), "remove: no package given");
@@ -1888,6 +2010,7 @@ mod tests {
                 names: vec![],
                 no_sync: false,
                 toolchain: None,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1896,6 +2019,7 @@ mod tests {
                 names: argv(&["serde", "tokio"]),
                 no_sync: false,
                 toolchain: None,
+                strict: false,
             }
         );
         // `--toolchain` is the other update: no package names, and the
@@ -1907,6 +2031,7 @@ mod tests {
                 names: vec![],
                 no_sync: false,
                 toolchain: Some(ToolchainUpdate { ecosystem: None }),
+                strict: false,
             }
         );
         assert_eq!(
@@ -1917,6 +2042,7 @@ mod tests {
                 toolchain: Some(ToolchainUpdate {
                     ecosystem: Some("rust".into())
                 }),
+                strict: false,
             }
         );
         assert!(message(&["update", "--toolchain", "serde"])

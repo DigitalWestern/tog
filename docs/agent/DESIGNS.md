@@ -1215,28 +1215,27 @@ They are the reason B.5's completion criteria are not cleared.
 
 ### Missing named tests
 
-The GC design named 26 tests for durable project records. On 2026-09-16 no
-test function with these names exists in `src/` or `tests/`; some behaviors
-may be covered under other names, so check before writing a duplicate:
+The GC design named 26 tests for durable project records. None is missing
+now. Four behaviors are covered under other names, so no test carries the
+design's name:
 
-- `root2_rejects_absolute_projection`
-- `root2_rejects_cross_store_object`
-- `root2_merge_is_a_union_never_a_replace`
-- `symlinked_registry_entry_is_a_malformed_record`
-- `closure_refs_reject_a_bare_path_that_merely_contains_an_id`
-- `publication_persists_the_record_before_the_closure`
-- `closure_refs_name_every_object_this_producer_created`
-- `moved_project_keeps_its_tools_and_forests`
-- `two_ecosystems_and_two_environments_all_stay_protected`
-- `register_imports_every_shipped_closure_schema`
-- `register_refuses_an_unknown_closure_and_keeps_the_old_record`
-- `register_runs_no_project_code`
-- `sibling_stores_have_disjoint_new_projection_namespaces`
-- `sync_imports_all_legacy_ecosystems_before_switching_one`
-- `forget_corrupt_record_works_with_an_unrelated_corrupt_record`
-- `forget_registry_symlink_never_touches_its_target`
-- `utf8_keys_unchanged_and_non_utf8_keys_distinct`
-- `legacy_lossy_key_is_not_silently_reassigned`
+- `register_imports_every_shipped_closure_schema`: each producer's
+  `closure_refs_name_every_object_this_producer_created` re-imports the
+  closure it really wrote and compares the record, and
+  `kernel::store::tests::register_imports_legacy_closure_bodies_of_every_ecosystem_together`
+  covers legacy body shapes. Re-importing a current Node closure adds one
+  `legacy-forests` reference the publisher never records (the importer
+  still follows the `node-forest/1` `projection_id` route). That namespace
+  is never swept, so it retains nothing; the Node test pins it.
+- `symlinked_registry_entry_is_a_malformed_record`:
+  `kernel::store::tests::unreadable_records_are_reported_not_skipped` and
+  `tests/gc_roots.rs::unreadable_records_block_the_sweep_instead_of_disappearing`.
+- `moved_project_keeps_its_tools_and_forests`:
+  `kernel::gc::tests::root2_keeps_objects_after_the_project_disappears` and
+  `kernel::gc::tests::forest_retention_works_with_the_project_directory_absent`.
+- `forget_corrupt_record_works_with_an_unrelated_corrupt_record`:
+  `tests/gc_roots.rs::a_corrupt_record_never_blocks_forgetting_a_key` and
+  `kernel::store::tests::exact_key_recovery_ignores_every_other_record`.
 
 ---
 

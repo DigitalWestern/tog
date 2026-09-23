@@ -86,7 +86,11 @@ the program's status through. Which files tog reads per ecosystem:
   checks signatures) is
   `tog: warning: <what happened>`, and every warning is followed by
   `tog:     fix: <command>`, the one command that resolves it, ready to
-  paste; a line with nothing for you to do is progress, not a warning. A
+  paste. Where no command clears it, the second line is
+  `tog:    next: <command>` instead, a command that shows why (a failed
+  setup.py probe's `egg_info`, `tog audit` over recorded exceptions); the
+  command starts in the same column either way. A line with nothing for
+  you to do is progress, not a warning. A
   failure is `tog: error: <what failed>`. `--quiet` silences the first two
   and never the third. `gc` narrates, so every line it prints — registered,
   forgot, would free, freed, cleanup skipped — is stderr and `--quiet`
@@ -116,7 +120,8 @@ the program's status through. Which files tog reads per ecosystem:
 - **Network failures say what happened**: offline, DNS, proxy, https-only,
   or the server's status, with the URL named once. Not ureq's words.
 - **Color** only on a tty stderr, only for `error:`/`warning:` and
-  `fix:`/`synced:` words (`fix:` is green, like `synced:`); `--no-color` or
+  `fix:`/`synced:` words (`fix:` is green, like `synced:`, and `next:`
+  stays plain); `--no-color` or
   `NO_COLOR` turns it off, and stdout never gets it.
 - **Global options work before or after the command.** `-C <dir>`, `-q`,
   `-v`, `--no-color`, `--frozen` and `--strict` mean the same thing in
@@ -128,7 +133,9 @@ the program's status through. Which files tog reads per ecosystem:
   command's own option is never searched (`tog gc --register -v` registers
   a directory called `-v`; the command table says which options take a
   value). What reaches that slot is then the option's own business — see
-  the next rule.
+  the next rule. `add`, `remove` and `update` refuse `--frozen`, since
+  they exist to write the lock. Each command's help ends with a line saying
+  where its global options go.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged, and `--` forces
   pass-through (`tog build --release` works). What tog keeps for itself is
@@ -189,7 +196,9 @@ any global option is: `run`, `build` and a script name hand everything after
 them to the program, so there the flags go first (`tog --frozen dev`), and
 `fmt` and `x` take them only ahead of the tool's own arguments. They govern
 the implicit sync of `run`, `env`, `build`, `tog <script>` and a
-package.json `fmt` script. `tog help setup` is the
+package.json `fmt` script. `--strict` also governs the sync after `add`,
+`remove` and `update`; `--frozen` is refused there, because those verbs
+exist to write the lock. `tog help setup` is the
 bare form's screen and `tog help inputs` the files it reads per ecosystem.
 
 `run`, `env`, `build` and `tog <script>` sync on their own when the project
@@ -239,7 +248,11 @@ sync only where the policy chain declares a `[signing]` table.
 **add / remove / update** edit the manifest and lock with the ecosystem's own
 pinned tool (uv, npm, pnpm, cargo, go, bundler, mix), then sync. `--no-sync`
 stops after the edit so the diff can be reviewed; `--dev` (`-D`) selects
-development dependencies (`remove --dev` only for uv and Cargo). Refusals —
+development dependencies (`remove --dev` only for uv and Cargo). The global
+`--strict` governs the edit's policy checks and the sync after it (`tog
+--strict add requests`); `--frozen` is a usage error ahead of all three
+verbs, including `update --toolchain` and `update --self`, because they
+exist to write the lock `--frozen` only checks. Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
 print the exact line and file to run yourself, exit 1, no writes. Every
 dependency argument is validated before delegation, and a request that would
@@ -455,8 +468,10 @@ build.
 
 What a pass proves: every closure file carries a valid signature from a key
 the machine policy trusts, every ecosystem detected in the directory has its
-primary closure, each record is current for the inputs on disk, and no
-recorded exception is denied or unknown. It does not prove the signer's
+primary closure, each record is current for the inputs on disk and for the
+committed `tog-toolchain.toml` (a missing or stale lock, or a record built
+from another bundle than the lock names, is `stale`, the same answer
+`status` gives), and no recorded exception is denied or unknown. It does not prove the signer's
 sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 
 **What has to be in the repository for this to work.** `audit` reads
@@ -661,7 +676,7 @@ jobs:
           rm -f "$TOG_SIGNING_KEY"
 
       # Every closure signed by a trusted key, current for the inputs on
-      # disk, no denied or unknown exception. Exit 1 is a denied build,
+      # disk and tog-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
       # exit 2 an operator mistake (missing or malformed policy).
       - run: tog audit
 

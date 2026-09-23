@@ -244,38 +244,55 @@ pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>
             });
             continue;
         };
-        // A lock verdict that a writable sync would refuse (stale rows, no
-        // section) is reported first: the closure may also say a source
-        // changed, but "run 'tog'" would only reach the refusal, and
-        // the lock's line names the verb that moves it. Otherwise the
-        // closure state decides, and only a `Synced` closure is downgraded
-        // to what the lock has to add.
-        let mut state = closure_state(platform, dir, closure)?;
-        match toolchain_lock_state(dir, ecosystem, &closure.body)? {
-            Some(LockVerdict {
-                state: verdict,
-                refuses_sync: true,
-            }) => state = verdict,
-            Some(LockVerdict { state: verdict, .. }) if state == State::Synced => state = verdict,
-            _ => {}
-        }
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
-            state,
+            state: locked_closure_state(platform, dir, closure)?,
             summary: summary(closure),
         });
     }
     Ok(rows)
 }
 
-/// What the committed `tog-toolchain.toml` says about one detected
-/// ecosystem, if anything: `None` means the lock agrees with both the
-/// project and the closure.
+/// The state of one closure file as `tog status` reports it and `tog audit`
+/// judges it: the record's own `closure_state`, combined with what the
+/// committed `tog-toolchain.toml` says about the ecosystem that wrote it.
+/// One function, so the gate can never pass a record that `status` calls
+/// out of step with the lock.
 ///
-/// The comparison is the same one a sync would refuse over — re-derive
-/// every consulted row and compare presence and value, never the source
-/// file's digest alone — so `tog status` predicts the next sync rather than
-/// having a second opinion about staleness.
+/// A lock verdict that a writable sync would refuse (stale rows, no
+/// section) is reported first: the closure may also say a source changed,
+/// but "run 'tog'" would only reach the refusal, and the lock's line names
+/// the verb that moves it. Otherwise the closure state decides, and only a
+/// `Synced` closure is downgraded to what the lock has to add.
+///
+/// The lock is consulted for primary closures only: a secondary record
+/// (cargo's `rustfmt`) is compared with its own pins, and the lock that
+/// governs its project is judged through the primary closure beside it.
+pub fn locked_closure_state(
+    platform: Platform,
+    dir: &Path,
+    closure: &ClosureFile,
+) -> io::Result<State> {
+    let mut state = closure_state(platform, dir, closure)?;
+    match toolchain_lock_state(dir, &closure.ecosystem, &closure.body)? {
+        Some(LockVerdict {
+            state: verdict,
+            refuses_sync: true,
+        }) => state = verdict,
+        Some(LockVerdict { state: verdict, .. }) if state == State::Synced => state = verdict,
+        _ => {}
+    }
+    Ok(state)
+}
+
+/// Whether every entry of a `Changed` state is a toolchain-lock finding.
+/// Such a line already carries its own next step, and it is not always the
+/// bare `tog`, so `status` and `audit` print it as written rather than
+/// wrapping it in the dependency-input sentence.
+pub fn only_lock_findings(files: &[String]) -> bool {
+    !files.is_empty() && files.iter().all(|file| file.starts_with(LOCK_PATH))
+}
+
 /// What the toolchain lock adds to a status row, and whether a plain
 /// sync would stop at it: a missing lock is created by the next
 /// writable sync and a changed bundle is re-projected by it, but stale
@@ -294,6 +311,14 @@ impl LockVerdict {
     }
 }
 
+/// What the committed `tog-toolchain.toml` says about one detected
+/// ecosystem, if anything: `None` means the lock agrees with both the
+/// project and the closure.
+///
+/// The comparison is the same one a sync would refuse over — re-derive
+/// every consulted row and compare presence and value, never the source
+/// file's digest alone — so `tog status` predicts the next sync rather than
+/// having a second opinion about staleness.
 fn toolchain_lock_state(
     dir: &Path,
     ecosystem: &str,
@@ -415,12 +440,7 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
         let line = match &row.state {
             State::Synced => format!("synced      ({})", row.summary),
             State::NotSynced => "not synced  run 'tog'".to_string(),
-            // A toolchain-lock finding already carries its own next step,
-            // and it is not always the bare `tog`, so it is printed as written
-            // rather than wrapped in the dependency-input sentence.
-            State::Changed(files)
-                if !files.is_empty() && files.iter().all(|file| file.starts_with(LOCK_PATH)) =>
-            {
+            State::Changed(files) if only_lock_findings(files) => {
                 format!("changed     {}", files.join(", "))
             }
             State::Changed(files) => format!(
@@ -871,6 +891,33 @@ pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
     Ok(out)
 }
 
+/// Publish a `tog-toolchain.toml` section for this ecosystem and hand
+/// back the bundle id the closure has to record to count as synced
+/// against it. A lock-aware sync writes both together, and a fixture
+/// with only one of them is testing the lock verdict rather than
+/// whatever it meant to test. Shared with the `audit` tests, which judge
+/// the same lock.
+#[cfg(test)]
+pub(crate) fn with_toolchain_lock(dir: &Path, ecosystem: &str, mut body: Value) -> Value {
+    let Some(tailor) = tailors::by_id(ecosystem) else {
+        return body;
+    };
+    let lock_ecosystem = tailor.lock_ecosystem();
+    let root = ProjectRoot::open(dir).unwrap();
+    let mut lock = ToolchainLock::read_via(&root)
+        .unwrap()
+        .unwrap_or_else(|| ToolchainLock::new(env!("CARGO_PKG_VERSION")));
+    let catalog = tailor.toolchain_catalog().unwrap();
+    let rows = input::discover(&root, lock_ecosystem).unwrap();
+    let bundle = crate::kernel::toolchain::select_for(&catalog, lock_ecosystem, &rows)
+        .unwrap()
+        .clone();
+    lock.set_ecosystem(lock_ecosystem, &bundle, &rows).unwrap();
+    fs::write(dir.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+    body["toolchain"] = json!({"bundle_id": bundle.bundle_id()});
+    body
+}
+
 #[cfg(test)]
 mod tests {
     /// The display order lives here for the `ls` vocabulary and closure
@@ -907,31 +954,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
-    }
-
-    /// Publish a `tog-toolchain.toml` section for this ecosystem and hand
-    /// back the bundle id the closure has to record to count as synced
-    /// against it. A lock-aware sync writes both together, and a fixture
-    /// with only one of them is testing the lock verdict rather than
-    /// whatever it meant to test.
-    fn with_toolchain_lock(dir: &Path, ecosystem: &str, mut body: Value) -> Value {
-        let Some(tailor) = tailors::by_id(ecosystem) else {
-            return body;
-        };
-        let lock_ecosystem = tailor.lock_ecosystem();
-        let root = ProjectRoot::open(dir).unwrap();
-        let mut lock = ToolchainLock::read_via(&root)
-            .unwrap()
-            .unwrap_or_else(|| ToolchainLock::new(env!("CARGO_PKG_VERSION")));
-        let catalog = tailor.toolchain_catalog().unwrap();
-        let rows = input::discover(&root, lock_ecosystem).unwrap();
-        let bundle = crate::kernel::toolchain::select_for(&catalog, lock_ecosystem, &rows)
-            .unwrap()
-            .clone();
-        lock.set_ecosystem(lock_ecosystem, &bundle, &rows).unwrap();
-        fs::write(dir.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
-        body["toolchain"] = json!({"bundle_id": bundle.bundle_id()});
-        body
     }
 
     fn write_closure(dir: &Path, ecosystem: &str, platform: &str, body: Value) {

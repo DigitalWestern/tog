@@ -177,18 +177,16 @@ impl Tailor for Go {
     fn doctor(&self, platform: Platform, dir: &Path) -> Vec<DoctorCheck> {
         let mut checks = Vec::new();
         if dir.join("go.mod").is_file() {
-            match go::resolve_project_toolchain(platform, dir) {
+            match go::project_go_version(platform, dir) {
                 Ok(version) => checks.push(DoctorCheck {
                     name: "go-toolchain",
                     ok: true,
-                    detail: format!("{version} selected from go.mod"),
+                    detail: format!("{version} selected for this project"),
                 }),
                 Err(error) => checks.push(DoctorCheck {
                     name: "go-toolchain",
                     ok: false,
-                    detail: format!(
-                        "cannot select a realizable Go toolchain: {error}; use a pinned version in go.mod"
-                    ),
+                    detail: format!("cannot select a realizable Go toolchain: {error}"),
                 }),
             }
         }
@@ -238,9 +236,8 @@ fn go_status(platform: Platform, dir: &Path, body: &Value) -> io::Result<State> 
     let mut changed = Vec::new();
     let recorded_version = string(&body["plan"]["go_version"]);
     if !recorded_version.is_empty() {
-        let go_mod = dir.join("go.mod");
-        match fs::read_to_string(&go_mod) {
-            Ok(text) => match go::resolve_toolchain(platform, &text) {
+        match fs::metadata(dir.join("go.mod")) {
+            Ok(_) => match go::project_go_version(platform, dir) {
                 Ok(selected) if selected == recorded_version => {}
                 Ok(_) => changed.push("go.mod".to_string()),
                 Err(_) => changed.push("go.mod (Go toolchain selection unavailable)".to_string()),
