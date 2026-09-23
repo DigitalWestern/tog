@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use super::spec::{
-    canonical_name, help, inputs, listed, spec, toolchain_section, usage, HELP_TOPICS, LS_WORDS,
-    SHELL_WORDS, TOOLCHAIN_ALIAS, TOOLCHAIN_WORDS,
+    canonical_name, help, inputs, listed, spec, toolchain_aliases, toolchain_section, usage,
+    HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS, X_REGISTRIES,
 };
 use super::{
     Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, ToolchainUpdate, UsageError,
@@ -749,10 +749,7 @@ fn not_an_ecosystem(word: &str) -> UsageError {
                 TOOLCHAIN_WORDS.join(", ")
             ),
             word,
-            TOOLCHAIN_WORDS
-                .iter()
-                .copied()
-                .chain(std::iter::once(TOOLCHAIN_ALIAS)),
+            TOOLCHAIN_WORDS.iter().copied().chain(toolchain_aliases()),
         ),
         Some("update"),
     )
@@ -782,8 +779,9 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         match arg {
             "-h" | "--help" => return Ok(None),
             "--clean" => clean = true,
-            "--py" | "--python" => ecosystem = Some("python".to_string()),
-            "--npm" | "--node" => ecosystem = Some("node".to_string()),
+            _ if x_registry_flag(arg).is_some() => {
+                ecosystem = x_registry_flag(arg).map(str::to_string);
+            }
             "--from" => {
                 let value = separate_value(args, index, arg, Some("x"), "a package name")?;
                 validate_x_package(value)?;
@@ -826,12 +824,12 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         ));
     };
     let mut tool = tool.clone();
-    if let Some(rest) = tool.strip_prefix("py:") {
-        ecosystem = Some("python".to_string());
-        tool = rest.to_string();
-    } else if let Some(rest) = tool.strip_prefix("npm:") {
-        ecosystem = Some("node".to_string());
-        tool = rest.to_string();
+    if let Some((id, rest)) = X_REGISTRIES.iter().find_map(|(id, word)| {
+        let rest = tool.strip_prefix(word)?.strip_prefix(':')?;
+        Some((*id, rest.to_string()))
+    }) {
+        ecosystem = Some(id.to_string());
+        tool = rest;
     }
     if clean && args.get(index + 1).is_some() {
         return Err(UsageError::new(
@@ -864,6 +862,16 @@ fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         tool,
         args: args[index + 1..].to_vec(),
     }))
+}
+
+/// The tailor id an `x` registry flag selects: `--<word>` or `--<id>` of an
+/// `X_REGISTRIES` row.
+fn x_registry_flag(arg: &str) -> Option<&'static str> {
+    let name = arg.strip_prefix("--")?;
+    X_REGISTRIES
+        .iter()
+        .find(|(id, word)| name == *id || name == *word)
+        .map(|(id, _)| *id)
 }
 
 fn split_x_version(value: &str) -> (&str, Option<&str>) {
@@ -2138,6 +2146,88 @@ mod tests {
             message(&["x", "--clean", "ruff", "extra"]),
             "x --clean: unexpected argument 'extra'"
         );
+    }
+
+    /// The grammar's registry words are the registry's own: every tailor
+    /// with a `RegistryTool`, in registry order, under its `spelling`, and
+    /// nothing else (#170). Each row is accepted all three ways.
+    #[test]
+    fn x_registry_words_are_the_registry_tools_spellings() {
+        let registry: Vec<(&str, &str)> = crate::commands::shared::registry_tools()
+            .into_iter()
+            .map(|(id, tool)| (id, tool.spelling()))
+            .collect();
+        assert_eq!(X_REGISTRIES, registry.as_slice());
+        for (id, word) in X_REGISTRIES {
+            let selected = Some(id.to_string());
+            for flag in [format!("--{word}"), format!("--{id}")] {
+                assert_eq!(
+                    command(&["x", &flag, "tool"]),
+                    Command::X {
+                        ecosystem: selected.clone(),
+                        from: None,
+                        tool: "tool".into(),
+                        args: Vec::new(),
+                    }
+                );
+            }
+            assert_eq!(
+                command(&["x", &format!("{word}:tool@1"), "a"]),
+                Command::X {
+                    ecosystem: selected.clone(),
+                    from: None,
+                    tool: "tool@1".into(),
+                    args: argv(&["a"]),
+                }
+            );
+        }
+        // A word that is not a registry's is part of the tool name, and the
+        // prefix needs its colon.
+        assert_eq!(
+            command(&["x", "pyright"]),
+            Command::X {
+                ecosystem: None,
+                from: None,
+                tool: "pyright".into(),
+                args: Vec::new(),
+            }
+        );
+    }
+
+    /// `ls`, `build` and `update --toolchain` read their words from
+    /// `ECOSYSTEM_WORDS`, and each row is its tailor's: id and order, lock
+    /// ecosystem, whether it builds, and closures only it owns.
+    #[test]
+    fn ecosystem_words_are_the_registrys() {
+        use super::super::spec::ECOSYSTEM_WORDS;
+        let registry = crate::tailors::registry();
+        let ids: Vec<&str> = registry.iter().map(|tailor| tailor.id()).collect();
+        let rows: Vec<&str> = ECOSYSTEM_WORDS.iter().map(|row| row.id).collect();
+        assert_eq!(rows, ids);
+        for (row, tailor) in ECOSYSTEM_WORDS.iter().zip(registry) {
+            assert_eq!(row.toolchain, tailor.lock_ecosystem(), "{}", row.id);
+            assert_eq!(row.builds, tailor.builds(), "{}", row.id);
+            for closure in std::iter::once(row.id).chain(row.closures.iter().copied()) {
+                let owners: Vec<&str> = registry
+                    .iter()
+                    .filter(|other| other.owns_closure(closure))
+                    .map(|other| other.id())
+                    .collect();
+                assert_eq!(owners, [row.id], "closure {closure}");
+            }
+        }
+        assert_eq!(
+            LS_WORDS,
+            ["python", "node", "cargo", "go", "ruby", "elixir", "dotnet", "rustfmt"]
+        );
+        assert_eq!(
+            super::super::spec::BUILD_WORDS,
+            ["cargo", "go", "elixir", "dotnet"]
+        );
+        assert_eq!(toolchain_aliases().collect::<Vec<_>>(), ["cargo"]);
+        assert_eq!(toolchain_section("cargo"), Some("rust"));
+        assert_eq!(toolchain_section("rust"), Some("rust"));
+        assert_eq!(toolchain_section("rustfmt"), None);
     }
 
     #[test]

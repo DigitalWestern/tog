@@ -10,7 +10,7 @@ when they were ported to the `Tailor` trait on 2026-09-12.
 | File | Owns |
 |---|---|
 | `mod.rs` | The pinned toolchain (per-platform rows with sha256s, verified at pin time) and its catalog adapter `toolchain_catalog` (the same rows as `kernel::toolchain` release bundles, with the recipe ids the identities commit to), `legacy_toolchain_evidence` (what a pre-lock closure records), `preflight_platform`, `ensure_<toolchain>_for`, `plan_*`, `realize_*`, `project_*_env`, and `build_sandboxed` if the ecosystem builds. Declares the sibling modules. |
-| `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `listing`, `closure_state`, `doctor`, `sbom_components`, `fmt*`, `object_kinds`, `toolchain_catalog`, `legacy_toolchain_evidence`, `registry_tool` (`tog x`). Only implement what the ecosystem has; the defaults say "not supported". |
+| `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `refused_command` (`tog run` verbs refused before any environment is looked up), `listing`, `closure_state`, `doctor`, `sbom_components`, `fmt*`, `object_kinds`, `toolchain_kinds` (which of those kinds `doctor` lists as realized toolchains), `toolchain_catalog`, `legacy_toolchain_evidence`, `registry_tool` (`tog x`). Only implement what the ecosystem has; the defaults say "not supported". |
 | `objects.rs` | `pub static KINDS: &[KindAdapter]`: one row per (kind, schema) pair the tailor commits to the store, with the live grammar, migration grammar, and the function that recovers a legacy record's dependencies. Add the producer's full `live_contract` beside its identity constructor whenever it has dynamic counts, paired keys, or platform-conditional inputs. A kind without a row is refused by GC, never certified. The registry hands every tailor's rows to the kernel at startup (`tailors::install_kinds`, called by `commands::dispatch`); nothing to wire by hand. |
 | `inputs.rs` (optional) | Project-inputs-to-plan loaders when they are more than a few lines. |
 
@@ -49,20 +49,22 @@ order (this order is `plan` output, `sync` narration, `status` rows, `ls`).
 
 ## 3. The vocabulary lists (still hand-maintained)
 
-These name ecosystems outside the registry; keep them in step:
+These name ecosystems outside the registry; a test fails until each is in
+step:
 
-- `src/cli/spec.rs`: `LS_WORDS` (what `ls <ecosystem>` accepts) and
-  `BUILD_WORDS` if the ecosystem builds; the grammar has no I/O and so does
-  not read the registry.
-- `src/commands/inspect.rs`: `ECOSYSTEMS` (display order; a unit test
-  asserts it matches the registry).
+- `src/cli/spec.rs`: one `ECOSYSTEM_WORDS` row (id, lock ecosystem,
+  whether it builds, extra closures). The `ls`, `build` and
+  `update --toolchain` words are derived from it; the grammar may not name
+  a tailor, so it mirrors the registry, and a parser test compares them.
 - `src/commands/deps.rs`: `Eco` if the ecosystem supports
   `add`/`remove`/`update` (a `Tailor::edit_manifest` method is the
   planned replacement; see FOLLOW-UPS.md).
-- `tog x`, only if the ecosystem implements `Tailor::registry_tool`: the
-  `--py`/`--npm` flags and `py:`/`npm:` prefixes in `src/cli/parse.rs` and
-  `src/cli/spec.rs`. Everything else `x` needs lives in the tailor's
-  `RegistryTool`.
+- `tog x`, only if the ecosystem implements `Tailor::registry_tool`: a
+  `(id, spelling)` row in `X_REGISTRIES` (`src/cli/spec.rs`), which the
+  parser reads for the `--<word>`/`--<id>` flags and the `<word>:` prefix,
+  and the two flags in the `x` help. A parser test fails until the row
+  matches `RegistryTool::spelling`, and a help test until the help lists
+  it. Everything else `x` needs lives in the tailor's `RegistryTool`.
 
 ## 4. Tests and evidence
 

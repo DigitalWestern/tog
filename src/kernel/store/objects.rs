@@ -529,9 +529,6 @@ pub(super) fn make_read_only(path: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(e.kind(), format!("chmod {}: {e}", path.display())))
 }
 
-/// The object/cache mtime is the cheap activity marker used by GC. Opening
-/// the path and setting its timestamp avoids a platform-specific touch
-/// executable and also works for read-only published directories/files.
 #[cfg(test)]
 thread_local! {
     /// A test's hook at the named points of `published_identity`, so a
@@ -552,6 +549,9 @@ fn published_identity_failpoint(at: &str) {
 #[cfg(not(test))]
 fn published_identity_failpoint(_at: &str) {}
 
+/// The object/cache mtime is the cheap activity marker used by GC. Opening
+/// the path and setting its timestamp avoids a platform-specific touch
+/// executable and also works for read-only published directories/files.
 pub(crate) fn touch_path(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.set_modified(SystemTime::now())
 }

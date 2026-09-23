@@ -20,8 +20,13 @@ use crate::kernel::toolchain::lock::{self as toolchain_lock, ToolchainLock, LOCK
 use crate::tailors;
 pub use crate::tailors::PackageRow;
 
-/// Display order; also the `ls <ecosystem>` vocabulary.
-pub const ECOSYSTEMS: &[&str] = &["python", "node", "cargo", "go", "ruby", "elixir", "dotnet"];
+/// Display order: the tailor registry's.
+pub fn ecosystems() -> Vec<&'static str> {
+    tailors::registry()
+        .iter()
+        .map(|tailor| tailor.id())
+        .collect()
+}
 
 /// The ecosystems whose inputs are present in `dir` itself (the same tests
 /// `sync` uses to decide what to realize).
@@ -91,10 +96,11 @@ pub fn closures(dir: &Path) -> io::Result<Vec<ClosureFile>> {
 }
 
 fn rank(ecosystem: &str) -> usize {
-    ECOSYSTEMS
+    let order = ecosystems();
+    order
         .iter()
         .position(|name| *name == ecosystem)
-        .unwrap_or(ECOSYSTEMS.len())
+        .unwrap_or(order.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -597,19 +603,6 @@ fn free_bytes(path: &Path) -> io::Result<u64> {
     }
 }
 
-const TOOLCHAIN_KINDS: &[&str] = &[
-    "cpython",
-    "uv",
-    "nodejs",
-    "rust",
-    "rustfmt",
-    "go",
-    "ruby",
-    "beam",
-    "dotnet-sdk",
-    "native-libs",
-];
-
 /// Realized toolchains, from the store's metadata files only.
 fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
     let mut found = Vec::new();
@@ -623,7 +616,10 @@ fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
         };
         let identity = &value["identity"];
         let kind = string(&identity["kind"]);
-        if TOOLCHAIN_KINDS.contains(&kind.as_str()) {
+        let toolchain = tailors::registry()
+            .iter()
+            .any(|tailor| tailor.toolchain_kinds().contains(&kind.as_str()));
+        if toolchain {
             let name = string(&identity["name"]);
             let version = string(&identity["version"]);
             found.push(format!(
@@ -994,18 +990,24 @@ pub(crate) fn with_toolchain_lock(dir: &Path, ecosystem: &str, mut body: Value) 
 
 #[cfg(test)]
 mod tests {
-    /// The display order lives here for the `ls` vocabulary and closure
-    /// ranking; the registry is the source of truth.
-    #[test]
-    fn ecosystems_match_the_tailor_registry() {
-        let ids: Vec<&str> = crate::tailors::registry()
-            .iter()
-            .map(|tailor| tailor.id())
-            .collect();
-        assert_eq!(ids, super::ECOSYSTEMS);
-    }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Doctor's realized-toolchain row reads `Tailor::toolchain_kinds`; each
+    /// is a kind its own tailor registers, and every ecosystem has one.
+    #[test]
+    fn toolchain_kinds_are_registered_object_kinds() {
+        for tailor in tailors::registry() {
+            assert!(!tailor.toolchain_kinds().is_empty(), "{}", tailor.id());
+            for kind in tailor.toolchain_kinds() {
+                assert!(
+                    tailor.object_kinds().iter().any(|row| row.kind == *kind),
+                    "{}: toolchain kind {kind} has no object-kind row",
+                    tailor.id()
+                );
+            }
+        }
+    }
 
     struct TempDir(PathBuf);
 
@@ -1059,7 +1061,7 @@ mod tests {
         fs::write(temp.0.join("Gemfile"), "").unwrap();
         fs::write(temp.0.join("mix.exs"), "").unwrap();
         fs::write(temp.0.join("app.csproj"), "").unwrap();
-        assert_eq!(detected(&temp.0).unwrap(), ECOSYSTEMS);
+        assert_eq!(detected(&temp.0).unwrap(), ecosystems());
     }
 
     #[test]
@@ -1116,7 +1118,7 @@ mod tests {
         let all = closures(&temp.0).unwrap();
         assert_eq!(
             all.iter().map(|c| c.ecosystem.as_str()).collect::<Vec<_>>(),
-            ECOSYSTEMS
+            ecosystems()
         );
         let node = listing(&all[1]);
         assert_eq!(

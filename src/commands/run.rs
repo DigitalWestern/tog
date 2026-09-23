@@ -4,190 +4,51 @@
 //! events, `npm_*` variables) is the one ecosystem-specific piece that stays
 //! here, because it decides *how* the command runs, not what it sees.
 
-use crate::comforter;
 use crate::commands::shared::{self, child_status_code};
 use crate::commands::sync;
 use crate::kernel::context::Context;
 use crate::kernel::supervise;
-use crate::tailors::node;
+use crate::tailors::{self, node};
 use std::io;
 
-fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool {
-    has_dotnet_closure && script_resolved
-}
-
-/// The npm-family subcommands that write into `node_modules`. `npm run`,
-/// `npm test`, `npm ls` and the rest are untouched: only the ones that
-/// install are a problem.
-const NODE_INSTALL_VERBS: &[&str] = &[
-    "install",
-    "i",
-    "add",
-    "ci",
-    "uninstall",
-    "remove",
-    "rm",
-    "update",
-    "upgrade",
-    "link",
-    "dedupe",
-];
-
-/// The npm-family verbs that install the lockfile rather than change it.
-/// The advice differs: the bare `tog` replaces these, not `tog add`.
-const NODE_REINSTALL_VERBS: &[&str] = &["install", "i", "ci"];
-
-/// The pip subcommands that try to write into the environment. Reading
-/// commands (`pip list`, `pip freeze`, `pip show`, `pip check`) work
-/// against a projected .venv and are none of tog's business.
-const PIP_MUTATING_VERBS: &[&str] = &["install", "uninstall", "wheel"];
-
-/// Every pip subcommand, so an option's *value* is never mistaken for one.
-/// `pip --index-url x install y` has two bare words before the package;
-/// taking the first would read the URL as the subcommand and let an
-/// install through.
-const PIP_SUBCOMMANDS: &[&str] = &[
-    "install",
-    "uninstall",
-    "wheel",
-    "download",
-    "freeze",
-    "inspect",
-    "list",
-    "show",
-    "check",
-    "config",
-    "search",
-    "cache",
-    "index",
-    "hash",
-    "completion",
-    "debug",
-    "help",
-];
-
-/// pip's subcommand: the first word that is one, wherever it sits among
-/// the global options.
-fn pip_subcommand(cmd: &[String], from: usize) -> &str {
-    cmd.iter()
-        .skip(from)
-        .map(String::as_str)
-        .find(|word| PIP_SUBCOMMANDS.contains(word))
-        .unwrap_or_default()
-}
-
-/// Python options that take a separate value, so the value is not mistaken
-/// for the script name when looking for `-m`.
-const PYTHON_VALUE_OPTIONS: &[&str] = &["-X", "-W", "-Q", "--check-hash-based-pycs"];
-
-/// `python -m pip install ...` reaches the same pip by another road.
-///
-/// `-m` is only python's while it is still an option: in
-/// `python script.py -m pip install x` the `-m` belongs to the script, and
-/// refusing that would refuse a program tog knows nothing about.
-fn python_module_pip_verb(cmd: &[String]) -> Option<&str> {
-    let program = cmd.first()?.rsplit('/').next()?;
-    if !program.starts_with("python") {
+/// Why a resolved package.json script may not run in `dir`: the first
+/// projection there that forbids it (`Tailor::refused_package_script`).
+fn package_script_refusal(dir: &std::path::Path, script_resolved: bool) -> Option<String> {
+    if !script_resolved {
         return None;
     }
-    let mut index = 1;
-    while let Some(word) = cmd.get(index).map(String::as_str) {
-        if word == "-m" {
-            // `-m <module>` ends python's own options.
-            if cmd.get(index + 1).map(String::as_str)? != "pip" {
-                return None;
-            }
-            return Some(pip_subcommand(cmd, index + 2));
-        }
-        if !word.starts_with('-') {
-            // The script or the `-c` program: everything after is its own.
-            return None;
-        }
-        index += if PYTHON_VALUE_OPTIONS.contains(&word) {
-            2
-        } else {
-            1
-        };
-    }
-    None
-}
-
-fn pip_refusal(program: &str, verb: &str) -> String {
-    format!(
-        "'{program} {verb}' cannot change a tog environment: .venv is a projection of an \
-         immutable store object, so nothing can be installed into or removed from it. Add the \
-         dependency instead ('tog add <package>', 'tog remove <package>'), then \
-         'tog run python ...'"
-    )
+    tailors::registry()
+        .iter()
+        .find_map(|tailor| tailor.refused_package_script(dir))
 }
 
 /// The habits a projected environment cannot honour, refused with the verb
 /// that replaces them.
 ///
-/// A projection is a symlink into the immutable store. `pip install` finds
-/// no pip and reports a missing file; `npm install` succeeds, silently
-/// replaces the symlink with a real directory, and the next `tog status`
-/// says `missing`. Both are better refused with an explanation than left
-/// to produce their own. Only the mutating verbs are refused: reading the
-/// environment with `pip list` or `npm ls` is fine.
+/// A projection is a symlink into the immutable store, so installing into
+/// one either fails with the tool's own confusing error or silently leaves
+/// the closure stale. Each tailor refuses its own package manager's
+/// mutating verbs (`Tailor::refused_command`); what is refused here is the
+/// habit no ecosystem owns: activating an environment.
 pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
     let program = cmd.first()?.rsplit('/').next()?;
     let argument = |index: usize| cmd.get(index).map(String::as_str).unwrap_or_default();
-    if let Some(verb) = python_module_pip_verb(cmd) {
-        if PIP_MUTATING_VERBS.contains(&verb) {
-            return Some(pip_refusal("python -m pip", verb));
-        }
-        return None;
+    // `tog run activate` and `tog run source .venv/bin/activate`: there is
+    // no activate script to find.
+    if program == "activate"
+        || (matches!(program, "source" | ".") && argument(1).contains("activate"))
+    {
+        return Some(
+            "a tog environment has no activate script: 'tog run <command>' is the \
+             activation, and it applies to one command instead of a shell session. \
+             'tog run python', 'tog run pytest', 'tog run npm test' all see the \
+             projected environment"
+                .to_string(),
+        );
     }
-    match program {
-        "pip" | "pip3" | "easy_install" => {
-            let verb = pip_subcommand(cmd, 1);
-            // easy_install has no subcommand: installing is all it does.
-            (program == "easy_install" || PIP_MUTATING_VERBS.contains(&verb))
-                .then(|| pip_refusal(program, verb))
-        }
-        // `tog run activate` and `tog run source .venv/bin/activate`: there
-        // is no activate script to find.
-        "activate" | "source" | "."
-            if program == "activate" || argument(1).contains("activate") =>
-        {
-            Some(
-                "a tog environment has no activate script: 'tog run <command>' is the \
-                 activation, and it applies to one command instead of a shell session. \
-                 'tog run python', 'tog run pytest', 'tog run npm test' all see the \
-                 projected environment"
-                    .to_string(),
-            )
-        }
-        // Bare `yarn` and bare `bun` install; bare `npm` and `pnpm` print
-        // help. Everything else needs an installing subcommand.
-        "npm" | "pnpm" | "yarn" | "bun" => {
-            let verb = argument(1);
-            let bare_install = verb.is_empty() && matches!(program, "yarn" | "bun");
-            if !bare_install && !NODE_INSTALL_VERBS.contains(&verb) {
-                return None;
-            }
-            let invocation = if verb.is_empty() {
-                program.to_string()
-            } else {
-                format!("{program} {verb}")
-            };
-            // `install` and `ci` install what the lockfile already says, so
-            // what replaces them is the bare `tog`, not `tog add`.
-            let advice = if bare_install || NODE_REINSTALL_VERBS.contains(&verb) {
-                "'tog' sets node_modules up from the lockfile ('tog --fresh' rebuilds it); to change what is in it, \
-                 'tog add <package>', 'tog remove <package>', 'tog update'"
-            } else {
-                "edit dependencies through tog instead: 'tog add <package>', \
-                 'tog remove <package>', 'tog update'; 'tog --fresh' rebuilds node_modules"
-            };
-            Some(format!(
-                "'{invocation}' would replace the node_modules projection with a real directory \
-                 and leave the closure stale. {advice}"
-            ))
-        }
-        _ => None,
-    }
+    tailors::registry()
+        .iter()
+        .find_map(|tailor| tailor.refused_command(cmd))
 }
 
 pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Result<i32> {
@@ -212,18 +73,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Res
     // Outside a project this finds nothing to sync and the refusal below
     // explains.
     let dir = sync::ensure_current(ctx, &cwd, frozen, strict)?;
-    let (node_projected, _) = node::tailor::projected_node_modules(&dir, &cwd);
-    let package_json = if node_projected {
-        comforter::read_closure(&dir, "node")?;
-        let path = dir.join("package.json");
-        if std::fs::symlink_metadata(&path).is_ok() {
-            Some((path.canonicalize()?, std::fs::read_to_string(path)?))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let package_json = node::tailor::projected_package_json(&dir, &cwd)?;
     let script_steps = package_json
         .as_ref()
         .map(|(_, json)| node::script_commands_from_package(json, &cmd[0], &cmd[1..]))
@@ -243,14 +93,8 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Res
     } else {
         None
     };
-    if refuse_dotnet_script(
-        std::fs::symlink_metadata(dir.join(".tog/closures/dotnet.json")).is_ok(),
-        script_steps.is_some(),
-    ) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "package.json scripts are not run under a .NET projection (MSBuild belongs in the sandbox: use `tog build dotnet`)",
-        ));
+    if let Some(refusal) = package_script_refusal(&dir, script_steps.is_some()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, refusal));
     }
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
@@ -463,8 +307,13 @@ mod tests {
 
     #[test]
     fn dotnet_projection_refuses_resolved_package_scripts() {
-        assert!(refuse_dotnet_script(true, true));
-        assert!(!refuse_dotnet_script(true, false));
-        assert!(!refuse_dotnet_script(false, true));
+        let dir = std::env::temp_dir().join(format!("tog-run-script-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        assert!(package_script_refusal(&dir, true).is_none());
+        std::fs::write(dir.join(".tog/closures/dotnet.json"), "{}").unwrap();
+        let refusal = package_script_refusal(&dir, true).expect("refused");
+        assert!(refusal.contains("tog build dotnet"), "{refusal}");
+        assert!(package_script_refusal(&dir, false).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

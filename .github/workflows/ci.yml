@@ -36,3 +36,101 @@ jobs:
         run: |
           cargo test --locked --lib sandbox
           cargo test --locked --test sandbox_deny
+
+  # Ubuntu 23.10 and later can deny unprivileged user namespaces to any
+  # program without its own AppArmor profile
+  # (kernel.apparmor_restrict_unprivileged_userns), and bwrap needs one.
+  # This job checks `tog doctor` against what bwrap itself says on such a
+  # host, then that the sandbox works under each fix doctor names: an
+  # AppArmor profile for bwrap, or the sysctl set to 0.
+  sandbox-ubuntu-24:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Linux sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: Doctor agrees with bwrap about user namespaces
+        id: host
+        run: |
+          set -euo pipefail
+          switch=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
+          echo "kernel.apparmor_restrict_unprivileged_userns: $switch"
+          # What bwrap says on its own, with no tog involved: the answer
+          # doctor has to match. The namespace set is the one tog's preflight
+          # asks for (bwrap_preflight_with_activity in src/kernel/sandbox.rs),
+          # so a denial of any of them (the net namespace's RTM_NEWADDR, say)
+          # shows up here too.
+          if /usr/bin/bwrap --unshare-user --unshare-net --unshare-pid \
+              --unshare-ipc --unshare-uts --hostname tog --unshare-cgroup-try \
+              --die-with-parent --new-session --clearenv \
+              --ro-bind / / --dev /dev --proc /proc /usr/bin/true 2> bwrap.err; then
+            bwrap=works
+          else
+            bwrap=refused
+          fi
+          echo "bwrap alone: $bwrap"
+          cat bwrap.err
+          ./target/debug/tog doctor --json > doctor.json || true
+          jq '.checks[] | select(.name == "sandbox")' doctor.json
+          level=$(jq -r '.checks[] | select(.name == "sandbox") | .level' doctor.json)
+          detail=$(jq -r '.checks[] | select(.name == "sandbox") | .detail' doctor.json)
+          if [ "$bwrap" = works ]; then
+            if [ "$level" != ok ]; then
+              echo "::error::bwrap works on this runner but doctor's sandbox row is '$level'"
+              exit 1
+            fi
+            echo "::warning::bwrap was not refused a user namespace on this runner (switch: $switch); the AppArmor note went unexercised"
+          else
+            if [ "$level" != fail ]; then
+              echo "::error::bwrap is refused a user namespace but doctor's sandbox row is '$level'"
+              exit 1
+            fi
+            if [ "$switch" = 1 ] && ! grep -qF 'kernel.apparmor_restrict_unprivileged_userns=1' <<< "$detail"; then
+              echo "::error::the AppArmor switch is on and bwrap was refused, but doctor did not name the switch"
+              exit 1
+            fi
+          fi
+          echo "restricted=$([ "$bwrap" = refused ] && [ "$switch" = 1 ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: "Fix one: an AppArmor profile for bwrap"
+        if: steps.host.outputs.restricted == 'yes'
+        run: |
+          set -euo pipefail
+          sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/bwrap>
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          ./target/debug/tog doctor --json > doctor.json || true
+          jq '.checks[] | select(.name == "sandbox")' doctor.json
+          test "$(jq -r '.checks[] | select(.name == "sandbox") | .level' doctor.json)" = ok
+      # A skip is a failure here too: under the profile (or on a runner
+      # that never restricted bwrap) the sandbox has to work.
+      - name: Linux sandbox (required)
+        env:
+          TOG_SANDBOX_TESTS: required
+        run: |
+          cargo test --locked --lib sandbox
+          cargo test --locked --test sandbox_deny
+      - name: "Fix two: the sysctl set to 0"
+        if: steps.host.outputs.restricted == 'yes'
+        run: |
+          set -euo pipefail
+          # Without the profile the refusal, and doctor's note, come back.
+          sudo apparmor_parser -R /etc/apparmor.d/bwrap
+          sudo rm /etc/apparmor.d/bwrap
+          ./target/debug/tog doctor --json > doctor.json || true
+          jq '.checks[] | select(.name == "sandbox")' doctor.json
+          test "$(jq -r '.checks[] | select(.name == "sandbox") | .level' doctor.json)" = fail
+          jq -r '.checks[] | select(.name == "sandbox") | .detail' doctor.json \
+            | grep -qF 'kernel.apparmor_restrict_unprivileged_userns=1'
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          ./target/debug/tog doctor --json > doctor.json || true
+          jq '.checks[] | select(.name == "sandbox")' doctor.json
+          test "$(jq -r '.checks[] | select(.name == "sandbox") | .level' doctor.json)" = ok
