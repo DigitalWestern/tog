@@ -204,6 +204,10 @@ pub(crate) const WARNING_PREFIX: &str = "tog: warning: ";
 /// The prefix of the fix line. The same 14 columns as `WARNING_PREFIX`, so
 /// `fix:` right-aligns under `warning:`.
 pub(crate) const FIX_PREFIX: &str = "tog:     fix: ";
+/// The prefix of the next line, for the rare warning whose best command
+/// explains the condition rather than clears it. The same 14 columns again,
+/// so its command starts where a fix's would.
+pub(crate) const NEXT_PREFIX: &str = "tog:    next: ";
 
 /// Something the user should know that did not stop the command, and the
 /// one command that resolves it. Suppressed by `--quiet` like all
@@ -212,7 +216,8 @@ pub(crate) const FIX_PREFIX: &str = "tog:     fix: ";
 /// `fix` is a command to paste into a shell: no leading "run", no trailing
 /// period, no explanation — the explanation is the message. An advisory
 /// with nothing for the user to do is not a warning; it is progress, so
-/// print it with `note`.
+/// print it with `note`. One whose only command explains the condition
+/// without clearing it is `warning_next`.
 pub fn warning(message: &str, fix: &str) {
     if quiet() {
         return;
@@ -224,15 +229,37 @@ pub fn warning(message: &str, fix: &str) {
 /// handle of its own (the maintenance narration holds a locked stderr) and
 /// must still look like every other advisory.
 pub fn warning_lines(message: &str, fix: &str) -> String {
-    debug_assert!(
-        !fix.trim().is_empty(),
-        "a warning names the command that resolves it: {message}"
-    );
-    debug_assert!(
-        !fix.starts_with("run ") && !fix.starts_with("Run "),
-        "the fix line is a command, not a sentence about one: {fix}"
-    );
+    debug_assert_command(message, fix);
     format!("{}{}", advisory_line(message), fix_line(fix))
+}
+
+/// A warning whose best command shows why the condition holds but does not
+/// clear it: a probe's own output, or a report that judges what was
+/// recorded. Labelled `next:` so nobody pastes it expecting the warning to
+/// go away. Prefer `warning` whenever a command that resolves it exists.
+pub fn warning_next(message: &str, next: &str) {
+    if quiet() {
+        return;
+    }
+    eprint!("{}", warning_next_lines(message, next));
+}
+
+/// `warning_next` as text, the way `warning_lines` is `warning`'s.
+pub fn warning_next_lines(message: &str, next: &str) -> String {
+    debug_assert_command(message, next);
+    format!("{}{}", advisory_line(message), next_line(next))
+}
+
+/// The second line of either kind is a command to paste, never prose.
+fn debug_assert_command(message: &str, command: &str) {
+    debug_assert!(
+        !command.trim().is_empty(),
+        "a warning names the command to type next: {message}"
+    );
+    debug_assert!(
+        !command.starts_with("run ") && !command.starts_with("Run "),
+        "the second line is a command, not a sentence about one: {command}"
+    );
 }
 
 /// The first of the two lines, colored for the current terminal.
@@ -244,6 +271,12 @@ pub(crate) fn advisory_line(message: &str) -> String {
 /// like `synced`: it is the way out, not the problem.
 pub(crate) fn fix_line(command: &str) -> String {
     format!("tog:     {}: {command}\n", paint("fix", GREEN))
+}
+
+/// The `next:` line. Uncolored: it is neither the problem nor the way out,
+/// only where to look.
+pub(crate) fn next_line(command: &str) -> String {
+    format!("{NEXT_PREFIX}{command}\n")
 }
 
 /// Progress narration.
@@ -578,6 +611,29 @@ mod tests {
             fix_line("tog --fresh"),
             format!("{FIX_PREFIX}tog --fresh\n")
         );
+    }
+
+    /// A warning whose command only explains ends with `next:` instead,
+    /// and that command starts in the same column a fix's would.
+    #[test]
+    fn a_diagnostic_warning_names_the_next_command_in_the_fix_column() {
+        assert!(!color(), "the test process has no terminal");
+        assert_eq!(
+            warning_next_lines("3 policy exception(s) recorded", "tog audit"),
+            "tog: warning: 3 policy exception(s) recorded\n\
+             tog:    next: tog audit\n"
+        );
+        assert_eq!(
+            NEXT_PREFIX.len(),
+            FIX_PREFIX.len(),
+            "the command column must line up"
+        );
+        assert_eq!(
+            NEXT_PREFIX.find(": "),
+            FIX_PREFIX.find(": "),
+            "`next:` right-aligns under `fix:`"
+        );
+        assert_eq!(next_line("tog audit"), format!("{NEXT_PREFIX}tog audit\n"));
     }
 
     #[test]
