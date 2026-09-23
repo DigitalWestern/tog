@@ -1077,8 +1077,9 @@ mod tests {
             ecosystem: &str,
             platform: Option<Platform>,
             body: &serde_json::Value,
+            store: Option<&crate::kernel::store::Store>,
         ) -> crate::kernel::toolchain::LegacyEvidence {
-            Self::real().legacy_toolchain_evidence(ecosystem, platform, body)
+            Self::real().legacy_toolchain_evidence(ecosystem, platform, body, store)
         }
     }
 

@@ -1122,6 +1122,27 @@ mod tests {
         std::os::unix::fs::symlink(store.root.join("meta").join(format!("{id}.json")), &record)
             .unwrap();
         assert!(store.published_identity(&meta_link_id).is_err());
+
+        // A FIFO planted as the record is refused, not waited on: a
+        // blocking open would hang `status` forever with no writer.
+        let mut piped = identity();
+        piped.name = "piped".into();
+        let piped_id = publish_bare(&store, &piped);
+        let record = store.root.join("meta").join(format!("{piped_id}.json"));
+        fs::remove_file(&record).unwrap();
+        let name = CString::new(record.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path and a plain mode.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = store.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(reader.published_identity(&piped_id).map(|_| ()));
+        });
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("published_identity blocked on a FIFO record")
+            .unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
     }
 
     /// `existing` finds a store without creating one, and holds it to

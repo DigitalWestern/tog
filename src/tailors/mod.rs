@@ -952,6 +952,72 @@ mod tests {
         }
     }
 
+    /// A malformed reference contradicts the closure before any store is
+    /// consulted, so it refuses a uniquely versioned release with or
+    /// without a store; so does an `{id, path}` pair whose path names
+    /// another object than its id.
+    #[test]
+    fn a_malformed_reference_refuses_a_unique_version_with_or_without_a_store() {
+        use crate::comforter::toolchain::publish_for_test;
+        use crate::kernel::toolchain::Source;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let store = scratch_store(&temp, "refs");
+        let go = by_id("go").unwrap();
+        let catalog = go.toolchain_catalog().unwrap();
+        let bundle = catalog.select(&Request::newest()).unwrap().clone();
+        let selected = Selected {
+            ecosystem: "go".into(),
+            bundle: bundle.clone(),
+            lock_sha256: None,
+            source: Source::Shipped,
+        };
+        let (_, objects) = legacy_runtime("go", LINUX, &selected, &store);
+        let real = publish_for_test(&store, &objects[0]);
+        let mut other = objects[0].clone();
+        other.name = "go-other".into();
+        let other = publish_for_test(&store, &other);
+        let refusal = |body: &Value, store: Option<&crate::kernel::store::Store>| {
+            let evidence = go.legacy_toolchain_evidence("go", Some(LINUX), body, store);
+            seed(&catalog, &evidence).unwrap_err().to_string()
+        };
+        let with = |reference: Value| {
+            let mut body = legacy_body("go", &bundle);
+            body["go_object"] = reference;
+            body
+        };
+        // The version alone seeds this catalog.
+        let bare =
+            go.legacy_toolchain_evidence("go", Some(LINUX), &legacy_body("go", &bundle), None);
+        assert!(seed(&catalog, &bare).is_ok());
+        for reference in [
+            json!(42),
+            json!("relative/not-an-object"),
+            json!({"id": "not-an-id", "path": store.object_path("not-an-id")}),
+            json!({"id": real}),
+            json!({"id": real, "path": store.object_path(&other)}),
+        ] {
+            for store in [None, Some(&store)] {
+                let error = refusal(&with(reference.clone()), store);
+                assert!(
+                    error.contains("object reference is malformed"),
+                    "{reference}: {error}"
+                );
+            }
+        }
+        let error = refusal(
+            &with(json!({"id": real, "path": store.object_path(&other)})),
+            Some(&store),
+        );
+        assert!(
+            error.contains("is not the object its path names"),
+            "{error}"
+        );
+        // A null reference names nothing: the version alone still seeds.
+        let evidence =
+            go.legacy_toolchain_evidence("go", Some(LINUX), &with(Value::Null), Some(&store));
+        assert!(seed(&catalog, &evidence).is_ok());
+    }
+
     #[test]
     fn an_unconstrained_python_project_keeps_the_shipped_default() {
         use crate::kernel::toolchain::input::InputRow;

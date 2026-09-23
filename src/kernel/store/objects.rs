@@ -163,9 +163,12 @@ impl Store {
         }
         published_identity_failpoint("before-metadata-open");
         let path = self.root.join("meta").join(format!("{id}.json"));
+        // O_NONBLOCK: a FIFO planted as the record must not hang a
+        // read-only caller in open(2); the descriptor's own type is checked
+        // before a byte is read. On a regular file the flag changes nothing.
         let file = match fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&path)
         {
             Ok(file) => file,

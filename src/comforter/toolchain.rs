@@ -242,44 +242,55 @@ fn legacy_runtime_identity(
     runtime: LegacyRuntime<'_>,
 ) -> Result<Identity, ProofGap> {
     let first_kind = runtime.via.first().map_or(runtime.kind, |(kind, _)| kind);
-    let Some(reference) = body.pointer(runtime.pointer) else {
-        return Err(ProofGap::Unproved(format!(
-            "the closure names no {first_kind} object"
-        )));
+    let reference = match body.pointer(runtime.pointer) {
+        None | Some(serde_json::Value::Null) => {
+            return Err(ProofGap::Unproved(format!(
+                "the closure names no {first_kind} object"
+            )))
+        }
+        Some(reference) => reference,
     };
-    let Some(store) = store else {
-        return Err(ProofGap::Unproved(format!(
-            "there is no store to find the closure's {first_kind} object in"
-        )));
+    // The reference is validated before any store is consulted: a
+    // malformed one contradicts the closure whether or not a store exists.
+    let malformed = |why: String| {
+        ProofGap::Contradicted(format!(
+            "the closure's {first_kind} object reference is malformed: {why}"
+        ))
+    };
+    let path_id = |path: &Path| {
+        store::object_id_from_path(path).map_err(|error| malformed(error.to_string()))
     };
     let (id, path) = match reference {
         serde_json::Value::String(path) => {
             let path = PathBuf::from(path);
-            let id = store::object_id_from_path(&path).map_err(|error| {
-                ProofGap::Contradicted(format!(
-                    "the closure's {first_kind} object reference is malformed: {error}"
-                ))
-            })?;
-            (id, path)
+            (path_id(&path)?, path)
         }
         serde_json::Value::Object(fields) => match (
             fields.get("id").and_then(serde_json::Value::as_str),
             fields.get("path").and_then(serde_json::Value::as_str),
         ) {
-            (Some(id), Some(path)) if store::is_object_id(id) => {
-                (id.to_string(), PathBuf::from(path))
+            (Some(id), Some(path)) => {
+                let path = PathBuf::from(path);
+                let named = path_id(&path)?;
+                if named != id {
+                    return Err(malformed(format!(
+                        "its id {id:?} is not the object its path names ({named})"
+                    )));
+                }
+                (named, path)
             }
-            _ => {
-                return Err(ProofGap::Contradicted(format!(
-                    "the closure's {first_kind} object reference is malformed"
-                )))
-            }
+            _ => return Err(malformed("it needs a string id and path".into())),
         },
         _ => {
-            return Err(ProofGap::Contradicted(format!(
-                "the closure's {first_kind} object reference is malformed"
-            )))
+            return Err(malformed(
+                "it is neither an object path nor an {id, path} pair".into(),
+            ))
         }
+    };
+    let Some(store) = store else {
+        return Err(ProofGap::Unproved(format!(
+            "there is no store to find the closure's {first_kind} object in"
+        )));
     };
     // The recorded path only has to name this store's object; it never
     // decides what is read.
