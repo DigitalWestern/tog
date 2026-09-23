@@ -173,17 +173,83 @@ fn poetry_python_alternative(text: &str) -> io::Result<VersionRequest> {
     specifier_set(FIELD, text.trim())
 }
 
-/// The first version past everything `version` spells: `1.2.3` gives
-/// `1.2.4`, `1.2` gives `1.3`, `1` gives `2`. Node versions are integer
-/// triples with no prerelease rows in the catalog, so `>X` is `>=` this and
-/// `<=X` is `<` this, with node semver's partial-version reading.
-fn next_after(version: &Version) -> Version {
-    let mut parts = version.parts().to_vec();
-    if let Some(last) = parts.last_mut() {
-        *last += 1;
+/// The largest component node semver accepts (`Number.MAX_SAFE_INTEGER`).
+const NODE_MAX_COMPONENT: u64 = 9_007_199_254_740_991;
+
+/// The refusal every unreadable `engines.node` range gets.
+fn node_unsupported(whole: &str) -> io::Error {
+    invalid(format!(
+        "engines.node range {whole} is not supported; put an exact version in .node-version"
+    ))
+}
+
+/// A node semver partial version: one to three numeric components, any of
+/// them replaceable from some point on by `x`, `X` or `*` (`24`, `24.1.x`,
+/// `v24.1.2`, `*`). Returns the numeric components before the first
+/// wildcard, so `24.0.x` is `[24, 0]` and `*` is `[]`. Prerelease and build
+/// suffixes, a fourth component, leading zeros and components past node
+/// semver's limit are refused.
+fn node_partial(whole: &str, text: &str) -> io::Result<Vec<u64>> {
+    let text = text.strip_prefix('v').unwrap_or(text);
+    let pieces: Vec<&str> = text.split('.').collect();
+    if text.is_empty() || pieces.len() > 3 {
+        return Err(node_unsupported(whole));
     }
+    let mut parts = Vec::new();
+    let mut wild = false;
+    for piece in pieces {
+        if matches!(piece, "x" | "X" | "*") {
+            wild = true;
+            continue;
+        }
+        if wild
+            || piece.is_empty()
+            || (piece.len() > 1 && piece.starts_with('0'))
+            || !piece.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(node_unsupported(whole));
+        }
+        let value = piece
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value <= NODE_MAX_COMPONENT)
+            .ok_or_else(|| node_unsupported(whole))?;
+        parts.push(value);
+    }
+    Ok(parts)
+}
+
+fn node_version(whole: &str, parts: &[u64]) -> io::Result<Version> {
     let text: Vec<String> = parts.iter().map(u64::to_string).collect();
-    Version::parse(&text.join(".")).expect("a bumped dotted numeric version parses")
+    Version::parse(&text.join(".")).map_err(|_| node_unsupported(whole))
+}
+
+/// The first version past everything `parts` spells, keeping its component
+/// count: `1.2.3` gives `1.2.4`, `24.0` gives `24.1`, `1` gives `2`. Node
+/// versions are integer triples with no prerelease rows in the catalog, so
+/// `>X` is `>=` this and `<=X` is `<` this.
+fn node_next(whole: &str, parts: &[u64]) -> io::Result<Version> {
+    let mut parts = parts.to_vec();
+    let last = parts.last_mut().ok_or_else(|| node_unsupported(whole))?;
+    *last = last.checked_add(1).ok_or_else(|| node_unsupported(whole))?;
+    node_version(whole, &parts)
+}
+
+/// `>= low` and `< high`: the explicit bounds every partial lowers to, so a
+/// zero-bearing line (`24.0.x`) stays `>=24.0,<24.1` rather than widening.
+fn node_bounds(
+    whole: &str,
+    low: Option<&[u64]>,
+    high: Option<Version>,
+) -> io::Result<Vec<VersionRequest>> {
+    let mut terms = Vec::new();
+    if let Some(low) = low {
+        terms.push(node_specifier(Op::Ge, node_version(whole, low)?)?);
+    }
+    if let Some(high) = high {
+        terms.push(node_specifier(Op::Lt, high)?);
+    }
+    Ok(terms)
 }
 
 fn node_specifier(op: Op, version: Version) -> io::Result<VersionRequest> {
@@ -193,70 +259,77 @@ fn node_specifier(op: Op, version: Version) -> io::Result<VersionRequest> {
     .map_err(|error| invalid(format!("engines.node: {error}")))?]))
 }
 
-/// One `engines.node` term, as the node semver subset allows it.
-fn engines_node_term(whole: &str, term: &str) -> io::Result<VersionRequest> {
-    const FIELD: &str = "engines.node";
-    let unsupported = || {
-        invalid(format!(
-            "engines.node range {whole} is not supported; put an exact version in .node-version"
-        ))
-    };
-    let version = |text: &str| Version::parse(text).map_err(|_| unsupported());
-    let bounded = |rest: &str, keep: usize| -> io::Result<VersionRequest> {
-        let lower = parse_version(FIELD, rest)?;
-        let mut upper: Vec<u64> = lower.parts().iter().copied().take(keep).collect();
-        while upper.len() < keep {
-            upper.push(0);
-        }
-        let last = upper.len() - 1;
-        upper[last] += 1;
-        let upper: Vec<String> = upper.iter().map(u64::to_string).collect();
-        let upper = parse_version(FIELD, &upper.join("."))?;
-        Ok(VersionRequest::Specifiers(vec![
-            Specifier::new(Op::Ge, lower).map_err(|error| invalid(format!("{FIELD}: {error}")))?,
-            Specifier::new(Op::Lt, upper).map_err(|error| invalid(format!("{FIELD}: {error}")))?,
-        ]))
-    };
-    if let Some(rest) = term.strip_prefix('^') {
-        return bounded(rest, 1);
+/// One `engines.node` comparator, lowered to the requests that all apply.
+/// An empty result admits every release (`*`, `>=0`). Partials read the way
+/// node semver reads them: a bare or `=` partial is its whole line (`24` is
+/// `>=24,<25`, only `24.1.2` is exact), `>X` is past all of X, `<=X` admits
+/// all of X, `^` bumps the first non-zero stated component and `~` the minor
+/// (or the major when only the major is stated).
+fn engines_node_term(whole: &str, term: &str) -> io::Result<Vec<VersionRequest>> {
+    for (op, rest) in [
+        (">=", term.strip_prefix(">=")),
+        ("<=", term.strip_prefix("<=")),
+        (">", term.strip_prefix('>')),
+        ("<", term.strip_prefix('<')),
+        ("^", term.strip_prefix('^')),
+        ("~", term.strip_prefix('~')),
+        ("=", term.strip_prefix('=')),
+    ] {
+        let Some(rest) = rest else { continue };
+        let parts = node_partial(whole, rest)?;
+        return match op {
+            ">=" if parts.is_empty() => Ok(Vec::new()),
+            ">=" => node_bounds(whole, Some(&parts[..]), None),
+            "<=" if parts.is_empty() => Ok(Vec::new()),
+            "<=" => node_bounds(whole, None, Some(node_next(whole, &parts)?)),
+            // `>*` and `<*` admit nothing: refuse rather than lock nothing.
+            ">" | "<" if parts.is_empty() => Err(node_unsupported(whole)),
+            ">" => Ok(vec![node_specifier(Op::Ge, node_next(whole, &parts)?)?]),
+            "<" => node_bounds(whole, None, Some(node_version(whole, &parts)?)),
+            "^" | "~" | "=" if parts.is_empty() => Ok(Vec::new()),
+            "^" => {
+                let keep = parts
+                    .iter()
+                    .position(|part| *part != 0)
+                    .map_or(parts.len(), |index| index + 1)
+                    .min(parts.len());
+                node_bounds(
+                    whole,
+                    Some(&parts[..]),
+                    Some(node_next(whole, &parts[..keep])?),
+                )
+            }
+            "~" => {
+                let keep = parts.len().min(2);
+                node_bounds(
+                    whole,
+                    Some(&parts[..]),
+                    Some(node_next(whole, &parts[..keep])?),
+                )
+            }
+            _ => node_line(whole, &parts),
+        };
     }
-    if let Some(rest) = term.strip_prefix('~') {
-        let parts = parse_version(FIELD, rest)?.parts().len();
-        return bounded(rest, parts.min(2));
+    let parts = node_partial(whole, term)?;
+    if parts.is_empty() {
+        return Ok(Vec::new());
     }
-    if let Some(rest) = term.strip_prefix(">=") {
-        return node_specifier(Op::Ge, version(rest)?);
-    }
-    if let Some(rest) = term.strip_prefix("<=") {
-        return node_specifier(Op::Lt, next_after(&version(rest)?));
-    }
-    if let Some(rest) = term.strip_prefix('>') {
-        return node_specifier(Op::Ge, next_after(&version(rest)?));
-    }
-    if let Some(rest) = term.strip_prefix('<') {
-        return node_specifier(Op::Lt, version(rest)?);
-    }
-    let bare = term.strip_prefix('=').unwrap_or(term);
-    for suffix in [".x", ".*", ".X"] {
-        if let Some(prefix) = bare.strip_suffix(suffix) {
-            return Ok(VersionRequest::Prefix(parse_version(FIELD, prefix)?));
-        }
-    }
-    Version::parse(bare)
-        .map(VersionRequest::Exact)
-        .map_err(|_| unsupported())
+    node_line(whole, &parts)
 }
 
-/// One `||` alternative: space-joined terms that all apply. An operator
-/// spelled apart from its version (`>= 20`) is one term, and `A - B` is a
-/// hyphen range: `>=A` (a partial `A` is zero-filled) and `<=B` (a partial
-/// `B` admits its whole line, so `- 2.3` is `<2.4`).
+/// A bare partial: exact at three components, otherwise its whole line.
+fn node_line(whole: &str, parts: &[u64]) -> io::Result<Vec<VersionRequest>> {
+    if parts.len() == 3 {
+        return Ok(vec![VersionRequest::Exact(node_version(whole, parts)?)]);
+    }
+    node_bounds(whole, Some(parts), Some(node_next(whole, parts)?))
+}
+
+/// One `||` alternative: space-joined comparators that all apply. An
+/// operator spelled apart from its version (`>= 20`) is one comparator, and
+/// `A - B` is a hyphen range: `>=A` (a partial `A` is zero-filled) and
+/// `<=B` (a partial `B` admits its whole line, so `- 2.3` is `<2.4`).
 fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<VersionRequest>> {
-    let unsupported = || {
-        invalid(format!(
-            "engines.node range {whole} is not supported; put an exact version in .node-version"
-        ))
-    };
     let mut tokens: Vec<String> = Vec::new();
     let mut words = alternative.split_whitespace().peekable();
     while let Some(word) = words.next() {
@@ -266,26 +339,36 @@ fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<Ve
                 tokens.push(format!("{word}{next}"));
                 words.next();
             }
-            (true, None) => return Err(unsupported()),
+            (true, None) => return Err(node_unsupported(whole)),
             (false, _) => tokens.push(word.to_string()),
         }
     }
     let mut terms = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
+        if tokens[index] == "-" {
+            return Err(node_unsupported(whole));
+        }
         if tokens.get(index + 1).map(String::as_str) == Some("-") {
-            let (low, high) = match tokens.get(index + 2) {
-                Some(high) => (&tokens[index], high),
-                None => return Err(unsupported()),
+            let high = tokens
+                .get(index + 2)
+                .ok_or_else(|| node_unsupported(whole))?;
+            let low = node_partial(whole, &tokens[index])?;
+            let high = node_partial(whole, high)?;
+            let high = if high.is_empty() {
+                None
+            } else {
+                Some(node_next(whole, &high)?)
             };
-            let low = Version::parse(low).map_err(|_| unsupported())?;
-            let high = Version::parse(high).map_err(|_| unsupported())?;
-            terms.push(node_specifier(Op::Ge, low)?);
-            terms.push(node_specifier(Op::Lt, next_after(&high))?);
+            terms.extend(node_bounds(
+                whole,
+                Some(&low).filter(|low| !low.is_empty()).map(|low| &low[..]),
+                high,
+            )?);
             index += 3;
             continue;
         }
-        terms.push(engines_node_term(whole, &tokens[index])?);
+        terms.extend(engines_node_term(whole, &tokens[index])?);
         index += 1;
     }
     Ok(terms)
@@ -293,18 +376,19 @@ fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<Ve
 
 /// Every `engines.node` term, which all apply together. `*` and an empty
 /// range state nothing. A `||` range is a set of alternatives, each a
-/// space-joined set of terms: it lowers to one [`VersionRequest::AnyOf`],
-/// or to nothing when any alternative is itself unconstrained, since that
-/// alternative admits every release.
+/// space-joined set of comparators: it lowers to one
+/// [`VersionRequest::AnyOf`], or to nothing when any alternative is itself
+/// unconstrained (empty, `*`, `x`, `>=0`), since that alternative admits
+/// every release.
 fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
     let text = text.trim();
     let mut alternatives = Vec::new();
     for alternative in text.split("||") {
-        let alternative = alternative.trim();
-        if alternative.is_empty() || alternative == "*" {
+        let terms = engines_node_alternative(text, alternative.trim())?;
+        if terms.is_empty() {
             return Ok(Vec::new());
         }
-        alternatives.push(engines_node_alternative(text, alternative)?);
+        alternatives.push(terms);
     }
     if alternatives.len() == 1 {
         return Ok(alternatives.pop().unwrap_or_default());
@@ -664,10 +748,21 @@ mod tests {
         let engines = |text: &str| vec![row("package.json", "engines.node", Some(text))];
         assert_eq!(request("node", &engines("*")), "newest");
         assert_eq!(request("node", &engines("")), "newest");
-        assert_eq!(request("node", &engines("^24.2.1")), "node >=24.2.1,<25");
-        assert_eq!(request("node", &engines("~24.2")), "node >=24.2,<24.3");
+        assert_eq!(
+            request("node", &engines("^24.2.1")),
+            "node >=24.2.1; node <25"
+        );
+        assert_eq!(
+            request("node", &engines("~24.2")),
+            "node >=24.2; node <24.3"
+        );
         assert_eq!(request("node", &engines(">=24.1")), "node >=24.1");
-        assert_eq!(request("node", &engines("24.x")), "node 24.*");
+        assert_eq!(request("node", &engines("24.x")), "node >=24; node <25");
+        assert_eq!(request("node", &engines("24")), "node >=24; node <25");
+        assert_eq!(
+            request("node", &engines("=24.0")),
+            "node >=24.0; node <24.1"
+        );
         assert_eq!(request("node", &engines("=24.20.0")), "node ==24.20.0");
         assert_eq!(
             request("node", &engines(">=24.1 <25")),
@@ -678,8 +773,14 @@ mod tests {
             ">=",
             "1.2.3 -",
             "- 2.3.4",
-            "1.x - 2",
             "^20.19 || lts/*",
+            "24.0.0.0 - 24.99.0.0",
+            "24.0.0.0",
+            ">*",
+            "1.2.3-beta.1",
+            "01.2",
+            "9007199254740992",
+            "24.x.1",
         ] {
             let error = refusal("node", &engines(text));
             assert!(
@@ -715,11 +816,11 @@ mod tests {
         // vitejs/vite's range.
         assert_eq!(
             request("node", &engines("^20.19.0 || >=22.12.0")),
-            "node >=20.19.0,<21 || >=22.12.0"
+            "node >=20.19.0 <21 || >=22.12.0"
         );
         assert_eq!(
             request("node", &engines(">=18.1 <19 || 22.x||=24.2.0")),
-            "node >=18.1 <19 || 22.* || ==24.2.0"
+            "node >=18.1 <19 || >=22 <23 || ==24.2.0"
         );
         // An unconstrained alternative admits every release.
         for text in ["^20 || *", "^20 ||", "|| ^20"] {
@@ -739,7 +840,7 @@ mod tests {
         // 21.x and 22.11 fall between the alternatives.
         assert_eq!(pick("^20.20 || ~22.11").unwrap(), "node-22.11.0");
         let error = pick("^19 || >=23").unwrap_err();
-        assert!(error.contains("node >=19,<20 || >=23"), "{error}");
+        assert!(error.contains("node >=19 <20 || >=23"), "{error}");
 
         // The pin still intersects with the whole disjunction.
         let rows = vec![
@@ -808,6 +909,148 @@ mod tests {
         assert_eq!(pick("20.0.0 - 22.11.0"), "node-22.11.0");
         assert_eq!(pick("20 - 22"), "node-22.20.0");
         assert_eq!(pick(">22 || <=20"), "node-24.1.0");
+    }
+
+    /// Node semver's own reading, case by case: (range, version, satisfies).
+    /// The cases follow node-semver's documented range grammar
+    /// (X-ranges, partials, caret, tilde, hyphen, primitive comparators).
+    #[test]
+    fn node_engines_agree_with_node_semver_on_each_case() {
+        const CASES: &[(&str, &str, bool)] = &[
+            // Bare and `=` partials are X-ranges; three components are exact.
+            ("24", "24.0.0", true),
+            ("24", "24.20.0", true),
+            ("24", "25.0.0", false),
+            ("=24", "24.20.0", true),
+            ("24.1", "24.1.9", true),
+            ("24.1", "24.2.0", false),
+            ("24.1.2", "24.1.2", true),
+            ("24.1.2", "24.1.3", false),
+            ("v24.1.2", "24.1.2", true),
+            // Zero-bearing X-ranges keep every stated component.
+            ("24.0.x", "24.0.5", true),
+            ("24.0.x", "24.20.0", false),
+            ("24.0", "24.20.0", false),
+            ("0.x", "0.9.0", true),
+            ("0.x", "1.0.0", false),
+            ("*", "1.0.0", true),
+            ("x", "24.0.0", true),
+            ("24.x.x", "24.3.1", true),
+            ("24.X", "24.3.1", true),
+            ("24.*", "25.0.0", false),
+            // Primitive comparators over partials.
+            (">24", "24.9.9", false),
+            (">24", "25.0.0", true),
+            (">24.1", "24.1.9", false),
+            (">24.1", "24.2.0", true),
+            (">24.1.2", "24.1.3", true),
+            (">24.1.2", "24.1.2", false),
+            (">=24.1", "24.1.0", true),
+            (">=24.1", "24.0.9", false),
+            ("<24.1", "24.0.9", true),
+            ("<24.1", "24.1.0", false),
+            ("<=24.1", "24.1.9", true),
+            ("<=24.1", "24.2.0", false),
+            ("<=24", "24.99.0", true),
+            ("<=24.1.2", "24.1.2", true),
+            ("<=24.1.2", "24.1.3", false),
+            // Caret: the first non-zero stated component is fixed.
+            ("^1.2.3", "1.9.0", true),
+            ("^1.2.3", "2.0.0", false),
+            ("^1.2.3", "1.2.2", false),
+            ("^0.2.3", "0.2.9", true),
+            ("^0.2.3", "0.3.0", false),
+            ("^0.0.3", "0.0.3", true),
+            ("^0.0.3", "0.0.4", false),
+            ("^0.0", "0.0.9", true),
+            ("^0.0", "0.1.0", false),
+            ("^0", "0.9.0", true),
+            ("^0", "1.0.0", false),
+            ("^1.x", "1.9.9", true),
+            ("^1.x", "2.0.0", false),
+            ("^0.x", "0.9.0", true),
+            // Tilde: the minor is fixed when stated, else the major.
+            ("~1.2.3", "1.2.9", true),
+            ("~1.2.3", "1.3.0", false),
+            ("~1.2", "1.2.0", true),
+            ("~1.2", "1.3.0", false),
+            ("~1", "1.9.0", true),
+            ("~1", "2.0.0", false),
+            ("~0.2", "0.2.5", true),
+            ("~0.2", "0.3.0", false),
+            // Hyphen ranges: partial low zero-filled, partial high its line.
+            ("1.2.3 - 2.3.4", "2.3.4", true),
+            ("1.2.3 - 2.3.4", "2.3.5", false),
+            ("1.2.3 - 2.3.4", "1.2.2", false),
+            ("1.2 - 2.3.4", "1.2.0", true),
+            ("1.2.3 - 2.3", "2.3.9", true),
+            ("1.2.3 - 2.3", "2.4.0", false),
+            ("1.2.3 - 2", "2.9.9", true),
+            ("1.2.3 - 2", "3.0.0", false),
+            ("1.x - 2.x", "2.9.0", true),
+            ("* - 2", "0.1.0", true),
+            ("24.0 - 24.0", "24.0.9", true),
+            ("24.0 - 24.0", "24.1.0", false),
+            // Sets and disjunctions.
+            (">=1.2.7 <1.3.0", "1.2.8", true),
+            (">=1.2.7 <1.3.0", "1.3.0", false),
+            (">= 1.2.7 < 1.3.0", "1.2.7", true),
+            ("1.2.7 || >=1.2.9 <2.0.0", "1.2.8", false),
+            ("1.2.7 || >=1.2.9 <2.0.0", "1.4.6", true),
+            ("24 || 26", "24.20.0", true),
+            ("24 || 26", "25.0.0", false),
+            ("24.0.x || 22.20.x", "24.20.0", false),
+            ("24.0.x || 22.20.x", "22.20.1", true),
+        ];
+        for (range, version, satisfies) in CASES {
+            let terms = engines_node(range).unwrap_or_else(|e| panic!("{range}: {e}"));
+            let candidate = Version::parse(version).unwrap();
+            let admitted = terms.iter().all(|term| term.matches(&candidate));
+            assert_eq!(admitted, *satisfies, "{range} vs {version}");
+        }
+    }
+
+    /// Zero-bearing and bare partials select from a real-shaped catalog:
+    /// `24.0.x` does not widen to 24.x, and `24 || 26` is a line, not 24.0.0.
+    #[test]
+    fn node_partials_select_their_whole_line_and_no_wider() {
+        let engines = |text: &str| vec![row("package.json", "engines.node", Some(text))];
+        let catalog = catalog(
+            "node",
+            "node",
+            &["22.20.0", "22.20.3", "24.0.2", "24.20.0", "25.1.0"],
+        );
+        let pick = |text: &str| {
+            select_for(&catalog, "node", &engines(text))
+                .map(|bundle| bundle.release.clone())
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(pick("24.0.x || 22.20.x").unwrap(), "node-24.0.2");
+        assert_eq!(pick("24.0").unwrap(), "node-24.0.2");
+        assert_eq!(pick("24 || 26").unwrap(), "node-24.20.0");
+        assert_eq!(pick("=24").unwrap(), "node-24.20.0");
+        assert_eq!(pick("22.20").unwrap(), "node-22.20.3");
+        assert!(pick("24.1").is_err());
+        // `.node-version 24.0` is the 24.0 line too.
+        let pin = vec![row(".node-version", "version", Some("24.0"))];
+        assert_eq!(
+            select_for(&catalog, "node", &pin).unwrap().release,
+            "node-24.0.2"
+        );
+    }
+
+    #[test]
+    fn node_partials_refuse_overflow_and_out_of_range_components() {
+        // Past node semver's Number.MAX_SAFE_INTEGER, and u64::MAX, refuse
+        // rather than overflow while bumping.
+        for text in [
+            "9007199254740992",
+            "<=18446744073709551615",
+            ">1.18446744073709551615",
+        ] {
+            assert!(engines_node(text).is_err(), "{text}");
+        }
+        assert!(engines_node("<=9007199254740991").is_ok());
     }
 
     #[test]
