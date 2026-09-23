@@ -97,7 +97,8 @@ by position.
   suite red because parallel test threads legitimately supervise at once,
   and a blocking lock reintroduces an unbounded silent wait. The interim
   workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
-  `--ignored` targets. Needs its own design review.
+  `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
+  signal sessions" (#57); implementation follows its review.
 - **Thread the caller's activity token through child processes.** About 25
   sites mint a fresh lease per child, and several extraction and clone
   helpers take no token at all, so protection cannot be proved at the call
