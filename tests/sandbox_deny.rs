@@ -6,7 +6,6 @@
 
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use tog::kernel::platform::Platform;
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
@@ -89,46 +88,13 @@ fn bwrap_contract() {
             return;
         }
     }
-    let version_ok = Command::new("bwrap")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    let probe_ok = Command::new("bwrap")
-        .args([
-            "--unshare-user",
-            "--unshare-net",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--unshare-cgroup-try",
-            "--die-with-parent",
-            "--new-session",
-            "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "/usr/bin/true",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !version_ok || !probe_ok {
-        skip_or_panic("bwrap_contract", "bubblewrap preflight failed");
+    // tog's own preflight, so this gate mounts exactly the system layout
+    // real builds get and a skip carries the reason doctor would print.
+    if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+        skip_or_panic(
+            "bwrap_contract",
+            format!("bubblewrap preflight failed: {error}"),
+        );
         return;
     }
 

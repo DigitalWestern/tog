@@ -580,19 +580,7 @@ impl Sandbox<'_> {
             OsString::from("--new-session"),
             OsString::from("--clearenv"),
         ];
-        push_bind(&mut args, "--ro-bind", "/usr", "/usr");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/bin");
-        push_arg(&mut args, "/bin");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/lib");
-        push_arg(&mut args, "/lib");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/lib64");
-        push_arg(&mut args, "/lib64");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/sbin");
-        push_arg(&mut args, "/sbin");
+        args.extend(system_root_args(Path::new("/")));
 
         for item in [
             "/etc/ld.so.cache",
@@ -723,14 +711,16 @@ fn bwrap_unavailable() -> String {
 /// `/usr`; a failure to exec anything else is a property of that command.
 const PROBE_TARGET: &str = "/usr/bin/true";
 
-/// A bubblewrap that starts but cannot exec. Ubuntu 22.04's bubblewrap
-/// cannot resolve tog's merged-/usr bind layout, so the raw
-/// `execvp /usr/bin/true: No such file or directory` reads like a missing
-/// file in the user's project rather than a host limitation.
+/// A bubblewrap that starts but cannot exec. The probe target is in the
+/// ro-bound `/usr`, so failing to exec it means the system runtime tog
+/// mirrors into the sandbox (`system_root_args`) does not hold together on
+/// this host, e.g. an ELF interpreter reached through an entry tog does not
+/// recreate. The raw `execvp /usr/bin/true: No such file or directory`
+/// would read like a missing file in the user's project instead.
 ///
 /// Only the probe's own target gets that explanation. bwrap prints the
 /// same line when a build spec names a binary that is not in the closure,
-/// and blaming Ubuntu for that would send the user to the wrong place.
+/// and blaming the host for that would send the user to the wrong place.
 fn explained_bwrap_stderr(stderr: &str) -> String {
     let raw = stderr.trim_end();
     if !raw.contains("execvp") || !raw.contains("No such file or directory") {
@@ -738,15 +728,36 @@ fn explained_bwrap_stderr(stderr: &str) -> String {
     }
     if raw.contains(PROBE_TARGET) {
         return format!(
-            "the sandbox starts but cannot exec inside it ({raw}): this host's bubblewrap does \
-             not resolve tog's /usr bind layout, known on Ubuntu 22.04 and fixed by a newer \
-             bubblewrap (Ubuntu 24.04, Debian 13); sandboxed work stays unavailable until then"
+            "the sandbox starts but cannot exec inside it ({raw}): tog's copy of this host's \
+             system layout (/usr, /bin, /lib, /lib64) does not let {PROBE_TARGET} load; \
+             please report it with the output of 'ls -ld /bin /lib /lib64 /usr/lib64'"
         );
     }
     format!(
-        "the sandbox started but could not exec the command ({raw}): either that binary is not \
-         in the closure bound into the sandbox, or this host's bubblewrap does not resolve \
-         tog's /usr bind layout (known on Ubuntu 22.04; a newer bubblewrap fixes it)"
+        "the sandbox started but could not exec the command ({raw}): that binary, or the \
+         interpreter it names, is not in the closure bound into the sandbox"
+    )
+}
+
+/// Ubuntu 23.10 and later ship an AppArmor switch that denies unprivileged
+/// user namespaces to any program without its own profile, and bwrap needs
+/// one. When the switch is on it is the likeliest reason the probe failed,
+/// and bwrap's own words ("setting up uid map: Permission denied") do not
+/// name it.
+fn apparmor_restricts_userns() -> bool {
+    fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn with_userns_restriction_note(message: String, restricted: bool) -> String {
+    if !restricted {
+        return message;
+    }
+    format!(
+        "{message} (AppArmor restricts unprivileged user namespaces on this host: \
+         kernel.apparmor_restrict_unprivileged_userns=1; install an AppArmor profile \
+         for bwrap, or set that sysctl to 0)"
     )
 }
 
@@ -968,7 +979,9 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
         if !version_ok {
             return Err(bwrap_unavailable());
         }
-        let probe_args = [
+        // The same system runtime the real sandbox mounts, so the probe
+        // cannot pass or fail on a layout builds never see.
+        let mut probe_args: Vec<OsString> = [
             "--unshare-user",
             "--unshare-net",
             "--unshare-pid",
@@ -980,21 +993,16 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             "--die-with-parent",
             "--new-session",
             "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            PROBE_TARGET,
-        ];
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        probe_args.extend(system_root_args(Path::new("/")));
+        probe_args.extend(
+            ["--dev", "/dev", "--proc", "/proc", PROBE_TARGET]
+                .into_iter()
+                .map(OsString::from),
+        );
         let mut probe_command = bwrap_command(&path).map_err(|error| error.to_string())?;
         probe_command
             .args(probe_args)
@@ -1012,14 +1020,17 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             }
         };
         if probe_output.0.success() {
-            Ok(path)
-        } else if probe_output.1.starts_with(b"bwrap:") {
-            Err(explained_bwrap_stderr(&String::from_utf8_lossy(
-                &probe_output.1,
-            )))
-        } else {
-            Err(bwrap_unavailable())
+            return Ok(path);
         }
+        let message = if probe_output.1.starts_with(b"bwrap:") {
+            explained_bwrap_stderr(&String::from_utf8_lossy(&probe_output.1))
+        } else {
+            bwrap_unavailable()
+        };
+        Err(with_userns_restriction_note(
+            message,
+            apparmor_restricts_userns(),
+        ))
     }) {
         Ok(path) => Ok(path.as_path()),
         Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
@@ -1058,6 +1069,50 @@ fn find_bwrap() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The top-level entries a dynamically linked program may reach outside
+/// `/usr`: `/bin/sh` shebangs, and the ELF interpreter path
+/// (`/lib64/ld-linux-x86-64.so.2`) baked into every x86_64 binary.
+const SYSTEM_ROOT_ENTRIES: [&str; 6] = ["bin", "sbin", "lib", "lib64", "lib32", "libx32"];
+
+/// The system runtime every sandbox gets: a read-only `/usr`, then each
+/// top-level entry in `SYSTEM_ROOT_ENTRIES` recreated the way `host_root`
+/// has it. A symlink becomes the same symlink (merged-/usr hosts), a real
+/// directory is read-only bound (split-/usr hosts), and a missing entry
+/// stays missing.
+///
+/// Mirroring matters because distros chain these differently. Fedora's
+/// `/lib64/ld-linux-x86-64.so.2` is a file under `/usr/lib64`; Ubuntu's is a
+/// symlink to `/lib/x86_64-linux-gnu/...`, so a sandbox without `/lib`
+/// cannot start any dynamically linked program (issue #87).
+///
+/// `host_root` is `/` in production; tests pass a fake host layout.
+fn system_root_args(host_root: &Path) -> Vec<OsString> {
+    let mut args = Vec::new();
+    push_arg(&mut args, "--ro-bind");
+    args.push(host_root.join("usr").into_os_string());
+    push_arg(&mut args, "/usr");
+    for name in SYSTEM_ROOT_ENTRIES {
+        let host = host_root.join(name);
+        let inside = Path::new("/").join(name);
+        let Ok(metadata) = fs::symlink_metadata(&host) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            let Ok(target) = fs::read_link(&host) else {
+                continue;
+            };
+            push_arg(&mut args, "--symlink");
+            args.push(target.into_os_string());
+            args.push(inside.into_os_string());
+        } else if metadata.is_dir() {
+            push_arg(&mut args, "--ro-bind");
+            args.push(host.into_os_string());
+            args.push(inside.into_os_string());
+        }
+    }
+    args
 }
 
 fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
@@ -1887,15 +1942,149 @@ mod tests {
         );
     }
 
-    /// The Ubuntu 22.04 failure is a host limitation, not a missing file in
-    /// the user's project. Doctor and every sandboxed build must say which,
-    /// keep the raw bwrap line for the bug report, and name the fix.
+    fn rendered(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Fedora and Ubuntu 22.04 are both merged-/usr, but Ubuntu reaches its
+    /// ELF interpreter through `/lib64 -> usr/lib64` and then an absolute
+    /// `/lib/x86_64-linux-gnu/...` link, so `/lib` must exist in the sandbox
+    /// (issue #87). Each host's own links are recreated, not Fedora's.
+    #[test]
+    fn system_root_mirrors_merged_usr_symlinks() {
+        let fedora = temp_dir("fedora-root");
+        fs::create_dir_all(fedora.join("usr/lib64")).unwrap();
+        for (name, target) in [
+            ("bin", "usr/bin"),
+            ("sbin", "usr/sbin"),
+            ("lib", "usr/lib"),
+            ("lib64", "usr/lib64"),
+        ] {
+            std::os::unix::fs::symlink(target, fedora.join(name)).unwrap();
+        }
+        let usr = fedora.join("usr").to_string_lossy().into_owned();
+        assert_eq!(
+            rendered(&system_root_args(&fedora)),
+            [
+                "--ro-bind",
+                &usr,
+                "/usr", //
+                "--symlink",
+                "usr/bin",
+                "/bin", //
+                "--symlink",
+                "usr/sbin",
+                "/sbin", //
+                "--symlink",
+                "usr/lib",
+                "/lib", //
+                "--symlink",
+                "usr/lib64",
+                "/lib64",
+            ]
+        );
+
+        let ubuntu = temp_dir("ubuntu-root");
+        fs::create_dir_all(ubuntu.join("usr/lib64")).unwrap();
+        for (name, target) in [
+            ("bin", "usr/bin"),
+            ("sbin", "usr/sbin"),
+            ("lib", "usr/lib"),
+            ("lib32", "usr/lib32"),
+            ("lib64", "usr/lib64"),
+            ("libx32", "usr/libx32"),
+        ] {
+            std::os::unix::fs::symlink(target, ubuntu.join(name)).unwrap();
+        }
+        let usr = ubuntu.join("usr").to_string_lossy().into_owned();
+        assert_eq!(
+            rendered(&system_root_args(&ubuntu)),
+            [
+                "--ro-bind",
+                &usr,
+                "/usr", //
+                "--symlink",
+                "usr/bin",
+                "/bin", //
+                "--symlink",
+                "usr/sbin",
+                "/sbin", //
+                "--symlink",
+                "usr/lib",
+                "/lib", //
+                "--symlink",
+                "usr/lib64",
+                "/lib64", //
+                "--symlink",
+                "usr/lib32",
+                "/lib32", //
+                "--symlink",
+                "usr/libx32",
+                "/libx32",
+            ]
+        );
+        fs::remove_dir_all(fedora).unwrap();
+        fs::remove_dir_all(ubuntu).unwrap();
+    }
+
+    /// A split-/usr host (older Debian, some containers) has real `/bin` and
+    /// `/lib` directories: they are bound read-only, and an entry the host
+    /// lacks is not invented.
+    #[test]
+    fn system_root_binds_real_directories_and_skips_missing_ones() {
+        let root = temp_dir("split-root");
+        for directory in ["usr", "bin", "lib", "lib64"] {
+            fs::create_dir(root.join(directory)).unwrap();
+        }
+        std::os::unix::fs::symlink("usr/sbin", root.join("sbin")).unwrap();
+        let host = |name: &str| root.join(name).to_string_lossy().into_owned();
+        assert_eq!(
+            rendered(&system_root_args(&root)),
+            [
+                "--ro-bind",
+                &host("usr"),
+                "/usr",
+                "--ro-bind",
+                &host("bin"),
+                "/bin",
+                "--symlink",
+                "usr/sbin",
+                "/sbin",
+                "--ro-bind",
+                &host("lib"),
+                "/lib",
+                "--ro-bind",
+                &host("lib64"),
+                "/lib64",
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Doctor names the AppArmor switch only when it is on.
+    #[test]
+    fn userns_restriction_is_named_only_when_active() {
+        let base = "bwrap: setting up uid map: Permission denied".to_string();
+        assert_eq!(with_userns_restriction_note(base.clone(), false), base);
+        let noted = with_userns_restriction_note(base.clone(), true);
+        assert!(noted.starts_with(&base), "{noted}");
+        assert!(
+            noted.contains("apparmor_restrict_unprivileged_userns"),
+            "{noted}"
+        );
+    }
+
+    /// Failing to exec the probe's own target is a host layout problem, not
+    /// a missing file in the user's project. Doctor and every sandboxed
+    /// build must say which and keep the raw bwrap line for the bug report.
     #[test]
     fn a_bwrap_that_cannot_exec_is_explained_not_forwarded_raw() {
         let raw = format!("bwrap: execvp {PROBE_TARGET}: No such file or directory");
         let explained = explained_bwrap_stderr(&raw);
         assert!(explained.contains(&raw), "{explained}");
-        assert!(explained.contains("Ubuntu 22.04"), "{explained}");
+        assert!(explained.contains("system layout"), "{explained}");
         assert!(explained.contains("cannot exec inside it"), "{explained}");
 
         // bwrap prints the same line when a build spec names a binary the
