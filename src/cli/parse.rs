@@ -167,6 +167,20 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             frozen: options.frozen,
             strict: options.strict,
         }),
+        // `fmt` syncs too when it is a package.json script delegated to
+        // `run`; it takes the flags ahead of the tool's own arguments.
+        Some(Command::Fmt {
+            check,
+            ecosystem,
+            args,
+            ..
+        }) => Some(Command::Fmt {
+            check,
+            ecosystem,
+            args,
+            frozen: options.frozen,
+            strict: options.strict,
+        }),
         other => other,
     };
     let command = match command {
@@ -415,10 +429,14 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
+    // `frozen`/`strict` are filled in by `parse` after the match, from the
+    // global options on either side of the verb.
     Ok(Some(Command::Fmt {
         check,
         ecosystem,
         args: tool_args,
+        frozen: false,
+        strict: false,
     }))
 }
 
@@ -1622,6 +1640,8 @@ mod tests {
                 check: false,
                 ecosystem: None,
                 args: vec![],
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1630,6 +1650,8 @@ mod tests {
                 check: true,
                 ecosystem: Some("rust".into()),
                 args: argv(&["--edition", "2024"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1638,6 +1660,8 @@ mod tests {
                 check: false,
                 ecosystem: None,
                 args: argv(&["--help"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1650,9 +1674,34 @@ mod tests {
                 check: false,
                 ecosystem: Some("rust".into()),
                 args: vec![],
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(message(&["fmt", "--eco"]), "fmt: --eco needs an ecosystem");
+        // `--frozen` and `--strict` reach the command from either side of
+        // the verb, so a package.json `fmt` script's sync honors them; past
+        // the tool's own arguments they belong to the tool.
+        assert_eq!(
+            command(&["--frozen", "fmt", "--strict", "--check"]),
+            Command::Fmt {
+                check: true,
+                ecosystem: None,
+                args: vec![],
+                frozen: true,
+                strict: true,
+            }
+        );
+        assert_eq!(
+            command(&["fmt", "--", "--frozen"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: None,
+                args: argv(&["--frozen"]),
+                frozen: false,
+                strict: false,
+            }
+        );
         // Both spellings reject a value that is really a mistyped flag.
         for args in [
             &["fmt", "--eco", "--check"][..],

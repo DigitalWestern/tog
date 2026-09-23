@@ -76,6 +76,11 @@ pub enum Command {
         check: bool,
         ecosystem: Option<String>,
         args: Vec<String>,
+        /// `--frozen`/`--strict` from either side of the verb (ahead of the
+        /// tool's own arguments): they govern the implicit sync when `fmt`
+        /// is a package.json script delegated to `run`.
+        frozen: bool,
+        strict: bool,
     },
     Plan {
         json: bool,
