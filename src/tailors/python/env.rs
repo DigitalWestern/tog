@@ -669,6 +669,94 @@ mod tests {
         assert!(bare.get("runtime_object").is_none());
     }
 
+    /// The durable root/2 record `project_env_inner` publishes names exactly
+    /// the environment object, the interpreter object, the native library
+    /// object the environment was built against, and the backup of the
+    /// user's real `.venv`: nothing inferred from the closure JSON, nothing
+    /// missing.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        use std::os::unix::fs::PermissionsExt;
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let store = test_store("closure-refs");
+        for sub in ["roots", "backups"] {
+            fs::create_dir_all(store.root.join(sub)).unwrap();
+        }
+        let env_id = format!("{}-env-0", "1".repeat(40));
+        let runtime_id = format!("{}-cpython-3.12.14", "2".repeat(40));
+        let native_id = format!("{}-native-libs-0", "3".repeat(40));
+        for (id, inputs) in [
+            (&env_id, serde_json::json!({ "native_libs": native_id })),
+            (&runtime_id, serde_json::json!({})),
+            (&native_id, serde_json::json!({})),
+        ] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "test", "name": id, "version": "0", "inputs": inputs},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        // A real .venv the user made: it is moved into a store backup.
+        let project = std::env::temp_dir().join(format!(
+            "tog-python-closure-refs-project-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&project);
+        fs::create_dir_all(project.join(".venv/lib")).unwrap();
+        let plan = Plan {
+            ecosystem: "python".into(),
+            python_version: "3.12.14".into(),
+            packages: Vec::new(),
+        };
+        let selected = selected_3_12();
+        let runtime = store.object_path(&runtime_id);
+        project_env_inner(
+            &project,
+            &store.object_path(&env_id),
+            &plan,
+            None,
+            &[],
+            Some((&selected, runtime.as_path())),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let backups: Vec<PathBuf> = fs::read_dir(store.root.join("backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(
+            record.objects,
+            std::collections::BTreeSet::from([env_id, runtime_id, native_id])
+        );
+        assert_eq!(
+            record.projections,
+            std::collections::BTreeSet::from([store
+                .projection_ref(crate::kernel::store::ProjectionBase::Backups, &backups[0])
+                .unwrap()])
+        );
+        let _ = crate::kernel::store::remove_tree(&store.root);
+        let _ = fs::remove_dir_all(&project);
+    }
+
     /// The shipped release the fixture plans name. Selection is the
     /// kernel's job; these tests are about what an identity hashes.
     fn selected_3_12() -> crate::kernel::toolchain::Selected {

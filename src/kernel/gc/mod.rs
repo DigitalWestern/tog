@@ -1503,6 +1503,98 @@ mod tests {
         assert!(store.object_path(&child).is_dir());
     }
 
+    /// The marking walk seeds from root objects as well as from retention
+    /// policy. `root_live` alone keeps a root's objects, but the cached
+    /// artifacts they name are kept only through the marked set: an aged,
+    /// root-protected object must keep its artifacts too.
+    #[test]
+    fn a_root_protected_object_keeps_its_cached_artifacts() {
+        let temp = TempStore::new("root-cache");
+        let store = temp.store();
+        let kept: String = std::iter::repeat_n('a', 64).collect();
+        let unnamed: String = std::iter::repeat_n('b', 64).collect();
+        for hex in [&kept, &unnamed] {
+            cached_artifact(&store, hex);
+            age(&store.cache_path("sha256", hex));
+        }
+        let identity = test_identity("cache-holder", None);
+        let id = identity.object_id();
+        let staged = store.stage().unwrap();
+        fs::write(staged.join("payload"), "cache-holder").unwrap();
+        let mut deps = ObjectDeps::new();
+        deps.cache_digest(crate::kernel::fetch::Digest::sha256(&kept).unwrap());
+        store
+            .commit_with_deps(&identity, &staged, &[], &deps)
+            .unwrap();
+        age(&store.object_path(&id));
+        register_objects(&store, &temp.root.join("project"), &[&id]);
+
+        let (report, text) = sweep(
+            &store,
+            Options {
+                keep_days: 0,
+                ..Options::default()
+            },
+        );
+        let report = report.unwrap();
+        assert_eq!(report.objects, 0, "{text}");
+        assert_eq!(report.cached_artifacts, 1, "{text}");
+        assert!(store.object_path(&id).is_dir(), "{text}");
+        assert!(
+            store.cache_path("sha256", &kept).is_file(),
+            "a root-protected object lost its cached artifact: {text}"
+        );
+        assert!(!store.cache_path("sha256", &unnamed).exists(), "{text}");
+    }
+
+    /// A root naming an object the store no longer has, directly or through
+    /// a dependency, is incomplete evidence, and only the marking walk can
+    /// see it: `root_live` skips an id with no record. The sweep must refuse
+    /// rather than treat the missing object as protecting nothing.
+    #[test]
+    fn a_root_naming_an_absent_object_blocks_the_sweep() {
+        for shape in ["root", "dependency"] {
+            let temp = TempStore::new(&format!("absent-{shape}"));
+            let store = temp.store();
+            let dead = commit(&store, "dead", None);
+            age(&store.object_path(&dead));
+            let (named, absent) = match shape {
+                "root" => {
+                    let absent = format!("{}-absent-1", "0".repeat(40));
+                    (absent.clone(), absent)
+                }
+                _ => {
+                    let child = commit(&store, "child", None);
+                    let parent = commit(&store, "parent", Some(&child));
+                    age(&store.object_path(&parent));
+                    store::remove_tree(&store.object_path(&child)).unwrap();
+                    fs::remove_file(store.root.join("meta").join(format!("{child}.json"))).unwrap();
+                    (parent, child)
+                }
+            };
+            register_objects(&store, &temp.root.join("project"), &[&named]);
+
+            let (result, text) = sweep(
+                &store,
+                Options {
+                    keep_days: 0,
+                    ..Options::default()
+                },
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("refusing to sweep"), "{shape}: {error}");
+            assert!(
+                error.contains(&format!("{absent} has no metadata"))
+                    || error.contains(&format!("object {absent}, reachable from")),
+                "{shape}: the absent object is not named: {error}"
+            );
+            assert!(
+                store.object_path(&dead).is_dir(),
+                "{shape}: a refused sweep deleted an unprotected object: {text}"
+            );
+        }
+    }
+
     #[test]
     fn dependency_cycle_terminates_and_retains_both() {
         let temp = TempStore::new("cycle");
@@ -2783,6 +2875,198 @@ mod tests {
             projection.join("left-pad").is_dir(),
             "a forest lost its protection when the project directory vanished: {text}"
         );
+    }
+
+    /// One project synced with two ecosystems, each resynced once: the
+    /// visible closures name only the newest environments, but the durable
+    /// record is a union, so all four stay protected.
+    #[test]
+    fn two_ecosystems_and_two_environments_all_stay_protected() {
+        let temp = TempStore::new("two-ecosystems");
+        let store = temp.store();
+        let project = temp.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let dead = commit(&store, "dead", None);
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut published = Vec::new();
+        for (ecosystem, generation) in [
+            ("python", "old"),
+            ("node", "old"),
+            ("python", "new"),
+            ("node", "new"),
+        ] {
+            let id = commit(&store, &format!("{ecosystem}-{generation}-env"), None);
+            let mut attribution = crate::kernel::policy::Attribution::open(ecosystem).unwrap();
+            let activity = store.activity(ActivityMode::Exclusive).unwrap();
+            let mut refs = crate::comforter::ClosureRefs::new();
+            refs.object_id(&store, &activity, &id).unwrap();
+            crate::comforter::write_closure(
+                &project,
+                ecosystem,
+                serde_json::json!({"env_object": store.object_path(&id)}),
+                &store,
+                &activity,
+                refs,
+                &mut attribution,
+            )
+            .unwrap();
+            attribution.finish(true).unwrap();
+            published.push(id);
+        }
+        for id in published.iter().chain([&dead]) {
+            age(&store.object_path(id));
+        }
+
+        let (report, text) = sweep(
+            &store,
+            Options {
+                keep_days: 0,
+                ..Options::default()
+            },
+        );
+        assert_eq!(report.unwrap().objects, 1, "{text}");
+        for id in &published {
+            assert!(
+                store.object_path(id).is_dir(),
+                "{id} lost its protection: {text}"
+            );
+        }
+        assert!(!store.object_path(&dead).exists(), "{text}");
+    }
+
+    /// New projections live under the store's own root, so two stores that
+    /// share a home never share a forest: the same reference names a
+    /// different directory in each, neither can claim the other's, and a
+    /// sweep of one never reaches into the other.
+    #[test]
+    fn sibling_stores_have_disjoint_new_projection_namespaces() {
+        let temp = TempStore::new("sibling-stores");
+        let home = temp.root.join("home");
+        let [ours, theirs] = ["store-a", "store-b"].map(|name| {
+            let root = home.join(name);
+            for sub in [
+                "objects",
+                "meta",
+                "cache/sha256",
+                "tmp",
+                "roots",
+                "forests",
+                "backups",
+            ] {
+                fs::create_dir_all(root.join(sub)).unwrap();
+            }
+            Store {
+                root: root.canonicalize().unwrap(),
+            }
+        });
+        let reference = store::ProjectionRef::new(
+            store::ProjectionBase::Forests,
+            vec!["0123456789abcdef".into(), "node_modules".into()],
+        )
+        .unwrap();
+        let (our_forest, their_forest) = (reference.path(&ours), reference.path(&theirs));
+        assert_ne!(our_forest, their_forest);
+        assert!(our_forest.starts_with(ours.root.join("forests")));
+        assert!(their_forest.starts_with(theirs.root.join("forests")));
+        assert!(
+            ours.projection_ref(store::ProjectionBase::Forests, &their_forest)
+                .is_err(),
+            "a store claimed its sibling's forest"
+        );
+
+        for forest in [&our_forest, &their_forest] {
+            fs::create_dir_all(forest.join("left-pad")).unwrap();
+            age(forest);
+        }
+        register_objects(&ours, &temp.root.join("project"), &[]);
+        let (report, text) = sweep(
+            &ours,
+            Options {
+                keep_days: 0,
+                project: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(report.unwrap().forests, 1, "{text}");
+        assert!(!our_forest.exists(), "{text}");
+        assert!(
+            their_forest.join("left-pad").is_dir(),
+            "a sweep reached into a sibling store: {text}"
+        );
+    }
+
+    /// A project whose path is not UTF-8 may once have been recorded under
+    /// its lossy spelling (U+FFFD for the bad byte), and so under the lossy
+    /// spelling's key. Registering the real path writes its own key; the
+    /// old record is neither merged into it nor re-keyed. It stays as it
+    /// was, both keys are listed, and the sweep refuses until the old key is
+    /// forgotten explicitly.
+    // APFS refuses non-UTF-8 file names (EILSEQ), so the real path can only
+    // exist on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_lossy_key_is_not_silently_reassigned() {
+        use sha1::Digest as _;
+        use std::os::unix::ffi::OsStringExt;
+        let key = |path: &Path| hex::encode(sha1::Sha1::digest(path.as_os_str().as_bytes()));
+        let temp = TempStore::new("lossy-key");
+        let store = temp.store();
+        let protected = commit(&store, "protected", None);
+        let dead = commit(&store, "dead", None);
+        age(&store.object_path(&protected));
+        age(&store.object_path(&dead));
+        let raw = PathBuf::from(std::ffi::OsString::from_vec(
+            [store.root.as_os_str().as_bytes(), b"/project-\xff"].concat(),
+        ));
+        fs::create_dir_all(&raw).unwrap();
+        let lossy = PathBuf::from(raw.to_string_lossy().into_owned());
+        let (raw_key, lossy_key) = (key(&raw), key(&lossy));
+        assert_ne!(raw_key, lossy_key);
+
+        let legacy = store.root.join("roots").join(&lossy_key);
+        fs::write(&legacy, format!("{}\n", lossy.display())).unwrap();
+        let legacy_bytes = fs::read(&legacy).unwrap();
+        store
+            .register_root_record(store::RootRecord {
+                key: raw_key.clone(),
+                project_path: raw.clone(),
+                objects: BTreeSet::from([protected.clone()]),
+                projections: BTreeSet::new(),
+                updated: 1,
+            })
+            .unwrap();
+
+        let roots = store.roots().unwrap();
+        let keys: BTreeSet<&str> = roots.iter().map(|root| root.key.as_str()).collect();
+        assert_eq!(keys, BTreeSet::from([raw_key.as_str(), lossy_key.as_str()]));
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+
+        let (result, text) = sweep(
+            &store,
+            Options {
+                keep_days: 0,
+                ..Options::default()
+            },
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("--forget {lossy_key}")),
+            "the old key is not named for recovery: {error}"
+        );
+        assert!(store.object_path(&dead).is_dir(), "{text}");
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+
+        store.forget_root(&lossy_key).unwrap();
+        let (report, text) = sweep(
+            &store,
+            Options {
+                keep_days: 0,
+                ..Options::default()
+            },
+        );
+        assert_eq!(report.unwrap().objects, 1, "{text}");
+        assert!(store.object_path(&protected).is_dir(), "{text}");
+        assert!(!store.object_path(&dead).exists(), "{text}");
     }
 
     /// A preview separates what it would delete from what retention kept

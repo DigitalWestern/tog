@@ -1622,6 +1622,79 @@ mod tests {
         assert_eq!(closure["plan"]["go_version"], GO_VERSION);
     }
 
+    /// The durable root/2 record `project_go_env` publishes names exactly
+    /// the Go runtime object and the module-cache object it was handed:
+    /// nothing inferred from the closure JSON, nothing missing.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("go").unwrap();
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let selected = selection();
+        let go_id = {
+            let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
+            runtime_identity(Platform::host().unwrap(), &row.version, row.digest.hex()).object_id()
+        };
+        let modcache_id = "0000000000000000000000000000000000000000-modcache-0".to_string();
+        for id in [&go_id, &modcache_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": id,
+                    "identity": {"kind": "go", "name": "go", "version": "0", "inputs": {}},
+                    "created": 0,
+                    "exceptions": [],
+                    "refs": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let plan = GoPlan {
+            go_version: GO_VERSION.into(),
+            module: "example.com/m".into(),
+            modules: Vec::new(),
+        };
+        project_go_env(
+            &project,
+            &store.object_path(&go_id),
+            &store.object_path(&modcache_id),
+            &plan,
+            "sum",
+            &selected,
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(
+            record.objects,
+            std::collections::BTreeSet::from([go_id, modcache_id])
+        );
+        assert!(record.projections.is_empty(), "{:?}", record.projections);
+    }
+
     #[test]
     fn ensure_go_for_rejects_unpinned_version_before_store_access() {
         let _lock = crate::kernel::store::STORE_ENV_LOCK

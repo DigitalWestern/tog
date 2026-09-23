@@ -1468,6 +1468,62 @@ mod tests {
         assert_eq!(body["plan"]["ruby_platform"], "x86_64-linux");
     }
 
+    /// The durable root/2 record `project_ruby_env` publishes names exactly
+    /// the Ruby interpreter object and the gems object it was handed:
+    /// nothing inferred from the closure JSON, nothing missing.
+    #[test]
+    fn closure_refs_name_every_object_this_producer_created() {
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let mut attribution = crate::kernel::policy::Attribution::open("ruby").unwrap();
+        let temp = TempDir::new();
+        let store_root = temp.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp", "roots"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: store_root.canonicalize().unwrap(),
+        };
+        let ruby_id = format!("{}-ruby-{RUBY_VERSION}", "1".repeat(40));
+        let gems_id = format!("{}-gems-1", "2".repeat(40));
+        for id in [&ruby_id, &gems_id] {
+            let object = store.object_path(id);
+            fs::create_dir_all(&object).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            fs::set_permissions(&object, permissions).unwrap();
+            fs::write(
+                store.root.join("meta").join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&serde_json::json!({ "id": id })).unwrap(),
+            )
+            .unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        project_ruby_env(
+            &project,
+            &store.object_path(&ruby_id),
+            &store.object_path(&gems_id),
+            &linux_test_plan(),
+            &"c".repeat(64),
+            &shipped_selection().unwrap(),
+            &mut attribution,
+        )
+        .unwrap();
+        attribution.finish(true).unwrap();
+
+        let roots = store.roots().unwrap();
+        assert_eq!(roots.len(), 1, "no durable root record was published");
+        let record = roots[0].record.as_ref().expect("root/2 record");
+        assert_eq!(
+            record.objects,
+            std::collections::BTreeSet::from([ruby_id, gems_id])
+        );
+        assert!(record.projections.is_empty(), "{:?}", record.projections);
+    }
+
     #[test]
     fn forced_env_covers_bundler_side_doors() {
         let env = forced_env(Path::new("/p"), Path::new("/g"));
