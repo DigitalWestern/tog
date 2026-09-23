@@ -359,13 +359,17 @@ snapshots:
       b: 2.0.0
 "#
     );
-    let error = plan_local("local-hoisted", &["vendor/a"], &hoisted).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("needed by the local package vendor/a"),
-        "{error}"
-    );
+    let error = plan_local("local-hoisted", &["vendor/a"], &hoisted)
+        .unwrap_err()
+        .to_string();
+    for part in [
+        "the file: package vendor/a needs b@2.0.0",
+        "the root importer needs b@1.0.0",
+        "reaches node_modules/b first",
+        "file: packages whose dependencies conflict with their workspace member's are not supported yet",
+    ] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
 
     // Same shape, but the root already links `a` elsewhere, so the second
     // link would nest inside host's directory: a store object.
@@ -458,13 +462,121 @@ fn a_local_package_may_not_shadow_its_importers_own_dependency() {
         &["packages/app/vendor/same", "packages/lib/vendor/cross"],
         &lock,
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
+    for part in [
+        "importer packages/app needs is-number@7.0.0",
+        "the file: package packages/app/vendor/same needs is-number@6.0.0",
+        "reaches packages/app/node_modules/is-number first",
+        "file: packages whose dependencies conflict with their workspace member's are not supported yet",
+    ] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
+}
+
+/// An optional dependency skipped for the host platform is never placed,
+/// so it is no requirement: the root's darwin-only b@2 must not conflict
+/// with the b@1 a registry package hoists to the root.
+#[test]
+fn a_platform_skipped_optional_dependency_is_no_requirement() {
+    let lock = format!(
+        r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      host:
+        specifier: 1.0.0
+        version: 1.0.0
+    optionalDependencies:
+      b:
+        specifier: 2.0.0
+        version: 2.0.0
+packages:
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  b@2.0.0:
+    resolution: {{integrity: {SRI}}}
+    os: [darwin]
+  host@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  b@1.0.0: {{}}
+  b@2.0.0:
+    optional: true
+  host@1.0.0:
+    dependencies:
+      b: 1.0.0
+"#
+    );
+    let plan = plan_local("optional-skip", &[], &lock).unwrap();
     assert!(
-        error
-            .to_string()
-            .contains("importer packages/app needs its own is-number"),
+        plan.packages
+            .iter()
+            .any(|package| package.path == "node_modules/b" && package.version == "1.0.0"),
+        "{:?}",
+        plan.packages
+    );
+}
+
+/// `foo` and `foo@*` both patch every version; pnpm keeps the one its config
+/// lists last, an order the lockfile's sorted map loses. The hash pnpm
+/// recorded on the snapshot says which one it applied; without it the lock
+/// is refused rather than guessed.
+#[test]
+fn two_every_version_patch_keys_are_settled_by_the_recorded_hash() {
+    let dir = scratch_project("pnpm-every-version-twice");
+    let bare = write_patch(&dir, "foo.patch", b"diff --git a/bare b/bare\n");
+    let star = write_patch(&dir, "foo-star.patch", b"diff --git a/star b/star\n");
+    let lock = |recorded: &str| {
+        let suffix = if recorded.is_empty() {
+            String::new()
+        } else {
+            format!("(patch_hash={recorded})")
+        };
+        format!(
+            r#"lockfileVersion: '9.0'
+patchedDependencies:
+  foo:
+    hash: {bare}
+    path: patches/foo.patch
+  foo@*:
+    hash: {star}
+    path: patches/foo-star.patch
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0{suffix}
+packages:
+  foo@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  foo@1.0.0{suffix}: {{}}
+"#
+        )
+    };
+    let plan_for = |lock: &str| {
+        tog::tailors::node::lock_import::plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            lock,
+            &dir,
+            node_version(),
+        )
+    };
+    for chosen in [&bare, &star] {
+        let plan = plan_for(&lock(chosen)).unwrap();
+        assert_eq!(
+            plan.packages[0].patch.as_ref().map(|patch| &patch.hash),
+            Some(chosen)
+        );
+    }
+    let error = plan_for(&lock("")).unwrap_err().to_string();
+    assert!(
+        error.contains("each patch every version of foo with a different patch"),
         "{error}"
     );
+    let _ = fs::remove_dir_all(dir);
 }
 
 fn write_patch(dir: &Path, name: &str, bytes: &[u8]) -> String {

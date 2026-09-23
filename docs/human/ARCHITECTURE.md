@@ -146,10 +146,15 @@ gets them in the nearest enclosing importer's `node_modules`, where Node
 looks from the package's real path. Every importer's and local package's
 dependencies are then checked against that lookup chain, and a layout where
 one would shadow another, or a link that would sit inside a registry
-package, is refused. pnpm `patchedDependencies` follow pnpm's precedence
-(exact version, then the one npm semver range the version satisfies, then a
-bare name that covers every version), and any snapshot whose recorded
-`patch_hash` disagrees with the selected patch is refused. Lifecycle scripts run hermetically (below).
+package, is refused; a `file:` package whose dependencies conflict with its
+workspace member's is not supported yet. pnpm `patchedDependencies` follow
+pnpm's precedence (exact version, then the one npm semver range the version
+satisfies, then a bare name or `name@*` that covers every version, two of
+those settled by the snapshot's recorded hash), and any snapshot whose
+recorded `patch_hash` disagrees with the selected patch is refused. Ranges
+are read by `kernel/semver.rs`, node-semver's grammar and `satisfies`,
+checked case by case against node-semver itself
+(`kernel/semver_cases.tsv`). Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over
 ranged manifests, so a bare machine needs nothing installed besides tog.
 

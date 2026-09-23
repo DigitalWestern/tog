@@ -241,6 +241,90 @@ fn workspace_parent_context(path: &str, workspaces: &BTreeSet<String>) -> String
         .unwrap_or_default()
 }
 
+/// Whoever needs a dependency resolved from a real path in the project: an
+/// importer, or a local `file:` package. `context` is where Node's walk up
+/// the projected node_modules starts.
+#[derive(Debug, Clone)]
+struct Requirer {
+    who: String,
+    context: String,
+    local: bool,
+}
+
+/// The first `node_modules/<name>` Node's resolver meets walking up from
+/// `context`, if any.
+fn first_on_chain<'a>(
+    context: &str,
+    name: &str,
+    occupied: &'a BTreeMap<String, Occupied>,
+    workspaces: &BTreeSet<String>,
+) -> Option<(String, &'a Occupied)> {
+    let mut context = context.to_string();
+    loop {
+        let path = dependency_path(&context, name);
+        if let Some(existing) = occupied.get(&path) {
+            return Some((path, existing));
+        }
+        if context.is_empty() {
+            return None;
+        }
+        context = if context.contains("/node_modules/") {
+            parent_context(&context)
+        } else {
+            workspace_parent_context(&context, workspaces)
+        };
+    }
+}
+
+fn target_description(dependency: &Dependency, nodes: &BTreeMap<String, Node>) -> String {
+    match &dependency.target {
+        Target::Node(key) => nodes
+            .get(key)
+            .map(|node| format!("{}@{}", node.name, node.version))
+            .unwrap_or_else(|| key.clone()),
+        Target::Link(target) => format!("{} (workspace link {target})", dependency.name),
+        Target::External(detail) => format!("{} ({detail})", dependency.name),
+    }
+}
+
+/// Two requirements Node would resolve to the same `node_modules/<name>`,
+/// named both ways round.
+fn conflict(
+    requirer: &Requirer,
+    dependency: &Dependency,
+    (path, found): (&str, &Occupied),
+    requirements: &[(Requirer, Dependency)],
+    occupied: &BTreeMap<String, Occupied>,
+    workspaces: &BTreeSet<String>,
+    nodes: &BTreeMap<String, Node>,
+) -> io::Error {
+    // Prefer the requirer that resolves to that very path.
+    let holders = requirements.iter().filter(|(_, other)| {
+        other.name == dependency.name && same_target(found, &other.target, nodes)
+    });
+    let holder = holders
+        .clone()
+        .find(|(holder, _)| {
+            first_on_chain(&holder.context, &dependency.name, occupied, workspaces)
+                .is_some_and(|(held, _)| held == path)
+        })
+        .or_else(|| holders.clone().next());
+    let holder_who = holder.map_or("another package", |(holder, _)| holder.who.as_str());
+    let mut message = format!(
+        "{} needs {} but {holder_who} needs {}, and Node resolving from {}'s real path reaches {path} first; tog cannot project both",
+        requirer.who,
+        target_description(dependency, nodes),
+        occupied_description(found),
+        requirer.who,
+    );
+    if requirer.local || holder.is_some_and(|(holder, _)| holder.local) {
+        message.push_str(
+            ". file: packages whose dependencies conflict with their workspace member's are not supported yet",
+        );
+    }
+    err(message)
+}
+
 fn existing_ancestor(
     parent: &str,
     name: &str,
@@ -538,43 +622,63 @@ fn build_plan(
 ) -> io::Result<NpmPlan> {
     let workspace_paths = graph.workspace_paths.clone();
     let mut occupied = BTreeMap::<String, Occupied>::new();
-    // (parent, dependency, workspace, local package that needs it)
-    let mut queue = VecDeque::<(String, Dependency, Option<String>, Option<String>)>::new();
+    // (parent, dependency, workspace, who needs it when it is a requirement
+    // Node must resolve from a real path in the project)
+    let mut queue = VecDeque::<(String, Dependency, Option<String>, Option<Requirer>)>::new();
     let enqueue_roots = |roots: Vec<RootDependency>, queue: &mut VecDeque<_>| {
         for root in roots {
             let parent = root.workspace.clone().unwrap_or_default();
-            queue.push_back((parent, root.dependency, root.workspace, None));
+            let requirer = Requirer {
+                who: match &root.workspace {
+                    Some(workspace) => format!("importer {workspace}"),
+                    None => "the root importer".to_string(),
+                },
+                context: parent.clone(),
+                local: false,
+            };
+            queue.push_back((parent, root.dependency, root.workspace, Some(requirer)));
         }
     };
-    // (who needs it, the context Node resolves it from, the dependency).
-    // Every importer's own dependencies and every local package's are
-    // checked against the final layout, so a later placement cannot shadow
-    // one of them unnoticed.
-    let mut requirements = Vec::<(String, String, Dependency)>::new();
-    for root in graph.roots.iter().chain(&graph.workspace_roots) {
-        let context = root.workspace.clone().unwrap_or_default();
-        let who = match &root.workspace {
-            Some(workspace) => format!("importer {workspace}"),
-            None => "the root importer".to_string(),
-        };
-        requirements.push((who, context, root.dependency.clone()));
-    }
     enqueue_roots(graph.roots, &mut queue);
     let mut workspace_queue = VecDeque::new();
     enqueue_roots(graph.workspace_roots, &mut workspace_queue);
     let mut expanded = BTreeSet::<(String, String)>::new();
     let mut links = BTreeMap::<String, NpmLink>::new();
+    // Every importer's own dependencies and every local package's, once
+    // placed: checked against the final layout, so a later placement cannot
+    // shadow one of them unnoticed.
+    let mut requirements = Vec::<(Requirer, Dependency)>::new();
 
     while !queue.is_empty() || !workspace_queue.is_empty() {
         if queue.is_empty() {
             std::mem::swap(&mut queue, &mut workspace_queue);
         }
-        let (parent, dependency, workspace, needed_by) = queue.pop_front().unwrap();
-        let for_local = |error: io::Error| match &needed_by {
-            Some(target) => err(format!(
-                "{error} (needed by the local package {target}, resolved from its real path)"
-            )),
-            None => error,
+        let (parent, dependency, workspace, requirer) = queue.pop_front().unwrap();
+        // A local package's dependency that cannot be placed conflicts with
+        // whatever already holds its name on the real-path lookup chain.
+        let for_local = |error: io::Error,
+                         occupied: &BTreeMap<String, Occupied>,
+                         requirements: &[(Requirer, Dependency)]| {
+            let Some(requirer) = requirer.as_ref().filter(|requirer| requirer.local) else {
+                return error;
+            };
+            match first_on_chain(
+                &requirer.context,
+                &dependency.name,
+                occupied,
+                &workspace_paths,
+            ) {
+                Some((path, found)) => conflict(
+                    requirer,
+                    &dependency,
+                    (&path, found),
+                    requirements,
+                    occupied,
+                    &workspace_paths,
+                    &graph.nodes,
+                ),
+                None => error,
+            }
         };
         let in_workspace =
             workspace.is_some() || (!parent.is_empty() && !parent.starts_with("node_modules/"));
@@ -584,6 +688,8 @@ fn build_plan(
                 continue;
             }
             Target::Node(node_key) => {
+                // A platform-skipped optional dependency is not placed, so it
+                // is no requirement either.
                 let Some(node) =
                     realizable_node(platform, &graph.nodes, node_key, &dependency, lock_source)?
                 else {
@@ -599,7 +705,7 @@ fn build_plan(
                     &graph.nodes,
                     &workspace_paths,
                 )
-                .map_err(for_local)?;
+                .map_err(|error| for_local(error, &occupied, &requirements))?;
                 (path, true)
             }
             Target::Link(target) => {
@@ -612,10 +718,13 @@ fn build_plan(
                     &mut links,
                     &graph.nodes,
                 )
-                .map_err(for_local)?;
+                .map_err(|error| for_local(error, &occupied, &requirements))?;
                 (path, false)
             }
         };
+        if let Some(requirer) = requirer {
+            requirements.push((requirer, dependency.clone()));
+        }
         if should_expand {
             let Target::Node(node_key) = dependency.target else {
                 continue;
@@ -646,17 +755,12 @@ fn build_plan(
                 let context = workspace_parent_context(target, &workspace_paths);
                 if let Some(children) = graph.local_link_deps.get(target) {
                     for child in children {
-                        requirements.push((
-                            format!("local package {target}"),
-                            context.clone(),
-                            child.clone(),
-                        ));
-                        queue.push_back((
-                            context.clone(),
-                            child.clone(),
-                            None,
-                            Some(target.clone()),
-                        ));
+                        let requirer = Requirer {
+                            who: format!("the file: package {target}"),
+                            context: context.clone(),
+                            local: true,
+                        };
+                        queue.push_back((context.clone(), child.clone(), None, Some(requirer)));
                     }
                 }
             }
@@ -665,23 +769,24 @@ fn build_plan(
 
     // Node walks up from each requirer's real path and stops at the first
     // node_modules/<name>; that first hit must be what the lock gave it.
-    for (who, context, dependency) in &requirements {
-        if matches!(dependency.target, Target::External(_)) {
-            continue;
-        }
-        let found = existing_ancestor(
-            context,
+    for (requirer, dependency) in &requirements {
+        if let Some((path, found)) = first_on_chain(
+            &requirer.context,
             &dependency.name,
-            &dependency.target,
             &occupied,
-            &graph.nodes,
             &workspace_paths,
-        );
-        if found.is_err() {
-            return Err(err(format!(
-                "{who} needs its own {name}, but Node resolving from its real path would find a different {name} first; tog cannot project this layout",
-                name = dependency.name
-            )));
+        ) {
+            if !same_target(found, &dependency.target, &graph.nodes) {
+                return Err(conflict(
+                    requirer,
+                    dependency,
+                    (&path, found),
+                    &requirements,
+                    &occupied,
+                    &workspace_paths,
+                    &graph.nodes,
+                ));
+            }
         }
     }
     // A link below a package would be planted inside that package's
