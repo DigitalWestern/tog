@@ -261,7 +261,19 @@ from a pre-lock closure's recorded platform and exact versions and refuses,
 naming `tog update --toolchain`, when either is missing, when the
 version is not in the catalog, or when the bundle is incomplete on the
 other platform: a closure realized on one platform is not evidence for the
-other.
+other. The closure's version strings are only a claim. Each tailor's
+`legacy_toolchain_evidence` also reads the runtime object the closure
+names (through its environment object for Python and Node) in the active
+store, located by `Store::existing` and read by `Store::published_identity`.
+The seeding lookup itself only reads: no lease, lock file, touch or created
+directory (the command around it, `status` and `doctor` included, may
+already have opened the store). An object the store
+holds proves the artifact rows its identity was built from
+(`comforter::toolchain::prove_legacy_runtime`), and those proofs decide
+between releases that share a version. An object the store lacks proves
+nothing: a unique version still seeds, and a tie refuses and says the
+object was missing. An object whose kind, platform or version contradicts
+the closure, or whose metadata does not hash to its id, refuses outright.
 
 ## Permissive by default, strict as a switch
 

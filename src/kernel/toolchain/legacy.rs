@@ -3,11 +3,18 @@
 //!
 //! A seed comes only from what the closure proves: the platform it was
 //! realized on and the exact primary version(s) it records, plus, when the
-//! tailor can verify the closure's runtime object against its pins, the
-//! artifact(s) that object was built from. Anything less refuses and names
-//! `tog update --toolchain`; the seed never guesses from the shipped
-//! default. A closure proves its own platform only: the other platform's
-//! rows must come from a bundle the catalog already holds complete.
+//! tailor finds the closure's runtime object in the active store, the
+//! artifact(s) that object's identity says it was built from. Anything less
+//! refuses and names `tog update --toolchain`; the seed never guesses from
+//! the shipped default. A closure proves its own platform only: the other
+//! platform's rows must come from a bundle the catalog already holds
+//! complete.
+//!
+//! Versions alone seed only when exactly one release carries them. When
+//! several do, only a proved artifact tells them apart, and a runtime object
+//! the store does not hold proves nothing. A runtime object the store does
+//! hold whose identity contradicts the closure refuses outright: that
+//! closure is evidence for nothing.
 
 use super::{invalid, qualified, Bundle, Catalog, Version};
 use crate::kernel::digest::Digest;
@@ -18,7 +25,9 @@ use std::io;
 pub const UPDATE_HINT: &str = "run `tog update --toolchain`";
 
 /// An artifact a closure's recorded runtime object proves it was built
-/// from: the tailor recomputed the object id from a pin row and it matched.
+/// from: the tailor found the object in the active store, its metadata
+/// identity hashes to the recorded id, and this digest and recipe are that
+/// identity's own inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvedArtifact {
     pub component: String,
@@ -36,6 +45,13 @@ pub struct LegacyEvidence {
     pub versions: Vec<(String, String)>,
     /// Artifacts proved on `platform`, when the tailor could verify them.
     pub artifacts: Vec<ProvedArtifact>,
+    /// Why the closure's runtime object proved no artifact (it names none,
+    /// or one the active store does not hold). Seeding goes on from the
+    /// versions and names this when they are ambiguous.
+    pub unproved: Vec<String>,
+    /// How a runtime object the store does hold contradicts the closure
+    /// (another kind, platform or version). Seeding refuses.
+    pub contradicted: Vec<String>,
 }
 
 impl LegacyEvidence {
@@ -59,6 +75,9 @@ pub fn seed<'a>(catalog: &'a Catalog, evidence: &LegacyEvidence) -> io::Result<&
     let Some(platform) = evidence.platform else {
         return Err(refuse(catalog, "the closure records no platform".into()));
     };
+    if let Some(why) = evidence.contradicted.first() {
+        return Err(refuse(catalog, why.clone()));
+    }
     let Some(first) = catalog.bundles().first() else {
         return Err(invalid(format!(
             "{} catalog is empty: nothing to seed a toolchain lock from",
@@ -124,13 +143,14 @@ pub fn seed<'a>(catalog: &'a Catalog, evidence: &LegacyEvidence) -> io::Result<&
     }
     if candidates.len() > 1 {
         let keys: Vec<&str> = candidates.iter().map(|b| b.release.as_str()).collect();
-        return Err(refuse(
-            catalog,
-            format!(
-                "releases {} all have {described} and the closure proves no artifact that tells them apart",
-                keys.join(", ")
-            ),
-        ));
+        let mut why = format!(
+            "releases {} all have {described} and the closure proves no artifact that tells them apart",
+            keys.join(", ")
+        );
+        for gap in &evidence.unproved {
+            why.push_str(&format!(" ({gap})"));
+        }
+        return Err(refuse(catalog, why));
     }
     let bundle = candidates[0];
     if !bundle.complete_for(platform) {
@@ -186,6 +206,7 @@ mod tests {
             platform,
             versions: vec![("cpython".into(), version.into())],
             artifacts: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -286,6 +307,7 @@ mod tests {
                 recipe: recipe.into(),
                 digest: sha256(fill),
             }],
+            ..Default::default()
         };
         assert_eq!(
             seed(&catalog, &proof("example/2", 'b')).unwrap().release,
@@ -304,6 +326,36 @@ mod tests {
         assert_refuses(
             seed(&catalog, &proof("example/9", 'b')).unwrap_err(),
             "under recipe example/9",
+        );
+    }
+
+    #[test]
+    fn a_contradiction_refuses_and_a_gap_is_named_only_when_it_matters() {
+        let catalog = python_catalog();
+        // A unique version seeds without proof; the gap is not an error.
+        let mut unproved = evidence(Some(LINUX), "3.12.14");
+        unproved.unproved = vec!["the closure's cpython object x is not in the store".into()];
+        assert_eq!(seed(&catalog, &unproved).unwrap().release, "py312");
+        // A contradiction refuses even when the version alone would do.
+        let mut contradicted = evidence(Some(LINUX), "3.12.14");
+        contradicted.contradicted = vec!["the closure's go object x is a ruby object".into()];
+        assert_refuses(
+            seed(&catalog, &contradicted).unwrap_err(),
+            "the closure's go object x is a ruby object",
+        );
+        // An ambiguous version names why no object told the releases apart.
+        let mut r1 = bundle("py312-r1", "cpython", "3.12.14", Platform::ALL);
+        r1.revision = Some(1);
+        let mut r2 = r1.clone();
+        r2.release = "py312-r2".into();
+        r2.revision = Some(2);
+        for row in &mut r2.artifacts {
+            row.recipe = "example/2".into();
+        }
+        let tied = Catalog::new("python", vec![r1, r2]).unwrap();
+        assert_refuses(
+            seed(&tied, &unproved).unwrap_err(),
+            "tells them apart (the closure's cpython object x is not in the store)",
         );
     }
 
@@ -327,6 +379,7 @@ mod tests {
             platform: Some(LINUX),
             versions: vec![("otp".into(), "29.0.5".into())],
             artifacts: Vec::new(),
+            ..Default::default()
         };
         let error = seed(&catalog, &otp_only).unwrap_err().to_string();
         assert!(error.contains("records no elixir version"), "{error}");
@@ -337,6 +390,7 @@ mod tests {
                 ("otp".into(), "29.0.5".into()),
             ],
             artifacts: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(seed(&catalog, &both).unwrap().release, "beam");
     }

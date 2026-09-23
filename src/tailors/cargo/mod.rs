@@ -160,18 +160,71 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 }
 
 /// A pre-lock cargo closure records the toolchain under `plan.rust_version`;
-/// a rustfmt closure records it at the top level.
+/// a rustfmt closure records it at the top level. Both name the Rust object
+/// under `rust_object`: the three component archives and the recipe its
+/// identity names are the proof.
 pub fn legacy_toolchain_evidence(
     ecosystem: &str,
     platform: Option<Platform>,
     body: &serde_json::Value,
+    store: Option<&crate::kernel::store::Store>,
 ) -> LegacyEvidence {
+    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
     let pointer = if ecosystem == "rustfmt" {
         "/rust_version"
     } else {
         "/plan/rust_version"
     };
-    crate::comforter::legacy_toolchain_evidence(platform, body, &[("rustc", pointer)])
+    let mut evidence =
+        crate::comforter::legacy_toolchain_evidence(platform, body, &[("rustc", pointer)]);
+    project_toolchain::prove_legacy_runtime(
+        &mut evidence,
+        store,
+        body,
+        LegacyRuntime {
+            pointer: "/rust_object",
+            via: &[],
+            kind: "rust",
+        },
+        |identity, evidence| {
+            project_toolchain::expect_legacy_version(
+                identity,
+                evidence,
+                "rustc",
+                &identity.version,
+            )?;
+            let recipe = project_toolchain::schema_recipe(identity)?;
+            RUNTIME_COMPONENTS
+                .iter()
+                .map(|component| {
+                    project_toolchain::proved_from_identity(
+                        identity,
+                        component,
+                        &format!("{}_sha256", component.replace('-', "_")),
+                        "sha256",
+                        recipe,
+                    )
+                })
+                .collect()
+        },
+    );
+    evidence
+}
+
+/// The Rust object a pre-lock sync from `selected` left for legacy seeding
+/// to read, and the body field that names it (cargo and rustfmt closures
+/// both use it).
+#[cfg(test)]
+pub(crate) fn legacy_runtime_for_test(
+    platform: Platform,
+    selected: &Selected,
+    store: &Store,
+) -> (serde_json::Value, Vec<Identity>) {
+    let rust = identity_of(platform, &runtime_rows(platform, selected).unwrap());
+    let body = serde_json::json!({
+        "rust_object": crate::comforter::toolchain::object_ref_for_test(store, &rust.object_id()),
+    });
+    (body, vec![rust])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

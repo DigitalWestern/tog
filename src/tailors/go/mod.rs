@@ -120,12 +120,54 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
     Catalog::new("go", bundles)
 }
 
-/// A pre-lock Go closure records the toolchain under `plan.go_version`.
+/// A pre-lock Go closure records the toolchain under `plan.go_version` and
+/// the Go object under `go_object`: the archive and recipe that object's
+/// identity names are the proof.
 pub fn legacy_toolchain_evidence(
     platform: Option<Platform>,
     body: &serde_json::Value,
+    store: Option<&crate::kernel::store::Store>,
 ) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(platform, body, &[("go", "/plan/go_version")])
+    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
+    let mut evidence =
+        crate::comforter::legacy_toolchain_evidence(platform, body, &[("go", "/plan/go_version")]);
+    project_toolchain::prove_legacy_runtime(
+        &mut evidence,
+        store,
+        body,
+        LegacyRuntime {
+            pointer: "/go_object",
+            via: &[],
+            kind: "go",
+        },
+        |identity, evidence| {
+            project_toolchain::expect_legacy_version(identity, evidence, "go", &identity.version)?;
+            Ok(vec![project_toolchain::proved_from_identity(
+                identity,
+                "go",
+                "artifact_sha256",
+                "sha256",
+                project_toolchain::schema_recipe(identity)?,
+            )?])
+        },
+    );
+    evidence
+}
+
+/// The Go object a pre-lock sync from `selected` left for legacy seeding to
+/// read, and the body field that names it.
+#[cfg(test)]
+pub(crate) fn legacy_runtime_for_test(
+    platform: Platform,
+    selected: &Selected,
+    store: &Store,
+) -> (serde_json::Value, Vec<Identity>) {
+    let row = runtime_row(platform, selected).unwrap();
+    let go = runtime_identity(platform, &row.version, row.digest.hex());
+    let body = serde_json::json!({
+        "go_object": crate::comforter::toolchain::object_ref_for_test(store, &go.object_id()),
+    });
+    (body, vec![go])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

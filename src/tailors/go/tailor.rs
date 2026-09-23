@@ -144,8 +144,9 @@ impl Tailor for Go {
         _ecosystem: &str,
         platform: Option<Platform>,
         body: &Value,
+        store: Option<&crate::kernel::store::Store>,
     ) -> LegacyEvidence {
-        go::legacy_toolchain_evidence(platform, body)
+        go::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

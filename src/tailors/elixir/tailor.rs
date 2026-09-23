@@ -180,8 +180,9 @@ impl Tailor for Elixir {
         _ecosystem: &str,
         platform: Option<Platform>,
         body: &Value,
+        store: Option<&crate::kernel::store::Store>,
     ) -> LegacyEvidence {
-        elixir::legacy_toolchain_evidence(platform, body)
+        elixir::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

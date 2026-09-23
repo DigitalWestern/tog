@@ -11,12 +11,16 @@
 //! source file edited while a long sync ran aborts instead of pairing new
 //! inputs with old outputs.
 
+use crate::kernel::digest::Digest;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::store::Store;
+use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::input::{self, InputRow};
 use crate::kernel::toolchain::lock::{self, ToolchainLock};
-use crate::kernel::toolchain::{seed, select_for, Catalog, LegacyEvidence, Selected, Source};
+use crate::kernel::toolchain::{
+    seed, select_for, Catalog, LegacyEvidence, ProvedArtifact, Selected, Source,
+};
+use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use crate::tailors::Tailor;
 use sha2::{Digest as _, Sha256};
@@ -130,23 +134,36 @@ fn from_section(
 /// seeding; one for a foreign platform still yields evidence, carrying its
 /// own platform, because the seed refuses on that platform rather than
 /// guessing from the host.
+///
+/// `store` is the active store, opened read-only ([`Store::existing`]):
+/// the tailor proves artifacts from the runtime object the closure names
+/// only when that store holds it. `None` (no store yet) proves nothing.
 pub fn legacy_evidence(
     tailor: &dyn Tailor,
     envelope: &serde_json::Value,
+    store: Option<&Store>,
 ) -> Option<LegacyEvidence> {
     let body = &envelope["body"];
-    if body.get("toolchain").is_some() {
+    if !needs_seeding(envelope) {
         return None;
     }
     let platform = envelope["platform"]
         .as_str()
         .and_then(Platform::from_triple);
-    Some(tailor.legacy_toolchain_evidence(tailor.id(), platform, body))
+    Some(tailor.legacy_toolchain_evidence(tailor.id(), platform, body, store))
+}
+
+/// Whether `envelope` predates the toolchain lock, so [`legacy_evidence`]
+/// has something to say about it. Callers use this to leave the store
+/// unlooked-up when no closure needs it.
+pub fn needs_seeding(envelope: &serde_json::Value) -> bool {
+    envelope["body"].get("toolchain").is_none()
 }
 
 /// [`legacy_evidence`] for the closure `tailor` wrote under `dir`, if any:
 /// what a read-only answer (`tog doctor`, `tog status`) passes `resolve`
-/// so it seeds exactly as the next sync would.
+/// so it seeds exactly as the next sync would. This lookup itself only
+/// reads the store; the command around it may already hold it open.
 pub fn legacy_evidence_in(dir: &Path, tailor: &dyn Tailor) -> io::Result<Option<LegacyEvidence>> {
     let path = dir.join(format!(".tog/closures/{}.json", tailor.id()));
     let bytes = match std::fs::read(&path) {
@@ -156,7 +173,256 @@ pub fn legacy_evidence_in(dir: &Path, tailor: &dyn Tailor) -> io::Result<Option<
     };
     let envelope: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|error| invalid(format!("{}: {error}; run 'tog'", path.display())))?;
-    Ok(legacy_evidence(tailor, &envelope))
+    if !needs_seeding(&envelope) {
+        return Ok(None);
+    }
+    let store = Store::existing()?;
+    Ok(legacy_evidence(tailor, &envelope, store.as_ref()))
+}
+
+/// Why a closure's runtime object proves no artifact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProofGap {
+    /// Nothing to read: the closure names no object, there is no store,
+    /// the reference was recorded in another store, or this store does not
+    /// hold the object. Seeding may still go on from the versions.
+    Unproved(String),
+    /// The reference is malformed, or the store holds the object and it
+    /// disagrees with the closure or cannot be read as the tailor's
+    /// identity (another kind, platform or version, a missing or malformed
+    /// digest, recipe or next-object input, unusable metadata). Seeding
+    /// refuses.
+    Contradicted(String),
+}
+
+/// Where a tailor's pre-lock closure names its runtime object.
+#[derive(Clone, Copy, Debug)]
+pub struct LegacyRuntime<'a> {
+    /// Body-relative JSON pointer of the reference: an `{id, path}` object
+    /// or a bare object path.
+    pub pointer: &'a str,
+    /// Objects between the reference and the runtime, in order: the kind
+    /// each one must be and the identity input naming the next (a Python
+    /// closure names its environment, whose `cpython` input is the
+    /// interpreter).
+    pub via: &'a [(&'a str, &'a str)],
+    /// The runtime object's identity kind.
+    pub kind: &'a str,
+}
+
+/// Prove the artifacts a pre-lock closure's runtime object was built from.
+/// The reference is only a name: the object must be a complete, published
+/// object of `runtime.kind` in `store` whose metadata identity hashes to
+/// that name, and whose platform, when it records one, is the closure's.
+/// `artifacts` reads that identity (checking the version the closure
+/// records against it) into proved rows; once the object is found, any
+/// field it lacks or spells wrong is a contradiction. Nothing here writes,
+/// leases or touches the store. The outcome lands in `evidence`: proved rows, or the
+/// gap `seed` refuses or explains with.
+pub fn prove_legacy_runtime(
+    evidence: &mut LegacyEvidence,
+    store: Option<&Store>,
+    body: &serde_json::Value,
+    runtime: LegacyRuntime<'_>,
+    artifacts: impl FnOnce(&Identity, &LegacyEvidence) -> Result<Vec<ProvedArtifact>, ProofGap>,
+) {
+    let outcome = legacy_runtime_identity(evidence, store, body, runtime)
+        .and_then(|identity| artifacts(&identity, evidence));
+    match outcome {
+        Ok(proved) => evidence.artifacts.extend(proved),
+        Err(ProofGap::Unproved(why)) => evidence.unproved.push(why),
+        Err(ProofGap::Contradicted(why)) => evidence.contradicted.push(why),
+    }
+}
+
+fn legacy_runtime_identity(
+    evidence: &LegacyEvidence,
+    store: Option<&Store>,
+    body: &serde_json::Value,
+    runtime: LegacyRuntime<'_>,
+) -> Result<Identity, ProofGap> {
+    let first_kind = runtime.via.first().map_or(runtime.kind, |(kind, _)| kind);
+    let reference = match body.pointer(runtime.pointer) {
+        None | Some(serde_json::Value::Null) => {
+            return Err(ProofGap::Unproved(format!(
+                "the closure names no {first_kind} object"
+            )))
+        }
+        Some(reference) => reference,
+    };
+    // The reference is validated before any store is consulted: a
+    // malformed one contradicts the closure whether or not a store exists.
+    let malformed = |why: String| {
+        ProofGap::Contradicted(format!(
+            "the closure's {first_kind} object reference is malformed: {why}"
+        ))
+    };
+    let path_id = |path: &Path| {
+        store::object_id_from_path(path).map_err(|error| malformed(error.to_string()))
+    };
+    let (id, path) = match reference {
+        serde_json::Value::String(path) => {
+            let path = PathBuf::from(path);
+            (path_id(&path)?, path)
+        }
+        serde_json::Value::Object(fields) => match (
+            fields.get("id").and_then(serde_json::Value::as_str),
+            fields.get("path").and_then(serde_json::Value::as_str),
+        ) {
+            (Some(id), Some(path)) => {
+                let path = PathBuf::from(path);
+                let named = path_id(&path)?;
+                if named != id {
+                    return Err(malformed(format!(
+                        "its id {id:?} is not the object its path names ({named})"
+                    )));
+                }
+                (named, path)
+            }
+            _ => return Err(malformed("it needs a string id and path".into())),
+        },
+        _ => {
+            return Err(malformed(
+                "it is neither an object path nor an {id, path} pair".into(),
+            ))
+        }
+    };
+    let Some(store) = store else {
+        return Err(ProofGap::Unproved(format!(
+            "there is no store to find the closure's {first_kind} object in"
+        )));
+    };
+    // The recorded path only has to name this store's object; it never
+    // decides what is read.
+    if path != store.object_path(&id) {
+        return Err(ProofGap::Unproved(format!(
+            "the closure's {first_kind} object {id} was recorded in another store, not {}",
+            store.root.display()
+        )));
+    }
+    let mut id = id;
+    let chain = runtime
+        .via
+        .iter()
+        .map(|(kind, input)| (*kind, Some(*input)))
+        .chain(std::iter::once((runtime.kind, None)));
+    let mut identity = None;
+    for (kind, next) in chain {
+        let found = store
+            .published_identity(&id)
+            .map_err(|error| {
+                ProofGap::Contradicted(format!(
+                    "the closure's {kind} object {id} has unusable store metadata: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                ProofGap::Unproved(format!(
+                    "the closure's {kind} object {id} is not in the store at {}",
+                    store.root.display()
+                ))
+            })?;
+        if found.kind != kind {
+            return Err(ProofGap::Contradicted(format!(
+                "the closure's {kind} object {id} is a {} object",
+                found.kind
+            )));
+        }
+        if let (Some(recorded), Some(platform)) = (evidence.platform, found.inputs.get("platform"))
+        {
+            if platform != recorded.triple() {
+                return Err(ProofGap::Contradicted(format!(
+                    "the closure was realized on {} but its {kind} object {id} was built for {platform}",
+                    recorded.triple()
+                )));
+            }
+        }
+        match next {
+            Some(input) => {
+                id = found
+                    .inputs
+                    .get(input)
+                    .filter(|next| store::is_object_id(next))
+                    .cloned()
+                    .ok_or_else(|| {
+                        ProofGap::Contradicted(format!(
+                            "the closure's {kind} object {id} names no well-formed {input} object id"
+                        ))
+                    })?;
+            }
+            None => identity = Some(found),
+        }
+    }
+    Ok(identity.expect("the chain ends at the runtime object"))
+}
+
+/// The recorded `component` version must be the one `identity` was built
+/// as: an edited version string next to an untouched object contradicts it.
+pub fn expect_legacy_version(
+    identity: &Identity,
+    evidence: &LegacyEvidence,
+    component: &str,
+    built: &str,
+) -> Result<(), ProofGap> {
+    match evidence.version(component) {
+        Some(recorded) if recorded != built => Err(ProofGap::Contradicted(format!(
+            "the closure records {component} {recorded} but its {} object {} is {component} {built}",
+            identity.kind,
+            identity.object_id()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// One proved row from a runtime identity: `component` was fetched as the
+/// artifact whose `algo` digest is the identity's `input`, and laid out
+/// under `recipe`.
+pub fn proved_from_identity(
+    identity: &Identity,
+    component: &str,
+    input: &str,
+    algo: &str,
+    recipe: &str,
+) -> Result<ProvedArtifact, ProofGap> {
+    let hex = identity.inputs.get(input).ok_or_else(|| {
+        ProofGap::Contradicted(format!(
+            "the closure's {} object {} records no {input}",
+            identity.kind,
+            identity.object_id()
+        ))
+    })?;
+    let digest = match algo {
+        "sha256" => Digest::sha256(hex),
+        "sha512" => Digest::sha512(hex),
+        other => unreachable!("no {other} artifact digests"),
+    }
+    .map_err(|error| {
+        ProofGap::Contradicted(format!(
+            "the closure's {} object {} has a malformed {input}: {error}",
+            identity.kind,
+            identity.object_id()
+        ))
+    })?;
+    Ok(ProvedArtifact {
+        component: component.to_string(),
+        recipe: recipe.to_string(),
+        digest,
+    })
+}
+
+/// The recipe an identity commits to in its `schema` input, for runtime
+/// kinds whose layout recipe is that input.
+pub fn schema_recipe(identity: &Identity) -> Result<&str, ProofGap> {
+    identity
+        .inputs
+        .get("schema")
+        .map(String::as_str)
+        .ok_or_else(|| {
+            ProofGap::Contradicted(format!(
+                "the closure's {} object {} records no recipe",
+                identity.kind,
+                identity.object_id()
+            ))
+        })
 }
 
 /// Which toolchain this project uses, and where the answer came from.
@@ -536,6 +802,31 @@ pub fn runtime_object(
     super::closure_object(store, closure_body, "runtime_object", probe)
 }
 
+/// An `{id, path}` closure reference to `id` in `store`, as closure writers
+/// record one.
+#[cfg(test)]
+pub(crate) fn object_ref_for_test(store: &Store, id: &str) -> serde_json::Value {
+    serde_json::json!({"id": id, "path": store.object_path(id)})
+}
+
+/// Leave `identity` in `store` as a finished publication does: a read-only
+/// object root and a metadata record naming the identity. Returns its id.
+#[cfg(test)]
+pub(crate) fn publish_for_test(store: &Store, identity: &Identity) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let id = identity.object_id();
+    let path = store.object_path(&id);
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::create_dir_all(store.root.join("meta")).unwrap();
+    std::fs::write(
+        store.root.join("meta").join(format!("{id}.json")),
+        serde_json::to_vec(&serde_json::json!({"identity": identity})).unwrap(),
+    )
+    .unwrap();
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +976,128 @@ mod tests {
         assert_eq!(read_only.get("python").unwrap().source, Source::Shipped);
         assert!(read_only.pending.is_none());
         assert!(!dir.join(LOCK_PATH).exists());
+    }
+
+    /// Every path under `root` with its mtime: what a read-only caller must
+    /// leave exactly as it found it.
+    fn tree(root: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
+        let mut out = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    pending.push(path.clone());
+                }
+                out.push((path, metadata.modified().unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// `legacy_evidence_in` (the seeding lookup `status` and `doctor` use)
+    /// proves the closure's Go object through the store `TOG_STORE` names
+    /// without itself taking a lease, a lock file, a touch or creating a
+    /// directory, and metadata that
+    /// does not describe the recorded id is a contradiction, not a proof.
+    #[test]
+    fn legacy_evidence_reads_the_active_store_and_writes_nothing() {
+        let _store_env = crate::kernel::store::STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("TOG_STORE", value),
+                    None => std::env::remove_var("TOG_STORE"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("TOG_STORE"));
+        let temp = TempDir::new();
+        let platform = Platform::host().unwrap();
+        let go = tailor("go");
+        let selected = crate::kernel::toolchain::shipped(&go.toolchain_catalog().unwrap()).unwrap();
+
+        let root = temp.0.join("store");
+        for sub in ["objects", "meta"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let (refs, objects) =
+            crate::tailors::go::legacy_runtime_for_test(platform, &selected, &store);
+        for object in &objects {
+            publish_for_test(&store, object);
+        }
+        let dir = temp.0.join("proj");
+        std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        let mut body = serde_json::json!({"plan": {"go_version": selected.version("go").unwrap()}});
+        body["go_object"] = refs["go_object"].clone();
+        std::fs::write(
+            dir.join(".tog/closures/go.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "go",
+                "platform": platform.triple(),
+                "body": body,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var("TOG_STORE", &store.root);
+        let before = tree(&store.root);
+        let evidence = legacy_evidence_in(&dir, go).unwrap().unwrap();
+        assert_eq!(tree(&store.root), before);
+        assert!(evidence.unproved.is_empty(), "{:?}", evidence.unproved);
+        assert!(
+            evidence.contradicted.is_empty(),
+            "{:?}",
+            evidence.contradicted
+        );
+        let row = selected.artifact(platform, "go").unwrap();
+        assert_eq!(
+            evidence.artifacts,
+            vec![ProvedArtifact {
+                component: "go".into(),
+                recipe: row.recipe,
+                digest: row.digest,
+            }]
+        );
+
+        // Metadata that hashes to another id describes some other object.
+        let id = objects[0].object_id();
+        let mut forged = objects[0].clone();
+        forged.version = "0.0.1".into();
+        std::fs::write(
+            store.root.join("meta").join(format!("{id}.json")),
+            serde_json::to_vec(&serde_json::json!({"identity": forged})).unwrap(),
+        )
+        .unwrap();
+        let evidence = legacy_evidence_in(&dir, go).unwrap().unwrap();
+        assert!(evidence.artifacts.is_empty());
+        assert!(
+            evidence.contradicted[0].contains("has unusable store metadata"),
+            "{:?}",
+            evidence.contradicted
+        );
+
+        // No store yet: nothing proved, and nothing created.
+        let missing = temp.0.join("no-store");
+        std::env::set_var("TOG_STORE", &missing);
+        let evidence = legacy_evidence_in(&dir, go).unwrap().unwrap();
+        assert!(evidence.artifacts.is_empty());
+        assert!(
+            evidence.unproved[0].contains("there is no store"),
+            "{:?}",
+            evidence.unproved
+        );
+        assert!(!missing.exists());
     }
 
     #[test]
