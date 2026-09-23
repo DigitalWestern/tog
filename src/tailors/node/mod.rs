@@ -36,9 +36,8 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{
-    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component, LegacyEvidence, Selected, Version,
-};
+use crate::kernel::toolchain::document::Shipped;
+use crate::kernel::toolchain::{ArtifactSpec, Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
 use std::fs;
@@ -46,6 +45,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -132,7 +132,16 @@ pub fn script_commands(
     Some(commands)
 }
 
-/// Pinned Node.js toolchain (nodejs.org, checksum from SHASUMS256.txt).
+/// The shipped Node catalog: every release of the Node lines nodejs.org
+/// still supports, with its default, generated and verified by
+/// `tools/catalog.py node`. Each digest comes from that release's
+/// SHASUMS256.txt, whose detached signature the generator checks against
+/// the nodejs/release-keys keyring.
+static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
+
+/// One platform's nodejs.org tarball for one Node release, as the shipped
+/// catalog lists it.
+#[derive(Debug)]
 pub struct PinnedNode {
     pub platform: Platform,
     pub version: &'static str,
@@ -140,495 +149,50 @@ pub struct PinnedNode {
     pub sha256: &'static str,
 }
 
-/// Every shipped Node release, one row per supported platform. The table
-/// is append-only and admits the LTS-channel releases of the active LTS
-/// lines (22 "Jod" and 24 "Krypton"), so an exact `.node-version` pin on one
-/// of them selects it. Each digest comes from that release's SHASUMS256.txt,
-/// whose detached signature was checked against the nodejs/release-keys
-/// keyring when the row was added. The newest release here is the shipped
-/// default (`node_pin`), so adding a newer one moves that default.
-pub const NODE_PINS: &[PinnedNode] = &[
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.20.0",
-        url: "https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz",
-        sha256: "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.20.0",
-        url: "https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.gz",
-        sha256: "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.11.0",
-        url: "https://nodejs.org/dist/v22.11.0/node-v22.11.0-darwin-arm64.tar.gz",
-        sha256: "2e89afe6f4e3aa6c7e21c560d8a0453d84807e97850bbb819b998531a22bdfde",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.11.0",
-        url: "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.gz",
-        sha256: "4f862bab52039835efbe613b532238b6e4dde98d139a34e6923193e073438b13",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.12.0",
-        url: "https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-arm64.tar.gz",
-        sha256: "293dcc6c2408da21562d135b0412525e381bb6fe150d688edb58fe850d0f3e13",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.12.0",
-        url: "https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz",
-        sha256: "e05a4d65232ae2b27b3d77da2e368522fb46b923335b8e0d5f77624c32484044",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.13.0",
-        url: "https://nodejs.org/dist/v22.13.0/node-v22.13.0-darwin-arm64.tar.gz",
-        sha256: "bc1e374e7393e2f4b20e5bbc157d02e9b1fb2c634b2f992136b38fb8ca2023b7",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.13.0",
-        url: "https://nodejs.org/dist/v22.13.0/node-v22.13.0-linux-x64.tar.gz",
-        sha256: "9a33e89093a0d946c54781dcb3ccab4ccf7538a7135286528ca41ca055e9b38f",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.13.1",
-        url: "https://nodejs.org/dist/v22.13.1/node-v22.13.1-darwin-arm64.tar.gz",
-        sha256: "97483ff4361d239a56d038c6335767a56a291e78c10f07446f463f05d9d19b89",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.13.1",
-        url: "https://nodejs.org/dist/v22.13.1/node-v22.13.1-linux-x64.tar.gz",
-        sha256: "666148b9fe0c7e1301cc1b029e33a45e9e4a893f68d2d2bb1cc88a931a88a004",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.14.0",
-        url: "https://nodejs.org/dist/v22.14.0/node-v22.14.0-darwin-arm64.tar.gz",
-        sha256: "e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.14.0",
-        url: "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz",
-        sha256: "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.15.0",
-        url: "https://nodejs.org/dist/v22.15.0/node-v22.15.0-darwin-arm64.tar.gz",
-        sha256: "92eb58f54d172ed9dee320b8450f1390db629d4262c936d5c074b25a110fed02",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.15.0",
-        url: "https://nodejs.org/dist/v22.15.0/node-v22.15.0-linux-x64.tar.gz",
-        sha256: "29d1c60c5b64ccdb0bc4e5495135e68e08a872e0ae91f45d9ec34fc135a17981",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.15.1",
-        url: "https://nodejs.org/dist/v22.15.1/node-v22.15.1-darwin-arm64.tar.gz",
-        sha256: "d2689b86b17e1b51e76f801ffe2d9acca4225e76eda4b843c3d8438d4a7cd6fe",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.15.1",
-        url: "https://nodejs.org/dist/v22.15.1/node-v22.15.1-linux-x64.tar.gz",
-        sha256: "f4b8eec683708acb1a2a73c7182ba2de5466a5dd5f705934a0830903df28821c",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.16.0",
-        url: "https://nodejs.org/dist/v22.16.0/node-v22.16.0-darwin-arm64.tar.gz",
-        sha256: "1d7f34ec4c03e12d8b33481e5c4560432d7dc31a0ef3ff5a4d9a8ada7cf6ecc9",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.16.0",
-        url: "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.gz",
-        sha256: "fb870226119d47378fa9c92c4535389c72dae14fcc7b47e6fdcc82c43de5a547",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.17.0",
-        url: "https://nodejs.org/dist/v22.17.0/node-v22.17.0-darwin-arm64.tar.gz",
-        sha256: "615dda58b5fb41fad2be43940b6398ca56554cbe05800953afadc724729cb09e",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.17.0",
-        url: "https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-x64.tar.gz",
-        sha256: "0fa01328a0f3d10800623f7107fbcd654a60ec178fab1ef5b9779e94e0419e1a",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.17.1",
-        url: "https://nodejs.org/dist/v22.17.1/node-v22.17.1-darwin-arm64.tar.gz",
-        sha256: "a983f4f2a7b71512b78d7935b9ccf6b72120a255810070afd635c4146bca7b31",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.17.1",
-        url: "https://nodejs.org/dist/v22.17.1/node-v22.17.1-linux-x64.tar.gz",
-        sha256: "cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.18.0",
-        url: "https://nodejs.org/dist/v22.18.0/node-v22.18.0-darwin-arm64.tar.gz",
-        sha256: "2c12913cba67af77ded8a399df3fd91c2e7f8628c7079da40bb9ff33bf00dfc0",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.18.0",
-        url: "https://nodejs.org/dist/v22.18.0/node-v22.18.0-linux-x64.tar.gz",
-        sha256: "a2e703725d8683be86bb5da967bf8272f4518bdaf10f21389e2b2c9eaeae8c8a",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.19.0",
-        url: "https://nodejs.org/dist/v22.19.0/node-v22.19.0-darwin-arm64.tar.gz",
-        sha256: "c59006db713c770d6ec63ae16cb3edc11f49ee093b5c415d667bb4f436c6526d",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.19.0",
-        url: "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.gz",
-        sha256: "d36e56998220085782c0ca965f9d51b7726335aed2f5fc7321c6c0ad233aa96d",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.20.0",
-        url: "https://nodejs.org/dist/v22.20.0/node-v22.20.0-darwin-arm64.tar.gz",
-        sha256: "cc04a76a09f79290194c0646f48fec40354d88969bec467789a5d55dd097f949",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.20.0",
-        url: "https://nodejs.org/dist/v22.20.0/node-v22.20.0-linux-x64.tar.gz",
-        sha256: "eeaccb0378b79406f2208e8b37a62479c70595e20be6b659125eb77dd1ab2a29",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.21.0",
-        url: "https://nodejs.org/dist/v22.21.0/node-v22.21.0-darwin-arm64.tar.gz",
-        sha256: "dbc1a17024a32827adb23b5b11ce98cefcd783145a30fe41bb2845be711e9742",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.21.0",
-        url: "https://nodejs.org/dist/v22.21.0/node-v22.21.0-linux-x64.tar.gz",
-        sha256: "262b84b02f7e2bc017d4bdb81fec85ca0d6190a5cd0781d2d6e84317c08871f8",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.21.1",
-        url: "https://nodejs.org/dist/v22.21.1/node-v22.21.1-darwin-arm64.tar.gz",
-        sha256: "c170d6554fba83d41d25a76cdbad85487c077e51fa73519e41ac885aa429d8af",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.21.1",
-        url: "https://nodejs.org/dist/v22.21.1/node-v22.21.1-linux-x64.tar.gz",
-        sha256: "219a152ea859861d75adea578bdec3dce8143853c13c5187f40c40e77b0143b2",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.22.0",
-        url: "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz",
-        sha256: "5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.22.0",
-        url: "https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.gz",
-        sha256: "c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.22.1",
-        url: "https://nodejs.org/dist/v22.22.1/node-v22.22.1-darwin-arm64.tar.gz",
-        sha256: "679ad4966339e4ef4900f57996714864e4211b898825bb840c3086c419fbcef2",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.22.1",
-        url: "https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-x64.tar.gz",
-        sha256: "07c8aafa60644fb81adefa1ee7da860eb1920851ffdc9a37020ab0be47fbc10e",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.22.2",
-        url: "https://nodejs.org/dist/v22.22.2/node-v22.22.2-darwin-arm64.tar.gz",
-        sha256: "db4b275b83736df67533529a18cc55de2549a8329ace6c7bcc68f8d22d3c9000",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.22.2",
-        url: "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.gz",
-        sha256: "978978a635eef872fa68beae09f0aad0bbbae6757e444da80b570964a97e62a3",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.22.3",
-        url: "https://nodejs.org/dist/v22.22.3/node-v22.22.3-darwin-arm64.tar.gz",
-        sha256: "0da7ff74ef8611328c8212f17943368713a2ad953fb7d89a8c8a0eae87c23207",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.22.3",
-        url: "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-x64.tar.gz",
-        sha256: "c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.23.0",
-        url: "https://nodejs.org/dist/v22.23.0/node-v22.23.0-darwin-arm64.tar.gz",
-        sha256: "e0f383a215dd3093de6d2c74f87056dc2306a2e09ad494cbffdba28f89046f56",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.23.0",
-        url: "https://nodejs.org/dist/v22.23.0/node-v22.23.0-linux-x64.tar.gz",
-        sha256: "535eeb608ca1e0b71d49a0e36991d449d5f935fbb04eca61677519b010cd673a",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.23.1",
-        url: "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-arm64.tar.gz",
-        sha256: "ef28d8fab2c0e4314522d4bb1b7173270aa3937e93b92cb7de79c112ac1fa953",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.23.1",
-        url: "https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.gz",
-        sha256: "7a8cb04b4a1df4eaf432125324b81b29a088e73570a23259a8de1c65d07fc129",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "22.23.2",
-        url: "https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz",
-        sha256: "61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "22.23.2",
-        url: "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz",
-        sha256: "b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.11.0",
-        url: "https://nodejs.org/dist/v24.11.0/node-v24.11.0-darwin-arm64.tar.gz",
-        sha256: "0be2ab2816a4fa02d1acff014a434f29f56d8d956f5af6a98b70ced6c5f4d201",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.11.0",
-        url: "https://nodejs.org/dist/v24.11.0/node-v24.11.0-linux-x64.tar.gz",
-        sha256: "b3c071cdf47aab867c3b2aa287257df12ec5d7c962bf922b32fd33226c4295fd",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.11.1",
-        url: "https://nodejs.org/dist/v24.11.1/node-v24.11.1-darwin-arm64.tar.gz",
-        sha256: "b05aa3a66efe680023f930bd5af3fdbbd542794da5644ca2ad711d68cbd4dc35",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.11.1",
-        url: "https://nodejs.org/dist/v24.11.1/node-v24.11.1-linux-x64.tar.gz",
-        sha256: "58a5ff5cc8f2200e458bea22e329d5c1994aa1b111d499ca46ec2411d58239ca",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.12.0",
-        url: "https://nodejs.org/dist/v24.12.0/node-v24.12.0-darwin-arm64.tar.gz",
-        sha256: "319f221adc5e44ff0ed57e8a441b2284f02b8dc6fc87b8eb92a6a93643fd8080",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.12.0",
-        url: "https://nodejs.org/dist/v24.12.0/node-v24.12.0-linux-x64.tar.gz",
-        sha256: "6159227e0af7d7c3c6bb2fa900452b04a6cb8841a702a79acc613209d70b04d0",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.13.0",
-        url: "https://nodejs.org/dist/v24.13.0/node-v24.13.0-darwin-arm64.tar.gz",
-        sha256: "d595961e563fcae057d4a0fb992f175a54d97fcc4a14dc2d474d92ddeea3b9f8",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.13.0",
-        url: "https://nodejs.org/dist/v24.13.0/node-v24.13.0-linux-x64.tar.gz",
-        sha256: "6223aad1a81f9d1e7b682c59d12e2de233f7b4c37475cd40d1c89c42b737ffa8",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.13.1",
-        url: "https://nodejs.org/dist/v24.13.1/node-v24.13.1-darwin-arm64.tar.gz",
-        sha256: "8c039d59f2fec6195e4281ad5b0d02b9a940897b4df7b849c6fb48be6787bba6",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.13.1",
-        url: "https://nodejs.org/dist/v24.13.1/node-v24.13.1-linux-x64.tar.gz",
-        sha256: "7ad28fb172a9ab0593f86c1a39e5c268d0d8fc3d6cb0167f455b5655a7a6e2fd",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.14.0",
-        url: "https://nodejs.org/dist/v24.14.0/node-v24.14.0-darwin-arm64.tar.gz",
-        sha256: "a1a54f46a750d2523d628d924aab61758a51c9dad3e0238beb14141be9615dd3",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.14.0",
-        url: "https://nodejs.org/dist/v24.14.0/node-v24.14.0-linux-x64.tar.gz",
-        sha256: "dbf5b8665dec15e59e6359a517fefb47b23fdb9152d8def975b9bca3dfc6d355",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.14.1",
-        url: "https://nodejs.org/dist/v24.14.1/node-v24.14.1-darwin-arm64.tar.gz",
-        sha256: "25495ff85bd89e2d8a24d88566d7e2f827c6b0d3d872b2cebf75371f93fcb1fe",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.14.1",
-        url: "https://nodejs.org/dist/v24.14.1/node-v24.14.1-linux-x64.tar.gz",
-        sha256: "ace9fa104992ed0829642629c46ca7bd7fd6e76278cb96c958c4b387d29658ea",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.15.0",
-        url: "https://nodejs.org/dist/v24.15.0/node-v24.15.0-darwin-arm64.tar.gz",
-        sha256: "372331b969779ab5d15b949884fc6eaf88d5afe87bde8ba881d6400b9100ffc4",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.15.0",
-        url: "https://nodejs.org/dist/v24.15.0/node-v24.15.0-linux-x64.tar.gz",
-        sha256: "44836872d9aec49f1e6b52a9a922872db9a2b02d235a616a5681b6a85fec8d89",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.16.0",
-        url: "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz",
-        sha256: "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.16.0",
-        url: "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.gz",
-        sha256: "2faf6a387e9b62b888e21c54f01249fb27537ffecf1842f29f4c919d0a59a0ff",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.17.0",
-        url: "https://nodejs.org/dist/v24.17.0/node-v24.17.0-darwin-arm64.tar.gz",
-        sha256: "4fc3266a3702eebc39cc37661cf4eeceeade307e242ab64e4d7ce7949197e11f",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.17.0",
-        url: "https://nodejs.org/dist/v24.17.0/node-v24.17.0-linux-x64.tar.gz",
-        sha256: "e0472427aa791ad80bdc426ff7cc73cdd28ed0f616d1ff9689a23a7f47f1265f",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.18.0",
-        url: "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz",
-        sha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.18.0",
-        url: "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.gz",
-        sha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.18.1",
-        url: "https://nodejs.org/dist/v24.18.1/node-v24.18.1-darwin-arm64.tar.gz",
-        sha256: "eb02f7fab96d3d67de40c5ec8566096fcb4c2026728787683ae5a97eb612b941",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.18.1",
-        url: "https://nodejs.org/dist/v24.18.1/node-v24.18.1-linux-x64.tar.gz",
-        sha256: "9f5eb6ac21845a66c493c91a253b1da32fd684e89e9b7202d4936982336be4ca",
-    },
-    PinnedNode {
-        platform: Platform::Aarch64AppleDarwin,
-        version: "24.19.0",
-        url: "https://nodejs.org/dist/v24.19.0/node-v24.19.0-darwin-arm64.tar.gz",
-        sha256: "8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d",
-    },
-    PinnedNode {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: "24.19.0",
-        url: "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.gz",
-        sha256: "f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4",
-    },
-];
+/// Every shipped Node tarball: one row per release and supported platform.
+pub fn node_pins() -> io::Result<&'static [PinnedNode]> {
+    static PINS: OnceLock<Vec<PinnedNode>> = OnceLock::new();
+    let document = CATALOG.document()?;
+    Ok(PINS.get_or_init(|| {
+        document
+            .bundles
+            .iter()
+            .flat_map(|bundle| {
+                let version = bundle
+                    .component("node")
+                    .map(|c| c.version.as_str())
+                    .unwrap_or_default();
+                bundle
+                    .artifacts
+                    .iter()
+                    .filter(|row| row.component == "node")
+                    .map(move |row| PinnedNode {
+                        platform: row.platform,
+                        version,
+                        url: row.url.as_str(),
+                        sha256: row.digest.hex(),
+                    })
+            })
+            .collect()
+    }))
+}
 
-/// The shipped default Node for a platform: the newest pinned release, the
-/// same one `shipped_selection` picks from the catalog.
+/// The shipped default Node for a platform: the catalog's named default,
+/// the same release `shipped_selection` picks. A newer release in the
+/// catalog does not move it.
 pub fn node_pin(platform: Platform) -> io::Result<&'static PinnedNode> {
-    NODE_PINS
+    let default = &CATALOG.document()?.default;
+    node_pins()?
         .iter()
-        .filter(|pin| pin.platform == platform)
-        .max_by_key(|pin| Version::parse(pin.version).ok())
+        .find(|pin| pin.platform == platform && format!("node-{}", pin.version) == *default)
         .ok_or_else(|| no_pin("nodejs", platform))
 }
 
-/// The shipped Node catalog: one release bundle per pinned Node version.
-/// npm and node-gyp ship inside the Node artifact; the pin table records no
+/// The shipped Node catalog: one release bundle per nodejs.org release.
+/// npm and node-gyp ship inside the Node artifact; the catalog records no
 /// version for them, so they are not listed as components here.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    // Catalog order is pin-table order: the newest-appended row wins a tie.
-    let mut versions: Vec<&str> = Vec::new();
-    for version in NODE_PINS.iter().map(|pin| pin.version) {
-        if !versions.contains(&version) {
-            versions.push(version);
-        }
-    }
-    let mut bundles = Vec::new();
-    for version in versions {
-        let artifacts = NODE_PINS
-            .iter()
-            .filter(|pin| pin.version == version)
-            .map(|pin| {
-                Ok(ArtifactRow::new(
-                    pin.platform,
-                    "node",
-                    "nodejs.org",
-                    version,
-                    "nodejs/legacy",
-                    pin.url,
-                    Digest::sha256(pin.sha256)?,
-                ))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        bundles.push(Bundle {
-            release: format!("node-{version}"),
-            revision: None,
-            primary: vec!["node".into()],
-            components: vec![Component::new("node", version)],
-            artifacts,
-        });
-    }
-    Catalog::new("node", bundles)
+    CATALOG.catalog()
 }
 
 /// A pre-lock Node closure records its runtime under `node_version`, and
@@ -731,8 +295,8 @@ fn node_row(selected: &Selected, platform: Platform) -> io::Result<ArtifactSpec>
     Ok(spec)
 }
 
-/// The shipped catalog's newest complete Node release, for work with no
-/// project selection to honor.
+/// The shipped catalog's default Node release, for work with no project
+/// selection to honor.
 pub fn shipped_selection() -> io::Result<Selected> {
     crate::kernel::toolchain::shipped(&toolchain_catalog()?)
 }
@@ -787,7 +351,8 @@ fn node_identity(node: &PinnedNode) -> Identity {
 /// still distinguish the Linux-only native-library shape without changing the
 /// established node-env identity bytes.
 pub(crate) fn platform_of_node_object(id: &str) -> Option<Platform> {
-    NODE_PINS
+    node_pins()
+        .ok()?
         .iter()
         .find(|pin| node_identity(pin).object_id() == id)
         .map(|pin| pin.platform)
@@ -1489,7 +1054,8 @@ mod tests {
         // Every pinned version has exactly one well-formed row per platform.
         let mut rows = std::collections::BTreeSet::new();
         let mut versions = std::collections::BTreeSet::new();
-        for pin in NODE_PINS {
+        let pins = node_pins().unwrap();
+        for pin in pins {
             assert!(rows.insert((pin.platform.triple(), pin.version)));
             versions.insert(pin.version);
             let arch = match pin.platform {
@@ -1510,10 +1076,15 @@ mod tests {
             );
         }
         assert_eq!(rows.len(), versions.len() * Platform::ALL.len());
-        let digests: std::collections::BTreeSet<_> = NODE_PINS.iter().map(|p| p.sha256).collect();
-        assert_eq!(digests.len(), NODE_PINS.len(), "a digest repeats");
+        let digests: std::collections::BTreeSet<_> = pins.iter().map(|p| p.sha256).collect();
+        assert_eq!(digests.len(), pins.len(), "a digest repeats");
 
-        // The shipped default is the newest row, on every platform.
+        // The shipped default is the named one, on every platform, though
+        // the catalog holds newer releases (the 24 line past it, and 26).
+        assert!(versions
+            .iter()
+            .any(|v| crate::kernel::toolchain::Version::parse(v).unwrap()
+                > crate::kernel::toolchain::Version::parse("24.20.0").unwrap()));
         for platform in Platform::ALL {
             assert_eq!(node_pin(*platform).unwrap().version, "24.20.0");
         }
@@ -1529,8 +1100,9 @@ mod tests {
         );
     }
 
-    /// A pinned older LTS release is selectable exactly, a range still takes
-    /// the newest, and the shipped default does not move.
+    /// A pinned older LTS release is selectable exactly, a range the default
+    /// satisfies keeps the default, one it does not takes the newest it
+    /// admits, and the shipped default does not move.
     #[test]
     fn the_catalog_selects_a_pinned_lts_release_exactly() {
         use crate::kernel::toolchain::input::InputRow;
@@ -1573,11 +1145,13 @@ mod tests {
             &[row("package.json", "engines.node", "^22.12.0")],
         )
         .unwrap();
-        assert_eq!(maintenance.release, "node-22.23.2");
+        // No default on the 22 line: the newest release it admits.
+        assert_eq!(maintenance.release, "node-22.23.3");
         assert_eq!(shipped_selection().unwrap().bundle.release, "node-24.20.0");
 
         // A non-default release's object still names its platform.
-        let old = NODE_PINS
+        let old = node_pins()
+            .unwrap()
             .iter()
             .find(|p| p.version == "24.16.0" && p.platform == Platform::X86_64UnknownLinuxGnu)
             .unwrap();

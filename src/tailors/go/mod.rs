@@ -21,8 +21,9 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
+use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{
-    ArtifactRow, ArtifactSpec, Bundle, Catalog, Component, LegacyEvidence, Selected, Source,
+    ArtifactRow, ArtifactSpec, Catalog, LegacyEvidence, Selected, Source,
 };
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
@@ -34,91 +35,77 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const GO_VERSION: &str = "1.27.0";
+/// The shipped Go catalog: every go.dev release of the supported Go lines,
+/// with its default, generated and verified by `tools/catalog.py go`.
+static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
 
 /// The extraction/layout recipe this binary knows for a Go toolchain: the
 /// catalog emits it, the object identity commits to it, and a locked row
 /// naming anything else is refused rather than guessed at.
 const GO_RECIPE: &str = "go-toolchain/1";
+
+/// One platform's go.dev archive for one Go release, as the shipped
+/// catalog lists it.
+#[derive(Clone, Copy, Debug)]
 struct GoPin {
     platform: Platform,
     version: &'static str,
-    url: &'static str,
-    sha256: &'static str,
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read the row"))]
+    row: &'static ArtifactRow,
 }
 
-const GO_PIN_ROWS: &[GoPin] = &[
-    GoPin {
-        platform: Platform::Aarch64AppleDarwin,
-        version: GO_VERSION,
-        url: "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz",
-        sha256: "90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e",
-    },
-    GoPin {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        version: GO_VERSION,
-        url: "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
-        sha256: "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
-    },
-];
+#[cfg(test)]
+impl GoPin {
+    fn url(&self) -> &'static str {
+        &self.row.url
+    }
 
-fn go_pin(platform: Platform, version: &str) -> io::Result<&'static GoPin> {
-    if let Some(pin) = GO_PIN_ROWS
+    fn sha256(&self) -> &'static str {
+        self.row.digest.hex()
+    }
+}
+
+/// Every shipped Go archive: one row per release and supported platform.
+fn go_pin_rows() -> io::Result<Vec<GoPin>> {
+    let mut rows = Vec::new();
+    for bundle in &CATALOG.document()?.bundles {
+        let version = bundle.component("go").ok_or_else(|| {
+            err(format!(
+                "go catalog: {} has no go component",
+                bundle.release
+            ))
+        })?;
+        for row in bundle.artifacts.iter().filter(|row| row.component == "go") {
+            rows.push(GoPin {
+                platform: row.platform,
+                version: version.version.as_str(),
+                row,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn go_pin(platform: Platform, version: &str) -> io::Result<GoPin> {
+    let rows = go_pin_rows()?;
+    if let Some(pin) = rows
         .iter()
         .find(|pin| pin.platform == platform && pin.version == version)
     {
-        return Ok(pin);
+        return Ok(*pin);
     }
-    let pins = GO_PIN_ROWS
-        .iter()
-        .filter(|pin| pin.platform == platform)
-        .map(|pin| pin.version)
-        .collect::<Vec<_>>();
-    if pins.is_empty() {
-        return Err(no_pin("go", platform));
-    }
+    let pins = go_pins(platform)?;
     Err(err(format!(
-        "internal: resolved Go {version} for {} but only {} is realizable; set go.mod's `go` or `toolchain` directive to one of the pinned versions, or add a matching verified Go pin",
+        "internal: resolved Go {version} for {} but this tog realizes only Go {}; set go.mod's `go` or `toolchain` directive to one of the pinned versions, or add a matching verified Go pin",
         platform.triple(),
         pins.join(", ")
     )))
 }
 
-/// The shipped Go catalog: one release bundle per pinned Go version.
+/// The shipped Go catalog: one release bundle per go.dev release, and the
+/// release a project with no Go pin gets.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    // Catalog order is pin-table order: the newest-appended row wins a tie.
-    let mut versions: Vec<&str> = Vec::new();
-    for version in GO_PIN_ROWS.iter().map(|pin| pin.version) {
-        if !versions.contains(&version) {
-            versions.push(version);
-        }
-    }
-    let mut bundles = Vec::new();
-    for version in versions {
-        let artifacts = GO_PIN_ROWS
-            .iter()
-            .filter(|pin| pin.version == version)
-            .map(|pin| {
-                Ok(ArtifactRow::new(
-                    pin.platform,
-                    "go",
-                    "go.dev",
-                    version,
-                    GO_RECIPE,
-                    pin.url,
-                    Digest::sha256(pin.sha256)?,
-                ))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        bundles.push(Bundle {
-            release: format!("go-{version}"),
-            revision: None,
-            primary: vec!["go".into()],
-            components: vec![Component::new("go", version)],
-            artifacts,
-        });
-    }
-    Catalog::new("go", bundles)
+    CATALOG.catalog()
 }
 
 /// A pre-lock Go closure records the toolchain under `plan.go_version` and
@@ -180,8 +167,8 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
 /// identity from the selected bundle row instead; this is how the tests hold
 /// the two spellings to the same object id.
 #[cfg(test)]
-fn go_identity(pin: &GoPin) -> Identity {
-    runtime_identity(pin.platform, pin.version, pin.sha256)
+fn go_identity(pin: GoPin) -> Identity {
+    runtime_identity(pin.platform, pin.version, pin.sha256())
 }
 
 /// The Go object's identity, from the archive that went into it. The pin
@@ -228,12 +215,13 @@ fn runtime_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSp
 }
 
 fn go_pins(platform: Platform) -> io::Result<Vec<&'static str>> {
-    let mut pins: Vec<_> = GO_PIN_ROWS
-        .iter()
+    let mut pins: Vec<_> = go_pin_rows()?
+        .into_iter()
         .filter(|pin| pin.platform == platform)
         .map(|pin| pin.version)
         .collect();
-    pins.sort_unstable();
+    // Numeric order: 1.26.10 follows 1.26.9.
+    pins.sort_by_key(|version| crate::kernel::toolchain::Version::parse(version).ok());
     pins.dedup();
     if pins.is_empty() {
         return Err(no_pin("go", platform));
@@ -1384,6 +1372,11 @@ pub fn build_sandboxed(
     moved
 }
 
+/// The shipped default Go, the object-id golden the identity tests hold:
+/// adding a newer release to the catalog must not move it.
+#[cfg(test)]
+const GO_VERSION: &str = "1.27.0";
+
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let pin = go_pin(platform, GO_VERSION).expect("pinned Go toolchain for test platform");
@@ -1407,8 +1400,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     };
     vec![
         go,
-        modcache_identity(pin.version, pin.sha256, &empty_plan),
-        modcache_identity(pin.version, pin.sha256, &module_plan),
+        modcache_identity(pin.version, pin.sha256(), &empty_plan),
+        modcache_identity(pin.version, pin.sha256(), &module_plan),
     ]
 }
 
@@ -1420,10 +1413,10 @@ mod tests {
     /// a re-sync publishes and every later cache hit becomes a hard error.
     #[test]
     fn legacy_adapter_recovers_the_pinned_go_artifacts() {
-        for pin in GO_PIN_ROWS {
+        for pin in go_pin_rows().unwrap() {
             assert_eq!(
                 recovered_cache(go_identity(pin)),
-                vec![format!("sha256:{}", pin.sha256)]
+                vec![format!("sha256:{}", pin.sha256())]
             );
         }
     }
@@ -1492,30 +1485,38 @@ mod tests {
     }
 
     #[test]
-    fn one_unique_pin_per_supported_platform() {
-        assert_eq!(GO_PIN_ROWS.len(), Platform::ALL.len());
+    fn every_release_has_one_pin_per_platform_and_the_default_is_unchanged() {
+        let rows = go_pin_rows().unwrap();
+        let catalog = toolchain_catalog().unwrap();
+        assert_eq!(rows.len(), catalog.bundles().len() * Platform::ALL.len());
         let mut seen = std::collections::BTreeSet::new();
-        for pin in GO_PIN_ROWS {
-            assert!(seen.insert(pin.platform.triple()), "duplicate pin platform");
-        }
-        for platform in Platform::ALL {
-            assert_eq!(
-                GO_PIN_ROWS
-                    .iter()
-                    .filter(|pin| pin.platform == *platform)
-                    .count(),
-                1,
-                "expected one Go pin for {}",
-                platform.triple()
+        for pin in &rows {
+            assert!(
+                seen.insert((pin.version, pin.platform.triple())),
+                "duplicate Go pin {} {}",
+                pin.version,
+                pin.platform.triple()
+            );
+            assert!(
+                pin.url().starts_with("https://go.dev/dl/go"),
+                "{}",
+                pin.url()
             );
         }
+        // The catalog holds releases newer than the default; the default
+        // is still the one every Go object id golden was minted from.
+        assert!(catalog
+            .bundles()
+            .iter()
+            .any(|bundle| bundle.component("go").unwrap().version != GO_VERSION));
+        assert_eq!(selection().version("go").unwrap(), GO_VERSION);
 
         let linux = go_pin(Platform::X86_64UnknownLinuxGnu, GO_VERSION).unwrap();
         assert!(go_pin(Platform::X86_64UnknownLinuxGnu, "1.27").is_err());
         assert_eq!(linux.version, "1.27.0");
-        assert_eq!(linux.url, "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz");
+        assert_eq!(linux.url(), "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz");
         assert_eq!(
-            linux.sha256,
+            linux.sha256(),
             "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
         );
     }
@@ -1607,7 +1608,7 @@ mod tests {
             );
             assert_eq!(
                 modcache_identity(&row.version, row.digest.hex(), &plan).object_id(),
-                modcache_identity(pin.version, pin.sha256, &plan).object_id(),
+                modcache_identity(pin.version, pin.sha256(), &plan).object_id(),
                 "{}",
                 platform.triple()
             );
@@ -1813,11 +1814,15 @@ mod tests {
         .unwrap();
         let before = tree_snapshot(&store.root);
 
-        let error = ensure_go_for(&store, activity, platform, "1.26.0")
+        let error = ensure_go_for(&store, activity, platform, "1.25.0")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("resolved Go 1.26.0"), "{error}");
-        assert!(error.contains("only 1.27.0 is realizable"), "{error}");
+        assert!(error.contains("resolved Go 1.25.0"), "{error}");
+        assert!(
+            error.contains("realizes only Go 1.26.0, 1.26.1, "),
+            "{error}"
+        );
+        assert!(error.contains(" 1.27.0"), "{error}");
         assert_eq!(
             tree_snapshot(&store.root),
             before,
@@ -1859,7 +1864,7 @@ mod tests {
             module: "example.com/x".into(),
             modules: vec![],
         };
-        let modcache = modcache_identity(pin.version, pin.sha256, &empty);
+        let modcache = modcache_identity(pin.version, pin.sha256(), &empty);
         assert_eq!(
             modcache.inputs["extractor"],
             "go1.27.0:90493b3bbd5e10f91d12153198bf1994fd756399b4fec93b49b0c6e2acdeeb3e"
@@ -1867,10 +1872,10 @@ mod tests {
         assert_eq!(modcache.inputs["schema"], "go-modcache/1");
         let linux = go_pin(Platform::X86_64UnknownLinuxGnu, GO_VERSION).unwrap();
         assert_ne!(
-            modcache_identity(linux.version, linux.sha256, &empty).object_id(),
+            modcache_identity(linux.version, linux.sha256(), &empty).object_id(),
             modcache.object_id()
         );
-        assert_eq!(pin.url, "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz");
+        assert_eq!(pin.url(), "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz");
     }
 
     /// A project directory holding just this go.mod.

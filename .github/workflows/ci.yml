@@ -28,6 +28,13 @@ jobs:
           rustup component add clippy
           cargo clippy --locked --all-targets -- -D clippy::disallowed_methods
       - run: cargo test --locked
+      # The catalog generator's offline tests (no network). It reads the
+      # catalogs with tomllib, which needs Python 3.11; the runner has 3.10.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Catalog generator (offline)
+        run: python3 tools/test_catalog.py
       # The offline suite skips sandbox checks bwrap cannot run; here a
       # skip is a failure, so CI proves the Linux sandbox works.
       - name: Linux sandbox (required)

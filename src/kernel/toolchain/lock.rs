@@ -634,11 +634,7 @@ impl EcoLock {
 /// `<algorithm>:<hex>` back to a [`Digest`]. Validation already refused any
 /// other spelling, so an error here means the row was built, not parsed.
 fn parse_digest(text: &str) -> io::Result<Digest> {
-    match text.split_once(':') {
-        Some(("sha256", hex)) => Digest::sha256(hex),
-        Some(("sha512", hex)) => Digest::sha512(hex),
-        _ => Err(invalid(format!("unsupported digest {text:?}"))),
-    }
+    super::parse_qualified(text)
 }
 
 /// One recorded source row that no longer matches the project.

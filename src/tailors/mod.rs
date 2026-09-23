@@ -656,11 +656,14 @@ mod tests {
                 }
             }
         }
-        // Two platforms each for the SDK, Hex and rebar3.
-        assert_eq!(seen, 6);
-        // Python: five CPython releases, each with the one pinned uv.
+        // Two platforms each for every SDK, and for every pair's Hex and
+        // rebar3.
+        let sdks = by_id("dotnet").unwrap().toolchain_catalog().unwrap();
+        let pairs = by_id("elixir").unwrap().toolchain_catalog().unwrap();
+        assert_eq!(seen, 2 * sdks.bundles().len() + 4 * pairs.bundles().len());
+        // Python: every CPython release, each with the one pinned uv.
         let python = by_id("python").unwrap().toolchain_catalog().unwrap();
-        assert_eq!(python.bundles().len(), 5);
+        assert!(python.bundles().len() > 5);
         for bundle in python.bundles() {
             assert_eq!(bundle.components.len(), 2);
             assert_eq!(bundle.artifacts.len(), 4);
@@ -669,7 +672,7 @@ mod tests {
         // BEAM: the pair is primary, OTP first, and the Linux OTP row names
         // the relocation recipe the Linux identity already commits to.
         let elixir = by_id("elixir").unwrap().toolchain_catalog().unwrap();
-        let beam = &elixir.bundles()[0];
+        let beam = elixir.default_release().unwrap();
         assert_eq!(beam.primary, ["otp", "elixir"]);
         assert_eq!(
             beam.artifact(DARWIN, "otp").unwrap().recipe,
@@ -692,6 +695,372 @@ mod tests {
             rust.artifact(LINUX, "rustc").unwrap().recipe,
             "rust-toolchain/1"
         );
+    }
+
+    /// Each ecosystem's shipped default and its bundle id, as they were
+    /// before the catalogs became generated data and grew: a newer release
+    /// in a catalog must never move them (#187).
+    const SHIPPED_DEFAULTS: &[(&str, &str, &str)] = &[
+        (
+            "python",
+            "cpython-3.12.14",
+            "sha256:3eaf7376260d22d2718eb9e08e0738195a6b859e169da152bc219d18313f9e40",
+        ),
+        (
+            "node",
+            "node-24.20.0",
+            "sha256:3cb38df3f844d50b4e80ae966910f7a50e6356e95e8760f7ec7a9189f86c54f3",
+        ),
+        (
+            "cargo",
+            "rust-1.96.1",
+            "sha256:7f8d06960d2ffe5a22fd86070f3d0bd2f912259489d646f4c0c1fb5018dfc1e7",
+        ),
+        (
+            "go",
+            "go-1.27.0",
+            "sha256:0052a56796a0ee06a5944d5d1bac2e607418eca7108ea066be24956660350fc7",
+        ),
+        (
+            "ruby",
+            "ruby-3.4.6",
+            "sha256:d626f6fe2bf210af785f54bc2e697ae53b65e6512a0a206f98711659c7f5aae0",
+        ),
+        (
+            "elixir",
+            "beam-otp29.0.5-elixir1.20.4",
+            "sha256:a465cce7520aa1206afd7ae6b171fc6090581d9f18d0abaf9221c657b40996b4",
+        ),
+        (
+            "dotnet",
+            "dotnet-sdk-9.0.317",
+            "sha256:d56b9e135403ffc894a57c2ad1d855bb769be6f9465c7481f2b2ab35d4b0884f",
+        ),
+    ];
+
+    /// Every release the hand-written tables shipped, with its bundle id:
+    /// the catalogs are append-only, so each is still shipped, byte for
+    /// byte, and every lock minted from one still names a catalog release.
+    const SHIPPED_BEFORE_GROWTH: &[(&str, &str, &str)] = &[
+        (
+            "python",
+            "cpython-3.14.7",
+            "sha256:ddb9056bc192b606bf43c3fb352f59cc50e8008a746ed55ac1a593ec08d0a15e",
+        ),
+        (
+            "python",
+            "cpython-3.13.15",
+            "sha256:cebc9ba6c9f0cb45067b12ef607d9a540241e67e14ed6fb88fce918529f5da2b",
+        ),
+        (
+            "python",
+            "cpython-3.12.14",
+            "sha256:3eaf7376260d22d2718eb9e08e0738195a6b859e169da152bc219d18313f9e40",
+        ),
+        (
+            "python",
+            "cpython-3.11.16",
+            "sha256:5a887a8f0b5f727bf2aabac10ed0ee7b465a36ec289c7e839240fa909fd36723",
+        ),
+        (
+            "python",
+            "cpython-3.10.21",
+            "sha256:b8c28590bc35038a49c7b41b6ff6ce56f6be144b8f9fa943a1cd422bb1c2bf40",
+        ),
+        (
+            "node",
+            "node-24.20.0",
+            "sha256:3cb38df3f844d50b4e80ae966910f7a50e6356e95e8760f7ec7a9189f86c54f3",
+        ),
+        (
+            "node",
+            "node-24.19.0",
+            "sha256:402f7a0feb532a72dd2303c9c18c58d91d378c3ebc974b080d7070558c58a5fe",
+        ),
+        (
+            "node",
+            "node-24.18.1",
+            "sha256:9bffc9f7c99d7433f2098e4f7e6588abf8aa09deb860121f98bf3e7ebd5fc2c7",
+        ),
+        (
+            "node",
+            "node-24.18.0",
+            "sha256:a5180fe60d6f490f1b6c7ae53614c815eb6eaebe0e28a0bd9d988395bf03d806",
+        ),
+        (
+            "node",
+            "node-24.17.0",
+            "sha256:38346968cbcb16e70f7303e9b2f5a53f182508d246c9844a911093455f742ee4",
+        ),
+        (
+            "node",
+            "node-24.16.0",
+            "sha256:1cb138ee99612db4b7e5e879273b8e318502d94a4525f4bcda825bf7d4178bfe",
+        ),
+        (
+            "node",
+            "node-24.15.0",
+            "sha256:1fef41d30024fe7615325ee5444f093ca8d7fef9d8d4683e7fc5972caf814ca5",
+        ),
+        (
+            "node",
+            "node-24.14.1",
+            "sha256:0cb5af5ad46069f6116e927e62bf7bee6ddaeccbf51c47f3ff75e0072cb31576",
+        ),
+        (
+            "node",
+            "node-24.14.0",
+            "sha256:3bcb72fd0eacf4be0f9afabc0341ceccda73da551b68b8cdfe749d3003662a90",
+        ),
+        (
+            "node",
+            "node-24.13.1",
+            "sha256:976a3ec3833adf42946e6ac6b0cec2b6a23b8fe9fdda5d26e3e250b34a28852c",
+        ),
+        (
+            "node",
+            "node-24.13.0",
+            "sha256:e39beb1f3c6b6f645e1694c0ebb33ebcafcb36c33a3dbeced01eab8515a53317",
+        ),
+        (
+            "node",
+            "node-24.12.0",
+            "sha256:d2d7b1567fe88acce91b60eff4f58a0420109c6274bb720895c1563b1c1fd40e",
+        ),
+        (
+            "node",
+            "node-24.11.1",
+            "sha256:ed13631e5f7529bb610f6a4e23b2f95b50d10c5c4bbed0a08dcb01ce53a0c001",
+        ),
+        (
+            "node",
+            "node-24.11.0",
+            "sha256:558265d8d63b923d0d40e8084c9e507091510e0a65c27b67487b7ddf61d767bf",
+        ),
+        (
+            "node",
+            "node-22.23.2",
+            "sha256:19ac32abd8cee03ba2d45272364ac5f54ab3ace69b4febd0c5ec2f0ac7b8d6b8",
+        ),
+        (
+            "node",
+            "node-22.23.1",
+            "sha256:4250952c0376ea2859c4d4435843c50f8e53925f231731e1e4ac19014000a285",
+        ),
+        (
+            "node",
+            "node-22.23.0",
+            "sha256:b31df06adc0bdadca602e76248cf7b6cfb75433f21fa7f69bd0e951c42baaafa",
+        ),
+        (
+            "node",
+            "node-22.22.3",
+            "sha256:e30f7f7121a6a612e3a8a6123178ad09da0dc9c2dfab7e636fc2266f694027ca",
+        ),
+        (
+            "node",
+            "node-22.22.2",
+            "sha256:3955400278e60a57ba382b83e69979d1f20440905e01e642904c5447d9e46297",
+        ),
+        (
+            "node",
+            "node-22.22.1",
+            "sha256:d6c24aeb4a79ff2483381d5fb294b6b4b3a44338e9251a9f1fb457277682b748",
+        ),
+        (
+            "node",
+            "node-22.22.0",
+            "sha256:085ca7b7aa7a55db0a5a514cad45d84f2f02d5fa539050cf46efa3a8a10e5da1",
+        ),
+        (
+            "node",
+            "node-22.21.1",
+            "sha256:031e3e38307f7f00cc3662b3260b9cddf75638211e85d6d27d719cddce1fc515",
+        ),
+        (
+            "node",
+            "node-22.21.0",
+            "sha256:a11189d95b3b855c36244bddd18692ef2c95a59bcea2aacf1a9763bc32ac065c",
+        ),
+        (
+            "node",
+            "node-22.20.0",
+            "sha256:d91ecfe8b841cc99cc28191b50350e94d3d348228336ed38c33292f9883b653f",
+        ),
+        (
+            "node",
+            "node-22.19.0",
+            "sha256:e6d38802d98120b0c22dc2730609a984d58547506d3289b7fbc38924b26b6a7a",
+        ),
+        (
+            "node",
+            "node-22.18.0",
+            "sha256:d2203a70505b83062593dba197e37afa3efd625da3cadde7ee1760fc29eb9cf0",
+        ),
+        (
+            "node",
+            "node-22.17.1",
+            "sha256:46b459608b3de5cce068293342e9743fb424eb9a0773c54f3d87bb37108d5f5e",
+        ),
+        (
+            "node",
+            "node-22.17.0",
+            "sha256:633c54fe507f6e6175ad8c551a21172611d5263ef3ed84ae8e8368340b734211",
+        ),
+        (
+            "node",
+            "node-22.16.0",
+            "sha256:57425b0880130f63c120cfd282364a457e5485633ced9e2cedf3372efeeb4461",
+        ),
+        (
+            "node",
+            "node-22.15.1",
+            "sha256:ff8ede0cdc2a6d6dbde9af72fda72f5dbe6a13d7d7801dd7bdf21b79f242448a",
+        ),
+        (
+            "node",
+            "node-22.15.0",
+            "sha256:b5d085facf7ef2d0214a225dc9f92066beb7994ce2381d1199f7f4dd39ecee1a",
+        ),
+        (
+            "node",
+            "node-22.14.0",
+            "sha256:b16057acdbe7223f59056feee6ce0a78054dbe41a09b0ab0f8dda8c1f40d6be2",
+        ),
+        (
+            "node",
+            "node-22.13.1",
+            "sha256:a52009c15da8e3c3c5b5bf138ba9762514bc1aa2bf813c940d1f2110d7018b43",
+        ),
+        (
+            "node",
+            "node-22.13.0",
+            "sha256:b2f9aea47fca7f30f2b3b02c4ae5c0211ad5978cd80910bcab85184b2927fcb7",
+        ),
+        (
+            "node",
+            "node-22.12.0",
+            "sha256:5944510f7a74697c82cca081b8516df794426e8c5ab64870e08b41915513ff99",
+        ),
+        (
+            "node",
+            "node-22.11.0",
+            "sha256:c6cac9bb57646ae08a32a6853d523a14a1521de7ac6b9796b825ed2865ae920f",
+        ),
+        (
+            "cargo",
+            "rust-1.96.1",
+            "sha256:7f8d06960d2ffe5a22fd86070f3d0bd2f912259489d646f4c0c1fb5018dfc1e7",
+        ),
+        (
+            "go",
+            "go-1.27.0",
+            "sha256:0052a56796a0ee06a5944d5d1bac2e607418eca7108ea066be24956660350fc7",
+        ),
+        (
+            "ruby",
+            "ruby-3.4.6",
+            "sha256:d626f6fe2bf210af785f54bc2e697ae53b65e6512a0a206f98711659c7f5aae0",
+        ),
+        (
+            "elixir",
+            "beam-otp29.0.5-elixir1.20.4",
+            "sha256:a465cce7520aa1206afd7ae6b171fc6090581d9f18d0abaf9221c657b40996b4",
+        ),
+        (
+            "dotnet",
+            "dotnet-sdk-9.0.317",
+            "sha256:d56b9e135403ffc894a57c2ad1d855bb769be6f9465c7481f2b2ab35d4b0884f",
+        ),
+    ];
+
+    #[test]
+    fn the_shipped_defaults_and_every_earlier_release_are_unchanged() {
+        for (ecosystem, release, id) in SHIPPED_DEFAULTS {
+            let catalog = by_id(ecosystem).unwrap().toolchain_catalog().unwrap();
+            let shipped = crate::kernel::toolchain::shipped(&catalog).unwrap();
+            assert_eq!(&shipped.bundle.release, release, "{ecosystem}");
+            assert_eq!(&shipped.bundle_id(), id, "{ecosystem}");
+            // The empty request, which a project with no pin makes, is the
+            // default too.
+            assert_eq!(
+                &catalog.select(&Request::newest()).unwrap().release,
+                release,
+                "{ecosystem}"
+            );
+        }
+        for (ecosystem, release, id) in SHIPPED_BEFORE_GROWTH {
+            let catalog = by_id(ecosystem).unwrap().toolchain_catalog().unwrap();
+            let bundle = catalog
+                .release(release)
+                .unwrap_or_else(|| panic!("{ecosystem}: {release} is no longer shipped"));
+            assert_eq!(&bundle.bundle_id(), id, "{ecosystem}: {release}");
+        }
+        // Every ecosystem but Rust (whose catalog #134 regenerates) grew.
+        for tailor in registry() {
+            let before = SHIPPED_BEFORE_GROWTH
+                .iter()
+                .filter(|(ecosystem, _, _)| *ecosystem == tailor.id())
+                .count();
+            let now = tailor.toolchain_catalog().unwrap().bundles().len();
+            if tailor.id() == "cargo" {
+                assert_eq!(now, before);
+            } else {
+                assert!(now > before, "{}: {now} releases", tailor.id());
+            }
+        }
+    }
+
+    /// The generated documents, as the binary embeds them.
+    const SHIPPED_DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "python",
+            include_str!("../kernel/provider/cpython.catalog.toml"),
+        ),
+        ("node", include_str!("node/catalog.toml")),
+        ("go", include_str!("go/catalog.toml")),
+        ("ruby", include_str!("ruby/catalog.toml")),
+        ("elixir", include_str!("elixir/catalog.toml")),
+        ("dotnet", include_str!("dotnet/catalog.toml")),
+    ];
+
+    /// Each document is in the canonical spelling `tools/catalog.py`
+    /// writes, so a hand edit (or a generator that drifted from
+    /// `Document::render`) fails here; and it is the catalog its tailor
+    /// hands out.
+    #[test]
+    fn every_shipped_catalog_document_is_canonical_and_is_the_tailors_catalog() {
+        use crate::kernel::toolchain::document::Document;
+        for (ecosystem, text) in SHIPPED_DOCUMENTS {
+            let document = Document::parse(text).unwrap_or_else(|e| panic!("{ecosystem}: {e}"));
+            assert_eq!(&document.ecosystem, ecosystem);
+            assert!(
+                document.render().unwrap() == *text,
+                "{ecosystem}: the document is not in canonical form; regenerate it with \
+                 `python3 tools/catalog.py {ecosystem}`"
+            );
+            let catalog = by_id(ecosystem).unwrap().toolchain_catalog().unwrap();
+            assert_eq!(
+                catalog.bundles(),
+                document.bundles.as_slice(),
+                "{ecosystem}"
+            );
+            assert_eq!(
+                catalog.default_release().unwrap().release,
+                document.default,
+                "{ecosystem}"
+            );
+            // One release per upstream version, unless the generator added
+            // a re-published one as a higher explicit revision beside it.
+            let mut versions = std::collections::BTreeSet::new();
+            for bundle in &document.bundles {
+                assert!(
+                    versions.insert((bundle.primary_versions().unwrap(), bundle.revision)),
+                    "{ecosystem}: {} repeats a version and revision",
+                    bundle.release
+                );
+            }
+        }
     }
 
     /// A pre-lock closure body per ecosystem, shaped as the writers shape

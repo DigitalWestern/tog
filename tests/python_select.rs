@@ -251,7 +251,9 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     let temp = TempDir::new();
     let project = temp.0.join("proj-unpinned-patch");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join(".python-version"), "3.12.3\n").unwrap();
+    // 3.11.2 is a real CPython release python-build-standalone never
+    // published a checksummed build of, so no catalog can carry it.
+    std::fs::write(project.join(".python-version"), "3.11.2\n").unwrap();
     std::fs::write(project.join("requirements.txt"), "").unwrap();
     let store = temp.0.join("store");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
@@ -263,11 +265,11 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
         "unexpected status: {output:?}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("3.12.3"), "{stderr}");
+    assert!(stderr.contains("3.11.2"), "{stderr}");
     assert!(stderr.contains(".python-version"), "{stderr}");
-    assert!(stderr.contains("3.12.14"), "{stderr}");
+    assert!(stderr.contains("3.11.1, 3.11.3"), "{stderr}");
     assert!(
-        stderr.contains("pin 3.12 to accept the pinned patch"),
+        stderr.contains("pin 3.11 to accept the pinned patch"),
         "{stderr}"
     );
     assert!(stderr.contains("request one of:"), "{stderr}");

@@ -1,14 +1,16 @@
-//! Toolchain catalog (kernel layer): the shipped per-tailor pin tables as
+//! Toolchain catalog (kernel layer): each ecosystem's shipped releases as
 //! release bundles, and the selection that a toolchain lock is minted from.
 //!
-//! A tailor turns its pin rows into [`Bundle`]s and hands them to
-//! [`Catalog::new`]; nothing here names an ecosystem. `select` chooses a
-//! bundle from the releases that are complete on every supported platform,
-//! `source` is the typed endpoint policy retrieval will check, and `legacy`
-//! seeds a selection from a closure written before the lock existed.
-//! Realization still reads the pin tables directly: a catalog row carries the
-//! same URL and digest, it does not mint a new object identity.
+//! A tailor's shipped releases are a generated data file (`document`), read
+//! into [`Bundle`]s and a [`Catalog`] with an explicit default; nothing here
+//! names an ecosystem. `select` chooses a bundle from the releases that are
+//! complete on every supported platform, `source` is the typed endpoint
+//! policy retrieval will check, and `legacy` seeds a selection from a closure
+//! written before the lock existed. Realization reads the selected bundle's
+//! rows: a catalog row carries the URL and digest the object identity is
+//! built from, it does not mint a new identity.
 
+pub mod document;
 pub mod input;
 pub mod legacy;
 pub mod lock;
@@ -33,6 +35,16 @@ use std::io;
 /// a lock row share, so the row names the algorithm the verifier must use.
 pub fn qualified(digest: &Digest) -> String {
     format!("{}:{}", digest.algo(), digest.hex())
+}
+
+/// `<algorithm>:<hex>` back to a [`Digest`]: the spelling [`qualified`]
+/// writes, for the two algorithms a catalog row or a lock may carry.
+pub fn parse_qualified(text: &str) -> io::Result<Digest> {
+    match text.split_once(':') {
+        Some(("sha256", hex)) => Digest::sha256(hex),
+        Some(("sha512", hex)) => Digest::sha512(hex),
+        _ => Err(invalid(format!("unsupported digest {text:?}"))),
+    }
 }
 
 /// One component of a release bundle: a fetched artifact (`embedded_in`
@@ -291,10 +303,11 @@ impl Bundle {
 pub struct Catalog {
     ecosystem: String,
     bundles: Vec<Bundle>,
-    /// The release a range or an empty request prefers when it satisfies
-    /// that request: an ecosystem's shipped default (Python's unconstrained
-    /// CPython), so activating the lock changes no default version.
-    preference: Option<Request>,
+    /// The release key an unconstrained project gets, and the release any
+    /// request prefers when it satisfies that request. It is named, never
+    /// inferred from the newest row, so the catalog can grow without moving
+    /// anyone's environment.
+    default: Option<String>,
 }
 
 impl Catalog {
@@ -337,20 +350,36 @@ impl Catalog {
         Ok(Catalog {
             ecosystem: ecosystem.into(),
             bundles,
-            preference: None,
+            default: None,
         })
     }
 
-    /// Prefer the releases matching `request` whenever they also satisfy
-    /// the caller's request; an exact or prefix request that excludes them
-    /// is still honored.
-    pub fn with_preference(mut self, request: Request) -> Catalog {
-        self.preference = Some(request);
-        self
+    /// Name the shipped default: what an empty request selects, and what
+    /// every request it satisfies selects, so a range or a line prefix keeps
+    /// the default rather than jumping to a newer row. An exact or prefix
+    /// request that excludes it is still honored. The default must be a
+    /// release complete on every supported platform.
+    pub fn with_default(mut self, release: &str) -> io::Result<Catalog> {
+        let bundle = self.release(release).ok_or_else(|| {
+            invalid(format!(
+                "{} catalog: default release {release} is not in the catalog",
+                self.ecosystem
+            ))
+        })?;
+        if !bundle.complete_everywhere() {
+            return Err(invalid(format!(
+                "{} catalog: default release {release} is not complete on every supported platform",
+                self.ecosystem
+            )));
+        }
+        self.default = Some(release.to_string());
+        Ok(self)
     }
 
-    pub fn preference(&self) -> Option<&Request> {
-        self.preference.as_ref()
+    /// The named default release. A catalog that names none (test fixtures)
+    /// has no preference, and its empty request selects the newest release.
+    pub fn default_release(&self) -> Option<&Bundle> {
+        self.default.as_deref().and_then(|key| self.release(key))
     }
 
     pub fn ecosystem(&self) -> &str {

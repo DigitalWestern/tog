@@ -130,8 +130,9 @@ impl Selected {
     }
 }
 
-/// The shipped default: the newest complete release in `catalog`, for work
-/// with no project lock to honor.
+/// The shipped default: the release `catalog` names as its default (the
+/// newest complete release when it names none), for work with no project
+/// lock to honor.
 pub fn shipped(catalog: &Catalog) -> io::Result<Selected> {
     let bundle = catalog.select(&Request::newest())?;
     Ok(Selected {

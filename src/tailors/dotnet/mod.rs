@@ -15,10 +15,11 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
-use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
+use crate::kernel::toolchain::document::Shipped;
+use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -30,59 +31,22 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SDK_VERSION: &str = "9.0.317";
-// Official Microsoft release-metadata checksum channel (HTTPS; hashes
-// published, not cryptographically signed).
-struct SdkPin {
-    platform: Platform,
-    url: &'static str,
-    sha512: &'static str,
+/// The shipped .NET catalog: every SDK of the .NET channels Microsoft still
+/// supports, with its default, generated and verified by
+/// `tools/catalog.py dotnet` from Microsoft's release metadata (sha512,
+/// published over HTTPS, not signed).
+static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
+
+/// The default SDK's archive for a platform: what a project with no
+/// `global.json` pin realizes there.
+fn sdk_pin(platform: Platform) -> io::Result<&'static ArtifactRow> {
+    CATALOG.default_row(platform, "dotnet-sdk")
 }
 
-const SDK_PINS: &[SdkPin] = &[SdkPin {
-    platform: Platform::Aarch64AppleDarwin,
-    url: "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz",
-    sha512: "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a",
-}, SdkPin {
-    platform: Platform::X86_64UnknownLinuxGnu,
-    url: "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-linux-x64.tar.gz",
-    sha512: "145bf69dcb88c4b905feb531cfdd7894a75fc875d2a030e958a13d1fb1131521c8cebd8a8a6e0fbd1a433ebae9cde86356b6adad07b1ad81efb92b36ff8a3333",
-}];
-
-fn sdk_pin(platform: Platform) -> io::Result<&'static SdkPin> {
-    SDK_PINS
-        .iter()
-        .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("dotnet-sdk", platform))
-}
-
-/// The shipped .NET catalog: the one pinned SDK per platform as a single
-/// release bundle, keeping the sha512 Microsoft publishes.
+/// The shipped .NET catalog: one release bundle per SDK, keeping the sha512
+/// Microsoft publishes, and the default.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let artifacts = SDK_PINS
-        .iter()
-        .map(|pin| {
-            Ok(ArtifactRow::new(
-                pin.platform,
-                "dotnet-sdk",
-                "builds.dotnet.microsoft.com",
-                SDK_VERSION,
-                "dotnet-sdk/1",
-                pin.url,
-                Digest::sha512(pin.sha512)?,
-            ))
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    Catalog::new(
-        "dotnet",
-        vec![Bundle {
-            release: format!("dotnet-sdk-{SDK_VERSION}"),
-            revision: None,
-            primary: vec!["dotnet-sdk".into()],
-            components: vec![Component::new("dotnet-sdk", SDK_VERSION)],
-            artifacts,
-        }],
-    )
+    CATALOG.catalog()
 }
 
 /// A pre-lock .NET closure records the SDK under `plan.sdk_version` and the
@@ -261,9 +225,14 @@ fn pin_spec(platform: Platform) -> SdkSpec {
         platform: pin.platform,
         version: SDK_VERSION.to_string(),
         url: pin.url.to_string(),
-        sha512: pin.sha512.to_string(),
+        sha512: pin.digest.hex().to_string(),
     }
 }
+
+/// The shipped default SDK, the object-id golden the identity tests hold:
+/// adding a newer SDK to the catalog must not move it.
+#[cfg(test)]
+const SDK_VERSION: &str = "9.0.317";
 
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
@@ -1755,24 +1724,36 @@ mod tests {
 
     #[test]
     fn sdk_pins_cover_each_supported_platform() {
-        assert_eq!(SDK_PINS.len(), Platform::ALL.len());
-        for &platform in Platform::ALL {
-            assert_eq!(
-                SDK_PINS
-                    .iter()
-                    .filter(|pin| pin.platform == platform)
-                    .count(),
-                1
-            );
+        let catalog = toolchain_catalog().unwrap();
+        assert!(
+            catalog.bundles().len() > 1,
+            "the catalog holds more than the default"
+        );
+        for bundle in catalog.bundles() {
+            for &platform in Platform::ALL {
+                let row = bundle.artifact(platform, "dotnet-sdk").unwrap();
+                assert_eq!(row.digest.algo(), "sha512");
+                assert!(row
+                    .url
+                    .starts_with("https://builds.dotnet.microsoft.com/dotnet/Sdk/"));
+            }
         }
+        assert_eq!(
+            shipped_selection().unwrap().version("dotnet-sdk").unwrap(),
+            SDK_VERSION
+        );
 
         let linux = sdk_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
         assert_eq!(
             linux.url,
             "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-linux-x64.tar.gz"
         );
-        assert_eq!(linux.sha512.len(), 128);
-        assert!(linux.sha512.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(linux.digest.hex().len(), 128);
+        assert!(linux
+            .digest
+            .hex()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -1795,7 +1776,7 @@ mod tests {
             "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz"
         );
         assert_eq!(
-            pin.sha512,
+            pin.digest.hex(),
             "f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a"
         );
         let spec = pin_spec(platform);

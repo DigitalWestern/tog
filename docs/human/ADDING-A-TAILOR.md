@@ -9,7 +9,8 @@ when they were ported to the `Tailor` trait on 2026-09-12.
 
 | File | Owns |
 |---|---|
-| `mod.rs` | The pinned toolchain (per-platform rows with sha256s, verified at pin time) and its catalog adapter `toolchain_catalog` (the same rows as `kernel::toolchain` release bundles, with the recipe ids the identities commit to), `legacy_toolchain_evidence` (what a pre-lock closure records), `preflight_platform`, `ensure_<toolchain>_for`, `plan_*`, `realize_*`, `project_*_env`, and `build_sandboxed` if the ecosystem builds. Declares the sibling modules. |
+| `catalog.toml` | The toolchain catalog: every release tog can realize, one verified row per platform, and the `default` a project with no pin gets. Generated, never hand-edited: add a reader for the ecosystem's upstream to `tools/catalog.py` and run `python3 tools/catalog.py <eco>` (see "Regenerating a catalog" below). |
+| `mod.rs` | `static CATALOG: Shipped` over `include_str!("catalog.toml")` and `toolchain_catalog` (the parsed release bundles, with the recipe ids the identities commit to), `legacy_toolchain_evidence` (what a pre-lock closure records), `preflight_platform`, `ensure_<toolchain>_for`, `plan_*`, `realize_*`, `project_*_env`, and `build_sandboxed` if the ecosystem builds. Declares the sibling modules. |
 | `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `refused_command` (`tog run` verbs refused before any environment is looked up), `listing`, `closure_state`, `doctor`, `sbom_components`, `fmt*`, `object_kinds`, `toolchain_kinds` (which of those kinds `doctor` lists as realized toolchains), `toolchain_catalog`, `legacy_toolchain_evidence`, `registry_tool` (`tog x`). Only implement what the ecosystem has; the defaults say "not supported". |
 | `objects.rs` | `pub static KINDS: &[KindAdapter]`: one row per (kind, schema) pair the tailor commits to the store, with the live grammar, migration grammar, and the function that recovers a legacy record's dependencies. Add the producer's full `live_contract` beside its identity constructor whenever it has dynamic counts, paired keys, or platform-conditional inputs. A kind without a row is refused by GC, never certified. The registry hands every tailor's rows to the kernel at startup (`tailors::install_kinds`, called by `commands::dispatch`); nothing to wire by hand. |
 | `inputs.rs` (optional) | Project-inputs-to-plan loaders when they are more than a few lines. |
@@ -21,6 +22,21 @@ Rules the tailor must keep:
   fails the build otherwise.
 - Every method takes the project directory explicitly; a tailor never reads
   the current directory.
+- Regenerating a catalog: `python3 tools/catalog.py <eco> [<eco> ...]`
+  (stdlib Python; set `GH_TOKEN` or be logged in to `gh` for the GitHub
+  API). It adds every upstream release of the maintained lines that has a
+  verifiable build for both supported platforms, re-verifies every row
+  already in the file (they must not change: object ids and existing locks
+  depend on them), prints each release it skipped and why, and never moves
+  the default. `--set-default <release>` moves it, deliberately and in its
+  own reviewable diff. `--check` writes nothing and exits non-zero if the
+  file would change. An upstream re-publish (a Homebrew rebuild, a newer
+  Hex for a BEAM pair) is a new release beside the old one, with a higher
+  `revision`, and `--check` names it. Listings and checksum files are
+  fetched fresh every run; only archives are cached. The generator's own
+  offline tests: `python3 tools/test_catalog.py` (Python 3.11+).
+  `tests/catalog_upstream.rs` re-checks samples later:
+  `cargo test --test catalog_upstream -- --ignored`.
 - Every artifact row `toolchain_catalog` emits must be served from an
   endpoint `SourcePolicy::shipped()` (`src/kernel/toolchain/source.rs`)
   lists under the row's `provider`; the registry test in `src/tailors/mod.rs`

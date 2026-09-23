@@ -15,10 +15,13 @@ pub mod tailor;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
-use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
+use crate::kernel::toolchain::document::Shipped;
+#[cfg(test)]
+use crate::kernel::toolchain::ArtifactRow;
+use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -30,121 +33,33 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const OTP_VERSION: &str = "29.0.5";
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
 // invocation, what gets embedded, or the verification changes, so hex-deps
 // objects and `_build/tog-*` roots re-derive. Darwin never sees it.
 const LINUX_RELOCATION_SCHEMA: &str = "otp-install-cross-minimal/1";
 
-struct OtpPin {
-    platform: Platform,
-    url: &'static str,
-    sha256: &'static str,
-}
+/// The shipped BEAM catalog, generated and verified by
+/// `tools/catalog.py elixir`: one release bundle per `(otp, elixir)` pair,
+/// the pair primary and compared OTP first. OTP is a per-platform build:
+/// erlef/otp_builds on Darwin (Install already run, bin/erl at the root),
+/// and on Linux our own source build in DigitalWestern/tog-toolchains
+/// (hex.pm bob's Ubuntu build needs OpenSSL SM4 symbols Fedora omits), a
+/// `make release` tree that is uninstalled until the relocation recipe runs
+/// `Install`, with a provenance manifest alongside the asset. An OTP
+/// version enters only when both builds exist. Elixir is the
+/// platform-neutral `elixir-otp-<major>.zip`. Hex and rebar3 are not in
+/// the Elixir release (Mix fetches them ad hoc); the generator picks them
+/// by Mix's own rule over builds.hex.pm's install CSVs, so each is the
+/// OTP-qualified build Mix would install (the legacy unqualified Hex is
+/// compiled for old OTP and hangs on 29; no otp-29 rebar3 is published, so
+/// the otp-28 escript runs on the 29 VM), keeping the sha512 hex.pm prints.
+/// Platform-neutral rows repeat their one digest on both platforms.
+static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
 
-const OTP_PINS: &[OtpPin] = &[
-    // erlef/otp_builds: Install already run pre-packaging, bin/erl at the root.
-    OtpPin {
-        platform: Platform::Aarch64AppleDarwin,
-        url: "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz",
-        sha256: "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d",
-    },
-    // Our own source build: hex.pm bob's Ubuntu build
-    // needs OpenSSL SM4 symbols Fedora omits). A `make release` tree: root
-    // entries ./Install ./bin ./erts-17.0.5 ./lib ./releases ./misc ./usr —
-    // UNINSTALLED, bin/erl does not exist until Install runs. Provenance
-    // manifest alongside the asset in the same release.
-    OtpPin {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        url: "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz",
-        sha256: "18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4",
-    },
-];
-
-fn otp_pin(platform: Platform) -> io::Result<&'static OtpPin> {
-    OTP_PINS
-        .iter()
-        .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("beam/otp", platform))
-}
-
-/// The shipped BEAM catalog: one release bundle whose primary is the
-/// `(otp, elixir)` pair. OTP is a per-platform build (erlef on Darwin, our
-/// own relocated build on Linux, under the relocation recipe); Elixir, Hex
-/// and rebar3 are platform-neutral BEAM code, so each repeats its one
-/// digest on both platforms. Hex and rebar3 keep the sha512 their publisher
-/// prints.
+/// The shipped BEAM catalog and its default pair.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let mut artifacts = Vec::new();
-    for pin in OTP_PINS {
-        let (provider, build, recipe) = if pin.platform.is_macos() {
-            (
-                "erlef-otp-builds",
-                format!("OTP-{OTP_VERSION}"),
-                "beam-toolchain/1",
-            )
-        } else {
-            (
-                "tog-toolchains",
-                format!("otp-{OTP_VERSION}-{}-fedora44", pin.platform.triple()),
-                LINUX_RELOCATION_SCHEMA,
-            )
-        };
-        artifacts.push(ArtifactRow::new(
-            pin.platform,
-            "otp",
-            provider,
-            &build,
-            recipe,
-            pin.url,
-            Digest::sha256(pin.sha256)?,
-        ));
-    }
-    for platform in Platform::ALL {
-        artifacts.push(ArtifactRow::new(
-            *platform,
-            "elixir",
-            "elixir-lang",
-            &format!("v{ELIXIR_VERSION}-otp-29"),
-            "beam-toolchain/1",
-            ELIXIR_URL,
-            Digest::sha256(ELIXIR_SHA256)?,
-        ));
-        artifacts.push(ArtifactRow::new(
-            *platform,
-            "hex",
-            "builds.hex.pm",
-            &format!("hex-{HEX_VERSION}-otp-29"),
-            "beam-toolchain/1",
-            HEX_URL,
-            Digest::sha512(HEX_SHA512)?,
-        ));
-        artifacts.push(ArtifactRow::new(
-            *platform,
-            "rebar3",
-            "builds.hex.pm",
-            &format!("rebar3-{REBAR3_VERSION}-otp-28"),
-            "beam-toolchain/1",
-            REBAR3_URL,
-            Digest::sha512(REBAR3_SHA512)?,
-        ));
-    }
-    Catalog::new(
-        "elixir",
-        vec![Bundle {
-            release: format!("beam-otp{OTP_VERSION}-elixir{ELIXIR_VERSION}"),
-            revision: None,
-            primary: vec!["otp".into(), "elixir".into()],
-            components: vec![
-                Component::new("otp", OTP_VERSION),
-                Component::new("elixir", ELIXIR_VERSION),
-                Component::new("hex", HEX_VERSION),
-                Component::new("rebar3", REBAR3_VERSION),
-            ],
-            artifacts,
-        }],
-    )
+    CATALOG.catalog()
 }
 
 /// A pre-lock Elixir closure records both halves of the BEAM pair under
@@ -243,7 +158,7 @@ pub(crate) fn legacy_runtime_for_test(
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {
     crate::kernel::platform::require_host(platform, "BEAM toolchain")?;
-    otp_pin(platform).map(|_| ())
+    CATALOG.default_row(platform, "otp").map(|_| ())
 }
 
 /// The recipe a Darwin OTP row carries, and the one every platform-neutral
@@ -424,25 +339,6 @@ fn hex_deps_identity(spec: &BeamSpec, plan: &ElixirPlan) -> io::Result<Identity>
         inputs,
     })
 }
-
-const ELIXIR_VERSION: &str = "1.20.4";
-// Platform-neutral BEAM code, keyed to the OTP major.
-const ELIXIR_URL: &str =
-    "https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip";
-const ELIXIR_SHA256: &str = "7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46";
-
-// Hex + rebar3 are NOT in the Elixir release; Mix normally downloads them
-// ad hoc. Pinned from builds.hex.pm (sha512s from its install CSVs).
-const HEX_VERSION: &str = "2.5.1";
-// OTP-QUALIFIED build (installs/hex.csv row for elixir 1.20 / otp 29):
-// the legacy un-qualified ez is compiled for old OTP and hangs on 29.
-const HEX_URL: &str = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez";
-const HEX_SHA512: &str = "6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7";
-const REBAR3_VERSION: &str = "3.25.1";
-// OTP-qualified escript (installs/rebar.csv); no otp-29 build published
-// yet — the otp-28 escript runs on the 29 VM (BEAM forward-compat).
-const REBAR3_URL: &str = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28";
-const REBAR3_SHA512: &str = "992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24";
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -2003,8 +1899,39 @@ pub fn build_sandboxed(
     result
 }
 
-/// A spec straight from the compiled pin tables: the catalog's own rows,
-/// and the fixture the identity goldens are written against.
+/// The shipped default pair's artifacts, the goldens every BEAM object id
+/// test is written against: adding a newer pair to the catalog must not
+/// move them, and `the_default_pair_is_unchanged` holds the catalog to them.
+#[cfg(test)]
+const OTP_VERSION: &str = "29.0.5";
+#[cfg(test)]
+const ELIXIR_VERSION: &str = "1.20.4";
+#[cfg(test)]
+const ELIXIR_URL: &str =
+    "https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip";
+#[cfg(test)]
+const ELIXIR_SHA256: &str = "7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46";
+#[cfg(test)]
+const HEX_VERSION: &str = "2.5.1";
+#[cfg(test)]
+const HEX_URL: &str = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez";
+#[cfg(test)]
+const HEX_SHA512: &str = "6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7";
+#[cfg(test)]
+const REBAR3_VERSION: &str = "3.25.1";
+#[cfg(test)]
+const REBAR3_URL: &str = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28";
+#[cfg(test)]
+const REBAR3_SHA512: &str = "992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24";
+
+/// The default pair's OTP row for a platform.
+#[cfg(test)]
+fn otp_pin(platform: Platform) -> io::Result<&'static ArtifactRow> {
+    CATALOG.default_row(platform, "otp")
+}
+
+/// A spec from the golden default pair: the fixture the identity goldens
+/// are written against.
 #[cfg(test)]
 fn pin_spec_with(platform: Platform, relocation_schema: &str) -> BeamSpec {
     let pin = otp_pin(platform).expect("pinned BEAM toolchain for test platform");
@@ -2013,7 +1940,7 @@ fn pin_spec_with(platform: Platform, relocation_schema: &str) -> BeamSpec {
         relocation_schema: relocation_schema.to_string(),
         otp_version: OTP_VERSION.to_string(),
         otp_url: pin.url.to_string(),
-        otp_sha256: pin.sha256.to_string(),
+        otp_sha256: pin.digest.hex().to_string(),
         elixir_version: ELIXIR_VERSION.to_string(),
         elixir_url: ELIXIR_URL.to_string(),
         elixir_sha256: ELIXIR_SHA256.to_string(),
@@ -2186,19 +2113,31 @@ mod tests {
     }
 
     #[test]
-    fn one_otp_row_per_platform_and_pins_exact() {
-        for platform in Platform::ALL {
-            let rows = OTP_PINS.iter().filter(|p| p.platform == *platform).count();
-            assert_eq!(rows, 1, "{}", platform.triple());
+    fn the_default_pair_is_unchanged() {
+        let catalog = toolchain_catalog().unwrap();
+        assert!(
+            catalog.bundles().len() > 1,
+            "the catalog holds more than the default"
+        );
+        for bundle in catalog.bundles() {
+            for platform in Platform::ALL {
+                for component in ["otp", "elixir", "hex", "rebar3"] {
+                    assert!(bundle.artifact(*platform, component).is_some());
+                }
+            }
         }
-        assert_eq!(OTP_PINS.len(), Platform::ALL.len());
-        assert_eq!(OTP_PINS[0].platform, DARWIN, "darwin row stays first");
+        let selected = shipped_selection().unwrap();
+        assert_eq!(selected.version("otp").unwrap(), OTP_VERSION);
+        assert_eq!(selected.version("elixir").unwrap(), ELIXIR_VERSION);
+        assert_eq!(selected.version("hex").unwrap(), HEX_VERSION);
+        assert_eq!(selected.version("rebar3").unwrap(), REBAR3_VERSION);
+        let darwin = otp_pin(DARWIN).unwrap();
         assert_eq!(
-            OTP_PINS[0].url,
+            darwin.url,
             "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz"
         );
         assert_eq!(
-            OTP_PINS[0].sha256,
+            darwin.digest.hex(),
             "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d"
         );
         let linux = otp_pin(LINUX).unwrap();
@@ -2207,32 +2146,20 @@ mod tests {
             "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
         );
         assert_eq!(
-            linux.sha256,
+            linux.digest.hex(),
             "18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4"
         );
-        // Platform-neutral artifacts: untouched.
-        assert_eq!(OTP_VERSION, "29.0.5");
-        assert_eq!(ELIXIR_VERSION, "1.20.4");
-        assert_eq!(
-            ELIXIR_URL,
-            "https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip"
-        );
-        assert_eq!(
-            ELIXIR_SHA256,
-            "7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46"
-        );
-        assert_eq!(HEX_VERSION, "2.5.1");
-        assert_eq!(
-            HEX_URL,
-            "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez"
-        );
-        assert_eq!(HEX_SHA512, "6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7");
-        assert_eq!(REBAR3_VERSION, "3.25.1");
-        assert_eq!(
-            REBAR3_URL,
-            "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28"
-        );
-        assert_eq!(REBAR3_SHA512, "992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24");
+        // Platform-neutral artifacts: the same row on both platforms, and
+        // the goldens above.
+        for platform in Platform::ALL {
+            let row = |component| selected.artifact(*platform, component).unwrap();
+            assert_eq!(row("elixir").url, ELIXIR_URL);
+            assert_eq!(row("elixir").digest.hex(), ELIXIR_SHA256);
+            assert_eq!(row("hex").url, HEX_URL);
+            assert_eq!(row("hex").digest.hex(), HEX_SHA512);
+            assert_eq!(row("rebar3").url, REBAR3_URL);
+            assert_eq!(row("rebar3").digest.hex(), REBAR3_SHA512);
+        }
         assert!(preflight_platform(Platform::host().unwrap()).is_ok());
     }
 

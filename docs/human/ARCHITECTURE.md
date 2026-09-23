@@ -276,12 +276,33 @@ tools have none and keep their `x/3` names; every `npm:` cache from before
 is a miss.
 
 The catalog a lock is minted from
-(`src/kernel/toolchain/`). Each tailor's `toolchain_catalog` turns its pin
-rows into release bundles: components, and per platform one artifact row
-with the provider, build, append-only recipe id, URL and algorithm-qualified
-digest (`sha256:…` or `sha512:…`, exactly the digest the pin already
-verifies; .NET, Hex and rebar3 keep their sha512). The rows carry the same
-bytes realization fetches; they mint no new object identity. The kernel
+(`src/kernel/toolchain/`). Each ecosystem's catalog is a checked-in,
+generated data file: `src/tailors/<eco>/catalog.toml`, and
+`src/kernel/provider/cpython.catalog.toml` for CPython and uv (Rust's
+pins are still a table in `rust.rs`). The binary embeds each file and
+`toolchain/document.rs` parses it once into release bundles: components,
+and per platform one artifact row with the provider, build, append-only
+recipe id, URL and algorithm-qualified digest (`sha256:…` or `sha512:…`,
+exactly the digest realization verifies; .NET, Hex and rebar3 keep their
+sha512). The rows carry the same bytes realization fetches; they mint no
+new object identity. A document also names its `default`, the release a
+project with no pin gets, so what is available and what is the default
+are separate facts: adding a newer release never moves the default. The
+files are written only by `python3 tools/catalog.py [eco ...]`, which reads
+each upstream's release listing (go.dev's JSON, Node's signed
+`SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby,
+erlef and `tog-toolchains` OTP builds with Hex and rebar3 from
+`builds.hex.pm`, .NET release metadata), verifies every row against a
+second published checksum where one exists, and reports each release it
+skips because a supported platform has no build. It is append-only: rows
+already shipped are re-verified against the choices they record and must be
+identical, an upstream re-publish becomes a new release with a higher
+`revision` beside the old one, and the default moves only with
+`--set-default <release>`. `--check` rewrites nothing and
+fails if the file would change. A unit test holds each file to the
+generator's canonical spelling, and `tests/catalog_upstream.rs`
+(`--ignored`) re-checks the default, newest and oldest release of each
+against upstream. The kernel
 names no tailor: it validates the bundles it is handed (unique
 release keys and bundle ids, resolvable embedding chains, one row per
 platform and component) and selects from the releases complete on every
@@ -290,7 +311,9 @@ either platform. Order is primary version descending (BEAM compares the
 `(otp, elixir)` pair, OTP first), highest explicit revision, then the
 provider/build/recipe tuple, the artifact tuple and the bundle id; exact
 requests filter by primary version and ranges take the first satisfying
-candidate. A `||` range (`engines.node`, Poetry's `python`) lowers to one
+candidate, except that a catalog's default wins whenever the request
+admits it (so `>=22` and a bare `24` keep the shipped `node-24.20.0`,
+while `22` takes the newest 22 release). A `||` range (`engines.node`, Poetry's `python`) lowers to one
 `AnyOf` request whose alternatives each AND their terms, so it too takes the
 first candidate any alternative admits; a `*` alternative in either
 reader, and an empty or `x` alternative in `engines.node`, drops the
@@ -301,9 +324,9 @@ or `=` partial is its whole line (`24` is `>=24,<25`, only three
 components are exact), a zero-bearing X-range keeps every stated
 component (`24.0.x` is `>=24.0,<24.1`), and `>`, `<=`, `^`, `~` and
 hyphen ranges bound the stated line (`<=22` is `<23`, `1.2 - 2.3` is
-`>=1.2,<2.4`). The Node table holds every LTS-channel release
-of the active LTS lines at or below the shipped default, so an exact
-`.node-version` on one of them selects it. `SourcePolicy` is the typed endpoint policy retrieval will check
+`>=1.2,<2.4`). The Node catalog holds every release of the LTS lines
+Node's release schedule lists as active, so an exact `.node-version` on
+one of them selects it. `SourcePolicy` is the typed endpoint policy retrieval will check
 (shipped `https://` defaults per publisher, credential references only,
 never a secret, and not part of lock validity; the defaults are data the
 kernel owns, so a new tailor's publisher is added there). `seed` chooses a bundle
@@ -606,12 +629,14 @@ and build inputs tailors share, so no tailor reaches into another):
     supervise.rs    supervised child processes
     platform.rs     the only module that knows the host
     toolchain/      release-bundle catalog: mod.rs types + validation + bundle id,
-                    select.rs version requests and the global order, source.rs
-                    the typed endpoint policy, legacy.rs seeding from closures
+                    document.rs the generated catalog files, select.rs version
+                    requests and the global order, source.rs the typed
+                    endpoint policy, legacy.rs seeding from closures
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
     provider/       shared toolchain providers, the pinned things more than one
-                    tailor realizes: cpython.rs (CPython + uv pins, catalog,
-                    realization; node-gyp's interpreter too), rust.rs (Rust
+                    tailor realizes: cpython.rs (CPython + uv from
+                    cpython.catalog.toml, realization; node-gyp's
+                    interpreter too), rust.rs (Rust
                     pins, catalog, toolchain files), crates.rs (Cargo.lock
                     vendoring; sdists with Rust extensions too),
                     nativelibs.rs (the Linux native library set), artifacts.rs

@@ -1,0 +1,102 @@
+# The shipped elixir toolchain catalog. Generated and verified by
+# `python3 tools/catalog.py elixir`: regenerate it, do not edit it by hand.
+# Rows are append-only; `default` is what a project with no pin gets.
+schema = 1
+ecosystem = "elixir"
+primary = ["otp", "elixir"]
+default = "beam-otp29.0.5-elixir1.20.4"
+
+[[release]]
+key = "beam-otp29.0.5-elixir1.20.4"
+components = [
+  { name = "otp", version = "29.0.5" },
+  { name = "elixir", version = "1.20.4" },
+  { name = "hex", version = "2.5.1" },
+  { name = "rebar3", version = "3.25.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "otp", provider = "erlef-otp-builds", build = "OTP-29.0.5", recipe = "beam-toolchain/1", url = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz", digest = "sha256:24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "otp", provider = "tog-toolchains", build = "otp-29.0.5-x86_64-unknown-linux-gnu-fedora44", recipe = "otp-install-cross-minimal/1", url = "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz", digest = "sha256:18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4" },
+  { platform = "aarch64-apple-darwin", component = "elixir", provider = "elixir-lang", build = "v1.20.4-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip", digest = "sha256:7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46" },
+  { platform = "x86_64-unknown-linux-gnu", component = "elixir", provider = "elixir-lang", build = "v1.20.4-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip", digest = "sha256:7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46" },
+  { platform = "aarch64-apple-darwin", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "aarch64-apple-darwin", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+]
+
+[[release]]
+key = "beam-otp29.0.5-elixir1.20.3"
+components = [
+  { name = "otp", version = "29.0.5" },
+  { name = "elixir", version = "1.20.3" },
+  { name = "hex", version = "2.5.1" },
+  { name = "rebar3", version = "3.25.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "otp", provider = "erlef-otp-builds", build = "OTP-29.0.5", recipe = "beam-toolchain/1", url = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz", digest = "sha256:24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "otp", provider = "tog-toolchains", build = "otp-29.0.5-x86_64-unknown-linux-gnu-fedora44", recipe = "otp-install-cross-minimal/1", url = "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz", digest = "sha256:18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4" },
+  { platform = "aarch64-apple-darwin", component = "elixir", provider = "elixir-lang", build = "v1.20.3-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.3/elixir-otp-29.zip", digest = "sha256:51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625" },
+  { platform = "x86_64-unknown-linux-gnu", component = "elixir", provider = "elixir-lang", build = "v1.20.3-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.3/elixir-otp-29.zip", digest = "sha256:51f799b78374d569a5df659bdedeb0dd9ef8251230bcdaef00c533019086e625" },
+  { platform = "aarch64-apple-darwin", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "aarch64-apple-darwin", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+]
+
+[[release]]
+key = "beam-otp29.0.5-elixir1.20.2"
+components = [
+  { name = "otp", version = "29.0.5" },
+  { name = "elixir", version = "1.20.2" },
+  { name = "hex", version = "2.5.1" },
+  { name = "rebar3", version = "3.25.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "otp", provider = "erlef-otp-builds", build = "OTP-29.0.5", recipe = "beam-toolchain/1", url = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz", digest = "sha256:24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "otp", provider = "tog-toolchains", build = "otp-29.0.5-x86_64-unknown-linux-gnu-fedora44", recipe = "otp-install-cross-minimal/1", url = "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz", digest = "sha256:18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4" },
+  { platform = "aarch64-apple-darwin", component = "elixir", provider = "elixir-lang", build = "v1.20.2-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.2/elixir-otp-29.zip", digest = "sha256:a9e88cd41fbbba7da6f6dc237a49dd2ed4e70457121035cc7fc56ad05582f394" },
+  { platform = "x86_64-unknown-linux-gnu", component = "elixir", provider = "elixir-lang", build = "v1.20.2-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.2/elixir-otp-29.zip", digest = "sha256:a9e88cd41fbbba7da6f6dc237a49dd2ed4e70457121035cc7fc56ad05582f394" },
+  { platform = "aarch64-apple-darwin", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "aarch64-apple-darwin", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+]
+
+[[release]]
+key = "beam-otp29.0.5-elixir1.20.1"
+components = [
+  { name = "otp", version = "29.0.5" },
+  { name = "elixir", version = "1.20.1" },
+  { name = "hex", version = "2.5.1" },
+  { name = "rebar3", version = "3.25.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "otp", provider = "erlef-otp-builds", build = "OTP-29.0.5", recipe = "beam-toolchain/1", url = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz", digest = "sha256:24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "otp", provider = "tog-toolchains", build = "otp-29.0.5-x86_64-unknown-linux-gnu-fedora44", recipe = "otp-install-cross-minimal/1", url = "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz", digest = "sha256:18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4" },
+  { platform = "aarch64-apple-darwin", component = "elixir", provider = "elixir-lang", build = "v1.20.1-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.1/elixir-otp-29.zip", digest = "sha256:6f8aa7149d1ff24d048c5bcfc8c4e37e463faef7e8ae8f5ea105c95f7d4f3c9a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "elixir", provider = "elixir-lang", build = "v1.20.1-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.1/elixir-otp-29.zip", digest = "sha256:6f8aa7149d1ff24d048c5bcfc8c4e37e463faef7e8ae8f5ea105c95f7d4f3c9a" },
+  { platform = "aarch64-apple-darwin", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "aarch64-apple-darwin", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+]
+
+[[release]]
+key = "beam-otp29.0.5-elixir1.20.0"
+components = [
+  { name = "otp", version = "29.0.5" },
+  { name = "elixir", version = "1.20.0" },
+  { name = "hex", version = "2.5.1" },
+  { name = "rebar3", version = "3.25.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "otp", provider = "erlef-otp-builds", build = "OTP-29.0.5", recipe = "beam-toolchain/1", url = "https://github.com/erlef/otp_builds/releases/download/OTP-29.0.5/otp-aarch64-apple-darwin.tar.gz", digest = "sha256:24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "otp", provider = "tog-toolchains", build = "otp-29.0.5-x86_64-unknown-linux-gnu-fedora44", recipe = "otp-install-cross-minimal/1", url = "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz", digest = "sha256:18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4" },
+  { platform = "aarch64-apple-darwin", component = "elixir", provider = "elixir-lang", build = "v1.20.0-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.0/elixir-otp-29.zip", digest = "sha256:eb04bbe0748cfc1414081a005c711a102d0b3f551ff96cc8cff81b0e7d468f19" },
+  { platform = "x86_64-unknown-linux-gnu", component = "elixir", provider = "elixir-lang", build = "v1.20.0-otp-29", recipe = "beam-toolchain/1", url = "https://github.com/elixir-lang/elixir/releases/download/v1.20.0/elixir-otp-29.zip", digest = "sha256:eb04bbe0748cfc1414081a005c711a102d0b3f551ff96cc8cff81b0e7d468f19" },
+  { platform = "aarch64-apple-darwin", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "hex", provider = "builds.hex.pm", build = "hex-2.5.1-otp-29", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.20.0/hex-2.5.1-otp-29.ez", digest = "sha512:6629f4b4bb2e040326151ebb853aad065e342c65ad3a0f2a2674dcf7164eb4328d6c929513d7230309ad75042024e72bef0e0a51ebff373b4173d2746b1772b7" },
+  { platform = "aarch64-apple-darwin", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+  { platform = "x86_64-unknown-linux-gnu", component = "rebar3", provider = "builds.hex.pm", build = "rebar3-3.25.1-otp-28", recipe = "beam-toolchain/1", url = "https://builds.hex.pm/installs/1.18.4/rebar3-3.25.1-otp-28", digest = "sha512:992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24" },
+]
