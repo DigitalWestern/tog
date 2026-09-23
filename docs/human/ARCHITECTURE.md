@@ -231,7 +231,8 @@ presence and value, never the file digest alone — so ordinary sync,
 missing or stale lock, a missing section, and a closure built from another
 bundle as `changed` naming `tog-toolchain.toml`, and a verdict that sync
 would refuse is answered ahead of the tailor's own comparison. `tog audit`
-does not read the lock yet (`FOLLOW-UPS.md`). Cached `tog x` environments
+reuses the same combination (`inspect::locked_closure_state`), so each of
+those verdicts makes the record `stale` and fails the gate. Cached `tog x` environments
 key on `x/3`: store root, ecosystem, package request, platform, the primary
 runtime version, the selected `bundle_id` and the realized runtime object,
 so a changed bundle component gives a fresh environment and an `x/2`

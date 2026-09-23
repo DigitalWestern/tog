@@ -2127,9 +2127,30 @@ fn x_cleanup_revalidates_explicit_or_legacy_origin() {
 
 // --- CLI.md: `tog audit`, the CI admission gate over recorded exceptions ---
 
-/// A python closure with recorded inputs, a projection, and one recorded
-/// exception of `kind`, so `status` reports it synced and `audit` has
-/// something to judge. Returns the closure path.
+/// Publish the `tog-toolchain.toml` section a writable sync of `project`
+/// would write for `ecosystem` (a tailor id), through the same selection
+/// and writer the binary uses, and return the bundle id a closure synced
+/// against it records.
+fn commit_toolchain_lock(project: &Path, ecosystem: &str) -> String {
+    use tog::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+    let tailor = tog::tailors::by_id(ecosystem).unwrap();
+    let lock_ecosystem = tailor.lock_ecosystem();
+    let root = tog::kernel::fsroot::ProjectRoot::open(project).unwrap();
+    let rows = tog::kernel::toolchain::input::discover(&root, lock_ecosystem).unwrap();
+    let catalog = tailor.toolchain_catalog().unwrap();
+    let bundle = tog::kernel::toolchain::select_for(&catalog, lock_ecosystem, &rows).unwrap();
+    let mut lock = ToolchainLock::read_via(&root)
+        .unwrap()
+        .unwrap_or_else(|| ToolchainLock::new(env!("CARGO_PKG_VERSION")));
+    lock.set_ecosystem(lock_ecosystem, bundle, &rows).unwrap();
+    std::fs::write(project.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+    bundle.bundle_id()
+}
+
+/// A python closure with recorded inputs, a projection, the matching
+/// toolchain lock, and one recorded exception of `kind`, so `status`
+/// reports it synced and `audit` has something to judge. Returns the
+/// closure path.
 fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str) -> PathBuf {
     std::fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
     let env = project.join("env-object");
@@ -2138,6 +2159,7 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
     let requirements = hex::encode(Sha256::digest(
         std::fs::read(project.join("requirements.txt")).unwrap(),
     ));
+    let bundle_id = commit_toolchain_lock(project, "python");
     let platform = tog::kernel::platform::Platform::host().unwrap();
     let closures = project.join(".tog/closures");
     std::fs::create_dir_all(&closures).unwrap();
@@ -2152,6 +2174,7 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
             "python": {"version": "3.12.14"},
             "plan": {"packages": []},
             "inputs": [{"path": "requirements.txt", "sha256": requirements}],
+            "toolchain": {"bundle_id": bundle_id},
             "exceptions": [{
                 "kind": kind,
                 "subject": "left-pad",
@@ -2287,6 +2310,84 @@ fn audit_json_attributes_each_policy_to_its_source_file() {
     assert!(
         stdout.contains("python  denied        closure "),
         "{stdout}"
+    );
+}
+
+/// A gate that passes must not be running a toolchain the committed lock
+/// no longer names: `audit` reads the same lock answer `status` gives, and
+/// a missing lock, a stale lock row, or a closure built from another bundle
+/// is stale, never clean.
+#[test]
+fn audit_is_stale_when_the_toolchain_lock_does_not_describe_the_closure() {
+    let home = TempDir::new("audit-lock-home");
+    let project = TempDir::new("audit-lock-project");
+    let closure = synced_python_closure_with_exception(&home.0, &project.0, "git-dependency");
+    let lock_path = project.0.join("tog-toolchain.toml");
+    let audit = || {
+        let out = tog(&project.0, &home.0, &["audit", "--json"]);
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        (out.status.code(), value["closures"][0].clone())
+    };
+    let (code, verdict) = audit();
+    assert_eq!(code, Some(0), "{verdict}");
+    assert_eq!(verdict["freshness"], "current");
+
+    // No lock: the same line `status` prints, and the audit fails on it.
+    let lock = std::fs::read(&lock_path).unwrap();
+    std::fs::remove_file(&lock_path).unwrap();
+    let (code, verdict) = audit();
+    assert_eq!(code, Some(1));
+    assert_eq!(verdict["verdict"], "stale");
+    assert_eq!(verdict["freshness"], "stale");
+    let status = tog(&project.0, &home.0, &["status", "--json"]);
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        verdict["freshness_detail"],
+        status["ecosystems"][0]["detail"][0]
+    );
+    assert_eq!(
+        verdict["freshness_detail"],
+        "tog-toolchain.toml (missing; run 'tog' to create it)"
+    );
+    let out = tog(&project.0, &home.0, &["audit"]);
+    assert!(
+        text(&out.stdout)
+            .contains(": tog-toolchain.toml (missing; run 'tog' to create it), then audit again"),
+        "{}",
+        text(&out.stdout)
+    );
+    std::fs::write(&lock_path, &lock).unwrap();
+
+    // A toolchain source moved after the lock was written: stale, naming
+    // the verb that moves a locked runtime.
+    std::fs::write(project.0.join(".python-version"), "3.13.15\n").unwrap();
+    let (code, verdict) = audit();
+    assert_eq!(code, Some(1));
+    assert_eq!(verdict["freshness"], "stale");
+    let detail = verdict["freshness_detail"].as_str().unwrap();
+    assert!(detail.starts_with("tog-toolchain.toml stale: "), "{detail}");
+    assert!(
+        detail.ends_with("run 'tog update --toolchain python'"),
+        "{detail}"
+    );
+    std::fs::remove_file(project.0.join(".python-version")).unwrap();
+    let (code, _) = audit();
+    assert_eq!(code, Some(0));
+
+    // A signed record built from a different bundle than the lock names.
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&closure).unwrap()).unwrap();
+    record["body"]["toolchain"]["bundle_id"] =
+        serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    signing_key(&home.0).sign(&mut record).unwrap();
+    std::fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let (code, verdict) = audit();
+    assert_eq!(code, Some(1));
+    assert_eq!(verdict["signature"]["state"], "trusted");
+    assert_eq!(verdict["freshness"], "stale");
+    assert_eq!(
+        verdict["freshness_detail"],
+        "tog-toolchain.toml (toolchain changed since the last sync; run 'tog')"
     );
 }
 

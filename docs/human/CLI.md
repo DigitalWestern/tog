@@ -468,8 +468,10 @@ build.
 
 What a pass proves: every closure file carries a valid signature from a key
 the machine policy trusts, every ecosystem detected in the directory has its
-primary closure, each record is current for the inputs on disk, and no
-recorded exception is denied or unknown. It does not prove the signer's
+primary closure, each record is current for the inputs on disk and for the
+committed `tog-toolchain.toml` (a missing or stale lock, or a record built
+from another bundle than the lock names, is `stale`, the same answer
+`status` gives), and no recorded exception is denied or unknown. It does not prove the signer's
 sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 
 **What has to be in the repository for this to work.** `audit` reads
@@ -674,7 +676,7 @@ jobs:
           rm -f "$TOG_SIGNING_KEY"
 
       # Every closure signed by a trusted key, current for the inputs on
-      # disk, no denied or unknown exception. Exit 1 is a denied build,
+      # disk and tog-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
       # exit 2 an operator mistake (missing or malformed policy).
       - run: tog audit
 
