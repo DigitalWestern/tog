@@ -20,6 +20,7 @@
 pub mod inputs;
 pub mod lock_import;
 pub mod objects;
+pub mod registry_tool;
 pub mod tailor;
 
 mod plan;
