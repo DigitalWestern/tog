@@ -137,14 +137,15 @@ fn directory_identity(dir: &Path) -> io::Result<(u64, u64)> {
 /// Sync with a context the caller already opened (`add`/`remove`/`update`
 /// after their manifest edit).
 pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
-    run_in(ctx, &ctx.project_dir(), fresh, strict)
+    run_in(ctx, &ctx.project_dir(), fresh, strict, false)
 }
 
 /// The same sync of one named directory: the projected root a command
 /// found by walking up, which is not always the process cwd.
-fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool) -> io::Result<()> {
-    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, Mode::Writable)?;
-    sync_preflighted(ctx, dir, &present, &mut toolchain, fresh, &Mode::Writable)
+fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool, frozen: bool) -> io::Result<()> {
+    let mode = if frozen { Mode::Frozen } else { Mode::Writable };
+    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone())?;
+    sync_preflighted(ctx, dir, &present, &mut toolchain, fresh, &mode)
 }
 
 /// Sync first when the environment for `cwd` is not the one its inputs
@@ -167,8 +168,13 @@ fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool) -> io::Result<()
 /// The root is found again after the sync rather than assumed: a Cargo
 /// workspace member syncs and projects at the workspace root, so the
 /// projection to read is not always the directory that was synced.
-pub(crate) fn ensure_current(ctx: &Context, cwd: &Path) -> io::Result<PathBuf> {
-    ensure_current_for(ctx, cwd, None)
+pub(crate) fn ensure_current(
+    ctx: &Context,
+    cwd: &Path,
+    frozen: bool,
+    strict: bool,
+) -> io::Result<PathBuf> {
+    ensure_current_for(ctx, cwd, None, frozen, strict)
 }
 
 /// `ensure_current`, deciding on one ecosystem's row only when `only`
@@ -181,6 +187,8 @@ pub(crate) fn ensure_current_for(
     ctx: &Context,
     cwd: &Path,
     only: Option<&str>,
+    frozen: bool,
+    strict: bool,
 ) -> io::Result<PathBuf> {
     let dir = sync_root(cwd)?;
     let rows = crate::commands::inspect::status(ctx.platform, &dir)?;
@@ -192,7 +200,7 @@ pub(crate) fn ensure_current_for(
         .collect();
     if !stale.is_empty() {
         crate::kernel::ui::note(&format!("syncing first: {}", stale.join("; ")));
-        run_in(ctx, &dir, false, false)?;
+        run_in(ctx, &dir, false, strict, frozen)?;
     }
     Ok(projected_root(cwd))
 }
@@ -828,14 +836,15 @@ mod tests {
         let _store_env = StoreEnv::enter(&temp.0.join("store"));
         let ctx = Context::open_in(Platform::host().unwrap(), &bare, false).unwrap();
 
-        let root = ensure_current(&ctx, &bare).expect("a directory with no manifest is left alone");
+        let root = ensure_current(&ctx, &bare, false, false)
+            .expect("a directory with no manifest is left alone");
         assert_eq!(root, bare);
         assert!(!bare.join(".tog").exists());
 
-        let error = ensure_current(&ctx, &project).unwrap_err();
+        let error = ensure_current(&ctx, &project, false, false).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         // From a subdirectory the manifest above is the project.
-        let error = ensure_current(&ctx, &nested).unwrap_err();
+        let error = ensure_current(&ctx, &nested, false, false).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         assert_eq!(sync_root(&nested).unwrap(), project);
         assert_eq!(sync_root(&bare).unwrap(), bare);

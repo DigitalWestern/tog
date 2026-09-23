@@ -190,7 +190,7 @@ pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
     }
 }
 
-pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
+pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Result<i32> {
     let activity = &ctx.activity;
     if cmd.is_empty() {
         return Err(io::Error::new(
@@ -211,7 +211,7 @@ pub fn run(ctx: &Context, cmd: &[String]) -> io::Result<i32> {
     // reported, and the root to read is the one that sync leaves behind.
     // Outside a project this finds nothing to sync and the refusal below
     // explains.
-    let dir = sync::ensure_current(ctx, &cwd)?;
+    let dir = sync::ensure_current(ctx, &cwd, frozen, strict)?;
     let (node_projected, _) = node::tailor::projected_node_modules(&dir, &cwd);
     let package_json = if node_projected {
         comforter::read_closure(&dir, "node")?;

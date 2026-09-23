@@ -24,11 +24,13 @@ fn main() {
             args,
             message,
         }) => (
-            options,
+            options.clone(),
             commands::Pending::Script {
                 name,
                 args,
                 message,
+                frozen: options.frozen,
+                strict: options.strict,
             },
         ),
         Err(error) => {

@@ -46,9 +46,7 @@ MAINTAIN:
   version      print the version
 
 SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
-  --frozen    CI: check the locks are current without writing them
   --fresh     rebuild .venv / node_modules from scratch
-  --strict    refuse every policy exception (same as TOG_STRICT=1)
 
 OPTIONS (before or after the command; after 'run' or 'build' everything
 belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
@@ -57,6 +55,10 @@ own arguments):
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
+      --frozen           CI: the implicit sync checks the locks are current
+                         without writing them
+      --strict           the implicit sync refuses every policy exception
+                         (same as TOG_STRICT=1)
   -h, --help             this help ('tog help <command>' for one command)
   -V, --version          print the version
 
@@ -177,8 +179,13 @@ directory with no project is a failure (exit 1) rather than orientation, so
 a CI job pointed at the wrong directory goes red: `tog --frozen` validates
 the locks without writing them (below), `tog --fresh` drops project-local
 caches and rebuilds, and `tog --strict` refuses every policy exception.
-Inside a project `tog -q` is a sync with no narration and no help. The flags go on the bare
-form only: `tog --frozen status` is a usage error. `tog help setup` is the
+Inside a project `tog -q` is a sync with no narration and no help. `--fresh`
+stays on the bare form: rebuilding before every command is never what
+someone means, so `tog --fresh status` is a usage error. `--frozen` and
+`--strict` are global options, accepted before the verb (and after it,
+except for the pass-through verbs `run` and `build`, which hand everything
+after the verb to the program): they govern the implicit sync of `run`,
+`env`, `build` and `tog <script>`. `tog help setup` is the
 bare form's screen and `tog help inputs` the files it reads per ecosystem.
 
 `run`, `env`, `build` and `tog <script>` sync on their own when the project
@@ -399,7 +406,8 @@ updates `Cargo.lock`. Only the built ecosystem decides: a stale Python or Node
 environment elsewhere in the repository does not start a sync in front of a
 Cargo build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
-before it, and the check then finds nothing to do.
+before it, and the check then finds nothing to do — or goes one step in a
+single command, `tog --frozen build`, whose implicit sync runs frozen.
 
 ## Inspect verbs
 

@@ -265,7 +265,7 @@ fn usage_errors_exit_2_with_a_next_step() {
     let cases: &[(&[&str], &str, &str)] = &[
         (&["snyc"], "unknown command 'snyc'", "tog --help"),
         (&["--fersh"], "unknown option '--fersh'; did you mean '--fresh'?", "tog --help"),
-        (&["--frozen", "status"], "--frozen belongs to the bare 'tog'; run 'tog --frozen' on its own", "tog --help"),
+        (&["--fresh", "status"], "--fresh belongs to the bare 'tog'; run 'tog --fresh' on its own", "tog --help"),
         (&["sync", "--fersh"], "sync: unknown option '--fersh'; did you mean '--fresh'?", "tog help setup"),
         (&["sync", "now"], "unexpected argument 'now'; 'tog' sets up what the project already declares — to add a dependency run 'tog add now'", "tog help setup"),
         (&["plan", "--jsno"], "plan: unknown option '--jsno'; did you mean '--json'?", "tog help plan"),
@@ -2469,7 +2469,16 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
         "{}",
         text(&out.stderr)
     );
+    // `--strict` is global, so it is accepted and the audit runs (exit 1:
+    // nothing synced yet); a real typo stays a usage error.
     let out = tog(&project.0, &home.0, &["audit", "--strict"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("nothing synced"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = tog(&project.0, &home.0, &["audit", "--stric"]);
     assert_eq!(out.status.code(), Some(2));
     let out = tog(&project.0, &home.0, &["help", "audit"]);
     assert_eq!(out.status.code(), Some(0));

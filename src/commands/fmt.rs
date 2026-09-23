@@ -72,7 +72,7 @@ pub fn run(
                 // from its own thread through `io::stderr()`, so an outer
                 // lock held across a child is a pipe that stops being drained.
                 let ctx = Context::open(platform, true)?;
-                return run::run(&ctx, &command);
+                return run::run(&ctx, &command, false, false);
             }
             tailors::registry()
                 .iter()
