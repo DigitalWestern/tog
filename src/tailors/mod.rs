@@ -257,6 +257,13 @@ pub trait Tailor: Sync {
         None
     }
 
+    /// `tog run`: why a package.json script may not run in `dir`, when this
+    /// ecosystem's projection there forbids running project code outside
+    /// the sandbox (.NET: MSBuild belongs in `tog build`).
+    fn refused_package_script(&self, _dir: &Path) -> Option<String> {
+        None
+    }
+
     /// `tog ls`: what a closure of this ecosystem lists.
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing;
 

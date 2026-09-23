@@ -123,6 +123,16 @@ impl Tailor for Dotnet {
         )
     }
 
+    fn refused_package_script(&self, dir: &Path) -> Option<String> {
+        std::fs::symlink_metadata(dir.join(".tog/closures/dotnet.json"))
+            .is_ok()
+            .then(|| {
+                "package.json scripts are not run under a .NET projection (MSBuild belongs in \
+                 the sandbox: use `tog build dotnet`)"
+                    .to_string()
+            })
+    }
+
     fn run_env(
         &self,
         ctx: &Context,

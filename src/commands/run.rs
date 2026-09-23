@@ -11,8 +11,15 @@ use crate::kernel::supervise;
 use crate::tailors::{self, node};
 use std::io;
 
-fn refuse_dotnet_script(has_dotnet_closure: bool, script_resolved: bool) -> bool {
-    has_dotnet_closure && script_resolved
+/// Why a resolved package.json script may not run in `dir`: the first
+/// projection there that forbids it (`Tailor::refused_package_script`).
+fn package_script_refusal(dir: &std::path::Path, script_resolved: bool) -> Option<String> {
+    if !script_resolved {
+        return None;
+    }
+    tailors::registry()
+        .iter()
+        .find_map(|tailor| tailor.refused_package_script(dir))
 }
 
 /// The habits a projected environment cannot honour, refused with the verb
@@ -86,14 +93,8 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool, strict: bool) -> io::Res
     } else {
         None
     };
-    if refuse_dotnet_script(
-        std::fs::symlink_metadata(dir.join(".tog/closures/dotnet.json")).is_ok(),
-        script_steps.is_some(),
-    ) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "package.json scripts are not run under a .NET projection (MSBuild belongs in the sandbox: use `tog build dotnet`)",
-        ));
+    if let Some(refusal) = package_script_refusal(&dir, script_steps.is_some()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, refusal));
     }
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
@@ -306,8 +307,13 @@ mod tests {
 
     #[test]
     fn dotnet_projection_refuses_resolved_package_scripts() {
-        assert!(refuse_dotnet_script(true, true));
-        assert!(!refuse_dotnet_script(true, false));
-        assert!(!refuse_dotnet_script(false, true));
+        let dir = std::env::temp_dir().join(format!("tog-run-script-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        assert!(package_script_refusal(&dir, true).is_none());
+        std::fs::write(dir.join(".tog/closures/dotnet.json"), "{}").unwrap();
+        let refusal = package_script_refusal(&dir, true).expect("refused");
+        assert!(refusal.contains("tog build dotnet"), "{refusal}");
+        assert!(package_script_refusal(&dir, false).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

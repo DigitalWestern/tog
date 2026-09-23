@@ -1030,15 +1030,27 @@ fn tailor_words() -> Vec<String> {
     words
 }
 
-/// Per-function counts of string literals in `text` that are exactly one
-/// of `words`, outside `#[cfg(test)]` items.
+/// Does a string literal name one of `words`: the whole literal, or, in a
+/// path-shaped literal, one component up to its first dot
+/// (`.tog/closures/dotnet.json`)? Prose that mentions a name is neither.
+fn names_a_word(literal: &str, words: &[String]) -> bool {
+    let named = |text: &str| words.iter().any(|word| word == text);
+    named(literal)
+        || (literal.contains('/')
+            && literal
+                .split('/')
+                .any(|part| named(part.split('.').next().unwrap_or(part))))
+}
+
+/// Per-function counts of string literals in `text` that name one of
+/// `words` (`names_a_word`), outside `#[cfg(test)]` items.
 fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<(String, String, usize)> {
     let mut counts: Vec<(String, String, usize)> = Vec::new();
     for (token, owner) in production_tokens(text) {
         let Token::Str(literal) = &token else {
             continue;
         };
-        if !words.contains(literal) {
+        if !names_a_word(literal, words) {
             continue;
         }
         match counts
@@ -1060,11 +1072,11 @@ fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<(String, S
 const TAILOR_NAMING_DEBT: &[(&str, &str, usize)] = &[
     // #61: add/remove/update are per-ecosystem code in the command until
     // `Tailor::edit_manifest` exists; `Eco` is its hand-written table.
-    ("src/commands/deps.rs", "cargo_delegate", 1),
+    ("src/commands/deps.rs", "cargo_delegate", 2),
     ("src/commands/deps.rs", "elixir_delegate", 1),
     ("src/commands/deps.rs", "go_delegate", 1),
     ("src/commands/deps.rs", "name", 7),
-    ("src/commands/deps.rs", "node", 3),
+    ("src/commands/deps.rs", "node", 4),
     ("src/commands/deps.rs", "prefix", 4),
     ("src/commands/deps.rs", "registry", 1),
     ("src/commands/deps.rs", "ruby_delegate", 1),
@@ -1109,6 +1121,7 @@ fn the_literal_scan_sees_every_spelling() {
         fn byte() { f(b\"py\"); }\n\
         fn escaped() { f(\"say \\\"node\\\"\"); f(\"node:\"); }\n\
         fn comment() { // \"node\"\n /* \"py\" */ f('n'); }\n\
+        fn path() { f(\".tog/closures/node.json\"); f(\"node_modules/.bin\"); f(\"run node x\"); }\n\
         #[cfg(test)]\nfn test_only() { f(\"node\"); }";
     assert_eq!(
         literal_sites("f.rs", text, &words),
@@ -1116,6 +1129,7 @@ fn the_literal_scan_sees_every_spelling() {
             ("f.rs".to_string(), "plain".to_string(), 1),
             ("f.rs".to_string(), "raw".to_string(), 2),
             ("f.rs".to_string(), "byte".to_string(), 1),
+            ("f.rs".to_string(), "path".to_string(), 1),
         ]
     );
 }
