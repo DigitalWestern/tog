@@ -228,10 +228,19 @@ fn node_version(whole: &str, parts: &[u64]) -> io::Result<Version> {
 /// count: `1.2.3` gives `1.2.4`, `24.0` gives `24.1`, `1` gives `2`. Node
 /// versions are integer triples with no prerelease rows in the catalog, so
 /// `>X` is `>=` this and `<=X` is `<` this.
-fn node_next(whole: &str, parts: &[u64]) -> io::Result<Version> {
+///
+/// `primitive` marks a full three-component `>X` or `<=X`, which node
+/// semver keeps as a comparator on X itself, so its bump may pass the
+/// component limit. Every other bound node semver generates (partials,
+/// caret, tilde, a partial hyphen end) must stay within it, as node semver
+/// refuses those ranges.
+fn node_next(whole: &str, parts: &[u64], primitive: bool) -> io::Result<Version> {
     let mut parts = parts.to_vec();
     let last = parts.last_mut().ok_or_else(|| node_unsupported(whole))?;
-    *last = last.checked_add(1).ok_or_else(|| node_unsupported(whole))?;
+    *last = last
+        .checked_add(1)
+        .filter(|next| primitive || *next <= NODE_MAX_COMPONENT)
+        .ok_or_else(|| node_unsupported(whole))?;
     node_version(whole, &parts)
 }
 
@@ -281,10 +290,17 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<Vec<VersionRequest>>
             ">=" if parts.is_empty() => Ok(Vec::new()),
             ">=" => node_bounds(whole, Some(&parts[..]), None),
             "<=" if parts.is_empty() => Ok(Vec::new()),
-            "<=" => node_bounds(whole, None, Some(node_next(whole, &parts)?)),
+            "<=" => node_bounds(
+                whole,
+                None,
+                Some(node_next(whole, &parts, parts.len() == 3)?),
+            ),
             // `>*` and `<*` admit nothing: refuse rather than lock nothing.
             ">" | "<" if parts.is_empty() => Err(node_unsupported(whole)),
-            ">" => Ok(vec![node_specifier(Op::Ge, node_next(whole, &parts)?)?]),
+            ">" => Ok(vec![node_specifier(
+                Op::Ge,
+                node_next(whole, &parts, parts.len() == 3)?,
+            )?]),
             "<" => node_bounds(whole, None, Some(node_version(whole, &parts)?)),
             "^" | "~" | "=" if parts.is_empty() => Ok(Vec::new()),
             "^" => {
@@ -296,7 +312,7 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<Vec<VersionRequest>>
                 node_bounds(
                     whole,
                     Some(&parts[..]),
-                    Some(node_next(whole, &parts[..keep])?),
+                    Some(node_next(whole, &parts[..keep], false)?),
                 )
             }
             "~" => {
@@ -304,7 +320,7 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<Vec<VersionRequest>>
                 node_bounds(
                     whole,
                     Some(&parts[..]),
-                    Some(node_next(whole, &parts[..keep])?),
+                    Some(node_next(whole, &parts[..keep], false)?),
                 )
             }
             _ => node_line(whole, &parts),
@@ -322,7 +338,7 @@ fn node_line(whole: &str, parts: &[u64]) -> io::Result<Vec<VersionRequest>> {
     if parts.len() == 3 {
         return Ok(vec![VersionRequest::Exact(node_version(whole, parts)?)]);
     }
-    node_bounds(whole, Some(parts), Some(node_next(whole, parts)?))
+    node_bounds(whole, Some(parts), Some(node_next(whole, parts, false)?))
 }
 
 /// One `||` alternative: space-joined comparators that all apply. An
@@ -358,7 +374,7 @@ fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<Ve
             let high = if high.is_empty() {
                 None
             } else {
-                Some(node_next(whole, &high)?)
+                Some(node_next(whole, &high, high.len() == 3)?)
             };
             terms.extend(node_bounds(
                 whole,
@@ -1050,7 +1066,31 @@ mod tests {
         ] {
             assert!(engines_node(text).is_err(), "{text}");
         }
-        assert!(engines_node("<=9007199254740991").is_ok());
+        // A generated bound past the limit is refused, as node semver
+        // refuses the range: partials, caret, tilde, a partial hyphen end.
+        for text in [
+            "9007199254740991",
+            "=9007199254740991",
+            "<=9007199254740991",
+            ">9007199254740991",
+            "24.9007199254740991",
+            "^0.9007199254740991",
+            "~1.9007199254740991",
+            "1 - 9007199254740991",
+        ] {
+            assert!(engines_node(text).is_err(), "{text}");
+        }
+        // Full three-component `>` and `<=` stay comparators on the version
+        // itself, and so does a full hyphen end.
+        for text in [
+            "<=1.2.9007199254740991",
+            ">1.2.9007199254740991",
+            "1.0.0 - 1.2.9007199254740991",
+            "^1.2.9007199254740991",
+            "9007199254740991.0.0",
+        ] {
+            assert!(engines_node(text).is_ok(), "{text}");
+        }
     }
 
     #[test]
