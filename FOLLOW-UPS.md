@@ -32,22 +32,26 @@ by position.
   Recommended: make both global and have them govern every implicit sync,
   like `cargo build --locked`; `--fresh` stays bare-only.
 - **Fix lines that explain rather than resolve (#146).** Two of the 28
-  `fix:` lines are diagnostics (`setup.py egg_info`, `tog audit`). One
-  label and plainer wording, a second `next:` label, or notes.
+  `fix:` lines are diagnostics (`setup.py egg_info`, `tog audit`).
+  Decided 2026-09-23: add a second `next:` label with the same alignment;
+  user experience over label minimalism.
 - **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
   missing-lock generation run the ecosystem's own tool unsandboxed with
-  network, outside what `tog audit` can see. Options: a registry-proxy
-  design round, or refuse those verbs under company policy and require lock
-  edits outside tog (keeps the door closed but weakens the agent story).
-- **A shared system store at `/opt/tog/store`:** decide, or defer
-  explicitly.
+  network, outside what `tog audit` can see. Decided 2026-09-23: design
+  round for a registry proxy (see #68); no refusal behavior changes until
+  the design lands.
+- **A shared system store at `/opt/tog/store`:** decided 2026-09-23: full
+  design round on ownership, permissions, and cross-user GC (see #69).
 - **First outside target.** Cheapest visible artifact: a GitHub Action
   running `tog --frozen` under the company policy plus `tog sbom`, which
   should work on GitHub-hosted Ubuntu runners if unprivileged user
-  namespaces are allowed there.
+  namespaces are allowed there. Parked 2026-09-23; revisit after #87
+  (see #70).
 - **Is `skipped-optional` an exception at all?** An optional dependency
   group the user did not request is a choice, not a waiver, yet it drives the
   strict hit rate down to 8/30 on Python (`docs/agent/HITRATE.md`).
+  Decided 2026-09-23: informational closure field, not an exception
+  (see #71).
 - **Key and credential policy for the trust work.** Where trusted publisher
   keys live, who rotates them, and what revocation means (including a
   company's own internal publisher); a test account for private-registry
@@ -58,8 +62,9 @@ by position.
 
 - **`tog audit` without trusted keys (#144).** It exits 2 by design, so a
   recorded policy exception has no command that judges it in the default
-  unsigned setup. An unsigned mode of `audit`, exceptions in `tog status`,
-  or both; then the exception summary can name a real fix again.
+  unsigned setup. Decided 2026-09-23: both an unsigned mode of `audit`
+  and exceptions in `tog status`; then the exception summary can name a
+  real fix again. Stays open until both land.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so "bare `tog`, then the
   help" and anything else that runs after a successful sync is verified by
