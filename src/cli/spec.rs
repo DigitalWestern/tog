@@ -42,6 +42,14 @@ pub fn toolchain_section(word: &str) -> Option<&'static str> {
 }
 pub const SYNC_ALIASES: &[&str] = &["install", "i"];
 
+/// The registries `tog x` installs from, as (tailor id, command-line word).
+/// Each row selects its registry three ways: `--<word>`, `--<id>`, and a
+/// `<word>:` prefix on the tool. The grammar runs before any tailor exists
+/// and may not name one, so this table mirrors the registry rather than
+/// asking it: the source of truth is `RegistryTool::spelling` on each
+/// tailor that has a registry tool, and a test fails when the two differ.
+pub const X_REGISTRIES: &[(&str, &str)] = &[("python", "py"), ("node", "npm")];
+
 pub const COMMANDS: &[Spec] = &[
     Spec {
         name: "sync",
@@ -971,10 +979,15 @@ mod tests {
     /// `[--py | --npm]` to stay inside eighty columns.
     #[test]
     fn help_lists_the_extra_spellings_and_usage_matches_options() {
+        let x_spellings: Vec<String> = X_REGISTRIES
+            .iter()
+            .flat_map(|(id, word)| [format!("--{word}"), format!("--{id}"), format!("'{word}:'")])
+            .collect();
+        let x_spellings: Vec<&str> = x_spellings.iter().map(String::as_str).collect();
         for (command, spellings) in [
             ("add", &["-D", "--dev"][..]),
             ("remove", &["-D", "--dev"]),
-            ("x", &["--py", "--python", "--npm", "--node"]),
+            ("x", &x_spellings),
         ] {
             let text = help(spec(command).expect(command));
             for spelling in spellings {
