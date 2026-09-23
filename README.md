@@ -64,7 +64,8 @@ xcode-select --install
 
 `tog doctor` prints the command for the host it runs on. Ubuntu 23.10
 and later restrict unprivileged user namespaces through AppArmor, which
-bubblewrap needs; `tog doctor` says so when that switch is on.
+bubblewrap needs; when bubblewrap is refused a namespace and that switch
+is on, `tog doctor` names it.
 
 ## Install
 

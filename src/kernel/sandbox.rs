@@ -580,7 +580,7 @@ impl Sandbox<'_> {
             OsString::from("--new-session"),
             OsString::from("--clearenv"),
         ];
-        args.extend(system_root_args(Path::new("/")));
+        args.extend(system_root_args(Path::new("/"))?);
 
         for item in [
             "/etc/ld.so.cache",
@@ -750,8 +750,19 @@ fn apparmor_restricts_userns() -> bool {
         .unwrap_or(false)
 }
 
-fn with_userns_restriction_note(message: String, restricted: bool) -> String {
-    if !restricted {
+/// bwrap's words when the kernel refused it a user namespace or the uid map
+/// that goes with it, the failures the AppArmor switch causes. Anything
+/// later (an execvp failure, say) proves the namespace was created.
+fn is_userns_denial(stderr: &str) -> bool {
+    let denied = stderr.contains("Permission denied") || stderr.contains("Operation not permitted");
+    let namespace_step = stderr.contains("uid map")
+        || stderr.contains("namespace")
+        || stderr.contains("RTM_NEWADDR");
+    denied && namespace_step
+}
+
+fn with_userns_restriction_note(message: String, stderr: &str, restricted: bool) -> String {
+    if !restricted || !is_userns_denial(stderr) {
         return message;
     }
     format!(
@@ -997,7 +1008,7 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
         .into_iter()
         .map(OsString::from)
         .collect();
-        probe_args.extend(system_root_args(Path::new("/")));
+        probe_args.extend(system_root_args(Path::new("/")).map_err(|error| error.to_string())?);
         probe_args.extend(
             ["--dev", "/dev", "--proc", "/proc", PROBE_TARGET]
                 .into_iter()
@@ -1022,13 +1033,15 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
         if probe_output.0.success() {
             return Ok(path);
         }
-        let message = if probe_output.1.starts_with(b"bwrap:") {
-            explained_bwrap_stderr(&String::from_utf8_lossy(&probe_output.1))
+        let stderr = String::from_utf8_lossy(&probe_output.1);
+        let message = if stderr.starts_with("bwrap:") {
+            explained_bwrap_stderr(&stderr)
         } else {
             bwrap_unavailable()
         };
         Err(with_userns_restriction_note(
             message,
+            &stderr,
             apparmor_restricts_userns(),
         ))
     }) {
@@ -1087,32 +1100,139 @@ const SYSTEM_ROOT_ENTRIES: [&str; 6] = ["bin", "sbin", "lib", "lib64", "lib32", 
 /// symlink to `/lib/x86_64-linux-gnu/...`, so a sandbox without `/lib`
 /// cannot start any dynamically linked program (issue #87).
 ///
+/// A copied symlink is only as good as what it points at: every symlinked
+/// entry must resolve, through any chain of links, into `/usr` or into an
+/// entry that is itself bound. A host with `/bin -> /opt/base/bin` would
+/// otherwise get a dangling `/bin/sh` in the sandbox while the
+/// `/usr/bin/true` probe still passes, so setup refuses it (fail closed)
+/// rather than widening the mounts. Only a missing entry is skipped; any
+/// other error reading the host layout fails setup too.
+///
 /// `host_root` is `/` in production; tests pass a fake host layout.
-fn system_root_args(host_root: &Path) -> Vec<OsString> {
+fn system_root_args(host_root: &Path) -> io::Result<Vec<OsString>> {
+    let mut bound = vec![PathBuf::from("/usr")];
+    let mut entries = Vec::new();
+    for name in SYSTEM_ROOT_ENTRIES {
+        let host = host_root.join(name);
+        let inside = Path::new("/").join(name);
+        let metadata = match fs::symlink_metadata(&host) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(host_layout_error(&host, error)),
+        };
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&host).map_err(|error| host_layout_error(&host, error))?;
+            entries.push(("--symlink", target.into_os_string(), inside));
+        } else if metadata.is_dir() {
+            bound.push(inside.clone());
+            entries.push(("--ro-bind", host.into_os_string(), inside));
+        }
+    }
+
     let mut args = Vec::new();
     push_arg(&mut args, "--ro-bind");
     args.push(host_root.join("usr").into_os_string());
     push_arg(&mut args, "/usr");
-    for name in SYSTEM_ROOT_ENTRIES {
-        let host = host_root.join(name);
-        let inside = Path::new("/").join(name);
-        let Ok(metadata) = fs::symlink_metadata(&host) else {
+    for (flag, source, inside) in entries {
+        if flag == "--symlink" {
+            let resolved = resolve_host_path(host_root, &inside)?;
+            if !bound.iter().any(|root| resolved.starts_with(root)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "host {} resolves to {}, outside /usr and the system directories the \
+                         sandbox binds; it would dangle inside the sandbox",
+                        inside.display(),
+                        resolved.display()
+                    ),
+                ));
+            }
+        }
+        push_arg(&mut args, flag);
+        args.push(source);
+        args.push(inside.into_os_string());
+    }
+    Ok(args)
+}
+
+fn host_layout_error(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "cannot read host {} for the sandbox: {error}",
+            path.display()
+        ),
+    )
+}
+
+/// Linux's own limit on symlinks followed in one lookup (MAXSYMLINKS).
+const SYMLINK_HOP_LIMIT: usize = 40;
+
+/// Resolve `path` (absolute, as seen from `/`) the way the kernel would on
+/// the host rooted at `host_root`: follow symlinks component by component,
+/// absolute targets restarting at `host_root`. A missing component ends
+/// lookup and the rest is kept lexically. A chain longer than
+/// `SYMLINK_HOP_LIMIT` is a loop and an error, as in the kernel (ELOOP).
+fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<PathBuf> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    let mut pending: VecDeque<OsString> = VecDeque::new();
+    let push_front = |pending: &mut VecDeque<OsString>, path: &Path| {
+        let parts: Vec<OsString> = path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part.to_os_string()),
+                Component::ParentDir => Some(OsString::from("..")),
+                _ => None,
+            })
+            .collect();
+        for part in parts.into_iter().rev() {
+            pending.push_front(part);
+        }
+    };
+    push_front(&mut pending, path);
+    let mut resolved = PathBuf::from("/");
+    let mut hops = 0;
+    let mut missing = false;
+    while let Some(part) = pending.pop_front() {
+        if part == ".." {
+            resolved.pop();
             continue;
-        };
-        if metadata.file_type().is_symlink() {
-            let Ok(target) = fs::read_link(&host) else {
-                continue;
-            };
-            push_arg(&mut args, "--symlink");
-            args.push(target.into_os_string());
-            args.push(inside.into_os_string());
-        } else if metadata.is_dir() {
-            push_arg(&mut args, "--ro-bind");
-            args.push(host.into_os_string());
-            args.push(inside.into_os_string());
+        }
+        let candidate = resolved.join(&part);
+        if missing {
+            resolved = candidate;
+            continue;
+        }
+        let host = host_root.join(candidate.strip_prefix("/").unwrap_or(&candidate));
+        match fs::symlink_metadata(&host) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                hops += 1;
+                if hops > SYMLINK_HOP_LIMIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "host {} is a symlink loop; the sandbox cannot mirror it",
+                            path.display()
+                        ),
+                    ));
+                }
+                let target =
+                    fs::read_link(&host).map_err(|error| host_layout_error(&host, error))?;
+                if target.is_absolute() {
+                    resolved = PathBuf::from("/");
+                }
+                push_front(&mut pending, &target);
+            }
+            Ok(_) => resolved = candidate,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing = true;
+                resolved = candidate;
+            }
+            Err(error) => return Err(host_layout_error(&host, error)),
         }
     }
-    args
+    Ok(resolved)
 }
 
 fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
@@ -1942,8 +2062,9 @@ mod tests {
         );
     }
 
-    fn rendered(args: &[OsString]) -> Vec<String> {
-        args.iter()
+    fn rendered(args: io::Result<Vec<OsString>>) -> Vec<String> {
+        args.unwrap()
+            .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
     }
@@ -1966,7 +2087,7 @@ mod tests {
         }
         let usr = fedora.join("usr").to_string_lossy().into_owned();
         assert_eq!(
-            rendered(&system_root_args(&fedora)),
+            rendered(system_root_args(&fedora)),
             [
                 "--ro-bind",
                 &usr,
@@ -2000,7 +2121,7 @@ mod tests {
         }
         let usr = ubuntu.join("usr").to_string_lossy().into_owned();
         assert_eq!(
-            rendered(&system_root_args(&ubuntu)),
+            rendered(system_root_args(&ubuntu)),
             [
                 "--ro-bind",
                 &usr,
@@ -2041,7 +2162,7 @@ mod tests {
         std::os::unix::fs::symlink("usr/sbin", root.join("sbin")).unwrap();
         let host = |name: &str| root.join(name).to_string_lossy().into_owned();
         assert_eq!(
-            rendered(&system_root_args(&root)),
+            rendered(system_root_args(&root)),
             [
                 "--ro-bind",
                 &host("usr"),
@@ -2063,16 +2184,143 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Doctor names the AppArmor switch only when it is on.
+    fn fake_root(test_name: &str, dirs: &[&str], links: &[(&str, &str)]) -> PathBuf {
+        let root = temp_dir(test_name);
+        for directory in dirs {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for (name, target) in links {
+            std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+        }
+        root
+    }
+
+    /// Absolute links, relative links, and chains through other entries
+    /// are copied as the host has them when they end in `/usr` or in a
+    /// bound directory.
     #[test]
-    fn userns_restriction_is_named_only_when_active() {
-        let base = "bwrap: setting up uid map: Permission denied".to_string();
-        assert_eq!(with_userns_restriction_note(base.clone(), false), base);
-        let noted = with_userns_restriction_note(base.clone(), true);
-        assert!(noted.starts_with(&base), "{noted}");
+    fn system_root_accepts_links_that_land_in_bound_directories() {
+        let root = fake_root(
+            "chains-root",
+            &["usr/bin", "usr/lib", "lib"],
+            &[
+                ("bin", "/usr/bin"),       // absolute
+                ("sbin", "bin"),           // multi-hop: sbin -> bin -> /usr/bin
+                ("lib64", "./lib/../lib"), // into a bound real directory
+                ("lib32", "usr/lib32"),    // relative, target missing but in /usr
+            ],
+        );
+        assert_eq!(
+            rendered(system_root_args(&root))[3..],
+            [
+                "--symlink",
+                "/usr/bin",
+                "/bin",
+                "--symlink",
+                "bin",
+                "/sbin",
+                "--ro-bind",
+                &root.join("lib").to_string_lossy().into_owned(),
+                "/lib",
+                "--symlink",
+                "./lib/../lib",
+                "/lib64",
+                "--symlink",
+                "usr/lib32",
+                "/lib32",
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A link whose chain leaves the mounted set would dangle inside the
+    /// sandbox (a broken `/bin/sh` while the probe still passes), so setup
+    /// refuses the host instead of widening the mounts.
+    #[test]
+    fn system_root_refuses_links_that_leave_the_mounted_set() {
+        let outside = fake_root(
+            "outside-root",
+            &["usr", "opt/base/bin"],
+            &[("bin", "/opt/base/bin")],
+        );
+        let error = system_root_args(&outside).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        let message = error.to_string();
         assert!(
-            noted.contains("apparmor_restrict_unprivileged_userns"),
-            "{noted}"
+            message.contains("host /bin resolves to /opt/base/bin"),
+            "{message}"
+        );
+        fs::remove_dir_all(outside).unwrap();
+
+        // Multi-hop: each link looks harmless, the chain ends in /opt.
+        let chained = fake_root(
+            "multi-hop-root",
+            &["usr", "opt/base/lib"],
+            &[("lib64", "lib"), ("lib", "alt/lib"), ("alt", "/opt/base")],
+        );
+        let message = system_root_args(&chained).unwrap_err().to_string();
+        assert!(
+            message.contains("host /lib resolves to /opt/base/lib"),
+            "{message}"
+        );
+        fs::remove_dir_all(chained).unwrap();
+    }
+
+    /// A symlink cycle is an error, as the kernel's ELOOP would be.
+    #[test]
+    fn system_root_refuses_symlink_loops() {
+        let root = fake_root("loop-root", &["usr"], &[("bin", "sbin"), ("sbin", "/bin")]);
+        let error = system_root_args(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("symlink loop"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Only a missing entry is skipped. An unreadable host layout fails
+    /// setup rather than silently shrinking the sandbox's system runtime.
+    #[test]
+    fn system_root_propagates_errors_other_than_missing() {
+        let root = fake_root("locked-root", &["usr"], &[]);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::symlink_metadata(root.join("bin"))
+            .map(|_| true)
+            .unwrap_or_else(|error| error.kind() != io::ErrorKind::PermissionDenied);
+        let result = system_root_args(&root);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        if readable {
+            eprintln!("skip: running as a user that ignores directory permissions");
+            return;
+        }
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("cannot read host"), "{error}");
+    }
+
+    /// Doctor names the AppArmor switch only when it is on and bwrap was
+    /// refused a namespace. An execvp failure proves the namespace existed.
+    #[test]
+    fn userns_restriction_is_named_only_for_namespace_denials() {
+        let note = "apparmor_restrict_unprivileged_userns";
+        for denial in [
+            "bwrap: setting up uid map: Permission denied",
+            "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+            "bwrap: Creating new namespace failed: Permission denied",
+        ] {
+            let message = denial.to_string();
+            assert_eq!(
+                with_userns_restriction_note(message.clone(), denial, false),
+                message
+            );
+            let noted = with_userns_restriction_note(message.clone(), denial, true);
+            assert!(noted.starts_with(denial), "{noted}");
+            assert!(noted.contains(note), "{noted}");
+        }
+        let exec = format!("bwrap: execvp {PROBE_TARGET}: No such file or directory");
+        let explained = explained_bwrap_stderr(&exec);
+        assert_eq!(
+            with_userns_restriction_note(explained.clone(), &exec, true),
+            explained
         );
     }
 
