@@ -366,5 +366,18 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
             .contains("records fastdom@1.0.11(patch_hash="),
         "{error}"
     );
+
+    // A recorded hash is not a license to skip the range: roughjs@5.0.0
+    // carrying the ^4.6.0 patch's hash is outside that range, so no rule
+    // selects it and the lock is refused.
+    let lock = patched_lock(&fastdom, &rough, &rough_exact, &fastdom).replace("4.6.5", "5.0.0");
+    let error = plan_for(&lock).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("records roughjs@5.0.0(patch_hash=")
+            && error.to_string().contains("selects no patch"),
+        "{error}"
+    );
     let _ = fs::remove_dir_all(dir);
 }

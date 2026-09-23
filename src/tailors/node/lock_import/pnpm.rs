@@ -325,12 +325,12 @@ fn md5(input: &[u8]) -> [u8; 16] {
 /// precedence order (`groupPatchedDependencies` and `getPatchInfo` in pnpm's
 /// `patching/config`): an exact version wins, then a version range, then a
 /// key that names every version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum PatchSelector {
     /// `name@1.2.3`.
     Exact(String),
     /// `name@^1.0.0` and every other range except `*`.
-    Range(String),
+    Range(super::semver_range::Range),
     /// A bare `name`, or `name@*`.
     All,
 }
@@ -379,7 +379,11 @@ pub(super) fn patch_key_selector(key: &str) -> io::Result<(String, PatchSelector
     {
         PatchSelector::Exact(selector.to_string())
     } else {
-        PatchSelector::Range(selector.to_string())
+        // pnpm rejects a key that is neither a version nor a valid range
+        // (PATCH_NON_SEMVER_RANGE); so does tog.
+        let range = super::semver_range::Range::parse(selector)
+            .map_err(|error| err(format!("pnpm patch key {key:?}: {error}")))?;
+        PatchSelector::Range(range)
     };
     Ok((name.to_string(), selector))
 }
@@ -448,22 +452,27 @@ pub(super) fn pnpm_patches(
 
 /// The patch hash pnpm recorded in a snapshot key, e.g.
 /// `fastdom@1.0.12(patch_hash=10bad5…)`: the patch pnpm itself applied there.
-pub(super) fn recorded_patch_hash(snapshot_key: &str) -> Option<&str> {
+pub(super) fn recorded_patch_hash(snapshot_key: &str) -> io::Result<Option<&str>> {
     const MARKER: &str = "(patch_hash=";
-    let rest = &snapshot_key[snapshot_key.find(MARKER)? + MARKER.len()..];
-    Some(&rest[..rest.find(')').unwrap_or(rest.len())])
+    let Some(start) = snapshot_key.find(MARKER) else {
+        return Ok(None);
+    };
+    let rest = &snapshot_key[start + MARKER.len()..];
+    match rest.find(')') {
+        Some(end) if end > 0 => Ok(Some(&rest[..end])),
+        _ => Err(err(format!(
+            "pnpm snapshot {snapshot_key:?} has a malformed patch_hash suffix"
+        ))),
+    }
 }
 
-/// The rule pnpm applies to one locked package. Exact versions and bare
-/// names need no version arithmetic. A range is settled by the lockfile
-/// instead of a reimplementation of node-semver: pnpm writes the hash of the
-/// patch it applied into the snapshot key, so a range rule applies exactly
-/// where that recorded hash is the rule's hash.
+/// The rule pnpm applies to one locked package, by pnpm's `getPatchInfo`:
+/// an exact version, else the one range the version satisfies (two are a
+/// conflict pnpm itself refuses), else a key naming every version.
 fn select_pnpm_patch<'a>(
     rules: &'a [PnpmPatchRule],
     name: &str,
     version: &str,
-    recorded: Option<&str>,
 ) -> io::Result<Option<&'a PnpmPatchRule>> {
     let named = || rules.iter().filter(move |rule| rule.name == name);
     if let Some(rule) = named()
@@ -472,29 +481,22 @@ fn select_pnpm_patch<'a>(
         return Ok(Some(rule));
     }
     let ranges = named()
-        .filter(|rule| {
-            matches!(rule.selector, PatchSelector::Range(_))
-                && recorded == Some(rule.patch.hash.as_str())
-        })
+        .filter(|rule| matches!(&rule.selector, PatchSelector::Range(range) if range.satisfies(version)))
         .collect::<Vec<_>>();
-    if let Some(first) = ranges.first() {
-        // Two ranges naming one file with one hash are the same patch.
-        if ranges
-            .iter()
-            .any(|rule| rule.patch.path != first.patch.path)
-        {
+    match ranges.as_slice() {
+        [] => Ok(named().find(|rule| matches!(rule.selector, PatchSelector::All))),
+        [rule] => Ok(Some(rule)),
+        _ => {
             let keys = ranges
                 .iter()
                 .map(|rule| rule.key.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(err(format!(
+            Err(err(format!(
                 "pnpm patchedDependencies {keys} all match {name}@{version}; key the patch by the exact version"
-            )));
+            )))
         }
-        return Ok(Some(first));
     }
-    Ok(named().find(|rule| rule.selector == PatchSelector::All))
 }
 
 pub(super) fn attach_pnpm_patches(
@@ -503,9 +505,9 @@ pub(super) fn attach_pnpm_patches(
 ) -> io::Result<()> {
     let mut applied = BTreeSet::new();
     for node in nodes.values_mut() {
-        let recorded = recorded_patch_hash(&node.key);
+        let recorded = recorded_patch_hash(&node.key)?;
         let version = trim_peer_suffix(&node.version);
-        let rule = select_pnpm_patch(rules, &node.name, version, recorded)?;
+        let rule = select_pnpm_patch(rules, &node.name, version)?;
         // The snapshot key names the patch pnpm applied; tog must pick the
         // same one. A lock without the suffix (hand-written) is taken at its
         // patchedDependencies word.
@@ -1191,6 +1193,42 @@ pub(super) fn plan_pnpm_with_policy(
 #[cfg(test)]
 mod patch_hash_tests {
     use super::*;
+
+    #[test]
+    fn recorded_patch_hash_refuses_a_malformed_suffix() {
+        assert_eq!(
+            recorded_patch_hash("foo@1.0.0(patch_hash=abc)(react@18.0.0)").unwrap(),
+            Some("abc")
+        );
+        assert_eq!(
+            recorded_patch_hash("foo@1.0.0(react@18.0.0)").unwrap(),
+            None
+        );
+        for key in ["foo@1.0.0(patch_hash=abc", "foo@1.0.0(patch_hash=)"] {
+            assert!(recorded_patch_hash(key).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn patch_keys_split_into_exact_range_and_every_version() {
+        let exact = patch_key_selector("@scope/pkg@1.2.3").unwrap();
+        assert_eq!(exact.0, "@scope/pkg");
+        assert!(matches!(exact.1, PatchSelector::Exact(ref v) if v == "1.2.3"));
+        assert!(matches!(
+            patch_key_selector("fastdom").unwrap().1,
+            PatchSelector::All
+        ));
+        assert!(matches!(
+            patch_key_selector("@scope/pkg@*").unwrap().1,
+            PatchSelector::All
+        ));
+        let range = patch_key_selector("foo@^1.0.0").unwrap().1;
+        assert!(
+            matches!(range, PatchSelector::Range(ref r) if r.satisfies("1.4.0") && !r.satisfies("2.0.0"))
+        );
+        assert!(patch_key_selector("foo@latest").is_err());
+        assert!(patch_key_selector("@scope").is_err());
+    }
 
     const PATCH: &[u8] = b"diff --git a/index.js b/index.js\n";
     /// pnpm 9's `createBase32HashFromFile` of `PATCH`.
