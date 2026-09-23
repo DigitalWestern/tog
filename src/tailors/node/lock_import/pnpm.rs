@@ -321,11 +321,74 @@ fn md5(input: &[u8]) -> [u8; 16] {
     digest
 }
 
+/// Which locked versions a `patchedDependencies` key selects, in pnpm's
+/// precedence order (`groupPatchedDependencies` and `getPatchInfo` in pnpm's
+/// `patching/config`): an exact version wins, then a version range, then a
+/// key that names every version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PatchSelector {
+    /// `name@1.2.3`.
+    Exact(String),
+    /// `name@^1.0.0` and every other range except `*`.
+    Range(String),
+    /// A bare `name`, or `name@*`.
+    All,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PnpmPatchRule {
+    /// The key exactly as the lockfile spells it, for messages.
+    pub(super) key: String,
+    pub(super) name: String,
+    pub(super) selector: PatchSelector,
+    pub(super) patch: NpmPatch,
+}
+
+/// Split a `patchedDependencies` key into a package name and a selector.
+/// Like pnpm's own parser, text after the name that is a full semver version
+/// is an exact version and anything else is a range.
+pub(super) fn patch_key_selector(key: &str) -> io::Result<(String, PatchSelector)> {
+    let trimmed = key.trim();
+    let invalid = || err(format!("pnpm patch key {key:?} names no package"));
+    if trimmed.starts_with('/') {
+        // pnpm v6's `/name@version` and `/name/version` spellings.
+        let (name, version) = normalize_pnpm_snapshot_key(trimmed)
+            .as_deref()
+            .and_then(split_identity)
+            .ok_or_else(invalid)?;
+        return Ok((name, PatchSelector::Exact(version)));
+    }
+    let at = match trimmed.strip_prefix('@') {
+        Some(rest) => rest.find('@').map(|index| index + 1),
+        None => trimmed.find('@'),
+    };
+    let Some(at) = at else {
+        if trimmed.is_empty() || trimmed.starts_with('@') && !trimmed.contains('/') {
+            return Err(invalid());
+        }
+        return Ok((trimmed.to_string(), PatchSelector::All));
+    };
+    let (name, selector) = (&trimmed[..at], trimmed[at + 1..].trim());
+    if name.is_empty() || selector.is_empty() {
+        return Err(invalid());
+    }
+    let selector = if selector == "*" {
+        PatchSelector::All
+    } else if selector.starts_with(|c: char| c.is_ascii_digit())
+        && super::yarn1::parse_semver(selector, false).is_some()
+    {
+        PatchSelector::Exact(selector.to_string())
+    } else {
+        PatchSelector::Range(selector.to_string())
+    };
+    Ok((name.to_string(), selector))
+}
+
 pub(super) fn pnpm_patches(
     root: &BTreeMap<String, YamlValue>,
     project_dir: &Path,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
-) -> io::Result<Vec<(String, NpmPatch)>> {
+) -> io::Result<Vec<PnpmPatchRule>> {
     let Some(value) = root.get("patchedDependencies") else {
         return Ok(Vec::new());
     };
@@ -354,57 +417,122 @@ pub(super) fn pnpm_patches(
         };
         let path = patch_path(project_dir, &raw_path)?;
         let content_sha256 = verify_patch_hash(package, &path, hash)?;
-        let identity = normalize_pnpm_snapshot_key(package).ok_or_else(|| {
-            err(format!(
-                "pnpm patch {package} has no package@version identity"
-            ))
-        })?;
+        let (name, selector) = patch_key_selector(package)?;
+        let subject = match &selector {
+            PatchSelector::Exact(version) => format!("{name}@{version}"),
+            _ => package.trim().to_string(),
+        };
         if hash.len() == PNPM_BASE32_HASH_LEN {
             let detail = "pnpm 9 md5 patch hash accepted and verified, but is cryptographically weak; the environment id binds the patch by sha256";
             if let Err(policy_error) =
-                record(crate::kernel::policy::WEAK_INTEGRITY, &identity, detail)
+                record(crate::kernel::policy::WEAK_INTEGRITY, &subject, detail)
             {
                 return Err(err(format!(
-                    "pnpm patch {identity} uses weak md5 hash ({policy_error})"
+                    "pnpm patch {subject} uses weak md5 hash ({policy_error})"
                 )));
             }
         }
-        result.push((
-            identity,
-            NpmPatch {
+        result.push(PnpmPatchRule {
+            key: package.clone(),
+            name,
+            selector,
+            patch: NpmPatch {
                 path: path.to_string_lossy().into_owned(),
                 hash: hash.to_string(),
                 content_sha256,
             },
-        ));
+        });
     }
     Ok(result)
 }
 
+/// The patch hash pnpm recorded in a snapshot key, e.g.
+/// `fastdom@1.0.12(patch_hash=10bad5…)`: the patch pnpm itself applied there.
+pub(super) fn recorded_patch_hash(snapshot_key: &str) -> Option<&str> {
+    const MARKER: &str = "(patch_hash=";
+    let rest = &snapshot_key[snapshot_key.find(MARKER)? + MARKER.len()..];
+    Some(&rest[..rest.find(')').unwrap_or(rest.len())])
+}
+
+/// The rule pnpm applies to one locked package. Exact versions and bare
+/// names need no version arithmetic. A range is settled by the lockfile
+/// instead of a reimplementation of node-semver: pnpm writes the hash of the
+/// patch it applied into the snapshot key, so a range rule applies exactly
+/// where that recorded hash is the rule's hash.
+fn select_pnpm_patch<'a>(
+    rules: &'a [PnpmPatchRule],
+    name: &str,
+    version: &str,
+    recorded: Option<&str>,
+) -> io::Result<Option<&'a PnpmPatchRule>> {
+    let named = || rules.iter().filter(move |rule| rule.name == name);
+    if let Some(rule) = named()
+        .find(|rule| matches!(&rule.selector, PatchSelector::Exact(exact) if exact == version))
+    {
+        return Ok(Some(rule));
+    }
+    let ranges = named()
+        .filter(|rule| {
+            matches!(rule.selector, PatchSelector::Range(_))
+                && recorded == Some(rule.patch.hash.as_str())
+        })
+        .collect::<Vec<_>>();
+    if let Some(first) = ranges.first() {
+        // Two ranges naming one file with one hash are the same patch.
+        if ranges
+            .iter()
+            .any(|rule| rule.patch.path != first.patch.path)
+        {
+            let keys = ranges
+                .iter()
+                .map(|rule| rule.key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(err(format!(
+                "pnpm patchedDependencies {keys} all match {name}@{version}; key the patch by the exact version"
+            )));
+        }
+        return Ok(Some(first));
+    }
+    Ok(named().find(|rule| rule.selector == PatchSelector::All))
+}
+
 pub(super) fn attach_pnpm_patches(
     nodes: &mut BTreeMap<String, Node>,
-    patches: &[(String, NpmPatch)],
+    rules: &[PnpmPatchRule],
 ) -> io::Result<()> {
     let mut applied = BTreeSet::new();
     for node in nodes.values_mut() {
-        let Some((identity, patch)) = patches.iter().find(|(identity, _)| {
-            identity_key_for_snapshot(identity) == identity_key_for_snapshot(&node.key)
-        }) else {
+        let recorded = recorded_patch_hash(&node.key);
+        let version = trim_peer_suffix(&node.version);
+        let rule = select_pnpm_patch(rules, &node.name, version, recorded)?;
+        // The snapshot key names the patch pnpm applied; tog must pick the
+        // same one. A lock without the suffix (hand-written) is taken at its
+        // patchedDependencies word.
+        if let Some(recorded) = recorded {
+            if rule.map(|rule| rule.patch.hash.as_str()) != Some(recorded) {
+                return Err(err(format!(
+                    "pnpm-lock.yaml records {} as patched with {recorded}, but patchedDependencies selects {}",
+                    node.key,
+                    rule.map(|rule| rule.key.as_str()).unwrap_or("no patch")
+                )));
+            }
+        }
+        let Some(rule) = rule else {
             continue;
         };
-        node.patch = Some(patch.clone());
-        applied.insert(identity);
+        node.patch = Some(rule.patch.clone());
+        applied.insert(rule.key.as_str());
     }
-    if applied.len() != patches.len() {
-        let missing = patches
-            .iter()
-            .filter(|(identity, _)| !applied.contains(identity))
-            .map(|(identity, _)| identity)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
+    let missing = rules
+        .iter()
+        .filter(|rule| !applied.contains(rule.key.as_str()))
+        .map(|rule| rule.key.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
         return Err(err(format!(
-            "pnpm patchedDependencies has no matching locked package: {missing}"
+            "pnpm patchedDependencies has no matching locked package: {}",
+            missing.join(", ")
         )));
     }
     Ok(())

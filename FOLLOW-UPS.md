@@ -63,13 +63,6 @@ by position.
   hand. That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
 
-- **npm regressions from the 2026-09-11 hit-rate run.** Each synced on
-  2026-09-05 at the same pinned commits. Error text is in
-  `docs/agent/HITRATE.md`.
-  - *mermaid-js/mermaid:* `pnpm patch fastdom has no package@version
-    identity`. pnpm `patchedDependencies` keyed by a bare package name
-    applies to every version. Decide whether to support it by applying the
-    patch to each locked version.
 - **Supervision redesign: one signal session per operation.** Today one
   process supervises at most one child; a second concurrent session is
   rejected with a named busy error (`Session::new` in

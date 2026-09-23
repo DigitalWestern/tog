@@ -142,7 +142,11 @@ recorded); with none of these, the store node's bundled npm runs
 symlink into the user's source, so nothing is ever placed beneath one: a
 target that is itself an importer gets its dependencies from its own
 projected `node_modules` (as pnpm installs it), any other local package gets
-them beside the link. Lifecycle scripts run hermetically (below).
+them beside the link. pnpm `patchedDependencies` follow pnpm's precedence
+(exact version, then range, then a bare name that covers every version); a
+range is settled by the `patch_hash` pnpm wrote into each snapshot key, and
+any snapshot whose recorded hash disagrees with the selected patch is
+refused. Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over
 ranged manifests, so a bare machine needs nothing installed besides tog.
 

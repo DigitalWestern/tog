@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use sha2::{Digest, Sha256};
 use tog::kernel::platform::Platform;
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -241,6 +242,129 @@ snapshots:
         plan.packages.iter().any(|package| package.name == "b"),
         "{:?}",
         plan.packages
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn write_patch(dir: &Path, name: &str, bytes: &[u8]) -> String {
+    let path = dir.join("patches").join(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// mermaid-js/mermaid's shape (#52): `patchedDependencies` keyed by a bare
+/// package name, which pnpm applies to every locked version, next to a
+/// version range and an exact key. pnpm picks exact over range over bare
+/// name, and writes the hash it applied into each snapshot key.
+fn patched_lock(
+    fastdom: &str,
+    rough: &str,
+    rough_exact: &str,
+    fastdom_11_recorded: &str,
+) -> String {
+    format!(
+        r#"lockfileVersion: '9.0'
+patchedDependencies:
+  fastdom:
+    hash: {fastdom}
+    path: patches/fastdom.patch
+  roughjs@^4.6.0:
+    hash: {rough}
+    path: patches/roughjs.patch
+  roughjs@4.6.6:
+    hash: {rough_exact}
+    path: patches/roughjs@4.6.6.patch
+importers:
+  .:
+    dependencies:
+      fastdom:
+        specifier: 1.0.12
+        version: 1.0.12(patch_hash={fastdom})
+      old-fastdom:
+        specifier: npm:fastdom@1.0.11
+        version: fastdom@1.0.11(patch_hash={fastdom_11_recorded})
+      roughjs:
+        specifier: 4.6.5
+        version: 4.6.5(patch_hash={rough})
+      rough-exact:
+        specifier: npm:roughjs@4.6.6
+        version: roughjs@4.6.6(patch_hash={rough_exact})
+packages:
+  fastdom@1.0.11:
+    resolution: {{integrity: {SRI}}}
+  fastdom@1.0.12:
+    resolution: {{integrity: {SRI}}}
+  roughjs@4.6.5:
+    resolution: {{integrity: {SRI}}}
+  roughjs@4.6.6:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  fastdom@1.0.11(patch_hash={fastdom_11_recorded}): {{}}
+  fastdom@1.0.12(patch_hash={fastdom}): {{}}
+  roughjs@4.6.5(patch_hash={rough}): {{}}
+  roughjs@4.6.6(patch_hash={rough_exact}): {{}}
+"#
+    )
+}
+
+#[test]
+fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
+    let dir = scratch_project("pnpm-bare-patch");
+    let fastdom = write_patch(
+        &dir,
+        "fastdom.patch",
+        b"diff --git a/fastdom.js b/fastdom.js\n",
+    );
+    let rough = write_patch(&dir, "roughjs.patch", b"diff --git a/rough.js b/rough.js\n");
+    let rough_exact = write_patch(&dir, "roughjs@4.6.6.patch", b"diff --git a/exact b/exact\n");
+    let plan_for = |lock: &str| {
+        tog::tailors::node::lock_import::plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            lock,
+            &dir,
+            node_version(),
+        )
+    };
+    let plan = plan_for(&patched_lock(&fastdom, &rough, &rough_exact, &fastdom)).unwrap();
+    let patch_of = |name: &str, version: &str| {
+        let package = plan
+            .packages
+            .iter()
+            .find(|package| package.name == name && package.version == version)
+            .unwrap_or_else(|| panic!("{name}@{version} missing: {:?}", plan.packages));
+        package.patch.as_ref().map(|patch| patch.hash.clone())
+    };
+    // The bare name reaches every locked version.
+    assert_eq!(patch_of("fastdom", "1.0.11"), Some(fastdom.clone()));
+    assert_eq!(patch_of("fastdom", "1.0.12"), Some(fastdom.clone()));
+    // The range applies where the lock says pnpm applied it; the exact key
+    // wins over the range for its own version.
+    assert_eq!(patch_of("roughjs", "4.6.5"), Some(rough.clone()));
+    assert_eq!(patch_of("roughjs", "4.6.6"), Some(rough_exact.clone()));
+
+    // The patch bytes stay bound: an edited patch file is refused.
+    fs::write(dir.join("patches/fastdom.patch"), b"changed").unwrap();
+    let error = plan_for(&patched_lock(&fastdom, &rough, &rough_exact, &fastdom)).unwrap_err();
+    assert!(
+        error.to_string().contains("patch fastdom hash mismatch"),
+        "{error}"
+    );
+    write_patch(
+        &dir,
+        "fastdom.patch",
+        b"diff --git a/fastdom.js b/fastdom.js\n",
+    );
+
+    // A snapshot that records a different patch than tog would select is a
+    // lock tog cannot honor faithfully.
+    let other = "0".repeat(64);
+    let error = plan_for(&patched_lock(&fastdom, &rough, &rough_exact, &other)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("records fastdom@1.0.11(patch_hash="),
+        "{error}"
     );
     let _ = fs::remove_dir_all(dir);
 }
