@@ -20,8 +20,11 @@ fn version_text() -> String {
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let mut options = Options::default();
     // `--frozen`, `--fresh` and `--strict` belong to the bare `tog`, so
-    // they are read here, ahead of any verb, and a verb other than the
-    // hidden `sync` after them is refused.
+    // they are read here, ahead of any verb. Past a verb other than the
+    // hidden `sync`, `--fresh` is refused (it stays bare-only) while
+    // `--frozen` and `--strict` move into the global options, where they
+    // govern the implicit sync; after the verb the global scan lifts them
+    // out like `-q`.
     let mut setup: Vec<String> = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
@@ -78,11 +81,23 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         };
     };
     let name = canonical_name(word);
-    if let Some(flag) = setup.first().filter(|_| name != "sync") {
-        return Err(UsageError::new(
-            format!("{flag} belongs to the bare 'tog'; run 'tog {flag}' on its own"),
-            None,
-        ));
+    if name != "sync" {
+        // `--fresh` stays bare-only: rebuilding before every command is
+        // never what someone means. `--frozen` and `--strict` are global
+        // and move into the options, where they govern the implicit sync.
+        if let Some(flag) = setup.iter().find(|flag| *flag == "--fresh") {
+            return Err(UsageError::new(
+                format!("{flag} belongs to the bare 'tog'; run 'tog {flag}' on its own"),
+                None,
+            ));
+        }
+        for flag in setup.drain(..) {
+            match flag.as_str() {
+                "--frozen" => options.frozen = true,
+                "--strict" => options.strict = true,
+                _ => unreachable!("setup holds only the three setup flags"),
+            }
+        }
     }
     let mut rest = args[index + 1..].to_vec();
     if name == "sync" {
@@ -130,6 +145,43 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
                 ),
             });
         }
+    };
+    let command = match command {
+        // `--frozen` and `--strict` govern the implicit sync, so the three
+        // commands that sync on the way in carry them. `run` and `build`
+        // hand everything after the verb to the program, so for those two
+        // the flags must precede the verb; `env` reads them from either
+        // side through the global scan.
+        Some(Command::Run { command, .. }) => Some(Command::Run {
+            command,
+            frozen: options.frozen,
+            strict: options.strict,
+        }),
+        Some(Command::Build { args, .. }) => Some(Command::Build {
+            args,
+            frozen: options.frozen,
+            strict: options.strict,
+        }),
+        Some(Command::Env { shell, .. }) => Some(Command::Env {
+            shell,
+            frozen: options.frozen,
+            strict: options.strict,
+        }),
+        // `fmt` syncs too when it is a package.json script delegated to
+        // `run`; it takes the flags ahead of the tool's own arguments.
+        Some(Command::Fmt {
+            check,
+            ecosystem,
+            args,
+            ..
+        }) => Some(Command::Fmt {
+            check,
+            ecosystem,
+            args,
+            frozen: options.frozen,
+            strict: options.strict,
+        }),
+        other => other,
     };
     let command = match command {
         Some(command) => command,
@@ -224,6 +276,22 @@ fn take_global_flags(
         if arg == "--" || (leading && !arg.starts_with('-')) {
             rest.extend_from_slice(&args[index..]);
             break;
+        }
+        // `--frozen` and `--strict` are global: after the verb they are
+        // lifted out like `-q`, so they govern the implicit sync. (`run`
+        // and `build` never reach this scan; for those two the flags must
+        // precede the verb. `--fresh` stays bare-only and is left for the
+        // command's own grammar to refuse. The bare form itself is
+        // exempt: its flags belong to the sync command, not the options.)
+        if spec.name != "sync" && arg == "--frozen" {
+            options.frozen = true;
+            index += 1;
+            continue;
+        }
+        if spec.name != "sync" && arg == "--strict" {
+            options.strict = true;
+            index += 1;
+            continue;
         }
         if let Some(list) = value_slot(spec, arg) {
             rest.push(args[index].clone());
@@ -361,10 +429,14 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
+    // `frozen`/`strict` are filled in by `parse` after the match, from the
+    // global options on either side of the verb.
     Ok(Some(Command::Fmt {
         check,
         ecosystem,
         args: tool_args,
+        frozen: false,
+        strict: false,
     }))
 }
 
@@ -465,9 +537,19 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
         return Err(UsageError::new("run: no command given", Some("run")));
     }
     let args = args.to_vec();
+    // `frozen`/`strict` are filled in by `parse` after the match, from the
+    // global options on either side of the verb.
     Ok(Some(match name {
-        "run" => Command::Run { command: args },
-        _ => Command::Build { args },
+        "run" => Command::Run {
+            command: args,
+            frozen: false,
+            strict: false,
+        },
+        _ => Command::Build {
+            args,
+            frozen: false,
+            strict: false,
+        },
     }))
 }
 
@@ -1065,7 +1147,13 @@ fn parse_env(args: &[String]) -> Result<Option<Command>, UsageError> {
         }
         index += 1;
     }
-    Ok(Some(Command::Env { shell }))
+    // `frozen`/`strict` are filled in by `parse` after the match, from the
+    // global options on either side of the verb.
+    Ok(Some(Command::Env {
+        shell,
+        frozen: false,
+        strict: false,
+    }))
 }
 
 fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1251,6 +1339,8 @@ pub(super) const GLOBAL_FLAGS: &[&str] = &[
     "-v",
     "--verbose",
     "--no-color",
+    "--frozen",
+    "--strict",
     "-h",
     "--help",
     "-V",
@@ -1453,9 +1543,10 @@ mod tests {
         );
     }
 
-    /// The three flags belong to the bare `tog`: with one, the invocation
-    /// is a sync command rather than the implicit form, so no help follows
-    /// it and a directory with no project fails like any sync.
+    /// The bare `tog` with a setup flag is a sync command rather than the
+    /// implicit form, so no help follows it and a directory with no project
+    /// fails like any sync. `--frozen` and `--strict` are also global
+    /// options on every other verb; `--fresh` stays bare-only.
     #[test]
     fn the_bare_form_takes_the_setup_flags() {
         assert_eq!(
@@ -1490,12 +1581,55 @@ mod tests {
             printed(&["--frozen", "--help"]),
             help(spec("sync").unwrap())
         );
-        // Ahead of any other verb they mean nothing, so they are refused.
-        let error = parse(&argv(&["--frozen", "run", "pytest"])).unwrap_err();
+        // `--frozen` and `--strict` are global: ahead of a verb they move
+        // into the options and govern the implicit sync. `--fresh` stays
+        // bare-only, because rebuilding before every command is never what
+        // someone means.
+        let invocation = run(&["--frozen", "run", "pytest"]);
+        assert!(invocation.options.frozen);
+        assert!(!invocation.options.strict);
+        assert_eq!(
+            invocation.command,
+            Command::Run {
+                command: argv(&["pytest"]),
+                frozen: true,
+                strict: false,
+            }
+        );
+        let invocation = run(&["--strict", "--frozen", "build", "cargo"]);
+        assert_eq!(
+            invocation.command,
+            Command::Build {
+                args: argv(&["cargo"]),
+                frozen: true,
+                strict: true,
+            }
+        );
+        // After the verb they work where a global option works: `env`
+        // reads them from either side, while `run` and `build` hand
+        // everything after the verb to the program.
+        assert_eq!(
+            command(&["env", "--frozen", "--strict"]),
+            Command::Env {
+                shell: None,
+                frozen: true,
+                strict: true,
+            }
+        );
+        assert_eq!(
+            command(&["run", "pytest", "--frozen"]),
+            Command::Run {
+                command: argv(&["pytest", "--frozen"]),
+                frozen: false,
+                strict: false,
+            }
+        );
+        let error = parse(&argv(&["--fresh", "run", "pytest"])).unwrap_err();
         assert_eq!(
             error.message,
-            "--frozen belongs to the bare 'tog'; run 'tog --frozen' on its own"
+            "--fresh belongs to the bare 'tog'; run 'tog --fresh' on its own"
         );
+        assert_eq!(error.command, None);
     }
 
     #[test]
@@ -1506,6 +1640,8 @@ mod tests {
                 check: false,
                 ecosystem: None,
                 args: vec![],
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1514,6 +1650,8 @@ mod tests {
                 check: true,
                 ecosystem: Some("rust".into()),
                 args: argv(&["--edition", "2024"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1522,6 +1660,8 @@ mod tests {
                 check: false,
                 ecosystem: None,
                 args: argv(&["--help"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
@@ -1534,9 +1674,34 @@ mod tests {
                 check: false,
                 ecosystem: Some("rust".into()),
                 args: vec![],
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(message(&["fmt", "--eco"]), "fmt: --eco needs an ecosystem");
+        // `--frozen` and `--strict` reach the command from either side of
+        // the verb, so a package.json `fmt` script's sync honors them; past
+        // the tool's own arguments they belong to the tool.
+        assert_eq!(
+            command(&["--frozen", "fmt", "--strict", "--check"]),
+            Command::Fmt {
+                check: true,
+                ecosystem: None,
+                args: vec![],
+                frozen: true,
+                strict: true,
+            }
+        );
+        assert_eq!(
+            command(&["fmt", "--", "--frozen"]),
+            Command::Fmt {
+                check: false,
+                ecosystem: None,
+                args: argv(&["--frozen"]),
+                frozen: false,
+                strict: false,
+            }
+        );
         // Both spellings reject a value that is really a mistyped flag.
         for args in [
             &["fmt", "--eco", "--check"][..],
@@ -1606,9 +1771,17 @@ mod tests {
             message(&["audit", "--policy", ""]),
             "--policy needs a file path"
         );
+        // `--frozen` and `--strict` are global, so after any verb but the
+        // bare form's they land in the options instead of being refused.
+        let invocation = run(&["audit", "--strict"]);
+        assert!(invocation.options.strict);
+        assert!(!invocation.options.frozen);
         assert_eq!(
-            message(&["audit", "--strict"]),
-            "audit: unknown option '--strict'"
+            invocation.command,
+            Command::Audit {
+                policy: None,
+                json: false
+            }
         );
         assert_eq!(
             message(&["audit", "python"]),
@@ -1830,35 +2003,59 @@ mod tests {
         assert_eq!(
             command(&["run", "python", "-c", "print(1)", "--help"]),
             Command::Run {
-                command: argv(&["python", "-c", "print(1)", "--help"])
+                command: argv(&["python", "-c", "print(1)", "--help"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
             command(&["run", "--", "-h"]),
             Command::Run {
-                command: argv(&["-h"])
+                command: argv(&["-h"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(message(&["run"]), "run: no command given");
         assert_eq!(message(&["run", "--"]), "run: no command given");
-        assert_eq!(command(&["build"]), Command::Build { args: vec![] });
-        assert_eq!(command(&["build", "--"]), Command::Build { args: vec![] });
+        assert_eq!(
+            command(&["build"]),
+            Command::Build {
+                args: vec![],
+                frozen: false,
+                strict: false,
+            }
+        );
+        assert_eq!(
+            command(&["build", "--"]),
+            Command::Build {
+                args: vec![],
+                frozen: false,
+                strict: false,
+            }
+        );
         assert_eq!(
             command(&["build", "cargo", "--release", "-h"]),
             Command::Build {
-                args: argv(&["cargo", "--release", "-h"])
+                args: argv(&["cargo", "--release", "-h"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
             command(&["build", "--", "--help"]),
             Command::Build {
-                args: argv(&["--help"])
+                args: argv(&["--help"]),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
             command(&["build", "--release"]),
             Command::Build {
-                args: argv(&["--release"])
+                args: argv(&["--release"]),
+                frozen: false,
+                strict: false,
             }
         );
     }
@@ -2038,17 +2235,28 @@ mod tests {
     /// grammar may not look at.
     #[test]
     fn env_takes_a_shell_and_nothing_else() {
-        assert_eq!(command(&["env"]), Command::Env { shell: None });
+        assert_eq!(
+            command(&["env"]),
+            Command::Env {
+                shell: None,
+                frozen: false,
+                strict: false,
+            }
+        );
         assert_eq!(
             command(&["env", "--shell", "fish"]),
             Command::Env {
-                shell: Some(Shell::Fish)
+                shell: Some(Shell::Fish),
+                frozen: false,
+                strict: false,
             }
         );
         assert_eq!(
             command(&["env", "--shell=zsh"]),
             Command::Env {
-                shell: Some(Shell::Zsh)
+                shell: Some(Shell::Zsh),
+                frozen: false,
+                strict: false,
             }
         );
         // The same vocabulary and the same typo answer as `completions`.
@@ -2080,7 +2288,11 @@ mod tests {
                         quiet: true,
                         ..Options::default()
                     },
-                    command: Command::Env { shell: None },
+                    command: Command::Env {
+                        shell: None,
+                        frozen: false,
+                        strict: false,
+                    },
                 },
                 "{words:?}"
             );
@@ -2161,7 +2373,9 @@ mod tests {
         assert_eq!(
             command(&["run", "make", "-C", "sub"]),
             Command::Run {
-                command: argv(&["make", "-C", "sub"])
+                command: argv(&["make", "-C", "sub"]),
+                frozen: false,
+                strict: false,
             }
         );
     }
@@ -2175,6 +2389,8 @@ mod tests {
                 quiet: true,
                 verbose: true,
                 no_color: true,
+                frozen: false,
+                strict: false,
             }
         );
         assert!(run(&["--quiet", "--verbose", "plan"]).options.quiet);
@@ -2190,7 +2406,9 @@ mod tests {
         assert_eq!(
             command(&["run", "pytest", "-q"]),
             Command::Run {
-                command: argv(&["pytest", "-q"])
+                command: argv(&["pytest", "-q"]),
+                frozen: false,
+                strict: false,
             }
         );
     }

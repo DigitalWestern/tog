@@ -43,11 +43,15 @@ pub enum Pending {
     /// Bare `tog`: sync inside a project (and then the help, printed by
     /// `main` when the sync succeeded), the help alone outside one.
     Implicit,
-    /// An unknown first word: a package.json script if one matches.
+    /// An unknown first word: a package.json script if one matches. The
+    /// global sync flags travel with it, so `tog --frozen <script>` governs
+    /// the sync `run` performs first.
     Script {
         name: String,
         args: Vec<String>,
         message: String,
+        frozen: bool,
+        strict: bool,
     },
 }
 
@@ -84,6 +88,8 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
             name,
             args,
             message,
+            frozen,
+            strict,
         } => {
             let cwd = project_dir();
             let root = projected_root(&cwd);
@@ -99,7 +105,11 @@ pub fn resolve(pending: Pending) -> io::Result<cli::Command> {
                 ui::trace(&format!("'{name}' is a package.json script: running it"));
                 let mut command = vec![name];
                 command.extend(args);
-                return Ok(cli::Command::Run { command });
+                return Ok(cli::Command::Run {
+                    command,
+                    frozen,
+                    strict,
+                });
             }
             let message = if has_package_json {
                 format!("{message} (no package.json script named '{name}' here)")
@@ -160,9 +170,11 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         check,
         ref ecosystem,
         ref args,
+        frozen,
+        strict,
     } = command
     {
-        return fmt::run(platform, check, ecosystem.as_deref(), args);
+        return fmt::run(platform, check, ecosystem.as_deref(), args, frozen, strict);
     }
     // `sync` preflights (policy, pins, root registrability) before opening
     // the store, so a refused request touches nothing.
@@ -211,12 +223,24 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
         // `json` is not read here: plan's output is JSON either way, and
         // the flag only tells `main` which error renderer to use.
         Plan { .. } => plan::run(&ctx).map(|_| 0),
-        Build { args } => build::run(&ctx, &args).map(|_| 0),
-        Run { command } => run::run(&ctx, &command),
+        Build {
+            args,
+            frozen,
+            strict,
+        } => build::run(&ctx, &args, frozen, strict).map(|_| 0),
+        Run {
+            command,
+            frozen,
+            strict,
+        } => run::run(&ctx, &command, frozen, strict),
         // Like `run`, `env` needs the store open: a closure's recorded
         // runtime is a store object, and its bin directory is part of the
         // PATH `env` prints.
-        Env { shell } => env::run(&ctx, shell),
+        Env {
+            shell,
+            frozen,
+            strict,
+        } => env::run(&ctx, shell, frozen, strict),
         Sbom { output } => sbom::run(output.as_deref()).map(|_| 0),
         Add {
             specs,

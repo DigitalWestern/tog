@@ -46,17 +46,19 @@ MAINTAIN:
   version      print the version
 
 SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
-  --frozen    CI: check the locks are current without writing them
   --fresh     rebuild .venv / node_modules from scratch
-  --strict    refuse every policy exception (same as TOG_STRICT=1)
 
-OPTIONS (before or after the command; after 'run' or 'build' everything
-belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
-own arguments):
+OPTIONS (before or after the command; after 'run', 'build' or a script name
+everything belongs to the program, and 'fmt' and 'x' take them only ahead of
+the tool's own arguments):
   -C, --directory <dir>  run as if tog had been started in <dir>
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
+      --frozen           CI: the implicit sync checks the locks are current
+                         without writing them
+      --strict           the implicit sync refuses every policy exception
+                         (same as TOG_STRICT=1)
   -h, --help             this help ('tog help <command>' for one command)
   -V, --version          print the version
 
@@ -117,14 +119,16 @@ the program's status through. Which files tog reads per ecosystem:
   `fix:`/`synced:` words (`fix:` is green, like `synced:`); `--no-color` or
   `NO_COLOR` turns it off, and stdout never gets it.
 - **Global options work before or after the command.** `-C <dir>`, `-q`,
-  `-v` and `--no-color` mean the same thing in either position (`tog ls -v`
-  and `tog -v ls` are the same command), except where the rest of the line
-  belongs to something else: `run` and `build` pass every argument after
-  the verb to the program, `fmt` and `x` accept them only ahead of the
-  tool's own arguments, and the value slot of a command's own option is
-  never searched (`tog gc --register -v` registers a directory called
-  `-v`; the command table says which options take a value). What reaches
-  that slot is then the option's own business — see the next rule.
+  `-v`, `--no-color`, `--frozen` and `--strict` mean the same thing in
+  either position (`tog ls -v` and `tog -v ls` are the same command),
+  except where the rest of the line belongs to something else: `run`,
+  `build` and a script name pass every argument after them to the program
+  (`tog dev --strict` gives the script `--strict`), `fmt` and `x` accept
+  them only ahead of the tool's own arguments, and the value slot of a
+  command's own option is never searched (`tog gc --register -v` registers
+  a directory called `-v`; the command table says which options take a
+  value). What reaches that slot is then the option's own business — see
+  the next rule.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged, and `--` forces
   pass-through (`tog build --release` works). What tog keeps for itself is
@@ -177,8 +181,15 @@ directory with no project is a failure (exit 1) rather than orientation, so
 a CI job pointed at the wrong directory goes red: `tog --frozen` validates
 the locks without writing them (below), `tog --fresh` drops project-local
 caches and rebuilds, and `tog --strict` refuses every policy exception.
-Inside a project `tog -q` is a sync with no narration and no help. The flags go on the bare
-form only: `tog --frozen status` is a usage error. `tog help setup` is the
+Inside a project `tog -q` is a sync with no narration and no help. `--fresh`
+stays on the bare form: rebuilding before every command is never what
+someone means, so `tog --fresh status` is a usage error. `--frozen` and
+`--strict` are global options, accepted before the verb and after it where
+any global option is: `run`, `build` and a script name hand everything after
+them to the program, so there the flags go first (`tog --frozen dev`), and
+`fmt` and `x` take them only ahead of the tool's own arguments. They govern
+the implicit sync of `run`, `env`, `build`, `tog <script>` and a
+package.json `fmt` script. `tog help setup` is the
 bare form's screen and `tog help inputs` the files it reads per ecosystem.
 
 `run`, `env`, `build` and `tog <script>` sync on their own when the project
@@ -399,7 +410,8 @@ updates `Cargo.lock`. Only the built ecosystem decides: a stale Python or Node
 environment elsewhere in the repository does not start a sync in front of a
 Cargo build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
-before it, and the check then finds nothing to do.
+before it, and the check then finds nothing to do — or goes one step in a
+single command, `tog --frozen build`, whose implicit sync runs frozen.
 
 ## Inspect verbs
 

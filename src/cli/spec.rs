@@ -676,24 +676,26 @@ pub fn canonical_name(name: &str) -> &str {
 /// The global options, with the heading carrying the rule about where they
 /// may appear: a note under the block was read as a footnote and missed.
 const GLOBAL_OPTIONS: &str = "\
-OPTIONS (before or after the command; after 'run' or 'build' everything
-belongs to the program, and 'fmt' and 'x' take them only ahead of the tool's
-own arguments):
+OPTIONS (before or after the command; after 'run', 'build' or a script name
+everything belongs to the program, and 'fmt' and 'x' take them only ahead of
+the tool's own arguments):
   -C, --directory <dir>  run as if tog had been started in <dir>
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
+      --frozen           CI: the implicit sync checks the locks instead of
+                         writing them
+      --strict           the implicit sync refuses every policy exception
+                         (same as TOG_STRICT=1)
   -h, --help             this help ('tog help <command>' for one command)
   -V, --version          print the version
 ";
 
-/// The bare form's own options, on the first screen because a bare `tog`
-/// is the only way to spell them.
+/// The bare form's own option, on the first screen because a bare `tog`
+/// is the only way to spell it.
 const SETUP_OPTIONS: &str = "\
 SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
-  --frozen    CI: check the locks are current without writing them
   --fresh     rebuild .venv / node_modules from scratch
-  --strict    refuse every policy exception (same as TOG_STRICT=1)
 ";
 
 /// Top-level help: what the three shapes of argv mean, the four commands to
@@ -878,8 +880,11 @@ mod tests {
         // so, and names the bare form's flags and where they are explained.
         assert!(text.contains("'tog help inputs'"));
         assert!(text.contains("'tog help setup'"));
-        for flag in ["--frozen", "--fresh", "--strict"] {
-            assert!(text.contains(&format!("\n  {flag} ")), "usage lacks {flag}");
+        // `--fresh` stays bare-only; `--frozen` and `--strict` are global
+        // options now, named in the OPTIONS block instead of SETUP OPTIONS.
+        assert!(text.contains("\n  --fresh "), "usage lacks --fresh");
+        for flag in ["--frozen", "--strict"] {
+            assert!(text.contains(flag), "usage lacks {flag}");
         }
         assert!(text.contains("tog <script> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));

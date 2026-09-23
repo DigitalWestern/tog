@@ -20,6 +20,8 @@ pub fn run(
     check: bool,
     ecosystem: Option<&str>,
     args: &[String],
+    frozen: bool,
+    strict: bool,
 ) -> io::Result<i32> {
     let cwd = project_dir();
     policy::init(&cwd, false)?;
@@ -59,7 +61,9 @@ pub fn run(
             if is_script {
                 ui::trace("'fmt' is a package.json script: running it");
                 // `run` syncs a package that has never been synced before
-                // it runs the script, so there is nothing to refuse here.
+                // it runs the script, so there is nothing to refuse here;
+                // `--frozen`/`--strict` govern that sync as they would
+                // `tog run fmt`.
                 let mut command = vec!["fmt".to_string()];
                 if check {
                     command.push("--check".into());
@@ -72,7 +76,7 @@ pub fn run(
                 // from its own thread through `io::stderr()`, so an outer
                 // lock held across a child is a pipe that stops being drained.
                 let ctx = Context::open(platform, true)?;
-                return run::run(&ctx, &command);
+                return run::run(&ctx, &command, frozen, strict);
             }
             tailors::registry()
                 .iter()

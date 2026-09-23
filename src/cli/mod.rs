@@ -76,6 +76,11 @@ pub enum Command {
         check: bool,
         ecosystem: Option<String>,
         args: Vec<String>,
+        /// `--frozen`/`--strict` from either side of the verb (ahead of the
+        /// tool's own arguments): they govern the implicit sync when `fmt`
+        /// is a package.json script delegated to `run`.
+        frozen: bool,
+        strict: bool,
     },
     Plan {
         json: bool,
@@ -84,16 +89,28 @@ pub enum Command {
     /// ecosystem is inferred by the dispatcher from the project layout.
     Build {
         args: Vec<String>,
+        /// `--frozen`/`--strict` typed before the verb: they govern the
+        /// implicit sync, never the build itself.
+        frozen: bool,
+        strict: bool,
     },
     /// The program (or package.json script) and its arguments.
     Run {
         command: Vec<String>,
+        /// `--frozen`/`--strict` typed before the verb: they govern the
+        /// implicit sync, never the program itself.
+        frozen: bool,
+        strict: bool,
     },
     /// `env [--shell <shell>]`: the environment `run` would give a child,
     /// printed as shell assignments. `None` leaves the choice to the
     /// command, which reads `$SHELL`: the grammar stays pure.
     Env {
         shell: Option<Shell>,
+        /// `--frozen`/`--strict` from either side of the verb: they govern
+        /// the implicit sync.
+        frozen: bool,
+        strict: bool,
     },
     Sbom {
         output: Option<PathBuf>,
@@ -223,6 +240,15 @@ pub struct Options {
     /// `--no-color`: never emit ANSI color (NO_COLOR and a non-tty stderr
     /// have the same effect).
     pub no_color: bool,
+    /// `--frozen`: an implicit sync validates the committed
+    /// `tog-toolchain.toml` instead of creating one, and refuses a missing
+    /// or stale lock before anything is written. Accepted before the verb
+    /// (and after it, except for the pass-through verbs `run` and `build`,
+    /// which hand everything after the verb to the program).
+    pub frozen: bool,
+    /// `--strict`: an implicit sync refuses every policy exception (same
+    /// as `TOG_STRICT=1`). Same positions as `--frozen`.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

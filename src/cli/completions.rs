@@ -30,10 +30,16 @@ fn bash_completions() -> String {
          -C|--directory) ((i++)) ;;\n            -*) ;;\n            *) cmd=\"${COMP_WORDS[i]}\"; break ;;\n        \
          esac\n    done\n    if [[ -z \"$cmd\" ]]; then\n        if [[ \"$cur\" == -* ]]; then\n            ",
     );
+    // `--frozen` and `--strict` are in both lists; offer each word once.
+    let setup_only: Vec<&str> = SETUP_FLAGS
+        .iter()
+        .copied()
+        .filter(|flag| !GLOBAL_FLAGS.contains(flag))
+        .collect();
     out.push_str(&format!(
         "COMPREPLY=( $(compgen -W \"{} {}\" -- \"$cur\") )\n",
         GLOBAL_FLAGS.join(" "),
-        SETUP_FLAGS.join(" ")
+        setup_only.join(" ")
     ));
     out.push_str(&format!(
         "        else\n            COMPREPLY=( $(compgen -W \"{} $(_tog_scripts)\" -- \"$cur\") )\n        fi\n        return\n    fi\n    case \"$cmd\" in\n",

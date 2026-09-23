@@ -12,7 +12,7 @@ use std::io;
 
 /// Explicit ecosystem, or inferred when exactly one build-capable ecosystem
 /// is present.
-pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
+pub fn run(ctx: &Context, args: &[String], frozen: bool, strict: bool) -> io::Result<()> {
     let cwd = ctx.project_dir();
     let explicit = args
         .first()
@@ -55,10 +55,11 @@ pub fn run(ctx: &Context, args: &[String]) -> io::Result<()> {
     // sync-on-the-way-in exists to prevent, so when the ecosystem being
     // built is stale or never synced the project is synced first, as `run`
     // does: that sync may write a lock, like `cargo build` updating
-    // Cargo.lock. CI that must not write one runs `tog --frozen` first,
-    // and this check then finds nothing to do. Only the built ecosystem's
+    // Cargo.lock. CI that must not write one runs `tog --frozen build`,
+    // whose implicit sync runs frozen (or `tog --frozen` first, and this
+    // check then finds nothing to do). Only the built ecosystem's
     // row decides, so an unrelated one that is stale cannot block it.
-    crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()))?;
+    crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()), frozen, strict)?;
     let root = tailor.build_root(&cwd)?;
     policy::init(&root, false)?;
     // The build itself honors the lock the sync above left and never
