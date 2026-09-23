@@ -486,6 +486,13 @@ fn validate_checkout_tree_at_with_activity(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Treat the by-sha fetch as refused so tests reach the all-refs
+    /// fallback. Local transports accept any sha, so no server config can.
+    static REFUSE_SHA_FETCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Realize a git source in the store and return its object path.
 pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBuf> {
     validate_source(source)?;
@@ -518,19 +525,26 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
         // whichever branch (if any) the commit sits on. Servers that refuse
         // sha wants (uploadpack.allowReachableSHA1InWant off) need the full
         // history of every ref they advertise, not only branches and tags.
-        let shallow = run_git_with_activity(
-            &[
-                "fetch",
-                "--depth",
-                "1",
-                "--quiet",
-                &source.url,
-                &source.commit,
-            ],
-            Some(&work),
-            &activity,
-        )?;
-        if !shallow.status.success() {
+        let fetch_by_sha = || -> io::Result<bool> {
+            let output = run_git_with_activity(
+                &[
+                    "fetch",
+                    "--depth",
+                    "1",
+                    "--quiet",
+                    &source.url,
+                    &source.commit,
+                ],
+                Some(&work),
+                &activity,
+            )?;
+            Ok(output.status.success())
+        };
+        #[cfg(test)]
+        let refused = REFUSE_SHA_FETCH.with(|refuse| refuse.get()) || !fetch_by_sha()?;
+        #[cfg(not(test))]
+        let refused = !fetch_by_sha()?;
+        if refused {
             git_ok_with_activity(
                 &[
                     "fetch",
@@ -886,6 +900,53 @@ mod realization_tests {
                 "{reference}"
             );
         }
+    }
+
+    /// The pin is the unadvertised parent of `refs/pull/1/head`, so only a
+    /// fallback that fetches every ref (not just branches and tags) has it.
+    #[test]
+    fn a_refused_sha_fetch_falls_back_to_every_advertised_ref() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                REFUSE_SHA_FETCH.with(|refuse| refuse.set(false));
+            }
+        }
+        let _reset = Reset;
+        REFUSE_SHA_FETCH.with(|refuse| refuse.set(true));
+        let root = temp("fallback");
+        let (url, _) = fixture_repo(&root.0);
+        let parent = off_branch_commit(&url, "side.txt");
+        let repo = root.0.join("repo");
+        git_ok(
+            &["checkout", "-q", "--detach", &parent],
+            Some(&repo),
+            "detach",
+        )
+        .unwrap();
+        std::fs::write(repo.join("child.txt"), "child\n").unwrap();
+        git_ok(&["add", "-A"], Some(&repo), "add").unwrap();
+        git_ok(&["commit", "-qm", "child"], Some(&repo), "commit").unwrap();
+        let child = git_ok(&["rev-parse", "HEAD"], Some(&repo), "rev-parse").unwrap();
+        git_ok(&["checkout", "-q", "main"], Some(&repo), "checkout main").unwrap();
+        git_ok(
+            &["update-ref", "refs/pull/1/head", &child],
+            Some(&repo),
+            "ref",
+        )
+        .unwrap();
+        let object = realize(&root.0, &url, &parent).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(object.join("side.txt")).unwrap(),
+            "off the default branch\n"
+        );
+        assert!(
+            !object.join("child.txt").exists(),
+            "the pinned parent, not the ref tip, is checked out"
+        );
     }
 
     #[test]
