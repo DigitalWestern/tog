@@ -181,10 +181,12 @@ pub(crate) fn ensure_current(
 /// names it. `build` uses one environment, so a stale or broken ecosystem
 /// it does not build (a Python docs tool in a Rust repo) does not start a
 /// sync in front of it. When the built ecosystem is stale the sync still
-/// resolves the toolchain lock for every ecosystem, so the committed lock
-/// stays whole, but only the built ecosystem is prepared and realized: an
-/// unrelated one that cannot sync (offline, a broken install script, a
-/// CPython with no pinned build) no longer stops the build.
+/// preflights every ecosystem and resolves the toolchain lock for all of
+/// them, so the committed lock stays whole and an unrelated ecosystem this
+/// host cannot run, or whose lock section is stale, refuses as before; but
+/// only the built ecosystem is prepared and realized, so an unrelated one
+/// whose install fails (offline, a broken install script) no longer stops
+/// the build.
 pub(crate) fn ensure_current_for(
     ctx: &Context,
     cwd: &Path,
