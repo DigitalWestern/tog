@@ -58,7 +58,9 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool, strict: bool) -> io::Re
     // Cargo.lock. CI that must not write one runs `tog --frozen build`,
     // whose implicit sync runs frozen (or `tog --frozen` first, and this
     // check then finds nothing to do). Only the built ecosystem's
-    // row decides, so an unrelated one that is stale cannot block it.
+    // row decides, and only it is prepared and realized: the lock still
+    // resolves whole, so an unrelated ecosystem that cannot sync cannot
+    // block the build (see `sync::ensure_current_for`).
     crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()), frozen, strict)?;
     let root = tailor.build_root(&cwd)?;
     policy::init(&root, false)?;

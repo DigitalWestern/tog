@@ -404,7 +404,10 @@ inputs changed, so it never builds against a lock the manifest has moved
 past; that sync may write a lock (and `tog-toolchain.toml`), as `cargo build`
 updates `Cargo.lock`. Only the built ecosystem decides: a stale Python or Node
 environment elsewhere in the repository does not start a sync in front of a
-Cargo build. The build
+Cargo build, and when the built ecosystem is stale the sync that runs
+resolves the lock for every ecosystem but prepares and realizes the built
+one only, so an unrelated environment that cannot sync does not stop the
+build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.

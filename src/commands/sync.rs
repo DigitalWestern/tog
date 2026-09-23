@@ -180,9 +180,11 @@ pub(crate) fn ensure_current(
 /// `ensure_current`, deciding on one ecosystem's row only when `only`
 /// names it. `build` uses one environment, so a stale or broken ecosystem
 /// it does not build (a Python docs tool in a Rust repo) does not start a
-/// sync in front of it. When the built ecosystem is stale the sync is the
-/// ordinary whole-project one: the toolchain lock is written for every
-/// ecosystem at once.
+/// sync in front of it. When the built ecosystem is stale the sync still
+/// resolves the toolchain lock for every ecosystem, so the committed lock
+/// stays whole, but only the built ecosystem is prepared and realized: an
+/// unrelated one that cannot sync (offline, a broken install script, a
+/// CPython with no pinned build) no longer stops the build.
 pub(crate) fn ensure_current_for(
     ctx: &Context,
     cwd: &Path,
@@ -200,9 +202,42 @@ pub(crate) fn ensure_current_for(
         .collect();
     if !stale.is_empty() {
         crate::kernel::ui::note(&format!("syncing first: {}", stale.join("; ")));
-        run_in(ctx, &dir, false, strict, frozen)?;
+        match only {
+            Some(ecosystem) => run_in_only(ctx, &dir, strict, frozen, ecosystem)?,
+            None => run_in(ctx, &dir, false, strict, frozen)?,
+        }
     }
     Ok(projected_root(cwd))
+}
+
+/// The build's sync: preflight and resolve the whole project, so the lock
+/// `commit` publishes still names every detected ecosystem, but prepare
+/// and realize the named tailor only. Filtering after `commit` is what
+/// keeps the lock whole: resolving a subset would publish a lock with the
+/// other sections truncated.
+fn run_in_only(
+    ctx: &Context,
+    dir: &Path,
+    strict: bool,
+    frozen: bool,
+    only: &str,
+) -> io::Result<()> {
+    let mode = if frozen { Mode::Frozen } else { Mode::Writable };
+    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone())?;
+    let scoped = scope_to(&present, only);
+    sync_preflighted(ctx, dir, &scoped, &mut toolchain, false, &mode)
+}
+
+/// The tailors one sync realizes: every detected one, or the named one.
+/// `only` always names a tailor the caller resolved first (the ecosystem
+/// being built), so it is present here; anything else scopes to nothing,
+/// and the empty slice fails closed in `sync_preflighted` (`no_inputs`).
+fn scope_to<'a>(present: &[&'a dyn Tailor], only: &str) -> Vec<&'a dyn Tailor> {
+    present
+        .iter()
+        .filter(|tailor| tailor.id() == only)
+        .copied()
+        .collect()
 }
 
 /// The directory a command's sync belongs to: the nearest projected
@@ -848,6 +883,23 @@ mod tests {
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
         assert_eq!(sync_root(&nested).unwrap(), project);
         assert_eq!(sync_root(&bare).unwrap(), bare);
+    }
+
+    /// The build's sync realizes the built ecosystem only: with two
+    /// ecosystems detected, scoping to one leaves the other out. The lock
+    /// stays whole regardless, because `commit` publishes the full pending
+    /// toolchain whatever slice the tailor loop is given.
+    #[test]
+    fn build_sync_scopes_to_the_built_ecosystem() {
+        let present = tailors::registry();
+        assert!(present.len() > 1, "needs two ecosystems to scope");
+        let scoped = scope_to(present, "cargo");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id(), "cargo");
+        assert!(scoped.iter().all(|tailor| tailor.id() != "python"));
+        // An unknown name scopes to nothing, which fails closed downstream
+        // (`sync_preflighted` refuses an empty slice).
+        assert!(scope_to(present, "cobol").is_empty());
     }
 
     #[test]
