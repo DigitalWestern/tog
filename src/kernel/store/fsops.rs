@@ -454,22 +454,21 @@ pub(super) fn unix_secs() -> u64 {
 
 /// Store-aware copy-on-write clone. The copy utility is a child that reads a
 /// store object and writes a managed projection, so its complete spawn/wait
-/// interval must remain under operation protection.
-pub fn clone_tree_for_store(
-    store: &Store,
+/// interval runs under the caller's operation lease.
+pub fn clone_tree_with_activity(
+    activity: &StoreActivity,
     src: &Path,
     dest: &Path,
     platform: crate::kernel::platform::Platform,
 ) -> io::Result<()> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let clone = if platform.is_macos() {
         let mut command = std::process::Command::new("/bin/cp");
         command.args(["-Rc"]).arg(src).arg(dest);
-        crate::kernel::supervise::status(&mut command, &activity)?
+        crate::kernel::supervise::status(&mut command, activity)?
     } else {
         let mut command = std::process::Command::new("/bin/cp");
         command.args(["-a", "--reflink=auto"]).arg(src).arg(dest);
-        crate::kernel::supervise::status(&mut command, &activity)?
+        crate::kernel::supervise::status(&mut command, activity)?
     };
     if !clone.success() {
         if dest.exists() {
@@ -477,7 +476,7 @@ pub fn clone_tree_for_store(
         }
         let mut plain = std::process::Command::new("/bin/cp");
         plain.arg("-R").arg(src).arg(dest);
-        let plain_status = crate::kernel::supervise::status(&mut plain, &activity)?;
+        let plain_status = crate::kernel::supervise::status(&mut plain, activity)?;
         if !plain_status.success() {
             return Err(io::Error::other("cloning projected tree failed"));
         }

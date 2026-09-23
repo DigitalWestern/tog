@@ -39,7 +39,7 @@ impl Tailor for Dotnet {
         // loudly here, not after a toolchain download.
         dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
         let sdk = dotnet::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
-        let (plan, _) = dotnet::plan_dotnet(&ctx.store, dir, &sdk, toolchain)?;
+        let (plan, _) = dotnet::plan_dotnet(&ctx.store, &ctx.activity, dir, &sdk, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -55,7 +55,7 @@ impl Tailor for Dotnet {
         let store = &ctx.store;
         dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
         let sdk = dotnet::realize_runtime(store, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, dir, &sdk, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(store, &ctx.activity, dir, &sdk, toolchain)?;
         let packages = dotnet::realize_packages(store, platform, &plan, &sdk, dir, toolchain)?;
         dotnet::project_dotnet_env(
             dir,
@@ -94,7 +94,7 @@ impl Tailor for Dotnet {
         let platform = ctx.platform;
         let store = &ctx.store;
         let sdk = dotnet::realize_runtime(store, platform, toolchain)?;
-        let (plan, lock_sha256) = dotnet::plan_dotnet(store, cwd, &sdk, toolchain)?;
+        let (plan, lock_sha256) = dotnet::plan_dotnet(store, &ctx.activity, cwd, &sdk, toolchain)?;
         let packages = dotnet::realize_packages(store, platform, &plan, &sdk, cwd, toolchain)?;
         dotnet::project_dotnet_env(
             cwd,
@@ -105,7 +105,15 @@ impl Tailor for Dotnet {
             toolchain,
             attribution,
         )?;
-        dotnet::build_sandboxed(platform, cwd, &sdk, &packages, args, toolchain)
+        dotnet::build_sandboxed(
+            platform,
+            &ctx.activity,
+            cwd,
+            &sdk,
+            &packages,
+            args,
+            toolchain,
+        )
     }
 
     fn run_env(

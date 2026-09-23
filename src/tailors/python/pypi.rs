@@ -777,7 +777,9 @@ pub(crate) fn lock_requirement_text_with_uv(
 ) -> io::Result<String> {
     let python_version = selected.version("cpython")?;
     let uv = crate::tailors::python::realize_uv(store, platform, selected)?.join("uv");
-    let scratch = store.stage()?;
+    // One lease covers the scratch directory and the uv child.
+    let activity = &store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    let scratch = store.stage_with_activity(activity)?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");
     let constraints_path = scratch.join("constraints.txt");
@@ -807,7 +809,7 @@ pub(crate) fn lock_requirement_text_with_uv(
         }
         let uv_output = {
             command.arg(&input).args(["-o"]).arg(&output);
-            crate::kernel::supervise::output_owned(&mut command, store).map_err(|e| {
+            crate::kernel::supervise::output(&mut command, activity).map_err(|e| {
                 io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
             })?
         };

@@ -330,7 +330,7 @@ pub fn realize_runtime(
     let identity = identity_of(platform, &rows);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -341,7 +341,7 @@ pub fn realize_runtime(
 
     let names: Vec<&str> = rows.iter().map(|row| row.component.as_str()).collect();
     let staged = store.stage_with_activity(&activity)?;
-    extract_rust_components_for(store, &staged, platform, &names, &tarballs)?;
+    extract_rust_components_for(&activity, &staged, platform, &names, &tarballs)?;
 
     store
         .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
@@ -384,7 +384,7 @@ pub fn shipped_selection(version: &str) -> io::Result<Selected> {
 }
 
 fn extract_rust_components_for(
-    store: &Store,
+    activity: &crate::kernel::activity::StoreActivity,
     staged: &Path,
     platform: Platform,
     components: &[&str],
@@ -402,7 +402,7 @@ fn extract_rust_components_for(
             .args(["-C"])
             .arg(staged)
             .args(["--strip-components", "2"]);
-        let status = crate::kernel::supervise::status_owned(&mut command, store)
+        let status = crate::kernel::supervise::status(&mut command, activity)
             .map_err(|e| io::Error::new(e.kind(), format!("spawn tar for {component}: {e}")))?;
         if !status.success() {
             return Err(err(format!("{component} tarball extraction failed")));

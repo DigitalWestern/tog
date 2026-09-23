@@ -13,6 +13,7 @@
 pub mod objects;
 pub mod tailor;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
@@ -811,7 +812,7 @@ fn run_installer_spec(spec: &BuildSpec) -> io::Result<()> {
     Ok(())
 }
 
-fn run_installer_spec_for(store: &Store, spec: &BuildSpec) -> io::Result<()> {
+fn run_installer_spec_for(activity: &StoreActivity, spec: &BuildSpec) -> io::Result<()> {
     let (program, args) = spec
         .argv
         .split_first()
@@ -829,7 +830,7 @@ fn run_installer_spec_for(store: &Store, spec: &BuildSpec) -> io::Result<()> {
     for (key, value) in &spec.env {
         command.env(key, value);
     }
-    let output = crate::kernel::supervise::output_owned(&mut command, store)
+    let output = crate::kernel::supervise::output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1033,7 +1034,7 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
 /// this host (glibc floor, libcrypto/libssl symbol set — the failure mode
 /// that disqualified the Ubuntu build) and that the launcher resolves its
 /// root. The launcher self-locates from $0, so this works from staging.
-fn probe_otp_runtime(store: &Store, otp_root: &Path, scratch: &Path) -> io::Result<()> {
+fn probe_otp_runtime(activity: &StoreActivity, otp_root: &Path, scratch: &Path) -> io::Result<()> {
     let mut command = Command::new(otp_root.join("bin/erl"));
     command
         .args([
@@ -1053,7 +1054,7 @@ fn probe_otp_runtime(store: &Store, otp_root: &Path, scratch: &Path) -> io::Resu
         .env("TMPDIR", scratch)
         .env("LANG", "C")
         .stdin(std::process::Stdio::null());
-    let output = crate::kernel::supervise::output_owned(&mut command, store)
+    let output = crate::kernel::supervise::output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
@@ -1111,7 +1112,7 @@ fn extract_otp_archive(archive: &Path, destination: &Path, platform: Platform) -
 }
 
 fn extract_otp_archive_for(
-    store: &Store,
+    activity: &StoreActivity,
     archive: &Path,
     destination: &Path,
     platform: Platform,
@@ -1122,7 +1123,7 @@ fn extract_otp_archive_for(
     if strip > 0 {
         command.arg(format!("--strip-components={strip}"));
     }
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(err(format!(
             "OTP extraction failed ({status}) for {} into {}",
@@ -1161,7 +1162,7 @@ pub fn realize_runtime(
     let identity = beam_identity(&spec, &store.root)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
     let otp_tar = download_verified_held(store, &spec.otp_url, &spec.otp_sha256)?;
@@ -1175,7 +1176,7 @@ pub fn realize_runtime(
     let result = (|| {
         let otp_root = staged.join("otp");
         fs::create_dir_all(&otp_root)?;
-        extract_otp_archive_for(store, &otp_tar, &otp_root, platform)?;
+        extract_otp_archive_for(&activity, &otp_tar, &otp_root, platform)?;
         if platform.is_macos() {
             if !otp_root.join("bin/erl").is_file() {
                 return Err(err("OTP extraction failed or has unexpected layout"));
@@ -1188,10 +1189,10 @@ pub fn realize_runtime(
             let final_root = store.object_path(&id).join("otp");
             let scratch = store.stage_with_activity(&activity)?;
             let installed = run_otp_install_with_store(&otp_root, &final_root, &scratch, |spec| {
-                run_installer_spec_for(store, spec)
+                run_installer_spec_for(&activity, spec)
             })
             .and_then(|()| verify_otp_install(&otp_root, &final_root, &layout))
-            .and_then(|()| probe_otp_runtime(store, &otp_root, &scratch));
+            .and_then(|()| probe_otp_runtime(&activity, &otp_root, &scratch));
             let _ = crate::kernel::store::remove_tree(&scratch);
             installed?;
         }
@@ -1316,7 +1317,7 @@ fn beam_path(beam_obj: &Path) -> String {
 
 /// Run the store mix for a delegated edit (`tog update`).
 pub(crate) fn run_checked(
-    store: &Store,
+    activity: &StoreActivity,
     beam_obj: &Path,
     cwd: &Path,
     scratch: &Path,
@@ -1324,7 +1325,7 @@ pub(crate) fn run_checked(
     args: &[&str],
 ) -> io::Result<()> {
     crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_mix(store, beam_obj, cwd, scratch, offline, args)?;
+    let out = run_mix(activity, beam_obj, cwd, scratch, offline, args)?;
     if crate::kernel::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -1339,7 +1340,7 @@ pub(crate) fn run_checked(
 }
 
 fn run_mix(
-    store: &Store,
+    activity: &StoreActivity,
     beam_obj: &Path,
     cwd: &Path,
     scratch: &Path,
@@ -1357,7 +1358,7 @@ fn run_mix(
     }
     force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
     cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
 }
 
@@ -1500,6 +1501,7 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
 /// eval); missing lock delegates `mix deps.get` (planner scratch, network).
 pub fn plan_elixir(
     store: &Store,
+    activity: &StoreActivity,
     project_dir: &Path,
     beam_obj: &Path,
     selected: &Selected,
@@ -1508,11 +1510,11 @@ pub fn plan_elixir(
         return Err(err("mix.exs not found"));
     }
     let lock_path = project_dir.join("mix.lock");
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(activity)?;
     if !lock_path.is_file() {
         ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
         let out = run_mix(
-            store,
+            activity,
             beam_obj,
             project_dir,
             &scratch,
@@ -1534,7 +1536,7 @@ pub fn plan_elixir(
         let planner_home = store.root.join("planner-hexhome");
         fs::create_dir_all(&planner_home)?;
         let out = run_mix(
-            store,
+            activity,
             beam_obj,
             project_dir,
             &planner_home,
@@ -1554,7 +1556,7 @@ pub fn plan_elixir(
     let helper = scratch.join("helper.exs");
     fs::write(&helper, HELPER)?;
     let out = run_mix(
-        store,
+        activity,
         beam_obj,
         project_dir,
         &scratch,
@@ -1650,7 +1652,7 @@ pub fn realize_deps(
     let identity = hex_deps_identity(&spec, plan)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1671,7 +1673,7 @@ pub fn realize_deps(
         fs::create_dir_all(&outer_dir)?;
         let mut command = Command::new("/usr/bin/tar");
         command.args(["-xf"]).arg(&tar).args(["-C"]).arg(&outer_dir);
-        let st = crate::kernel::supervise::status_owned(&mut command, store)?;
+        let st = crate::kernel::supervise::status(&mut command, &activity)?;
         if !st.success() {
             return Err(err(format!("{}: outer tar extraction failed", d.app)));
         }
@@ -1717,7 +1719,7 @@ pub fn realize_deps(
             .arg(outer_dir.join("contents.tar.gz"))
             .args(["-C"])
             .arg(&dep_dir);
-        let st = crate::kernel::supervise::status_owned(&mut command, store)?;
+        let st = crate::kernel::supervise::status(&mut command, &activity)?;
         if !st.success() {
             return Err(err(format!("{}: contents extraction failed", d.app)));
         }
@@ -1749,7 +1751,7 @@ pub fn realize_deps(
         )?;
         // .hex marker via the pinned toolchain (ETF binary).
         let out = run_mix(
-            store,
+            &activity,
             beam_obj,
             &scratch,
             &scratch,
@@ -1853,7 +1855,7 @@ pub fn project_elixir_env(
         if tmp.exists() {
             crate::kernel::store::remove_tree(&tmp)?;
         }
-        crate::comforter::clone_tree_for_store(&store, &deps_obj, &tmp, platform)?;
+        crate::comforter::clone_tree_with_activity(&activity, &deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }
     crate::comforter::write_closure_with_project_lock(
@@ -1939,6 +1941,7 @@ pub fn build_root(
 /// build root, the deps projection (native builds write in-tree), scratch.
 pub fn build_sandboxed(
     platform: Platform,
+    activity: &StoreActivity,
     project_dir: &Path,
     beam_obj: &Path,
     deps_projection: &Path,
@@ -1955,7 +1958,8 @@ pub fn build_sandboxed(
     let beam_obj = beam_obj.canonicalize()?;
     let deps_projection = deps_projection.canonicalize()?;
     let store = Store::open()?;
-    let scratch = store.stage()?;
+    store.require_activity(activity, "mix build")?;
+    let scratch = store.stage_with_activity(activity)?;
     let build = build_root(platform, &project_dir, selected)?;
     fs::create_dir_all(&build)?;
     let build = build.canonicalize()?;
@@ -1979,7 +1983,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: beam_path(&beam_obj),
     };
-    let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store)
+    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
         .map_err(|e| {
             io::Error::new(
                 e.kind(),

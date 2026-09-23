@@ -37,7 +37,7 @@ impl Tailor for Elixir {
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
         let beam = elixir::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
-        let (plan, _) = elixir::plan_elixir(&ctx.store, dir, &beam, toolchain)?;
+        let (plan, _) = elixir::plan_elixir(&ctx.store, &ctx.activity, dir, &beam, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -54,7 +54,7 @@ impl Tailor for Elixir {
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::realize_runtime(store, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, dir, &beam, toolchain)?;
+        let (plan, lock_sha256) = elixir::plan_elixir(store, &ctx.activity, dir, &beam, toolchain)?;
         let deps = elixir::realize_deps(store, platform, &plan, &beam, toolchain)?;
         let projection = elixir::project_elixir_env(
             platform,
@@ -101,7 +101,8 @@ impl Tailor for Elixir {
         let platform = ctx.platform;
         let store = &ctx.store;
         let beam = elixir::realize_runtime(store, platform, toolchain)?;
-        let (plan, lock_sha256) = elixir::plan_elixir(store, root, &beam, toolchain)?;
+        let (plan, lock_sha256) =
+            elixir::plan_elixir(store, &ctx.activity, root, &beam, toolchain)?;
         let deps = elixir::realize_deps(store, platform, &plan, &beam, toolchain)?;
         let projection = elixir::project_elixir_env(
             platform,
@@ -114,7 +115,15 @@ impl Tailor for Elixir {
             toolchain,
             attribution,
         )?;
-        elixir::build_sandboxed(platform, root, &beam, &projection, args, toolchain)
+        elixir::build_sandboxed(
+            platform,
+            &ctx.activity,
+            root,
+            &beam,
+            &projection,
+            args,
+            toolchain,
+        )
     }
 
     fn run_env(

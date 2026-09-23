@@ -29,8 +29,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::process::Command;
 
-use crate::kernel::activity::{ActivityMode, StoreActivity};
-use crate::kernel::store::Store;
+use crate::kernel::activity::StoreActivity;
 
 /// One archive member as the header reader read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,27 +109,24 @@ pub fn list(archive: &Path, compression: Compression) -> io::Result<Vec<Entry>> 
     list_inner(archive, compression, None)
 }
 
-/// Store-consuming archive listing. A shared activity lease is held for the
-/// whole read, so GC cannot observe the store as idle while a caller still
-/// depends on an extracted/cache input.
-pub(crate) fn list_for_store(
-    store: &Store,
+/// Store-consuming archive listing. The caller's activity lease is borrowed
+/// for the whole read, so GC cannot observe the store as idle while a caller
+/// still depends on an extracted/cache input.
+pub(crate) fn list_with_activity(
+    activity: &StoreActivity,
     archive: &Path,
     compression: Compression,
 ) -> io::Result<Vec<Entry>> {
-    list_inner(archive, compression, Some(store))
+    list_inner(archive, compression, Some(activity))
 }
 
 fn list_inner(
     archive: &Path,
     compression: Compression,
-    store: Option<&Store>,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<Vec<Entry>> {
-    // One lease covers both the in-process read and the cross-check child.
-    let activity = match store {
-        Some(store) => Some(store.activity(ActivityMode::Shared)?),
-        None => None,
-    };
+    // The caller's lease covers both the in-process read and the
+    // cross-check child.
     let entries = read_archive(archive, compression)
         .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
     // Cross-check every name against the tar that will do the extraction.
@@ -140,7 +136,7 @@ fn list_inner(
     // a reader that is wrong about a name is a reader whose containment
     // decision was made on text that is not the name. Refuse rather than
     // extract on a guess.
-    let names = list_names(archive, compression, activity.as_ref())?;
+    let names = list_names(archive, compression, activity)?;
     cross_check(archive, &entries, &names)?;
     Ok(entries)
 }
@@ -846,8 +842,8 @@ pub fn extract_validated(
     extract_validated_inner(archive, destination, strip, compression, entries, None)
 }
 
-pub(crate) fn extract_validated_for_store(
-    store: &Store,
+pub(crate) fn extract_validated_with_activity(
+    activity: &StoreActivity,
     archive: &Path,
     destination: &Path,
     strip: usize,
@@ -860,7 +856,7 @@ pub(crate) fn extract_validated_for_store(
         strip,
         compression,
         entries,
-        Some(store),
+        Some(activity),
     )
 }
 
@@ -870,7 +866,7 @@ fn extract_validated_inner(
     strip: usize,
     compression: Compression,
     entries: &[Entry],
-    store: Option<&Store>,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<()> {
     validate(entries, strip)?;
     let mut command = tar_command();
@@ -882,7 +878,7 @@ fn extract_validated_inner(
         .arg(destination)
         .arg("--strip-components")
         .arg(strip.to_string());
-    let status = status_for(&mut command, store)
+    let status = status_for(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;
     if !status.success() {
         return Err(err(format!(
@@ -896,10 +892,10 @@ fn extract_validated_inner(
 
 fn status_for(
     command: &mut Command,
-    store: Option<&Store>,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<std::process::ExitStatus> {
-    match store {
-        Some(store) => crate::kernel::supervise::status_owned(command, store),
+    match activity {
+        Some(activity) => crate::kernel::supervise::status(command, activity),
         None => command.status(),
     }
 }

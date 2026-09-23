@@ -719,13 +719,10 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 
 /// Copy-on-write clone of a whole tree (macOS `cp -Rc` clonefile, Linux
 /// `cp -a --reflink=auto`, plain `cp -R` fallback), then restore user-write
-/// bits, which the clone inherits as read-only from the store. Used for
-/// writable projections of immutable objects (npm mutablePackages, elixir
-/// deps trees).
-pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
-    clone_tree_for(src, dest, Platform::host()?)
-}
-
+/// bits, which the clone inherits as read-only from the store. This form
+/// takes no lease, so it is only for trees outside any store (the `None`
+/// arm of a caller's `Option<&StoreActivity>`); a clone that reads a store
+/// object or writes a managed projection uses `clone_tree_with_activity`.
 pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io::Result<()> {
     use std::process::Command;
     let clone = if platform.is_macos() {
@@ -757,7 +754,7 @@ pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io:
     crate::kernel::store::restore_write_bits(dest)
 }
 
-pub(crate) use crate::kernel::store::clone_tree_for_store;
+pub(crate) use crate::kernel::store::clone_tree_with_activity;
 
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded

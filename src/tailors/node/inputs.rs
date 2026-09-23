@@ -19,6 +19,7 @@ pub fn ensure_npm_lock(
     platform: Platform,
     dir: &Path,
     store: &store::Store,
+    activity: &crate::kernel::activity::StoreActivity,
     selected: &Selected,
 ) -> io::Result<()> {
     if !dir.join("package.json").exists()
@@ -55,7 +56,7 @@ pub fn ensure_npm_lock(
     }
     command.current_dir(dir).env("PATH", path);
     ui::trace_command(&command);
-    let status = supervise::status_owned(&mut command, store).map_err(|e| {
+    let status = supervise::status(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("run store npm ({}/bin/npm): {e}", node.display()),

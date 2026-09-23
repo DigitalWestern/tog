@@ -21,6 +21,7 @@ use sha2::{Digest, Sha224, Sha256, Sha512};
 use crate::comforter;
 use crate::commands::inspect;
 use crate::commands::shared::{registry_tool, registry_tools};
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::context::Context;
 use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
@@ -875,6 +876,7 @@ fn check_projection_target(
 /// a stricter policy cannot be bypassed by a previously realized tool.
 fn cached_projection(
     store: &Store,
+    activity: &StoreActivity,
     root: &Path,
     ecosystem: &str,
 ) -> io::Result<(serde_json::Value, String)> {
@@ -899,7 +901,7 @@ fn cached_projection(
                  run the command again to rebuild it",
             )
         })?;
-    if path != store.object_path(&id) || !store.has(&id)? {
+    if path != store.object_path(&id) || !store.has_with_activity(activity, &id)? {
         return Err(other(
             "x: cached environment object is missing or outside the active store; run the command again",
         ));
@@ -914,9 +916,14 @@ fn cached_projection(
     Ok((closure, id))
 }
 
-fn check_cached_projection(store: &Store, root: &Path, ecosystem: &str) -> io::Result<()> {
-    let (closure, id) = cached_projection(store, root, ecosystem)?;
-    policy::check_cached(store, &id)?;
+fn check_cached_projection(
+    store: &Store,
+    activity: &StoreActivity,
+    root: &Path,
+    ecosystem: &str,
+) -> io::Result<()> {
+    let (closure, id) = cached_projection(store, activity, root, ecosystem)?;
+    policy::check_cached_with_activity(store, activity, &id)?;
 
     let persisted: Vec<policy::Exception> = if closure["exceptions"].is_null() {
         Vec::new()
@@ -1366,6 +1373,7 @@ fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateM
 /// time or every persisted exception is narrated and queued twice.
 fn x_request_is_ready(
     store: &Store,
+    activity: &StoreActivity,
     root: &Path,
     ecosystem: &str,
     executable: &Path,
@@ -1385,12 +1393,12 @@ fn x_request_is_ready(
     {
         return Ok(false);
     }
-    if !executable.is_file() || cached_projection(store, root, ecosystem).is_err() {
+    if !executable.is_file() || cached_projection(store, activity, root, ecosystem).is_err() {
         return Ok(false);
     }
     // Keep policy failures as failures. They must not be mistaken for a
     // missing projection and bypassed by a fresh realization.
-    check_cached_projection(store, root, ecosystem)?;
+    check_cached_projection(store, activity, root, ecosystem)?;
     Ok(true)
 }
 
@@ -1852,7 +1860,7 @@ pub fn launch(
     platform: Platform,
     cwd: &Path,
     request: Request,
-    activity: &crate::kernel::activity::StoreActivity,
+    activity: &StoreActivity,
 ) -> io::Result<i32> {
     let ecosystem = choose_ecosystem(&request, cwd)?;
     let (tool, tool_version) = split_version(&request.tool);
@@ -1905,7 +1913,7 @@ pub fn launch(
     // A pre-state x-request/1 root has no marker but can still be a
     // complete legacy cache. Preserve that cache path only when its
     // projected executable already exists.
-    let ready = x_request_is_ready(&store, &root, ecosystem, &executable)?;
+    let ready = x_request_is_ready(&store, activity, &root, ecosystem, &executable)?;
     if !ready {
         write_x_request_for_store(
             &root,
@@ -2077,6 +2085,7 @@ pub(crate) struct CorepackHash {
 /// `tog x`, so a delegate's second invocation is a normal cache hit.
 pub(crate) fn realize_node_tool(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     package: &str,
@@ -2085,7 +2094,7 @@ pub(crate) fn realize_node_tool(
     attribution: &mut policy::Attribution,
 ) -> io::Result<(PathBuf, fs::File, bool)> {
     validate_exact_version(version)?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    store.require_activity(activity, "node tool")?;
     let tool = registry_tool("node")?;
     let toolchain = x_toolchain(platform, project, "node")?;
     let runtime_object = tool.runtime_object_id(platform, &toolchain)?;
@@ -2107,7 +2116,7 @@ pub(crate) fn realize_node_tool(
     let x_lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(default_bin(package));
     if executable.is_file() {
-        check_cached_projection(store, &root, "node")?;
+        check_cached_projection(store, activity, &root, "node")?;
         if let Some(expected) = corepack_hash {
             verify_corepack_hash(store, &root, package, version, expected)?;
         }
@@ -2115,7 +2124,7 @@ pub(crate) fn realize_node_tool(
     }
     tool.realize(
         store,
-        &activity,
+        activity,
         platform,
         &root,
         package,
@@ -2960,17 +2969,15 @@ mod tests {
         policy::exception_guard()
     }
 
-    /// A cache hit validates the projection exactly once. `x_request_is_ready`
-    /// ends with `check_cached_projection`, so a caller that validated again
-    /// would narrate and queue every persisted exception twice.
-    #[test]
-    fn ready_cache_hit_records_each_exception_once() {
-        let _guard = exception_guard();
-        let _attribution = policy::Attribution::open("python").unwrap();
-        let base = temp_base("ready-exceptions");
+    /// A published Python `x` root whose environment object carries
+    /// `exceptions` in its metadata: (store, root, object).
+    fn ready_python_root(
+        base: &Path,
+        exceptions: &[serde_json::Value],
+    ) -> (Store, PathBuf, PathBuf) {
         fs::create_dir_all(base.join("store/objects/test-env/bin")).unwrap();
         fs::create_dir_all(base.join("store/meta")).unwrap();
-        // `Store::has` takes the publish lock under `tmp/`.
+        // `Store::has_with_activity` takes the publish lock under `tmp/`.
         fs::create_dir_all(base.join("store/tmp")).unwrap();
         // Closures record the store's own canonical object path.
         let store = Store {
@@ -2982,14 +2989,9 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         // A complete object is a read-only directory with metadata.
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
-        let exception = serde_json::json!({
-            "kind": policy::FILE_COLLISION,
-            "subject": "ruff",
-            "detail": "cached test exception"
-        });
         fs::write(
             store.root.join("meta/test-env.json"),
-            serde_json::json!({"id": "test-env", "exceptions": [exception.clone()]}).to_string(),
+            serde_json::json!({"id": "test-env", "exceptions": exceptions}).to_string(),
         )
         .unwrap();
 
@@ -3004,15 +3006,42 @@ mod tests {
                 "platform": Platform::host().unwrap().triple(),
                 "body": {
                     "env_object": object.display().to_string(),
-                    "exceptions": [exception]
+                    "exceptions": exceptions
                 }
             })
             .to_string(),
         )
         .unwrap();
+        (store, root, object)
+    }
+
+    /// A cache hit validates the projection exactly once. `x_request_is_ready`
+    /// ends with `check_cached_projection`, so a caller that validated again
+    /// would narrate and queue every persisted exception twice.
+    #[test]
+    fn ready_cache_hit_records_each_exception_once() {
+        let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("python").unwrap();
+        let base = temp_base("ready-exceptions");
+        let exception = serde_json::json!({
+            "kind": policy::FILE_COLLISION,
+            "subject": "ruff",
+            "detail": "cached test exception"
+        });
+        let (store, root, object) = ready_python_root(&base, &[exception]);
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
 
         assert!(policy::pending().is_empty());
-        assert!(x_request_is_ready(&store, &root, "python", &root.join(".venv/bin/ruff")).unwrap());
+        assert!(x_request_is_ready(
+            &store,
+            &activity,
+            &root,
+            "python",
+            &root.join(".venv/bin/ruff")
+        )
+        .unwrap());
         assert_eq!(
             policy::pending().len(),
             1,
@@ -3020,7 +3049,40 @@ mod tests {
             policy::pending()
         );
         let _ = policy::drain();
+        drop(activity);
         // The object is published read-only; make it removable again.
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The cache check runs under the x-root lock, and GC takes the activity
+    /// lock before the x-root lock. So the check must borrow the lease the
+    /// caller already holds, never take one underneath the x-root lock. The
+    /// caller here holds the exclusive lease: minting any lease on this
+    /// thread would be refused, so a ready answer proves none was taken.
+    #[test]
+    fn the_x_cache_check_takes_no_lease_under_the_x_root_lock() {
+        let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("python").unwrap();
+        let base = temp_base("borrowed-lease");
+        let (store, root, object) = ready_python_root(&base, &[]);
+        let exclusive = store
+            .activity(crate::kernel::activity::ActivityMode::Exclusive)
+            .unwrap();
+        let _x_lock = acquire_x_root(&root).unwrap();
+        assert!(x_request_is_ready(
+            &store,
+            &exclusive,
+            &root,
+            "python",
+            &root.join(".venv/bin/ruff")
+        )
+        .unwrap());
+        // The minting form the borrowed one replaced cannot even be taken on
+        // this thread now.
+        assert!(store.has("test-env").is_err());
+        drop(exclusive);
+        let _ = policy::drain();
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(base).unwrap();
     }

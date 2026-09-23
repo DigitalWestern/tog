@@ -36,7 +36,7 @@ impl Tailor for Ruby {
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
         let ruby_obj = ruby::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
-        let (plan, _) = ruby::plan_ruby(&ctx.store, dir, &ruby_obj, toolchain)?;
+        let (plan, _) = ruby::plan_ruby(&ctx.store, &ctx.activity, dir, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -51,8 +51,8 @@ impl Tailor for Ruby {
         let platform = ctx.platform;
         let store = &ctx.store;
         let ruby_obj = ruby::realize_runtime(store, platform, toolchain)?;
-        let (plan, lock_sha256) = ruby::plan_ruby(store, dir, &ruby_obj, toolchain)?;
-        let gems = ruby::realize_gems(store, platform, &plan, &ruby_obj, toolchain)?;
+        let (plan, lock_sha256) = ruby::plan_ruby(store, &ctx.activity, dir, &ruby_obj, toolchain)?;
+        let gems = ruby::realize_gems(store, &ctx.activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
             dir,
             &ruby_obj,

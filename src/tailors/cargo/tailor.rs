@@ -56,7 +56,8 @@ impl Tailor for Cargo {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, &ctx.store, toolchain)?;
+        let inputs =
+            inputs::load_cargo_inputs(ctx.platform, dir, &ctx.store, &ctx.activity, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -71,7 +72,7 @@ impl Tailor for Cargo {
         let fresh = request.fresh;
 
         let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store, toolchain)?;
+        let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store, &ctx.activity, toolchain)?;
         let rust_obj = &inputs.rust_obj;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
         if fresh {
@@ -124,7 +125,7 @@ impl Tailor for Cargo {
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         let store = &ctx.store;
-        let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store, toolchain)?;
+        let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store, &ctx.activity, toolchain)?;
         let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
         cargo::project_cargo_env(
             &inputs.root,
@@ -137,6 +138,7 @@ impl Tailor for Cargo {
         )?;
         cargo::build_sandboxed(
             ctx.platform,
+            &ctx.activity,
             &inputs.root,
             &inputs.rust_obj,
             &vendor_obj,
@@ -319,8 +321,10 @@ impl Tailor for Cargo {
         let rust_version = toolchain.version("rustc")?.to_string();
         let unavailable = cargo::toolchain_file_components(platform, cwd)?;
         let rust_object = cargo::realize_runtime(store, platform, toolchain)?;
-        let rustfmt_object = rustfmt::ensure_rustfmt(store, platform, toolchain, &rust_object)?;
-        let workspace_root = inputs::locate_cargo_root(&rust_object, cwd, store)?.canonicalize()?;
+        let rustfmt_object =
+            rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
+        let workspace_root =
+            inputs::locate_cargo_root(&rust_object, cwd, activity)?.canonicalize()?;
         let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
             let id = path
                 .file_name()
@@ -379,7 +383,7 @@ impl Tailor for Cargo {
             &workspace_root,
             &rust_object,
             &rustfmt_object,
-            store,
+            activity,
             check,
             args,
         )?;

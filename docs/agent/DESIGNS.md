@@ -32,7 +32,7 @@ history use them.
 2. Release catalog and publisher trust (WP3)
 3. Daily-driver gaps (WP4 open items)
 4. The company layer (WP5)
-5. GC-safety leftovers (supervision gaps, missing tests, per-operation signal sessions)
+5. GC-safety leftovers (supervision exclusions, missing tests, per-operation signal sessions)
 6. Backlog
 
 ---
@@ -1173,45 +1173,37 @@ and a local authenticated fixture are implementable before those arrive.
 
 ## 5. GC-safety leftovers
 
-### Supervision gaps (token threading)
+### Supervision exclusions (token threading shipped, #56)
 
-Shipped: `src/kernel/supervise.rs` supervises awaited store-consuming
-children while the caller's activity lease is held. Not finished: about 25
-`status_owned`/`output_owned` sites mint a fresh lease per child instead of
-borrowing the caller's token, and the helpers below take no token at all, so
-protection cannot be proved at the call site. Threading a token through them
-is a signature change. `Store::has` taking the activity lock underneath the
-x-root lock (a lock-order inversion, not reachable as a deadlock today) goes
-away with the same threading.
+Every child process that reads or writes a store path runs through
+`src/kernel/supervise.rs` with the caller's `&StoreActivity`. There is no
+`status_owned`/`output_owned` and no sandbox `*_for_store` wrapper any more:
+the helpers that spawn (archive extraction, clone, git, the tailors' tool
+runners, the sandboxed builds) take the token as a parameter, and the
+operation that owns the work holds one lease across its stage directory, its
+children and its commit. Command-level callers pass `Context::activity`; a
+realization entry point that is its own operation (`realize_runtime` and
+friends) takes its lease once at the top. The `x` cache check borrows the
+lease its caller holds, so nothing takes the activity lock underneath the
+x-root lock (GC takes activity first, then x-root).
 
-**Exclusion list, filled 2026-09-09.** Every production `.status()`,
-`.output()` or `.spawn()` in `src/` that does **not** go through
-`src/supervise.rs`, and why it is out. Test-module and test-helper sites are
-excluded from this list by construction and are not repeated here
-(`extract_ruby_bottle_for_test`, `project.rs::local_sdist`,
-`project.rs::local_native_sdist`, and the `#[cfg(test)]` blocks in
-`golang.rs`, `build_requires.rs`, `sandbox.rs`, `elixir.rs`, `build.rs`,
-`cargo.rs`, `dotnet.rs`, `gitsrc.rs`, `store.rs`, `archive.rs`).
+`tests/architecture.rs::store_children_borrow_the_callers_lease` pins this.
+It lists the only production functions outside `supervise.rs` that still
+call `.status()`, `.output()` or `.spawn()` directly, and it refuses a
+lease taken inside `supervise.rs` or `sandbox.rs`. The list and the reason
+for each row:
 
-| Site | What it runs | Disposition |
+| Function | What it runs | Why it takes no token |
 |---|---|---|
-| `pypi.rs:62` | `/usr/bin/getconf GNU_LIBC_VERSION` | **Legitimate.** Pure host probe; touches no store path and cannot outlive store protection. |
-| `dotnet.rs:1080` | `/usr/bin/id -u` | **Legitimate.** Pure host probe. |
-| `sandbox.rs:353`, `sandbox.rs:501` | unmanaged sandbox entry point | **Legitimate by construction.** Documented in-code as the path for "callers that do not consume a store"; store callers use the activity-aware sibling. |
-| `sandbox.rs:895`, `sandbox.rs:941` | `--version` and classification probes | **Legitimate by construction.** These are the `None` arm of an `Option<&StoreActivity>`; the `Some` arm already routes through `supervise::output`. |
-| `build_requires.rs:112,119`; `archive.rs:537,547` | delegated build/extract | **Legitimate by construction.** `None` arm of `Option<&Store>`; the `Some` arm calls `status_owned`/`output_owned`. |
-| `cargo.rs:246` `extract_rust_components` | `/usr/bin/tar -xJf … -C <staged>` | **Gap.** Extracts into a **store staging directory**, which GC sweeps. No token is threaded in, so protection cannot be proved at the call site; it depends on an unverified outer lease (`cargo.rs:155`). |
-| `elixir.rs:796` `extract_otp_archive` | `/usr/bin/tar -xzf … -C <destination>` | **Gap.** Same shape; no token parameter. |
-| `dotnet.rs:115` `extract_sdk_archive` | `/usr/bin/tar -xzf … -C <staged>` | **Gap.** Same shape; no token parameter. |
-| `elixir.rs:494` `run_installer_spec` | ecosystem installer | **Gap.** Runs a store-provisioning installer with no token. |
-| `project.rs:751,757,767` `clone_tree` | tree copy for projection | **Gap.** Writes projection content with no token parameter. |
-| `gitsrc.rs:172` `run_git` | `git` against a fetched tree | **Unproven.** `gitsrc.rs:493,1003` take a lease, but `run_git` receives no token, so no call site proves it. |
+| `pypi.rs` `detect_host_glibc` | `/usr/bin/getconf GNU_LIBC_VERSION` | Host probe; touches no store path. |
+| `dotnet/mod.rs` `invoking_uid` | `/usr/bin/id -u` | Host probe. |
+| `selfupdate.rs` `smoke_test` | the downloaded tog with `--version` | Runs a download outside the store. |
+| `gitsrc.rs` `run_git` | `git ls-remote` for `resolve_ref` | Network query with no working directory. Git against a tree uses `run_git_with_activity`. |
+| `sandbox.rs` `run_bwrap_with_stdout`, `run_seatbelt_status` | unmanaged sandbox entry | For callers that consume no store; store callers use the `*_with_activity` siblings. |
+| `sandbox.rs` `bwrap_preflight_with_activity` | `--version` and classification probes | `None` arm of `Option<&StoreActivity>`. |
+| `archive.rs` `list_names`, `status_for`; `build_requires.rs` `status_for`, `output_for`; `comforter/mod.rs` `clone_tree_for` | listing, extraction, copy | `None` arm of `Option<&StoreActivity>`: no store is involved. |
 
-The six **Gap**/**Unproven** rows are not signal-safety defects — they are
-the same "cannot be proved at the call site" shape as B.5's `*_owned`
-problem, one level lower: these helpers take a `&Path` and no token at all,
-so threading a token through them is a signature change, not a call change.
-They are the reason B.5's completion criteria are not cleared.
+Test modules and `#[cfg(test)]` helpers are outside the scan.
 
 ### Missing named tests
 

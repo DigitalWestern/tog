@@ -23,7 +23,6 @@
 pub(crate) static SUPERVISION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::store::Store;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -742,15 +741,6 @@ fn drain_stderr(
     }
 }
 
-/// Convenience boundary for store-consuming helpers that do not otherwise
-/// receive their caller's operation token. The short shared lease spans the
-/// complete supervised child interval; callers with a long-lived activity
-/// lease should prefer `status` directly.
-pub fn status_owned(command: &mut Command, store: &Store) -> io::Result<ExitStatus> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    status(command, &activity)
-}
-
 fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Result<bool> {
     let Some(reader) = reader else {
         return Ok(false);
@@ -867,12 +857,6 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
             return Err(error);
         }
     }
-}
-
-/// Captured-output counterpart to `status_owned`.
-pub fn output_owned(command: &mut Command, store: &Store) -> io::Result<Output> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    output(command, &activity)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! Inspection reads only archive metadata and pyproject.toml. Source is
 //! executed only later, by pip inside the existing build sandbox.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::types::Plan;
@@ -107,24 +108,24 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     }
 }
 
-fn status_for(command: &mut Command, store: Option<&Store>) -> io::Result<ExitStatus> {
-    match store {
-        Some(store) => crate::kernel::supervise::status_owned(command, store),
+fn status_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Result<ExitStatus> {
+    match activity {
+        Some(activity) => crate::kernel::supervise::status(command, activity),
         None => command.status(),
     }
 }
 
-fn output_for(command: &mut Command, store: Option<&Store>) -> io::Result<Output> {
-    match store {
-        Some(store) => crate::kernel::supervise::output_owned(command, store),
+fn output_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Result<Output> {
+    match activity {
+        Some(activity) => crate::kernel::supervise::output(command, activity),
         None => command.output(),
     }
 }
 
-fn tar_entries(path: &Path, store: Option<&Store>) -> io::Result<Vec<ArchiveEntry>> {
+fn tar_entries(path: &Path, activity: Option<&StoreActivity>) -> io::Result<Vec<ArchiveEntry>> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-tzf"]).arg(path);
-    let output = output_for(&mut command, store)
+    let output = output_for(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
     if !output.status.success() {
         return Err(invalid(format!(
@@ -168,9 +169,13 @@ fn zip_entries(path: &Path) -> io::Result<Vec<ArchiveEntry>> {
     Ok(entries)
 }
 
-fn entries(path: &Path, kind: ArchiveKind, store: Option<&Store>) -> io::Result<Vec<ArchiveEntry>> {
+fn entries(
+    path: &Path,
+    kind: ArchiveKind,
+    activity: Option<&StoreActivity>,
+) -> io::Result<Vec<ArchiveEntry>> {
     match kind {
-        ArchiveKind::TarGz => tar_entries(path, store),
+        ArchiveKind::TarGz => tar_entries(path, activity),
         ArchiveKind::Zip => zip_entries(path),
     }
 }
@@ -215,13 +220,13 @@ fn archive_file(
     path: &Path,
     kind: ArchiveKind,
     member: &str,
-    store: Option<&Store>,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<Vec<u8>> {
     match kind {
         ArchiveKind::TarGz => {
             let mut command = Command::new("/usr/bin/tar");
             command.args(["-xOzf"]).arg(path).arg("--").arg(member);
-            let output = output_for(&mut command, store)
+            let output = output_for(&mut command, activity)
                 .map_err(|e| io::Error::new(e.kind(), format!("read {member} from sdist: {e}")))?;
             if !output.status.success() {
                 return Err(invalid(format!(
@@ -443,13 +448,13 @@ pub(crate) fn inspect_sdist(path: &Path) -> io::Result<ArchiveInfo> {
     inspect_sdist_inner(path, None)
 }
 
-pub(crate) fn inspect_sdist_for(store: &Store, path: &Path) -> io::Result<ArchiveInfo> {
-    inspect_sdist_inner(path, Some(store))
+pub(crate) fn inspect_sdist_for(activity: &StoreActivity, path: &Path) -> io::Result<ArchiveInfo> {
+    inspect_sdist_inner(path, Some(activity))
 }
 
-fn inspect_sdist_inner(path: &Path, store: Option<&Store>) -> io::Result<ArchiveInfo> {
+fn inspect_sdist_inner(path: &Path, activity: Option<&StoreActivity>) -> io::Result<ArchiveInfo> {
     let kind = archive_kind(path)?;
-    let entries = entries(path, kind, store)?;
+    let entries = entries(path, kind, activity)?;
     let root = archive_root(&entries, path)?;
     let pyproject_member = format!("{root}/pyproject.toml");
     let pyproject_entry = entries
@@ -457,7 +462,7 @@ fn inspect_sdist_inner(path: &Path, store: Option<&Store>) -> io::Result<Archive
         .find(|entry| entry.normalized == pyproject_member);
     let (requires, backend, explicit_manifest) = if let Some(entry) = pyproject_entry {
         parse_pyproject(
-            &archive_file(path, kind, &entry.original, store)?,
+            &archive_file(path, kind, &entry.original, activity)?,
             &pyproject_member,
         )?
     } else {
@@ -532,19 +537,19 @@ pub(crate) fn extract_sdist(
 }
 
 pub(crate) fn extract_sdist_for(
-    store: &Store,
+    activity: &StoreActivity,
     path: &Path,
     destination: &Path,
     info: &ArchiveInfo,
 ) -> io::Result<PathBuf> {
-    extract_sdist_inner(path, destination, info, Some(store))
+    extract_sdist_inner(path, destination, info, Some(activity))
 }
 
 fn extract_sdist_inner(
     path: &Path,
     destination: &Path,
     info: &ArchiveInfo,
-    store: Option<&Store>,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(destination)?;
     match archive_kind(path)? {
@@ -565,8 +570,8 @@ fn extract_sdist_inner(
                     "--no-same-owner",
                     "--no-same-permissions",
                 ]);
-            let _ = entries(path, ArchiveKind::TarGz, store)?;
-            let status = status_for(&mut command, store).map_err(|e| {
+            let _ = entries(path, ArchiveKind::TarGz, activity)?;
+            let status = status_for(&mut command, activity).map_err(|e| {
                 io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
             })?;
             if !status.success() {

@@ -7,6 +7,7 @@ pub mod objects;
 pub mod rustfmt;
 pub mod tailor;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{LegacyEvidence, Selected};
@@ -335,13 +336,15 @@ pub fn project_cargo_env(
 /// Build a Cargo project in the network-denied sandbox.
 pub fn build_sandboxed(
     platform: Platform,
+    activity: &StoreActivity,
     project_dir: &Path,
     rust_obj: &Path,
     vendor_obj: &Path,
     args: &[String],
 ) -> io::Result<()> {
-    let store = Store::open()?;
     reject_user_config(args)?;
+    let store = Store::open()?;
+    store.require_activity(activity, "cargo build")?;
     let project_dir = project_dir.canonicalize()?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
@@ -402,7 +405,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
     };
-    let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store);
+    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity);
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
         io::Error::new(e.kind(), format!(
@@ -1654,9 +1657,11 @@ checksum = "{hash_b}"
 
     #[test]
     fn build_rejects_user_config_flag() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
         for bad in ["--config", "--config=net.offline=false"] {
             let error = build_sandboxed(
                 Platform::Aarch64AppleDarwin,
+                &activity,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),

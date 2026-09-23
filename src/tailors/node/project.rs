@@ -401,7 +401,7 @@ fn remove_stale_workspace_links(
 /// concurrent reader never sees a half-built tree.
 #[allow(clippy::too_many_arguments)]
 fn build_project_forest(
-    store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     env_obj: &Path,
     paths: &ForestPaths,
@@ -436,8 +436,8 @@ fn build_project_forest(
         if mutable.is_empty() {
             build_forest(&src, &tmp.join("node_modules"))?;
         } else {
-            crate::comforter::clone_tree_for_store(
-                store,
+            crate::comforter::clone_tree_with_activity(
+                activity,
                 &src,
                 &tmp.join("node_modules"),
                 platform,
@@ -455,7 +455,7 @@ fn build_project_forest(
             if mutable.is_empty() {
                 build_forest(&src, &dest)?;
             } else {
-                crate::comforter::clone_tree_for_store(store, &src, &dest, platform)?;
+                crate::comforter::clone_tree_with_activity(activity, &src, &dest, platform)?;
             }
         }
         fs::rename(&tmp, proj_dir)?;
@@ -717,7 +717,7 @@ pub fn project_node_env_recorded(
     }
     remove_stale_workspace_links(project_dir, &store, home, &previous_workspaces, &workspaces)?;
     build_project_forest(
-        &store,
+        &activity,
         platform,
         &env_obj,
         &paths,

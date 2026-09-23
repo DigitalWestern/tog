@@ -523,3 +523,92 @@ fn agent_docs_are_two_files() {
     names.sort();
     assert_eq!(names, ["DESIGNS.md", "HITRATE.md"]);
 }
+
+/// A child process that reads or writes a store path runs through
+/// `kernel::supervise` with the caller's activity lease, so protection is
+/// provable at the call site. The only raw `.status()`, `.output()` or
+/// `.spawn()` left in production code are the functions below, each of
+/// which touches no store path; the comment above each group says why. A
+/// new raw spawn fails here until it either borrows a lease or joins this
+/// list with a reason.
+const RAW_CHILD_SITES: &[(&str, &str)] = &[
+    // `None` arm of `Option<&StoreActivity>`: no store is involved.
+    ("src/comforter/mod.rs", "clone_tree_for"),
+    ("src/kernel/archive.rs", "list_names"),
+    ("src/kernel/archive.rs", "status_for"),
+    ("src/tailors/python/build_requires.rs", "output_for"),
+    ("src/tailors/python/build_requires.rs", "status_for"),
+    // `git ls-remote`: a network query with no working directory.
+    ("src/kernel/gitsrc.rs", "run_git"),
+    // The `None` arm of the bwrap `--version` and classification probes.
+    ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity"),
+    // Unmanaged sandbox entry points, for callers that consume no store.
+    ("src/kernel/sandbox.rs", "run_bwrap_with_stdout"),
+    ("src/kernel/sandbox.rs", "run_seatbelt_status"),
+    // Host probes.
+    ("src/commands/selfupdate.rs", "smoke_test"),
+    ("src/tailors/dotnet/mod.rs", "invoking_uid"),
+    ("src/tailors/python/pypi.rs", "detect_host_glibc"),
+];
+
+#[test]
+fn store_children_borrow_the_callers_lease() {
+    let mut found = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || relative == "src/kernel/supervise.rs" {
+            continue;
+        }
+        let clean = blank_literals(outside_test_modules(&text));
+        let mut current: Option<String> = None;
+        let mut test_only = false;
+        let mut previous = "";
+        for line in clean.lines() {
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            if indent <= 4 {
+                if let Some(name) = fn_name(trimmed) {
+                    test_only = previous.trim() == "#[cfg(test)]";
+                    current = Some(name);
+                }
+            }
+            if !trimmed.is_empty() {
+                previous = line;
+            }
+            if test_only {
+                continue;
+            }
+            if [".status()", ".output()", ".spawn()"]
+                .iter()
+                .any(|call| line.contains(call))
+            {
+                let site = (relative.clone(), current.clone().unwrap_or_default());
+                if !found.contains(&site) {
+                    found.push(site);
+                }
+            }
+        }
+    }
+    found.sort();
+    let mut expected: Vec<(String, String)> = RAW_CHILD_SITES
+        .iter()
+        .map(|(file, function)| (file.to_string(), function.to_string()))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "a production child runs without the caller's activity lease; pass \
+         `&StoreActivity` to `kernel::supervise` (or, for a child that touches \
+         no store path, name it in RAW_CHILD_SITES and DESIGNS.md)"
+    );
+
+    // The helpers that run children must not mint a lease of their own: a
+    // fresh lease per child is exactly what cannot be proved at the call
+    // site.
+    for relative in ["src/kernel/supervise.rs", "src/kernel/sandbox.rs"] {
+        let text = fs::read_to_string(repo().join(relative)).unwrap();
+        assert!(
+            !non_test(&text).contains(".activity("),
+            "{relative} takes its own activity lease; borrow the caller's"
+        );
+    }
+}

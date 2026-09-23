@@ -366,7 +366,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -409,8 +409,8 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         // workspace repository is searched for the crate the lock names.
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         let source_dir = crate_dir_in_repo(root, &krate.name, &krate.version)?;
-        crate::kernel::store::clone_tree_for_store(
-            store,
+        crate::kernel::store::clone_tree_with_activity(
+            &activity,
             &source_dir,
             &crate_dir,
             Platform::host()?,

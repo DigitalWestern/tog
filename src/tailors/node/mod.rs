@@ -31,6 +31,7 @@ pub use plan::*;
 pub use project::*;
 pub use realize::*;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -829,15 +830,16 @@ pub fn realize_runtime(
     let spec = node_row(selected, platform)?;
     let identity = node_identity_of(&spec, platform);
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    let activity = &store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         validate_node_layout(&store.object_path(&id))?;
         return Ok(store.object_path(&id));
     }
     let sha256 = spec.digest.hex();
     let tarball = download_verified_held(store, &spec.url, sha256)?;
     let staged = store
-        .stage()
+        .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
     let mut command = Command::new("/usr/bin/tar");
     command
@@ -846,14 +848,14 @@ pub fn realize_runtime(
         .arg("-C")
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)
+    let status = crate::kernel::supervise::status(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn tar: {e}")))?;
     if !status.success() {
         return Err(err("node tarball extraction failed"));
     }
     validate_node_layout(&staged)?;
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(sha256)?);
             deps

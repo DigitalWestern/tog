@@ -407,8 +407,11 @@ pub(crate) fn plan_sdist_identity_input(
     runtime_plan: Option<&Plan>,
 ) -> io::Result<SdistIdentityPlan> {
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
+    // One lease for the whole plan: the archive children, the staged work
+    // directory and the Cargo run all borrow it.
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
-    let info = build_requires::inspect_sdist_for(store, &sdist)?;
+    let info = build_requires::inspect_sdist_for(&activity, &sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
     let fast_sdist = fast_requirements
         && !info.rust_build
@@ -441,13 +444,22 @@ pub(crate) fn plan_sdist_identity_input(
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
-        let work = store.stage()?;
+        let work = store.stage_with_activity(&activity)?;
         let result: io::Result<Identity> = (|| {
             let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
             let source =
-                build_requires::extract_sdist_for(store, &sdist, &work.join("source"), &info)?;
+                build_requires::extract_sdist_for(&activity, &sdist, &work.join("source"), &info)?;
             drop(sdist);
-            let rust = rust_plan_inputs(store, platform, rust, &pkg.sha256, &source, &info, &work)?;
+            let rust = rust_plan_inputs(
+                store,
+                &activity,
+                platform,
+                rust,
+                &pkg.sha256,
+                &source,
+                &info,
+                &work,
+            )?;
             Ok(isolated_sdist_identity_from_ids(
                 platform,
                 pkg,
@@ -520,7 +532,7 @@ fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
 }
 
 fn generate_cargo_lock(
-    store: &Store,
+    activity: &crate::kernel::activity::StoreActivity,
     rust_obj: &Path,
     manifest: &Path,
     source: &Path,
@@ -538,7 +550,7 @@ fn generate_cargo_lock(
         .env("PATH", path_var)
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
-    let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
+    let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("run store cargo to generate Cargo.lock: {e}"),
@@ -568,8 +580,10 @@ struct RustPlanInputs {
     generated_lock: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rust_plan_inputs(
     store: &Store,
+    activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
     project_rust: Option<&Selected>,
     sdist_sha256: &str,
@@ -627,7 +641,7 @@ fn rust_plan_inputs(
         // before any later wheel-cache lookup so warm rebuilds stay offline.
         let rust_obj = crate::kernel::provider::rust::realize_runtime(store, platform, &rust)?;
         let plan_home = work.join("cargo-plan-home");
-        let lock = generate_cargo_lock(store, &rust_obj, &manifest, source, &plan_home)?;
+        let lock = generate_cargo_lock(activity, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
         fs::create_dir_all(generated_path.parent().expect("cache parent"))?;
         fs::write(&generated_path, &text)?;
@@ -676,7 +690,7 @@ fn prepare_rust(
 }
 
 fn run_sdist_build(
-    store: &Store,
+    activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
     pkg: &LockedPackage,
     build_env: &Path,
@@ -750,7 +764,7 @@ fn run_sdist_build(
             .collect(),
         write: vec![work],
     };
-    crate::kernel::sandbox::run_build_spec_on_for_store(
+    crate::kernel::sandbox::run_build_spec_on_with_activity(
         platform,
         &crate::kernel::sandbox::BuildSpec {
             argv,
@@ -761,7 +775,7 @@ fn run_sdist_build(
             scratch: work.to_path_buf(),
             path,
         },
-        store,
+        activity,
     )
     .map_err(|error| wrap_sandbox_build_error_with_tail(pkg, error, stderr_tail(&log)))
 }
@@ -864,8 +878,11 @@ pub(crate) fn build_sdist_wheel_at_depth(
     admit_sdist_build(platform, pkg, depth)?;
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
 
+    // One lease for the whole build: the archive children, the staged work
+    // directory and the Cargo run all borrow it.
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
-    let info = build_requires::inspect_sdist_for(store, &sdist)?;
+    let info = build_requires::inspect_sdist_for(&activity, &sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
     let fast_requirements = build_requires::fast_path(&info.build_requires);
@@ -875,8 +892,8 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let fast_identity = sdist_identity(platform, pkg, &python);
     if fast_sdist {
         let fast_id = fast_identity.object_id();
-        if store.has(&fast_id)? {
-            crate::kernel::policy::check_cached(store, &fast_id)?;
+        if store.has_with_activity(&activity, &fast_id)? {
+            crate::kernel::policy::check_cached_with_activity(store, &activity, &fast_id)?;
             return find_wheel(&store.object_path(&fast_id));
         }
     }
@@ -904,14 +921,14 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // so gc cannot collect the cached artifact while it is being used.
     let sdist = download_verified_held(store, &pkg.url, &pkg.sha256)?;
 
-    let work = store.stage()?;
+    let work = store.stage_with_activity(&activity)?;
     let outdir = work.join("out");
     fs::create_dir_all(&outdir)?;
     let sdist_named = stage_sdist_copy(&sdist, &work, pkg)?;
 
     let source = if info.rust_build {
         Some(build_requires::extract_sdist_for(
-            store,
+            &activity,
             &sdist,
             &work.join("source"),
             &info,
@@ -925,6 +942,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let rust_inputs = if let Some(source) = &source {
         Some(rust_plan_inputs(
             store,
+            &activity,
             platform,
             rust,
             &pkg.sha256,
@@ -946,8 +964,8 @@ pub(crate) fn build_sdist_wheel_at_depth(
         native_libs_id.as_deref(),
     )?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(&activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         let _ = crate::kernel::store::remove_tree(&work);
         return find_wheel(&store.object_path(&id));
     }
@@ -972,7 +990,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let cpython_obj = crate::tailors::python::realize_runtime(store, platform, selected)?;
     let input = source.as_deref().unwrap_or(&sdist_named);
     run_sdist_build(
-        store,
+        &activity,
         platform,
         pkg,
         &build_env,

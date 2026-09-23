@@ -13,6 +13,7 @@
 pub mod objects;
 pub mod tailor;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{cache_insert, download_verified_digest_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::sandbox::{force_env, BuildSpec};
@@ -316,13 +317,13 @@ pub fn realize_runtime(
     let identity = sdk_identity(&spec);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
     let digest = Digest::sha512(&spec.sha512)?;
     let tarball = download_verified_digest_held(store, &spec.url, &digest)?;
     let staged = store.stage_with_activity(&activity)?;
-    extract_sdk_archive_for(store, &tarball, &staged)?;
+    extract_sdk_archive_for(&activity, &tarball, &staged)?;
     store
         .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -346,10 +347,14 @@ fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn extract_sdk_archive_for(store: &Store, tarball: &Path, staged: &Path) -> io::Result<()> {
+fn extract_sdk_archive_for(
+    activity: &StoreActivity,
+    tarball: &Path,
+    staged: &Path,
+) -> io::Result<()> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-xzf"]).arg(tarball).args(["-C"]).arg(staged);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() || !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
@@ -873,6 +878,7 @@ pub fn preflight(project_dir: &Path, sdk_version: &str) -> io::Result<(PathBuf, 
 /// (named resolver mutation, isolated caches).
 pub fn plan_dotnet(
     store: &Store,
+    activity: &StoreActivity,
     project_dir: &Path,
     sdk_obj: &Path,
     selected: &Selected,
@@ -881,7 +887,7 @@ pub fn plan_dotnet(
     let (mut csproj, mut lock_path) = preflight(project_dir, &sdk_version)?;
     if !lock_path.is_file() {
         ui::note("no packages.lock.json; resolving with the store SDK...");
-        let scratch = store.stage()?;
+        let scratch = store.stage_with_activity(activity)?;
         let config = scratch.join("nuget.config");
         fs::write(
             &config,
@@ -892,7 +898,7 @@ pub fn plan_dotnet(
         let config = config.canonicalize()?;
         let config_arg = config.to_string_lossy().into_owned();
         let out = run_dotnet(
-            store,
+            activity,
             sdk_obj,
             project_dir,
             &scratch.join("pkgs"),
@@ -988,7 +994,7 @@ pub fn plan_dotnet(
 }
 
 fn run_dotnet(
-    store: &Store,
+    activity: &StoreActivity,
     sdk_obj: &Path,
     cwd: &Path,
     packages: &Path,
@@ -1012,7 +1018,7 @@ fn run_dotnet(
         &forced_env(sdk_obj, packages, scratch),
     );
     cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store dotnet {args:?}: {e}")))
 }
 
@@ -1186,7 +1192,7 @@ pub fn realize_packages(
         ),
     )?;
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::kernel::sandbox::run_build_spec_on_for_store(
+    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(
         platform,
         &BuildSpec {
             argv: vec![
@@ -1206,7 +1212,7 @@ pub fn realize_packages(
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
         },
-        &store,
+        &activity,
     );
     if let Err(e) = result {
         let _ = crate::kernel::store::remove_tree(&scratch);
@@ -1488,7 +1494,7 @@ fn publish_output(
     project_dir: &Path,
     platform: Platform,
     fingerprint: &str,
-    store: Option<&Store>,
+    activity: Option<&StoreActivity>,
 ) -> io::Result<PathBuf> {
     let output = checked_output_dir(project_dir, fingerprint)?;
     let bin = output
@@ -1507,9 +1513,9 @@ fn publish_output(
     match fs::rename(staged, &new) {
         Ok(()) => {}
         Err(e) if e.raw_os_error() == Some(18) => {
-            let cloned = match store {
-                Some(store) => {
-                    crate::comforter::clone_tree_for_store(store, staged, &new, platform)
+            let cloned = match activity {
+                Some(activity) => {
+                    crate::kernel::store::clone_tree_with_activity(activity, staged, &new, platform)
                 }
                 None => crate::comforter::clone_tree_for(staged, &new, platform),
             };
@@ -1575,6 +1581,7 @@ fn publish_output(
 /// assets, then build --no-restore. Project obj/ is never authority.
 pub fn build_sandboxed(
     platform: Platform,
+    activity: &StoreActivity,
     project_dir: &Path,
     sdk_obj: &Path,
     packages_obj: &Path,
@@ -1588,7 +1595,8 @@ pub fn build_sandboxed(
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
     let store = Store::open()?;
-    let scratch = store.stage()?;
+    store.require_activity(activity, "dotnet build")?;
+    let scratch = store.stage_with_activity(activity)?;
     let objdir = scratch.join("obj");
     let output_scratch = scratch.join("output");
     fs::create_dir_all(&objdir)?;
@@ -1631,16 +1639,18 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "offline locked restore failed: {e}; network is denied — \
+    crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity).map_err(
+        |e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "offline locked restore failed: {e}; network is denied — \
                      packages outside the lock, framework packs, or workloads \
                      are unsupported in v0"
-            ),
-        )
-    })?;
+                ),
+            )
+        },
+    )?;
     if !objdir.join("project.assets.json").is_file() {
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err("restore produced no project.assets.json"));
@@ -1668,7 +1678,9 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
     };
-    if let Err(e) = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store) {
+    if let Err(e) =
+        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
+    {
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(io::Error::new(
             e.kind(),
@@ -1687,7 +1699,7 @@ pub fn build_sandboxed(
         &project_dir,
         platform,
         &sdk_fingerprint_of(&sdk_spec),
-        Some(&store),
+        Some(activity),
     ) {
         Ok(output) => output,
         Err(e) => {

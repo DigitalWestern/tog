@@ -8,10 +8,10 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-pub(super) fn tarball_has_binding_gyp(store: &Store, path: &Path) -> io::Result<bool> {
+pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> io::Result<bool> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-tzf"]).arg(path);
-    let output = crate::kernel::supervise::output_owned(&mut command, store).map_err(|e| {
+    let output = crate::kernel::supervise::output(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("list npm tarball {}: {e}", path.display()),
@@ -192,6 +192,7 @@ pub(super) fn persisted_archive_classification(
 
 pub(super) fn classify_downloaded_archives(
     store: &Store,
+    activity: &StoreActivity,
     tarballs: &[(&NpmPackage, crate::kernel::fetch::CacheLease)],
 ) -> io::Result<bool> {
     let mut has_native = false;
@@ -199,7 +200,7 @@ pub(super) fn classify_downloaded_archives(
         let digest = Digest::from_sri(&package.integrity)?;
         // The tarball was returned by download_verified_digest, so inspect the
         // verified bytes and persist the result before planning the identity.
-        let binding_gyp = tarball_has_binding_gyp(store, tarball)?;
+        let binding_gyp = tarball_has_binding_gyp(activity, tarball)?;
         write_archive_classification(store, &digest, binding_gyp)?;
         has_native |= binding_gyp;
     }
@@ -565,6 +566,7 @@ fn node_env_identity_inner(
 /// the caller keeps those leases until it no longer needs the cached bytes.
 fn resolve_native_libs_id<'a>(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &'a NpmPlan,
     classification: &mut Vec<(&'a NpmPackage, crate::kernel::fetch::CacheLease)>,
@@ -576,7 +578,7 @@ fn resolve_native_libs_id<'a>(
         Some(has_native) => has_native,
         None => {
             *classification = fetch_npm_tarballs(store, &plan.packages)?;
-            classify_downloaded_archives(store, classification)?
+            classify_downloaded_archives(store, activity, classification)?
         }
     };
     native_libs_identity_id(store, platform, has_native)
@@ -640,8 +642,12 @@ fn fetch_plan_sources(
 }
 
 /// The staged env skeleton: the root node_modules plus one per workspace.
-fn stage_env_skeleton(store: &Store, workspaces: &[String]) -> io::Result<PathBuf> {
-    let staged = store.stage()?;
+fn stage_env_skeleton(
+    store: &Store,
+    activity: &StoreActivity,
+    workspaces: &[String],
+) -> io::Result<PathBuf> {
+    let staged = store.stage_with_activity(activity)?;
     fs::create_dir_all(staged.join("node_modules"))?;
     for workspace in workspaces {
         fs::create_dir_all(
@@ -750,7 +756,7 @@ fn snapshot_verified_patch(
 }
 
 fn apply_verified_patch(
-    store: &Store,
+    activity: &StoreActivity,
     package_path: &str,
     snapshot: &PatchSnapshot,
     dest: &Path,
@@ -770,7 +776,7 @@ fn apply_verified_patch(
         .args(["-p1", "--batch", "--forward"])
         .current_dir(dest)
         .stdin(snapshot_file);
-    let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
+    let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -802,6 +808,7 @@ fn apply_verified_patch(
 /// already holds after sort, since "a/node_modules/b" sorts after "a").
 fn extract_tarball_packages(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     staged: &Path,
     tarballs: &mut [(NpmPackage, PathBuf)],
@@ -826,7 +833,7 @@ fn extract_tarball_packages(
             // identical either way.
             tar.arg("--delay-directory-restore");
         }
-        let status = crate::kernel::supervise::status_owned(&mut tar, store)?;
+        let status = crate::kernel::supervise::status(&mut tar, activity)?;
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
@@ -834,7 +841,7 @@ fn extract_tarball_packages(
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {
             let snapshot = snapshot_verified_patch(store, &p.path, patch)?;
-            apply_verified_patch(store, &p.path, &snapshot, &dest)?;
+            apply_verified_patch(activity, &p.path, &snapshot, &dest)?;
         }
         if p.bin.is_empty() {
             if let Ok(manifest) = fs::read_to_string(dest.join("package.json")) {
@@ -862,7 +869,7 @@ fn extract_tarball_packages(
 /// tog does not, because that script is unsandboxed build logic with its
 /// own dependency needs — the exception says so rather than pretending.
 fn place_git_packages(
-    store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     staged: &Path,
     git_objects: &mut [(NpmPackage, PathBuf)],
@@ -897,7 +904,7 @@ fn place_git_packages(
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
         let _ = crate::kernel::store::remove_tree(&staging);
-        crate::comforter::clone_tree_for_store(store, &source_root, &staging, platform)
+        crate::comforter::clone_tree_with_activity(activity, &source_root, &staging, platform)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path)))?;
         for entry in fs::read_dir(&staging)? {
             let entry = entry?;
@@ -1066,8 +1073,16 @@ pub(super) fn realize_node_env_with_node_object(
             .map_err(|e| io::Error::new(e.kind(), format!("python for node-gyp: {e}")))?;
     let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
         Vec::new();
-    let native_libs_id =
-        resolve_native_libs_id(store, platform, plan, &mut classification_tarballs)?;
+    // One lease for the whole realization: the archive children and the
+    // staged environment borrow it.
+    let activity = &store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    let native_libs_id = resolve_native_libs_id(
+        store,
+        activity,
+        platform,
+        plan,
+        &mut classification_tarballs,
+    )?;
     let identity = node_env_identity(
         store,
         platform,
@@ -1078,8 +1093,8 @@ pub(super) fn realize_node_env_with_node_object(
         &gyp_python_id,
     )?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1099,9 +1114,9 @@ pub(super) fn realize_node_env_with_node_object(
         None
     };
 
-    let staged = stage_env_skeleton(store, &workspaces)?;
-    extract_tarball_packages(store, platform, &staged, &mut tarballs)?;
-    place_git_packages(store, platform, &staged, &mut git_objects)?;
+    let staged = stage_env_skeleton(store, activity, &workspaces)?;
+    extract_tarball_packages(store, activity, platform, &staged, &mut tarballs)?;
+    place_git_packages(activity, platform, &staged, &mut git_objects)?;
     // Capture provenance before the package vectors are merged and dropped.
     let mut deps = env_object_deps(plan, node_obj, native_libs_id.as_deref(), &git_objects)?;
 
@@ -1555,17 +1570,17 @@ pub(super) fn run_install_scripts_staged(
         let tools_dir = ensure_lifecycle_tools(store, node_obj, &mut tools, cleanup)?;
         // Fresh scratch HOME per package: no shared writable state between
         // one package's scripts and the next.
-        let tmp = store.stage()?;
+        let tmp = store.stage_with_activity(&activity)?;
         cleanup.push(tmp.clone());
         plant_declared_artifacts(store, artifacts, &tmp, consumed)?;
 
         // Snapshot lives in its own stage dir: neither readable nor writable
         // inside the sandbox, so a failing script cannot tamper with what
         // gets restored.
-        let snapshot_root = store.stage()?;
+        let snapshot_root = store.stage_with_activity(&activity)?;
         cleanup.push(snapshot_root.clone());
         let snapshot = snapshot_root.join("package");
-        crate::comforter::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
+        crate::comforter::clone_tree_with_activity(&activity, &pkg_dir, &snapshot, platform)?;
 
         let python = ensure_gyp_python(store, platform, gyp_python, &mut python_obj)?;
         // The script is handed `$PYTHON` and may leave a symlink or wrapper
@@ -1743,7 +1758,15 @@ mod patch_snapshot_tests {
             drop(original);
             assert_eq!(fs::metadata(&original_path).unwrap().ino(), original_inode);
 
-            apply_verified_patch(&store, "node_modules/example", &snapshot, &dest).unwrap();
+            apply_verified_patch(
+                &store
+                    .activity(crate::kernel::activity::ActivityMode::Shared)
+                    .unwrap(),
+                "node_modules/example",
+                &snapshot,
+                &dest,
+            )
+            .unwrap();
         }
         assert!(!snapshot_root.exists(), "snapshot stage leaked");
         assert_eq!(

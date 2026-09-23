@@ -13,7 +13,6 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::store::Store;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -94,17 +93,8 @@ pub(crate) fn run_build_spec_on(platform: Platform, spec: &BuildSpec) -> io::Res
     ))
 }
 
-/// Store-consuming counterpart to `run_build_spec_on`. The activity lease is
-/// held through sandbox setup, the child, and its reap.
-pub(crate) fn run_build_spec_on_for_store(
-    platform: Platform,
-    spec: &BuildSpec,
-    store: &Store,
-) -> io::Result<()> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    run_build_spec_on_with_activity(platform, spec, &activity)
-}
-
+/// Store-consuming counterpart to `run_build_spec_on`. The caller's activity
+/// lease is borrowed through sandbox setup, the child, and its reap.
 pub(crate) fn run_build_spec_on_with_activity(
     platform: Platform,
     spec: &BuildSpec,
@@ -146,15 +136,6 @@ pub(crate) fn run_build_spec_status_on(
         &spec.cwd,
         &spec.env,
     )
-}
-
-pub(crate) fn run_build_spec_status_on_for_store(
-    platform: Platform,
-    spec: &BuildSpec,
-    store: &Store,
-) -> io::Result<std::process::ExitStatus> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    run_build_spec_status_on_with_activity(platform, spec, &activity)
 }
 
 pub(crate) fn run_build_spec_status_on_with_activity(

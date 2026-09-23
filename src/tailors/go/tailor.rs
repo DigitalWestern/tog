@@ -36,7 +36,8 @@ impl Tailor for Go {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let inputs = inputs::load_go_inputs(ctx.platform, dir, &ctx.store, toolchain)?;
+        let inputs =
+            inputs::load_go_inputs(ctx.platform, dir, &ctx.store, &ctx.activity, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -50,9 +51,15 @@ impl Tailor for Go {
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, dir, store, toolchain)?;
-        let modcache =
-            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
+        let inputs = inputs::load_go_inputs(platform, dir, store, &ctx.activity, toolchain)?;
+        let modcache = go::realize_modcache(
+            store,
+            &ctx.activity,
+            platform,
+            toolchain,
+            &inputs.plan,
+            &inputs.go_obj,
+        )?;
         go::project_go_env(
             dir,
             &inputs.go_obj,
@@ -95,9 +102,15 @@ impl Tailor for Go {
     ) -> io::Result<()> {
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, root, store, toolchain)?;
-        let modcache =
-            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
+        let inputs = inputs::load_go_inputs(platform, root, store, &ctx.activity, toolchain)?;
+        let modcache = go::realize_modcache(
+            store,
+            &ctx.activity,
+            platform,
+            toolchain,
+            &inputs.plan,
+            &inputs.go_obj,
+        )?;
         go::project_go_env(
             root,
             &inputs.go_obj,
@@ -107,7 +120,14 @@ impl Tailor for Go {
             toolchain,
             attribution,
         )?;
-        go::build_sandboxed(platform, root, &inputs.go_obj, &modcache, args)
+        go::build_sandboxed(
+            platform,
+            &ctx.activity,
+            root,
+            &inputs.go_obj,
+            &modcache,
+            args,
+        )
     }
 
     fn run_env(

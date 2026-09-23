@@ -369,13 +369,14 @@ pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io:
     let spec = &row(selected, platform, "uv", UV_RECIPE)?;
     let identity = uv_identity_of(spec, platform)?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    if store.has_with_activity(&activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
     let sha256 = artifact_sha256(spec)?;
     let tarball = download_verified_held(store, &spec.url, sha256)?;
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(&activity)?;
     // Tarball root is platform-specific; strip it.
     let mut command = Command::new("/usr/bin/tar");
     command
@@ -384,12 +385,12 @@ pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io:
         .args(["-C"])
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, &activity)?;
     if !status.success() || !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(sha256)?);
             deps
@@ -412,14 +413,15 @@ pub fn realize_runtime(
     let spec = &row(selected, platform, "cpython", CPYTHON_RECIPE)?;
     let identity = cpython_identity_of(spec, platform)?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    if store.has_with_activity(&activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
     let sha256 = artifact_sha256(spec)?;
     let tarball = download_verified_held(store, &spec.url, sha256)?;
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(&activity)?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
     let mut command = Command::new("/usr/bin/tar");
     command
@@ -428,7 +430,7 @@ pub fn realize_runtime(
         .args(["-C"])
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, &activity)?;
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -436,7 +438,7 @@ pub fn realize_runtime(
         ));
     }
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(sha256)?);
             deps

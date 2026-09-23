@@ -74,11 +74,6 @@ by position.
   workaround is `SUPERVISION_TEST_LOCK` plus `--test-threads=1` for
   `--ignored` targets. Design: `docs/agent/DESIGNS.md` §5 "Per-operation
   signal sessions" (#57); implementation follows its review.
-- **Thread the caller's activity token through child processes.** About 25
-  sites mint a fresh lease per child, and several extraction and clone
-  helpers take no token at all, so protection cannot be proved at the call
-  site. The same fix removes the `Store::has` lock-order inversion. Site
-  table in `docs/agent/DESIGNS.md` §5.
 - **Descriptor-relative project access in sync.** Every command reads the
   project by pathname, so a same-user process that swaps the project
   directory mid-sync can make tog sync the replacement

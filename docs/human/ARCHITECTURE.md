@@ -514,7 +514,11 @@ mid-publication object for a crashed one. Store-consuming operations hold an
 activity lease (`src/kernel/activity.rs`), shared or exclusive, with a fixed
 ordering: activity, then x-root, then project transaction, then cache, then
 publication. Each process supervises at most one awaited store-consuming
-child (`src/kernel/supervise.rs`) and forwards TERM to it. Contention is a named
+child (`src/kernel/supervise.rs`) and forwards TERM to it. A helper that runs
+such a child takes the caller's `&StoreActivity` rather than taking a lease of
+its own, so the lease that protects a stage directory is visibly the one held
+across its children and its commit (`tests/architecture.rs` lists the few raw
+children that touch no store path). Contention is a named
 outcome, not a hang: GC acquires exclusive activity and skips safely while a
 managed job holds the shared lease. Stage dirs and download temps use
 collision-proof names.

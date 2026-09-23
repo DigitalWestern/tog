@@ -164,6 +164,10 @@ pub(crate) fn live_identity_for_test() -> Identity {
     })
 }
 
+/// Git with no store lease, so only for runs that touch no store path. The
+/// one production caller is `resolve_ref`'s `ls-remote`: a network query
+/// with no working directory. Every run against a staged or published tree
+/// goes through `run_git_with_activity`.
 fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);
@@ -500,7 +504,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
     let identity = identity(source);
     let id = identity.object_id();
     if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1189,7 +1193,7 @@ pub fn pack_checkout(
     // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
     // would take a rewrite expression built from these strings.
     let staged = work.join(&prefix);
-    crate::comforter::clone_tree_for_store(store, source_root, &staged, platform)?;
+    crate::comforter::clone_tree_with_activity(&activity, source_root, &staged, platform)?;
     validate_symlinks(&staged)?;
     normalize_for_packing(&staged)?;
 
