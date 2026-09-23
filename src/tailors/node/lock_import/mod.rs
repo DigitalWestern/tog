@@ -1809,6 +1809,58 @@ plugin@1.0.0:
         assert_eq!(package.integrity, "sha1-q/LpqFAgHjVxuNNoMPd7xSrz3ps=");
     }
 
+    /// A Yarn 1 archive URL names a commit in its path and the tarball's
+    /// sha1 in its fragment. The lock attests the bytes, so the entry is the
+    /// tarball checked against that sha1, not a git checkout of the commit.
+    #[test]
+    fn yarn_github_archive_with_sha1_fragment_is_an_attested_tarball() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";
+        let sha1 = "abf2e9a850201e3571b8d36830f77bc52af3de9b";
+        for url in [
+            format!("https://codeload.github.com/o/r/tar.gz/{commit}"),
+            format!("https://github.com/o/r/archive/{commit}.tar.gz"),
+        ] {
+            let lock = format!(
+                "# yarn lockfile v1\nplugin@1.0.0:\n  version \"1.0.0\"\n  resolved \"{url}#{sha1}\"\n"
+            );
+            let dir = project();
+            let plan = super::plan_yarn(
+                crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+                &lock,
+                r#"{"dependencies":{"plugin":"1.0.0"}}"#,
+                &dir,
+                node_version(),
+            );
+            let _ = crate::kernel::store::remove_tree(&dir);
+            let plan = plan.unwrap();
+            let package = plan.packages.iter().find(|p| p.name == "plugin").unwrap();
+            assert!(package.git.is_none(), "{url}: {:?}", package.git);
+            assert_eq!(package.url, url);
+            assert_eq!(package.integrity, "sha1-q/LpqFAgHjVxuNNoMPd7xSrz3ps=");
+
+            // A fragment that is not a sha1 is refused, not reinterpreted.
+            let lock = format!(
+                "# yarn lockfile v1\nplugin@1.0.0:\n  version \"1.0.0\"\n  resolved \"{url}#not-a-hash\"\n"
+            );
+            let dir = project();
+            let result = super::plan_yarn(
+                crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+                &lock,
+                r#"{"dependencies":{"plugin":"1.0.0"}}"#,
+                &dir,
+                node_version(),
+            );
+            let _ = crate::kernel::store::remove_tree(&dir);
+            let error = result
+                .err()
+                .expect("malformed fragment refused")
+                .to_string();
+            assert!(error.contains("malformed yarn sha1 fragment"), "{error}");
+        }
+    }
+
     #[test]
     fn a_codeload_dependency_is_realized_not_rejected() {
         let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";

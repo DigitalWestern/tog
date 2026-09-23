@@ -32,6 +32,22 @@ pub(crate) fn explicit_git_source(url: &str) -> Option<crate::kernel::gitsrc::Gi
         .flatten()
 }
 
+/// A GitHub archive tarball (codeload `tar.gz/<commit>` or
+/// `github.com/<o>/<r>/archive/<commit>.tar.gz`). Its commit is in the path,
+/// so any `#fragment` on it is a hash of the bytes, never a commit.
+pub(crate) fn is_github_archive_url(url: &str) -> bool {
+    let url = url.split_once('#').map_or(url, |(url, _)| url);
+    let archive = |path: &str, marker: &str| {
+        let parts: Vec<&str> = path.split('/').collect();
+        parts.len() >= 4 && parts[2] == marker
+    };
+    url.strip_prefix("https://codeload.github.com/")
+        .is_some_and(|path| archive(path, "tar.gz"))
+        || url
+            .strip_prefix("https://github.com/")
+            .is_some_and(|path| archive(path, "archive"))
+}
+
 /// Why a git dependency that is not pinned to a full commit cannot be
 /// realized. The wording is persisted verbatim, down to its trailing tag: it
 /// is recorded as `git-dependency` exception detail in closures and store
