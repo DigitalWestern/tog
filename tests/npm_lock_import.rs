@@ -579,6 +579,68 @@ snapshots:
     let _ = fs::remove_dir_all(dir);
 }
 
+/// pnpm's sha256 hash reads patches CRLF-blind, so an LF file and its CRLF
+/// twin share one hash while the environment would bind different bytes.
+/// Two every-version keys like that are one patch only if the bytes agree.
+#[test]
+fn every_version_patch_keys_sharing_a_hash_must_share_their_bytes() {
+    let dir = scratch_project("pnpm-every-version-crlf");
+    let hash = write_patch(&dir, "foo.patch", b"diff --git a/x b/x\n");
+    write_patch(&dir, "foo-star.patch", b"diff --git a/x b/x\r\n");
+    write_patch(&dir, "foo-same.patch", b"diff --git a/x b/x\n");
+    let lock = |star_path: &str, recorded: bool| {
+        let suffix = if recorded {
+            format!("(patch_hash={hash})")
+        } else {
+            String::new()
+        };
+        format!(
+            r#"lockfileVersion: '9.0'
+patchedDependencies:
+  foo:
+    hash: {hash}
+    path: patches/foo.patch
+  foo@*:
+    hash: {hash}
+    path: patches/{star_path}
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: 1.0.0{suffix}
+packages:
+  foo@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  foo@1.0.0{suffix}: {{}}
+"#
+        )
+    };
+    let plan_for = |lock: &str| {
+        tog::tailors::node::lock_import::plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            lock,
+            &dir,
+            node_version(),
+        )
+    };
+    for recorded in [true, false] {
+        let error = plan_for(&lock("foo-star.patch", recorded))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("foo, foo@*"), "{error}");
+        assert!(error.contains("different"), "{error}");
+        // Identical bytes under the same hash are one patch.
+        let plan = plan_for(&lock("foo-same.patch", recorded)).unwrap();
+        assert_eq!(
+            plan.packages[0].patch.as_ref().map(|patch| &patch.hash),
+            Some(&hash)
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
 fn write_patch(dir: &Path, name: &str, bytes: &[u8]) -> String {
     let path = dir.join("patches").join(name);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

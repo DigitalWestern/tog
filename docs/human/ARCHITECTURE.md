@@ -150,8 +150,10 @@ package, is refused; a `file:` package whose dependencies conflict with its
 workspace member's is not supported yet. pnpm `patchedDependencies` follow
 pnpm's precedence (exact version, then the one npm semver range the version
 satisfies, then a bare name or `name@*` that covers every version, two of
-those settled by the snapshot's recorded hash), and any snapshot whose
-recorded `patch_hash` disagrees with the selected patch is refused. Ranges
+those settled by the snapshot's recorded hash, and refused when that hash
+covers different bytes), and any snapshot whose recorded `patch_hash`
+disagrees with the selected patch is refused. Keys are read as written:
+whitespace around a key, its name or its version is refused. Ranges
 are read by `kernel/semver.rs`, node-semver's grammar and `satisfies`,
 checked case by case against node-semver itself
 (`kernel/semver_cases.tsv`). Lifecycle scripts run hermetically (below).

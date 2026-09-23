@@ -342,35 +342,62 @@ pub(super) struct PnpmPatchRule {
     pub(super) name: String,
     pub(super) selector: PatchSelector,
     pub(super) patch: NpmPatch,
+    /// sha256 of the patch file's raw bytes, which tell two rules apart
+    /// when their pnpm hashes (CRLF-blind) agree.
+    pub(super) raw_sha256: String,
 }
 
 /// Split a `patchedDependencies` key into a package name and a selector.
 /// Like pnpm's own parser, text after the name that is a full semver version
 /// is an exact version and anything else is a range.
+///
+/// The key is read byte for byte. pnpm looks an exact version up as written,
+/// so `"foo@1.2.3 "` never meets `foo@1.2.3`; rather than guess, whitespace
+/// around the key, in the name or around the selector is refused. A range
+/// may still space its own terms (`foo@^1 || ^2`).
 pub(super) fn patch_key_selector(key: &str) -> io::Result<(String, PatchSelector)> {
-    let trimmed = key.trim();
     let invalid = || err(format!("pnpm patch key {key:?} names no package"));
-    if trimmed.starts_with('/') {
+    if key.trim() != key {
+        return Err(err(format!(
+            "pnpm patch key {key:?} has surrounding whitespace; pnpm matches keys as written"
+        )));
+    }
+    if key.starts_with('/') {
         // pnpm v6's `/name@version` and `/name/version` spellings.
-        let (name, version) = normalize_pnpm_snapshot_key(trimmed)
+        if key.contains(char::is_whitespace) {
+            return Err(err(format!(
+                "pnpm patch key {key:?} has whitespace in it; pnpm matches keys as written"
+            )));
+        }
+        let (name, version) = normalize_pnpm_snapshot_key(key)
             .as_deref()
             .and_then(split_identity)
             .ok_or_else(invalid)?;
         return Ok((name, PatchSelector::Exact(version)));
     }
-    let at = match trimmed.strip_prefix('@') {
+    let at = match key.strip_prefix('@') {
         Some(rest) => rest.find('@').map(|index| index + 1),
-        None => trimmed.find('@'),
+        None => key.find('@'),
     };
     let Some(at) = at else {
-        if trimmed.is_empty() || trimmed.starts_with('@') && !trimmed.contains('/') {
+        if key.is_empty() || key.starts_with('@') && !key.contains('/') {
             return Err(invalid());
         }
-        return Ok((trimmed.to_string(), PatchSelector::All));
+        if key.contains(char::is_whitespace) {
+            return Err(err(format!(
+                "pnpm patch key {key:?} has whitespace in its name; pnpm matches keys as written"
+            )));
+        }
+        return Ok((key.to_string(), PatchSelector::All));
     };
-    let (name, selector) = (&trimmed[..at], trimmed[at + 1..].trim());
+    let (name, selector) = (&key[..at], &key[at + 1..]);
     if name.is_empty() || selector.is_empty() {
         return Err(invalid());
+    }
+    if name.contains(char::is_whitespace) || selector.trim() != selector {
+        return Err(err(format!(
+            "pnpm patch key {key:?} has whitespace around its name or version; pnpm matches keys as written"
+        )));
     }
     // pnpm's `dependency-path` parse: a valid version is exact (compared as
     // written), `*` is every version, anything else must be a valid range
@@ -423,7 +450,7 @@ pub(super) fn pnpm_patches(
         let (name, selector) = patch_key_selector(package)?;
         let subject = match &selector {
             PatchSelector::Exact(version) => format!("{name}@{version}"),
-            _ => package.trim().to_string(),
+            _ => package.to_string(),
         };
         if hash.len() == PNPM_BASE32_HASH_LEN {
             let detail = "pnpm 9 md5 patch hash accepted and verified, but is cryptographically weak; the environment id binds the patch by sha256";
@@ -439,6 +466,7 @@ pub(super) fn pnpm_patches(
             key: package.clone(),
             name,
             selector,
+            raw_sha256: hex::encode(Sha256::digest(fs::read(&path)?)),
             patch: NpmPatch {
                 path: path.to_string_lossy().into_owned(),
                 hash: hash.to_string(),
@@ -553,19 +581,35 @@ fn select_pnpm_patch<'a>(
     let Some(first) = every.first() else {
         return Ok(None);
     };
-    if every.iter().all(|rule| rule.patch.hash == first.patch.hash) {
+    // Rules are the same patch only when everything the environment id
+    // binds agrees: the lockfile hash and the raw-byte digest. pnpm's md5
+    // and normalized sha256 hashes ignore CRLF, so one recorded hash can
+    // stand for different bytes.
+    let same = |a: &PnpmPatchRule, b: &PnpmPatchRule| patch_identity(a) == patch_identity(b);
+    if every.iter().all(|rule| same(rule, first)) {
         return Ok(Some(first));
     }
-    match every
+    let recorded_rules = every
         .iter()
-        .find(|rule| Some(rule.patch.hash.as_str()) == recorded)
-    {
-        Some(rule) => Ok(Some(rule)),
-        None => Err(err(format!(
+        .filter(|rule| Some(rule.patch.hash.as_str()) == recorded)
+        .collect::<Vec<_>>();
+    match recorded_rules.as_slice() {
+        [] => Err(err(format!(
             "pnpm patchedDependencies {} each patch every version of {name} with a different patch, and pnpm-lock.yaml does not record which one {name}@{version} got; keep one of them",
             listed(&every)
         ))),
+        [rule, rest @ ..] if rest.iter().all(|other| same(other, rule)) => Ok(Some(rule)),
+        _ => Err(err(format!(
+            "pnpm patchedDependencies {} each patch every version of {name} with different bytes under the same recorded hash, so pnpm-lock.yaml does not say which bytes {name}@{version} got; keep one of them",
+            listed(&recorded_rules.into_iter().copied().collect::<Vec<_>>())
+        ))),
     }
+}
+
+/// What the environment id binds for a patch: the lockfile hash as written
+/// and the sha256 of the raw file bytes.
+fn patch_identity(rule: &PnpmPatchRule) -> (&str, &str) {
+    (rule.patch.hash.as_str(), rule.raw_sha256.as_str())
 }
 
 pub(super) fn attach_pnpm_patches(
@@ -1308,6 +1352,30 @@ mod patch_hash_tests {
         ] {
             assert!(recorded_patch_hash(key).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn patch_keys_are_read_as_written() {
+        for key in [
+            "foo@1.2.3 ",
+            " foo@1.2.3",
+            "foo@ 1.2.3",
+            "foo @1.2.3",
+            "foo ",
+            "fo o",
+            "foo@^1.0.0 ",
+            "foo@\t^1.0.0",
+            "/foo/1.2.3 ",
+            "/foo /1.2.3",
+        ] {
+            let error = patch_key_selector(key).unwrap_err().to_string();
+            assert!(error.contains("whitespace"), "{key:?}: {error}");
+        }
+        // A range spaces its own terms.
+        assert!(matches!(
+            patch_key_selector("foo@^1.0.0 || ^2.0.0").unwrap().1,
+            PatchSelector::Range(_)
+        ));
     }
 
     #[test]
