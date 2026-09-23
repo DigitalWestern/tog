@@ -88,10 +88,6 @@ by position.
     identity`. pnpm `patchedDependencies` keyed by a bare package name
     applies to every version. Decide whether to support it by applying the
     patch to each locked version.
-  - *ChatGPTNextWeb/NextChat:* git source checkout of
-    `Azure-Samples/aoai-realtime-audio-sdk` at `abf2e9a8…` fails with
-    `unable to read tree`. The fetch is too shallow for the checkout; check
-    whether the commit is on a non-default branch.
 - **Supervision redesign: one signal session per operation.** Today one
   process supervises at most one child; a second concurrent session is
   rejected with a named busy error (`Session::new` in

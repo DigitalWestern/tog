@@ -514,8 +514,10 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
             "git remote add origin",
             &activity,
         )?;
-        // A reachable-sha fetch is the cheap path; servers that refuse it
-        // (uploadpack.allowReachableSHA1InWant off) need the full history.
+        // Asking for the pinned commit by sha is the cheap path, and it works
+        // whichever branch (if any) the commit sits on. Servers that refuse
+        // sha wants (uploadpack.allowReachableSHA1InWant off) need the full
+        // history of every ref they advertise, not only branches and tags.
         let shallow = run_git_with_activity(
             &[
                 "fetch",
@@ -533,14 +535,29 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                 &[
                     "fetch",
                     "--quiet",
-                    "--tags",
+                    "--no-tags",
                     &source.url,
-                    "+refs/heads/*:refs/remotes/origin/*",
+                    "+refs/*:refs/fetched/*",
                 ],
                 Some(&work),
                 &format!("git fetch {}", source.url),
                 &activity,
             )?;
+        }
+        // Name a missing commit plainly. Otherwise checkout reports "unable
+        // to read tree", which reads like a fetch bug rather than a pin that
+        // names no commit in this repository.
+        let present = run_git_with_activity(
+            &["cat-file", "-e", &format!("{}^{{commit}}", source.commit)],
+            Some(&work),
+            &activity,
+        )?;
+        if !present.status.success() {
+            return Err(err(format!(
+                "{}: commit {} is not in the repository (the fetch by sha \
+                 failed and no ref reaches it)",
+                source.url, source.commit
+            )));
         }
         git_ok_with_activity(
             &["checkout", "-q", "--detach", &source.commit],
@@ -821,6 +838,91 @@ mod realization_tests {
         let error = ensure_git_source(&store, &source).unwrap_err().to_string();
         assert!(
             error.contains("fetch") || error.contains("checkout"),
+            "{error}"
+        );
+    }
+
+    /// Add a commit to the fixture repository that no branch tip reaches:
+    /// the default branch is left where it was. Returns the new commit.
+    fn off_branch_commit(url: &str, file: &str) -> String {
+        let repo = PathBuf::from(url.strip_prefix("file://").unwrap());
+        git_ok(&["checkout", "-q", "--detach"], Some(&repo), "detach").unwrap();
+        std::fs::write(repo.join(file), "off the default branch\n").unwrap();
+        git_ok(&["add", "-A"], Some(&repo), "add").unwrap();
+        git_ok(&["commit", "-qm", file], Some(&repo), "commit").unwrap();
+        let commit = git_ok(&["rev-parse", "HEAD"], Some(&repo), "rev-parse").unwrap();
+        git_ok(&["checkout", "-q", "main"], Some(&repo), "checkout main").unwrap();
+        commit
+    }
+
+    fn realize(root: &Path, url: &str, commit: &str) -> io::Result<PathBuf> {
+        let store = store_at(root);
+        ensure_git_source(
+            &store,
+            &GitSource {
+                url: normalize_url(url),
+                commit: commit.to_string(),
+                subdirectory: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_commit_reachable_only_from_a_non_default_ref_is_realized() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for reference in ["refs/heads/side", "refs/pull/1/head"] {
+            let root = temp("side");
+            let (url, _) = fixture_repo(&root.0);
+            let commit = off_branch_commit(&url, "side.txt");
+            let repo = root.0.join("repo");
+            git_ok(&["update-ref", reference, &commit], Some(&repo), "ref").unwrap();
+            let object = realize(&root.0, &url, &commit)
+                .unwrap_or_else(|error| panic!("{reference}: {error}"));
+            assert_eq!(
+                std::fs::read_to_string(object.join("side.txt")).unwrap(),
+                "off the default branch\n",
+                "{reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreferenced_commit_is_fetched_by_sha_when_the_server_allows_it() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp("anysha");
+        let (url, _) = fixture_repo(&root.0);
+        let commit = off_branch_commit(&url, "dangling.txt");
+        let repo = root.0.join("repo");
+        git_ok(
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+            Some(&repo),
+            "cfg",
+        )
+        .unwrap();
+        let object = realize(&root.0, &url, &commit).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(object.join("dangling.txt")).unwrap(),
+            "off the default branch\n"
+        );
+    }
+
+    #[test]
+    fn a_commit_no_ref_reaches_is_named_as_missing() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = temp("missing");
+        let (url, _) = fixture_repo(&root.0);
+        // A pin that names no commit (NextChat's lock once produced one from
+        // a tarball's sha1) is refused before checkout, in plain words.
+        let commit = "ab".repeat(20);
+        let error = realize(&root.0, &url, &commit).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("commit {commit} is not in the repository")),
             "{error}"
         );
     }

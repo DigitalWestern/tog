@@ -2743,6 +2743,25 @@ mod git_url_tests {
             );
         }
         assert!(super::git_source_from_url("https://registry.npmjs.org/a/-/a-1.0.0.tgz").is_none());
+        // The bare repository URL carries its commit in the fragment.
+        let source = super::git_source_from_url(&format!("https://github.com/o/r#{commit}"))
+            .expect("repository URL");
+        assert_eq!(source.commit, commit);
+        // A release asset is a plain tarball; its fragment is Yarn's sha1 of
+        // the bytes and names no commit.
+        let sha1 = "abf2e9a850201e3571b8d36830f77bc52af3de9b";
+        assert!(super::git_source_from_url(&format!(
+            "https://github.com/o/r/releases/download/v1/r-1.0.0.tgz#{sha1}"
+        ))
+        .is_none());
+        // An archive URL downloads the commit in its path, whatever the
+        // fragment says.
+        for url in [
+            format!("https://codeload.github.com/o/r/tar.gz/{commit}#{sha1}"),
+            format!("https://github.com/o/r/archive/{commit}.tar.gz#{sha1}"),
+        ] {
+            assert_eq!(super::git_source_from_url(&url).unwrap().commit, commit);
+        }
     }
 }
 

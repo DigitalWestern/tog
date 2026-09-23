@@ -1773,6 +1773,42 @@ plugin@1.0.0:
         let _ = crate::kernel::store::remove_tree(&project);
     }
 
+    /// ChatGPTNextWeb/NextChat's `rt-client`: a GitHub release asset whose
+    /// `#fragment` is Yarn's sha1 of the tarball. It was misread as a git
+    /// source pinned to that sha1, which names no commit, so the checkout
+    /// failed with "unable to read tree".
+    #[test]
+    fn yarn_github_release_asset_is_a_tarball_verified_by_its_sha1_fragment() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let url = "https://github.com/Azure-Samples/aoai-realtime-audio-sdk/releases/download/js/v0.5.0/rt-client-0.5.0.tgz";
+        let lock = format!(
+            r#"# yarn lockfile v1
+"rt-client@{url}":
+  version "0.5.0"
+  resolved "{url}#abf2e9a850201e3571b8d36830f77bc52af3de9b"
+"#
+        );
+        let project = project();
+        let plan = super::plan_yarn(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &format!(r#"{{"dependencies":{{"rt-client":"{url}"}}}}"#),
+            &project,
+            node_version(),
+        )
+        .unwrap();
+        let _ = crate::kernel::store::remove_tree(&project);
+        let package = plan
+            .packages
+            .iter()
+            .find(|p| p.name == "rt-client")
+            .unwrap();
+        assert!(package.git.is_none(), "{:?}", package.git);
+        assert_eq!(package.url, url);
+        assert_eq!(package.integrity, "sha1-q/LpqFAgHjVxuNNoMPd7xSrz3ps=");
+    }
+
     #[test]
     fn a_codeload_dependency_is_realized_not_rejected() {
         let commit = "8bf567b9e2230cdd02f9b8c9774fb8eb0d71af1e";

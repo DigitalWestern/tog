@@ -70,20 +70,23 @@ pub(crate) fn git_repo_and_commit(url: &str) -> Option<(String, String)> {
         commit = fragment_commit;
     } else if let Some(path) = source.strip_prefix("https://codeload.github.com/") {
         let parts: Vec<&str> = path.split('/').collect();
+        // The commit an archive URL downloads is the one in its path. A
+        // fragment on it is Yarn 1's sha1 of the tarball bytes, not a commit.
         if parts.len() >= 4 && parts[2] == "tar.gz" {
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
-            commit =
-                fragment_commit.or_else(|| Some(parts[3].trim_end_matches(".tar.gz").to_string()));
+            commit = Some(parts[3].trim_end_matches(".tar.gz").to_string());
         }
     } else if let Some(path) = source.strip_prefix("https://github.com/") {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() >= 4 && parts[2] == "archive" {
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
-            commit =
-                fragment_commit.or_else(|| Some(parts[3].trim_end_matches(".tar.gz").to_string()));
-        } else if parts.len() >= 2 && parts[0] != "" && parts[1] != "" {
+            commit = Some(parts[3].trim_end_matches(".tar.gz").to_string());
+        } else if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
             // Yarn also emits the repository URL itself for some GitHub
-            // dependencies (not an immutable registry tarball).
+            // dependencies (not an immutable registry tarball). Only the
+            // bare repository counts: any deeper path, such as a release
+            // asset `/releases/download/<tag>/<file>.tgz#<sha1>`, is an
+            // ordinary tarball whose fragment is Yarn's sha1 of its bytes.
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
             commit = fragment_commit;
         }
