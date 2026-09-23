@@ -253,7 +253,12 @@ either platform. Order is primary version descending (BEAM compares the
 `(otp, elixir)` pair, OTP first), highest explicit revision, then the
 provider/build/recipe tuple, the artifact tuple and the bundle id; exact
 requests filter by primary version and ranges take the first satisfying
-candidate. `SourcePolicy` is the typed endpoint policy retrieval will check
+candidate. A `||` range (`engines.node`, Poetry's `python`) lowers to one
+`AnyOf` request whose alternatives each AND their terms, so it too takes the
+first candidate any alternative admits; an unconstrained alternative (`*`,
+empty) drops the constraint. The Node table holds every LTS-channel release
+of the active LTS lines at or below the shipped default, so an exact
+`.node-version` on one of them selects it. `SourcePolicy` is the typed endpoint policy retrieval will check
 (shipped `https://` defaults per publisher, credential references only,
 never a secret, and not part of lock validity; the defaults are data the
 kernel owns, so a new tailor's publisher is added there). `seed` chooses a bundle

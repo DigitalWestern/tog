@@ -122,9 +122,24 @@ fn python_version_request(text: &str) -> io::Result<VersionRequest> {
     )))
 }
 
+/// A Poetry constraint: one alternative, or `||`-joined alternatives that
+/// lower to one [`VersionRequest::AnyOf`].
+fn poetry_python_request(text: &str) -> io::Result<VersionRequest> {
+    let mut alternatives = text
+        .split("||")
+        .map(poetry_python_alternative)
+        .collect::<io::Result<Vec<_>>>()?;
+    if alternatives.len() == 1 {
+        return Ok(alternatives.remove(0));
+    }
+    Ok(VersionRequest::AnyOf(
+        alternatives.into_iter().map(|one| vec![one]).collect(),
+    ))
+}
+
 /// Poetry's caret and tilde over the same grammar: `^3.9` is `>=3.9,<4`,
 /// `~3.9` is `>=3.9,<3.10`.
-fn poetry_python_request(text: &str) -> io::Result<VersionRequest> {
+fn poetry_python_alternative(text: &str) -> io::Result<VersionRequest> {
     const FIELD: &str = "tool.poetry.dependencies.python";
     let bounded = |rest: &str, keep: usize| -> io::Result<VersionRequest> {
         let lower = parse_version(FIELD, rest.trim())?;
@@ -213,20 +228,28 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<VersionRequest> {
 }
 
 /// Every `engines.node` term, which all apply together. `*` and an empty
-/// range state nothing.
+/// range state nothing. A `||` range is a set of alternatives, each a
+/// space-joined set of terms: it lowers to one [`VersionRequest::AnyOf`],
+/// or to nothing when any alternative is itself unconstrained, since that
+/// alternative admits every release.
 fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
     let text = text.trim();
-    if text.is_empty() || text == "*" {
-        return Ok(Vec::new());
+    let mut alternatives = Vec::new();
+    for alternative in text.split("||") {
+        let alternative = alternative.trim();
+        if alternative.is_empty() || alternative == "*" {
+            return Ok(Vec::new());
+        }
+        let terms = alternative
+            .split_whitespace()
+            .map(|term| engines_node_term(text, term))
+            .collect::<io::Result<Vec<_>>>()?;
+        alternatives.push(terms);
     }
-    if text.contains("||") {
-        return Err(invalid(format!(
-            "engines.node range {text} is not supported; put an exact version in .node-version"
-        )));
+    if alternatives.len() == 1 {
+        return Ok(alternatives.pop().unwrap_or_default());
     }
-    text.split_whitespace()
-        .map(|term| engines_node_term(text, term))
-        .collect()
+    Ok(vec![VersionRequest::AnyOf(alternatives)])
 }
 
 /// The selection request an ecosystem's consulted rows state. `ecosystem`
@@ -493,6 +516,20 @@ mod tests {
             Some("3.9.*"),
         )];
         assert_eq!(request("python", &star), "cpython 3.9.*");
+        // Poetry's `||` joins alternatives; the newest any of them admits wins.
+        let either = vec![row(
+            "pyproject.toml",
+            "tool.poetry.dependencies.python",
+            Some(">=3.9,<3.11 || ~3.12"),
+        )];
+        assert_eq!(
+            request("python", &either),
+            "cpython >=3.9,<3.11 || >=3.12,<3.13"
+        );
+        assert_eq!(
+            select_for(&catalog, "python", &either).unwrap().release,
+            "cpython-3.12.14"
+        );
     }
 
     #[test]
@@ -565,7 +602,7 @@ mod tests {
             request("node", &engines(">=24.1 <25")),
             "node >=24.1; node <25"
         );
-        for text in ["24 || 26", ">24", "<=24"] {
+        for text in [">24", "<=24", "^20.19 || >24", "1.2.3 - 2.3.4"] {
             let error = refusal("node", &engines(text));
             assert!(
                 error.contains(&format!("engines.node range {text} is not supported")),
@@ -592,6 +629,62 @@ mod tests {
             .to_string();
         assert!(error.contains("node toolchain"), "{error}");
         assert!(error.contains(">=26"), "{error}");
+    }
+
+    #[test]
+    fn node_engines_disjunctions_take_the_newest_release_any_alternative_admits() {
+        let engines = |text: &str| vec![row("package.json", "engines.node", Some(text))];
+        // vitejs/vite's range.
+        assert_eq!(
+            request("node", &engines("^20.19.0 || >=22.12.0")),
+            "node >=20.19.0,<21 || >=22.12.0"
+        );
+        assert_eq!(
+            request("node", &engines(">=18.1 <19 || 22.x||=24.2.0")),
+            "node >=18.1 <19 || 22.* || ==24.2.0"
+        );
+        // An unconstrained alternative admits every release.
+        for text in ["^20 || *", "^20 ||", "|| ^20"] {
+            assert_eq!(request("node", &engines(text)), "newest", "{text}");
+        }
+
+        let catalog = catalog("node", "node", &["20.19.5", "21.7.0", "22.11.0", "22.20.0"]);
+        let pick = |text: &str| {
+            select_for(&catalog, "node", &engines(text))
+                .map(|bundle| bundle.release.clone())
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(pick("^20.19.0 || >=22.12.0").unwrap(), "node-22.20.0");
+        // The highest release in any alternative, not the first alternative.
+        assert_eq!(pick(">=22.12.0 || ^20.19.0").unwrap(), "node-22.20.0");
+        assert_eq!(pick("^20.19.0 || >=23").unwrap(), "node-20.19.5");
+        // 21.x and 22.11 fall between the alternatives.
+        assert_eq!(pick("^20.20 || ~22.11").unwrap(), "node-22.11.0");
+        let error = pick("^19 || >=23").unwrap_err();
+        assert!(error.contains("node >=19,<20 || >=23"), "{error}");
+
+        // The pin still intersects with the whole disjunction.
+        let rows = vec![
+            row(".node-version", "version", Some("20")),
+            row(
+                "package.json",
+                "engines.node",
+                Some("^20.19.0 || >=22.12.0"),
+            ),
+        ];
+        assert_eq!(
+            select_for(&catalog, "node", &rows).unwrap().release,
+            "node-20.19.5"
+        );
+        let rows = vec![
+            row(".node-version", "version", Some("21.7.0")),
+            row(
+                "package.json",
+                "engines.node",
+                Some("^20.19.0 || >=22.12.0"),
+            ),
+        ];
+        assert!(select_for(&catalog, "node", &rows).is_err());
     }
 
     #[test]
