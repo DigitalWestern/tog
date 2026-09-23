@@ -17,22 +17,52 @@ use std::cmp::Ordering;
 /// The largest version component node-semver accepts (`Number.MAX_SAFE_INTEGER`).
 pub const MAX_COMPONENT: u64 = 9_007_199_254_740_991;
 
-/// node-semver's `MAX_LENGTH` for one version string.
+/// node-semver's `MAX_LENGTH` for one version string. In a range it bounds
+/// every comparator's version as node-semver renders it.
 const MAX_LENGTH: usize = 256;
 
-/// A prerelease identifier. Numeric identifiers keep their digits so that
-/// arbitrarily long ones still order numerically (by length, then digits;
-/// leading zeros are refused).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// node-semver's regex caps (`MAX_SAFE_BUILD_LENGTH`, and `\d*` capped at
+/// `MAX_LENGTH`): a build identifier, and whatever follows the first
+/// non-digit of an alphanumeric prerelease identifier, is at most 250
+/// characters, the digits before that non-digit at most 256, and a numeric
+/// prerelease identifier at most 257 digits.
+const MAX_IDENTIFIER: usize = MAX_LENGTH - 6;
+
+/// A prerelease identifier, kept as written.
+#[derive(Debug, Clone)]
 pub enum Ident {
     Numeric(String),
     Alpha(String),
 }
 
+impl Ident {
+    fn text(&self) -> &str {
+        match self {
+            Ident::Numeric(text) | Ident::Alpha(text) => text,
+        }
+    }
+}
+
+/// A numeric identifier as node-semver compares it: coerced to a JS Number,
+/// so digits past `Number.MAX_SAFE_INTEGER` round (`9007199254740992` and
+/// `9007199254740993` are equal). Rust's float parsing rounds to nearest
+/// as JS does, and 257 digits stay far below overflow.
+fn js_number(digits: &str) -> f64 {
+    digits.parse().unwrap_or(f64::INFINITY)
+}
+
+impl PartialEq for Ident {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Ident {}
+
 impl Ord for Ident {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Ident::Numeric(a), Ident::Numeric(b)) => a.len().cmp(&b.len()).then_with(|| a.cmp(b)),
+            (Ident::Numeric(a), Ident::Numeric(b)) => js_number(a).total_cmp(&js_number(b)),
             (Ident::Numeric(_), Ident::Alpha(_)) => Ordering::Less,
             (Ident::Alpha(_), Ident::Numeric(_)) => Ordering::Greater,
             (Ident::Alpha(a), Ident::Alpha(b)) => a.cmp(b),
@@ -74,10 +104,11 @@ impl SemVer {
     /// node-semver's `valid`: surrounding whitespace, an optional `v`, then
     /// `MAJOR.MINOR.PATCH[-prerelease][+build]`.
     pub fn parse(text: &str) -> Option<SemVer> {
-        let text = text.trim();
+        // node-semver measures before it trims.
         if text.len() > MAX_LENGTH {
             return None;
         }
+        let text = text.trim();
         let partial = parse_partial(text.strip_prefix('v').unwrap_or(text))?;
         partial.full()
     }
@@ -116,7 +147,9 @@ pub struct Partial {
     /// Only possible after three written components (`1.2.3-rc.1`,
     /// `1.2.x-rc.1`). node-semver drops it from a wildcard partial.
     pub prerelease: Vec<Ident>,
-    /// Whether `+build` metadata was written. It never affects matching.
+    /// Whether `+build` metadata was written. It never affects matching,
+    /// and a range's builds are stripped before its terms are read (see
+    /// [`Range::names_build`]), so a [`Term`]'s partial never has one.
     pub build: bool,
 }
 
@@ -194,6 +227,42 @@ impl Comparator {
 pub struct Range {
     alternatives: Vec<Vec<Term>>,
     sets: Vec<Vec<Comparator>>,
+    build: bool,
+}
+
+/// node-semver's `BUILDSTRIPRE`: every `+id(.id)*` (ids of letters, digits
+/// and `-`, unbounded) is removed from the whole range before anything else
+/// reads it. A `+` with no identifier after it stays, and is refused later.
+fn strip_builds(text: &str) -> (String, bool) {
+    let id_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-';
+    let bytes = text.as_bytes();
+    let mut kept = String::with_capacity(text.len());
+    let mut stripped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'+' && bytes.get(index + 1).is_some_and(|byte| id_char(*byte)) {
+            let mut end = index + 1;
+            loop {
+                while end < bytes.len() && id_char(bytes[end]) {
+                    end += 1;
+                }
+                if bytes.get(end) == Some(&b'.')
+                    && bytes.get(end + 1).is_some_and(|byte| id_char(*byte))
+                {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            stripped = true;
+            index = end;
+        } else {
+            let next = text[index..].chars().next().map_or(1, char::len_utf8);
+            kept.push_str(&text[index..index + next]);
+            index += next;
+        }
+    }
+    (kept, stripped)
 }
 
 /// Why a range was refused. The caller names the field it came from.
@@ -208,6 +277,7 @@ impl std::fmt::Display for RangeError {
 
 impl Range {
     pub fn parse(text: &str) -> Result<Range, RangeError> {
+        let (text, build) = strip_builds(text);
         let mut alternatives = Vec::new();
         let mut sets = Vec::new();
         for alternative in text.split("||") {
@@ -219,7 +289,17 @@ impl Range {
             alternatives.push(terms);
             sets.push(set);
         }
-        Ok(Range { alternatives, sets })
+        Ok(Range {
+            alternatives,
+            sets,
+            build,
+        })
+    }
+
+    /// Whether the text carried `+build` metadata, which node-semver strips
+    /// from a range before reading it (so it never reaches a [`Term`]).
+    pub fn names_build(&self) -> bool {
+        self.build
     }
 
     /// The terms as written, one list per `||` alternative. An empty list
@@ -294,7 +374,10 @@ fn parse_partial(text: &str) -> Option<Partial> {
         }
     }
     if let Some(build) = build {
-        if !build.split('.').all(identifier_chars) {
+        if !build
+            .split('.')
+            .all(|identifier| identifier_chars(identifier) && identifier.len() <= MAX_IDENTIFIER)
+        {
             return None;
         }
     }
@@ -303,13 +386,16 @@ fn parse_partial(text: &str) -> Option<Partial> {
         Some(prerelease) => prerelease
             .split('.')
             .map(|identifier| {
+                let digits = identifier.bytes().take_while(u8::is_ascii_digit).count();
                 if !identifier_chars(identifier) {
                     None
-                } else if identifier.bytes().all(|byte| byte.is_ascii_digit()) {
-                    (identifier.len() == 1 || !identifier.starts_with('0'))
+                } else if digits == identifier.len() {
+                    ((identifier.len() == 1 || !identifier.starts_with('0'))
+                        && identifier.len() <= MAX_LENGTH + 1)
                         .then(|| Ident::Numeric(identifier.to_string()))
                 } else {
-                    Some(Ident::Alpha(identifier.to_string()))
+                    (digits <= MAX_LENGTH && identifier.len() - digits - 1 <= MAX_IDENTIFIER)
+                        .then(|| Ident::Alpha(identifier.to_string()))
                 }
             })
             .collect::<Option<Vec<_>>>()?,
@@ -352,13 +438,47 @@ fn split_operator(token: &str) -> (Op, &str) {
     (Op::Eq, token)
 }
 
+/// The length of `MAJOR.MINOR.PATCH[-prerelease]` as node-semver renders a
+/// full partial into a generated comparator (no prefix, no build).
+fn rendered_len(partial: &Partial) -> usize {
+    let core = partial
+        .parts
+        .iter()
+        .map(|part| part.to_string().len() + 1)
+        .sum::<usize>()
+        - 1;
+    let prerelease = partial
+        .prerelease
+        .iter()
+        .map(|ident| ident.text().len() + 1)
+        .sum::<usize>();
+    core + prerelease
+}
+
+/// node-semver builds a `SemVer`, bounded by `MAX_LENGTH`, from every
+/// comparator a full version produces. A primitive comparator and a hyphen
+/// end without a prerelease keep the version as written (a `v` or `=`
+/// prefix included, the build already stripped); caret, tilde and a
+/// prerelease hyphen end re-render it.
+fn fits(written: &str, partial: &Partial, rendered: bool) -> bool {
+    partial.parts.len() < 3
+        || if rendered {
+            rendered_len(partial)
+        } else {
+            written.len()
+        } <= MAX_LENGTH
+}
+
 fn parse_set(text: &str) -> Option<Vec<Term>> {
     let words = text.split_whitespace().collect::<Vec<_>>();
     if words.len() == 3 && words[1] == "-" {
-        return Some(vec![Term::Hyphen {
-            low: parse_version_token(Op::Eq, words[0])?,
-            high: parse_version_token(Op::Eq, words[2])?,
-        }]);
+        let low = parse_version_token(Op::Eq, words[0])?;
+        let high = parse_version_token(Op::Eq, words[2])?;
+        let high_rendered = !high.prerelease.is_empty();
+        if !fits(words[0], &low, false) || !fits(words[2], &high, high_rendered) {
+            return None;
+        }
+        return Some(vec![Term::Hyphen { low, high }]);
     }
     // An operator written apart from its version is one term (`>= 1.2`).
     let mut tokens = Vec::new();
@@ -374,10 +494,9 @@ fn parse_set(text: &str) -> Option<Vec<Term>> {
         .iter()
         .map(|token| {
             let (op, rest) = split_operator(token);
-            Some(Term::Comparator {
-                op,
-                version: parse_version_token(op, rest)?,
-            })
+            let version = parse_version_token(op, rest)?;
+            fits(rest, &version, matches!(op, Op::Caret | Op::Tilde))
+                .then_some(Term::Comparator { op, version })
         })
         .collect()
 }

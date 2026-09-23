@@ -237,9 +237,9 @@ fn node_line(whole: &str, parts: &[u64]) -> io::Result<Vec<VersionRequest>> {
 }
 
 /// The numeric components of a parsed partial, refusing what a toolchain
-/// request never takes: prerelease and build suffixes.
+/// request never takes: a prerelease suffix.
 fn kernel_parts(whole: &str, partial: &crate::kernel::semver::Partial) -> io::Result<Vec<u64>> {
-    if !partial.prerelease.is_empty() || partial.build {
+    if !partial.prerelease.is_empty() {
         return Err(node_unsupported(whole));
     }
     Ok(partial.parts.clone())
@@ -314,6 +314,10 @@ fn kernel_term(whole: &str, term: &crate::kernel::semver::Term) -> io::Result<Ve
 fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
     let text = text.trim();
     let range = crate::kernel::semver::Range::parse(text).map_err(|_| node_unsupported(text))?;
+    // A toolchain request never takes build metadata.
+    if range.names_build() {
+        return Err(node_unsupported(text));
+    }
     let mut alternatives = Vec::new();
     for alternative in range.alternatives() {
         let mut terms = Vec::new();
