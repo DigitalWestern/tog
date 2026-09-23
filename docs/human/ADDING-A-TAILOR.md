@@ -49,11 +49,13 @@ order (this order is `plan` output, `sync` narration, `status` rows, `ls`).
 
 ## 3. The vocabulary lists (still hand-maintained)
 
-These name ecosystems outside the registry; keep them in step:
+These name ecosystems outside the registry; a test fails until each is in
+step:
 
-- `src/cli/spec.rs`: `LS_WORDS` (what `ls <ecosystem>` accepts) and
-  `BUILD_WORDS` if the ecosystem builds; the grammar has no I/O and so does
-  not read the registry.
+- `src/cli/spec.rs`: one `ECOSYSTEM_WORDS` row (id, lock ecosystem,
+  whether it builds, extra closures). The `ls`, `build` and
+  `update --toolchain` words are derived from it; the grammar may not name
+  a tailor, so it mirrors the registry, and a parser test compares them.
 - `src/commands/deps.rs`: `Eco` if the ecosystem supports
   `add`/`remove`/`update` (a `Tailor::edit_manifest` method is the
   planned replacement; see FOLLOW-UPS.md).

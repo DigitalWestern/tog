@@ -5,40 +5,172 @@ use super::{Group, Spec, VERSION};
 const HELP_OPTION: (&str, &str) = ("-h, --help", "print this help");
 const JSON_OPTION: (&str, &str) = ("--json", "machine-readable output on stdout");
 
-/// What `tog ls` accepts as a filter word. `ls` lists closures, not
-/// ecosystems: besides the seven ecosystems it prints a row for the
-/// toolchain-only `rustfmt` closure `tog fmt` writes, and every name
-/// `ls` can print must be a name it accepts. This is the `ls` vocabulary
-/// only; it never selects an ecosystem for sync, add, or build.
-pub const LS_WORDS: &[&str] = &[
-    "python", "node", "cargo", "go", "ruby", "elixir", "dotnet", "rustfmt",
+/// The words one tailor answers to on the command line. The grammar runs
+/// before any tailor exists and may not name one, so `ECOSYSTEM_WORDS`
+/// mirrors the registry instead of asking it; a parser test fails when a
+/// row differs from its tailor.
+pub struct EcosystemWords {
+    /// `Tailor::id`: what `ls` and `build` accept.
+    pub id: &'static str,
+    /// `Tailor::lock_ecosystem`: the `[toolchain.<name>]` section key of
+    /// `tog-toolchain.toml` that `update --toolchain` accepts. Where it
+    /// differs from the id (`rust` for `cargo`), the id is accepted as a
+    /// spelling of it too, because every other verb uses the id.
+    pub toolchain: &'static str,
+    /// `Tailor::builds`: whether `tog build <id>` names it.
+    pub builds: bool,
+    /// The closures besides `<id>.json` the tailor writes
+    /// (`Tailor::owns_closure`), which `ls` prints and so accepts.
+    pub closures: &'static [&'static str],
+}
+
+/// One row per tailor, in registry order.
+pub const ECOSYSTEM_WORDS: &[EcosystemWords] = &[
+    EcosystemWords {
+        id: "python",
+        toolchain: "python",
+        builds: false,
+        closures: &[],
+    },
+    EcosystemWords {
+        id: "node",
+        toolchain: "node",
+        builds: false,
+        closures: &[],
+    },
+    EcosystemWords {
+        id: "cargo",
+        toolchain: "rust",
+        builds: true,
+        closures: &["rustfmt"],
+    },
+    EcosystemWords {
+        id: "go",
+        toolchain: "go",
+        builds: true,
+        closures: &[],
+    },
+    EcosystemWords {
+        id: "ruby",
+        toolchain: "ruby",
+        builds: false,
+        closures: &[],
+    },
+    EcosystemWords {
+        id: "elixir",
+        toolchain: "elixir",
+        builds: true,
+        closures: &[],
+    },
+    EcosystemWords {
+        id: "dotnet",
+        toolchain: "dotnet",
+        builds: true,
+        closures: &[],
+    },
 ];
-pub const BUILD_WORDS: &[&str] = &["cargo", "go", "elixir", "dotnet"];
+
+const fn ls_count() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < ECOSYSTEM_WORDS.len() {
+        count += 1 + ECOSYSTEM_WORDS[i].closures.len();
+        i += 1;
+    }
+    count
+}
+
+const fn ls_words<const N: usize>() -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut at = 0;
+    // Every id first, in registry order, then the extra closures.
+    let mut i = 0;
+    while i < ECOSYSTEM_WORDS.len() {
+        out[at] = ECOSYSTEM_WORDS[i].id;
+        at += 1;
+        i += 1;
+    }
+    i = 0;
+    while i < ECOSYSTEM_WORDS.len() {
+        let mut j = 0;
+        while j < ECOSYSTEM_WORDS[i].closures.len() {
+            out[at] = ECOSYSTEM_WORDS[i].closures[j];
+            at += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+const fn build_count() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < ECOSYSTEM_WORDS.len() {
+        if ECOSYSTEM_WORDS[i].builds {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+const fn build_words<const N: usize>() -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut at = 0;
+    let mut i = 0;
+    while i < ECOSYSTEM_WORDS.len() {
+        if ECOSYSTEM_WORDS[i].builds {
+            out[at] = ECOSYSTEM_WORDS[i].id;
+            at += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+const fn toolchain_words<const N: usize>() -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = ECOSYSTEM_WORDS[i].toolchain;
+        i += 1;
+    }
+    out
+}
+
+const LS_ARRAY: [&str; ls_count()] = ls_words();
+const BUILD_ARRAY: [&str; build_count()] = build_words();
+const TOOLCHAIN_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = toolchain_words();
+
+/// What `tog ls` accepts as a filter word. `ls` lists closures, not
+/// ecosystems: besides the ecosystems it prints a row for the
+/// toolchain-only `rustfmt` closure `tog fmt` writes, and every name `ls`
+/// can print must be a name it accepts. This is the `ls` vocabulary only;
+/// it never selects an ecosystem for sync, add, or build.
+pub const LS_WORDS: &[&str] = &LS_ARRAY;
+pub const BUILD_WORDS: &[&str] = &BUILD_ARRAY;
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
 
-/// What `tog update --toolchain` accepts as an ecosystem. These are the
-/// `[toolchain.<name>]` section keys of `tog-toolchain.toml`, which is why
-/// Rust appears under its own name rather than `cargo`; `cargo` is accepted
-/// as a spelling of it, because every other verb calls that ecosystem
-/// `cargo`.
-pub const TOOLCHAIN_WORDS: &[&str] = &["python", "node", "rust", "go", "ruby", "elixir", "dotnet"];
+/// What `tog update --toolchain` lists as an ecosystem: the
+/// `[toolchain.<name>]` section keys.
+pub const TOOLCHAIN_WORDS: &[&str] = &TOOLCHAIN_ARRAY;
 
-/// The accepted spelling that is not a section key, offered for
-/// suggestions but not listed as one of the names.
-pub const TOOLCHAIN_ALIAS: &str = "cargo";
+/// The accepted spellings that are not section keys (`cargo` for `rust`),
+/// offered for suggestions but not listed as names.
+pub fn toolchain_aliases() -> impl Iterator<Item = &'static str> {
+    ECOSYSTEM_WORDS
+        .iter()
+        .filter(|row| row.id != row.toolchain)
+        .map(|row| row.id)
+}
 
 /// The `[toolchain.<name>]` section key an accepted word names.
 pub fn toolchain_section(word: &str) -> Option<&'static str> {
-    match word {
-        "cargo" | "rust" => Some("rust"),
-        "python" => Some("python"),
-        "node" => Some("node"),
-        "go" => Some("go"),
-        "ruby" => Some("ruby"),
-        "elixir" => Some("elixir"),
-        "dotnet" => Some("dotnet"),
-        _ => None,
-    }
+    ECOSYSTEM_WORDS
+        .iter()
+        .find(|row| row.toolchain == word || row.id == word)
+        .map(|row| row.toolchain)
 }
 pub const SYNC_ALIASES: &[&str] = &["install", "i"];
 

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use super::spec::{
-    canonical_name, help, inputs, listed, spec, toolchain_section, usage, HELP_TOPICS, LS_WORDS,
-    SHELL_WORDS, TOOLCHAIN_ALIAS, TOOLCHAIN_WORDS, X_REGISTRIES,
+    canonical_name, help, inputs, listed, spec, toolchain_aliases, toolchain_section, usage,
+    HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS, X_REGISTRIES,
 };
 use super::{
     Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, ToolchainUpdate, UsageError,
@@ -749,10 +749,7 @@ fn not_an_ecosystem(word: &str) -> UsageError {
                 TOOLCHAIN_WORDS.join(", ")
             ),
             word,
-            TOOLCHAIN_WORDS
-                .iter()
-                .copied()
-                .chain(std::iter::once(TOOLCHAIN_ALIAS)),
+            TOOLCHAIN_WORDS.iter().copied().chain(toolchain_aliases()),
         ),
         Some("update"),
     )
@@ -2195,6 +2192,42 @@ mod tests {
                 args: Vec::new(),
             }
         );
+    }
+
+    /// `ls`, `build` and `update --toolchain` read their words from
+    /// `ECOSYSTEM_WORDS`, and each row is its tailor's: id and order, lock
+    /// ecosystem, whether it builds, and closures only it owns.
+    #[test]
+    fn ecosystem_words_are_the_registrys() {
+        use super::super::spec::ECOSYSTEM_WORDS;
+        let registry = crate::tailors::registry();
+        let ids: Vec<&str> = registry.iter().map(|tailor| tailor.id()).collect();
+        let rows: Vec<&str> = ECOSYSTEM_WORDS.iter().map(|row| row.id).collect();
+        assert_eq!(rows, ids);
+        for (row, tailor) in ECOSYSTEM_WORDS.iter().zip(registry) {
+            assert_eq!(row.toolchain, tailor.lock_ecosystem(), "{}", row.id);
+            assert_eq!(row.builds, tailor.builds(), "{}", row.id);
+            for closure in std::iter::once(row.id).chain(row.closures.iter().copied()) {
+                let owners: Vec<&str> = registry
+                    .iter()
+                    .filter(|other| other.owns_closure(closure))
+                    .map(|other| other.id())
+                    .collect();
+                assert_eq!(owners, [row.id], "closure {closure}");
+            }
+        }
+        assert_eq!(
+            LS_WORDS,
+            ["python", "node", "cargo", "go", "ruby", "elixir", "dotnet", "rustfmt"]
+        );
+        assert_eq!(
+            super::super::spec::BUILD_WORDS,
+            ["cargo", "go", "elixir", "dotnet"]
+        );
+        assert_eq!(toolchain_aliases().collect::<Vec<_>>(), ["cargo"]);
+        assert_eq!(toolchain_section("cargo"), Some("rust"));
+        assert_eq!(toolchain_section("rust"), Some("rust"));
+        assert_eq!(toolchain_section("rustfmt"), None);
     }
 
     #[test]
