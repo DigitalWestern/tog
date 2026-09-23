@@ -123,18 +123,22 @@ fn python_version_request(text: &str) -> io::Result<VersionRequest> {
 }
 
 /// A Poetry constraint: one alternative, or `||`-joined alternatives that
-/// lower to one [`VersionRequest::AnyOf`].
-fn poetry_python_request(text: &str) -> io::Result<VersionRequest> {
-    let mut alternatives = text
-        .split("||")
-        .map(poetry_python_alternative)
-        .collect::<io::Result<Vec<_>>>()?;
-    if alternatives.len() == 1 {
-        return Ok(alternatives.remove(0));
+/// lower to one [`VersionRequest::AnyOf`]. `*` (alone or as any
+/// alternative) admits every release and states nothing.
+fn poetry_python_request(text: &str) -> io::Result<Option<VersionRequest>> {
+    let mut alternatives = Vec::new();
+    for alternative in text.split("||") {
+        if alternative.trim() == "*" {
+            return Ok(None);
+        }
+        alternatives.push(poetry_python_alternative(alternative)?);
     }
-    Ok(VersionRequest::AnyOf(
+    if alternatives.len() == 1 {
+        return Ok(alternatives.pop());
+    }
+    Ok(Some(VersionRequest::AnyOf(
         alternatives.into_iter().map(|one| vec![one]).collect(),
-    ))
+    )))
 }
 
 /// Poetry's caret and tilde over the same grammar: `^3.9` is `>=3.9,<4`,
@@ -169,6 +173,26 @@ fn poetry_python_alternative(text: &str) -> io::Result<VersionRequest> {
     specifier_set(FIELD, text.trim())
 }
 
+/// The first version past everything `version` spells: `1.2.3` gives
+/// `1.2.4`, `1.2` gives `1.3`, `1` gives `2`. Node versions are integer
+/// triples with no prerelease rows in the catalog, so `>X` is `>=` this and
+/// `<=X` is `<` this, with node semver's partial-version reading.
+fn next_after(version: &Version) -> Version {
+    let mut parts = version.parts().to_vec();
+    if let Some(last) = parts.last_mut() {
+        *last += 1;
+    }
+    let text: Vec<String> = parts.iter().map(u64::to_string).collect();
+    Version::parse(&text.join(".")).expect("a bumped dotted numeric version parses")
+}
+
+fn node_specifier(op: Op, version: Version) -> io::Result<VersionRequest> {
+    Ok(VersionRequest::Specifiers(vec![Specifier::new(
+        op, version,
+    )
+    .map_err(|error| invalid(format!("engines.node: {error}")))?]))
+}
+
 /// One `engines.node` term, as the node semver subset allows it.
 fn engines_node_term(whole: &str, term: &str) -> io::Result<VersionRequest> {
     const FIELD: &str = "engines.node";
@@ -177,6 +201,7 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<VersionRequest> {
             "engines.node range {whole} is not supported; put an exact version in .node-version"
         ))
     };
+    let version = |text: &str| Version::parse(text).map_err(|_| unsupported());
     let bounded = |rest: &str, keep: usize| -> io::Result<VersionRequest> {
         let lower = parse_version(FIELD, rest)?;
         let mut upper: Vec<u64> = lower.parts().iter().copied().take(keep).collect();
@@ -200,21 +225,16 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<VersionRequest> {
         return bounded(rest, parts.min(2));
     }
     if let Some(rest) = term.strip_prefix(">=") {
-        return Ok(VersionRequest::Specifiers(vec![Specifier::new(
-            Op::Ge,
-            parse_version(FIELD, rest)?,
-        )
-        .map_err(|error| invalid(format!("{FIELD}: {error}")))?]));
+        return node_specifier(Op::Ge, version(rest)?);
     }
-    if term.starts_with("<=") || term.starts_with('>') {
-        return Err(unsupported());
+    if let Some(rest) = term.strip_prefix("<=") {
+        return node_specifier(Op::Lt, next_after(&version(rest)?));
+    }
+    if let Some(rest) = term.strip_prefix('>') {
+        return node_specifier(Op::Ge, next_after(&version(rest)?));
     }
     if let Some(rest) = term.strip_prefix('<') {
-        return Ok(VersionRequest::Specifiers(vec![Specifier::new(
-            Op::Lt,
-            parse_version(FIELD, rest)?,
-        )
-        .map_err(|error| invalid(format!("{FIELD}: {error}")))?]));
+        return node_specifier(Op::Lt, version(rest)?);
     }
     let bare = term.strip_prefix('=').unwrap_or(term);
     for suffix in [".x", ".*", ".X"] {
@@ -225,6 +245,50 @@ fn engines_node_term(whole: &str, term: &str) -> io::Result<VersionRequest> {
     Version::parse(bare)
         .map(VersionRequest::Exact)
         .map_err(|_| unsupported())
+}
+
+/// One `||` alternative: space-joined terms that all apply. An operator
+/// spelled apart from its version (`>= 20`) is one term, and `A - B` is a
+/// hyphen range: `>=A` (a partial `A` is zero-filled) and `<=B` (a partial
+/// `B` admits its whole line, so `- 2.3` is `<2.4`).
+fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<VersionRequest>> {
+    let unsupported = || {
+        invalid(format!(
+            "engines.node range {whole} is not supported; put an exact version in .node-version"
+        ))
+    };
+    let mut tokens: Vec<String> = Vec::new();
+    let mut words = alternative.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        let bare_op = matches!(word, ">=" | "<=" | ">" | "<" | "=" | "^" | "~");
+        match (bare_op, words.peek()) {
+            (true, Some(next)) => {
+                tokens.push(format!("{word}{next}"));
+                words.next();
+            }
+            (true, None) => return Err(unsupported()),
+            (false, _) => tokens.push(word.to_string()),
+        }
+    }
+    let mut terms = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens.get(index + 1).map(String::as_str) == Some("-") {
+            let (low, high) = match tokens.get(index + 2) {
+                Some(high) => (&tokens[index], high),
+                None => return Err(unsupported()),
+            };
+            let low = Version::parse(low).map_err(|_| unsupported())?;
+            let high = Version::parse(high).map_err(|_| unsupported())?;
+            terms.push(node_specifier(Op::Ge, low)?);
+            terms.push(node_specifier(Op::Lt, next_after(&high))?);
+            index += 3;
+            continue;
+        }
+        terms.push(engines_node_term(whole, &tokens[index])?);
+        index += 1;
+    }
+    Ok(terms)
 }
 
 /// Every `engines.node` term, which all apply together. `*` and an empty
@@ -240,11 +304,7 @@ fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
         if alternative.is_empty() || alternative == "*" {
             return Ok(Vec::new());
         }
-        let terms = alternative
-            .split_whitespace()
-            .map(|term| engines_node_term(text, term))
-            .collect::<io::Result<Vec<_>>>()?;
-        alternatives.push(terms);
+        alternatives.push(engines_node_alternative(text, alternative)?);
     }
     if alternatives.len() == 1 {
         return Ok(alternatives.pop().unwrap_or_default());
@@ -269,7 +329,9 @@ pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
                 );
             }
             if let Some(text) = value(rows, "pyproject.toml", "tool.poetry.dependencies.python") {
-                request = request.with("cpython", poetry_python_request(text)?);
+                if let Some(poetry) = poetry_python_request(text)? {
+                    request = request.with("cpython", poetry);
+                }
             }
         }
         "node" => {
@@ -530,6 +592,15 @@ mod tests {
             select_for(&catalog, "python", &either).unwrap().release,
             "cpython-3.12.14"
         );
+        // Poetry's `*` states nothing, alone or as one alternative.
+        for text in ["*", " * ", "^3.9 || *"] {
+            let any = vec![row(
+                "pyproject.toml",
+                "tool.poetry.dependencies.python",
+                Some(text),
+            )];
+            assert_eq!(request("python", &any), "newest", "{text}");
+        }
     }
 
     #[test]
@@ -602,7 +673,14 @@ mod tests {
             request("node", &engines(">=24.1 <25")),
             "node >=24.1; node <25"
         );
-        for text in [">24", "<=24", "^20.19 || >24", "1.2.3 - 2.3.4"] {
+        for text in [
+            "latest",
+            ">=",
+            "1.2.3 -",
+            "- 2.3.4",
+            "1.x - 2",
+            "^20.19 || lts/*",
+        ] {
             let error = refusal("node", &engines(text));
             assert!(
                 error.contains(&format!("engines.node range {text} is not supported")),
@@ -685,6 +763,51 @@ mod tests {
             ),
         ];
         assert!(select_for(&catalog, "node", &rows).is_err());
+    }
+
+    #[test]
+    fn node_engines_read_greater_than_at_most_and_hyphen_ranges_like_node_semver() {
+        let engines = |text: &str| vec![row("package.json", "engines.node", Some(text))];
+        // `>X` is past everything X spells; `<=X` admits everything X spells.
+        assert_eq!(request("node", &engines(">24.2.1")), "node >=24.2.2");
+        assert_eq!(request("node", &engines(">24.2")), "node >=24.3");
+        assert_eq!(request("node", &engines(">24")), "node >=25");
+        assert_eq!(request("node", &engines("<=24.2.1")), "node <24.2.2");
+        assert_eq!(request("node", &engines("<=24")), "node <25");
+        // A partial low end is zero-filled; a partial high end keeps its line.
+        assert_eq!(
+            request("node", &engines("1.2.3 - 2.3.4")),
+            "node >=1.2.3; node <2.3.5"
+        );
+        assert_eq!(
+            request("node", &engines("1.2 - 2.3")),
+            "node >=1.2; node <2.4"
+        );
+        assert_eq!(request("node", &engines("20 - 22")), "node >=20; node <23");
+        // An operator spelled apart from its version is one term.
+        assert_eq!(
+            request("node", &engines(">= 20 < 23")),
+            "node >=20; node <23"
+        );
+        assert_eq!(
+            request("node", &engines("18 - 20 || > 22")),
+            "node >=18 <21 || >=23"
+        );
+
+        let catalog = catalog("node", "node", &["20.19.5", "22.11.0", "22.20.0", "24.1.0"]);
+        let pick = |text: &str| {
+            select_for(&catalog, "node", &engines(text))
+                .unwrap()
+                .release
+                .clone()
+        };
+        assert_eq!(pick(">22.11.0"), "node-24.1.0");
+        assert_eq!(pick("<=22.11.0"), "node-22.11.0");
+        assert_eq!(pick("<=22"), "node-22.20.0");
+        assert_eq!(pick("20 - 22.11"), "node-22.11.0");
+        assert_eq!(pick("20.0.0 - 22.11.0"), "node-22.11.0");
+        assert_eq!(pick("20 - 22"), "node-22.20.0");
+        assert_eq!(pick(">22 || <=20"), "node-24.1.0");
     }
 
     #[test]

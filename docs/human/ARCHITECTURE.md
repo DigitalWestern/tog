@@ -256,7 +256,9 @@ requests filter by primary version and ranges take the first satisfying
 candidate. A `||` range (`engines.node`, Poetry's `python`) lowers to one
 `AnyOf` request whose alternatives each AND their terms, so it too takes the
 first candidate any alternative admits; an unconstrained alternative (`*`,
-empty) drops the constraint. The Node table holds every LTS-channel release
+empty) drops the constraint. `engines.node` also reads `>`, `<=` and
+hyphen ranges with node semver's partial-version meaning (`<=22` is `<23`,
+`1.2 - 2.3` is `>=1.2,<2.4`). The Node table holds every LTS-channel release
 of the active LTS lines at or below the shipped default, so an exact
 `.node-version` on one of them selects it. `SourcePolicy` is the typed endpoint policy retrieval will check
 (shipped `https://` defaults per publisher, credential references only,
