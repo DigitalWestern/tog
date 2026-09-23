@@ -582,10 +582,20 @@ pub fn plan_yarn(
             .split_once('#')
             .map(|(url, _)| url)
             .unwrap_or(entry.resolved.as_str());
-        let pinned_git = lock_git_source(&entry.resolved, entry.integrity.is_some());
+        // Yarn 1 attests a GitHub archive tarball by the sha1 in its
+        // fragment, as it does any other tarball. Those bytes are what the
+        // lock pins, so the entry is a verified tarball, not a git checkout
+        // of the path commit. A malformed fragment fails in yarn_integrity.
+        let attested = entry.integrity.is_some()
+            || (crate::tailors::node::is_github_archive_url(&entry.resolved)
+                && entry
+                    .resolved
+                    .split_once('#')
+                    .is_some_and(|(_, fragment)| !fragment.is_empty()));
+        let pinned_git = lock_git_source(&entry.resolved, attested);
         let git_detail = if pinned_git.is_some() {
             None
-        } else if entry.integrity.is_some() {
+        } else if attested {
             None
         } else {
             crate::tailors::node::git_dependency_detail(&entry.name, &entry.resolved)

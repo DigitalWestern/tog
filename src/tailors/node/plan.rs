@@ -32,6 +32,22 @@ pub(crate) fn explicit_git_source(url: &str) -> Option<crate::kernel::gitsrc::Gi
         .flatten()
 }
 
+/// A GitHub archive tarball (codeload `tar.gz/<commit>` or
+/// `github.com/<o>/<r>/archive/<commit>.tar.gz`). Its commit is in the path,
+/// so any `#fragment` on it is a hash of the bytes, never a commit.
+pub(crate) fn is_github_archive_url(url: &str) -> bool {
+    let url = url.split_once('#').map_or(url, |(url, _)| url);
+    let archive = |path: &str, marker: &str| {
+        let parts: Vec<&str> = path.split('/').collect();
+        parts.len() >= 4 && parts[2] == marker
+    };
+    url.strip_prefix("https://codeload.github.com/")
+        .is_some_and(|path| archive(path, "tar.gz"))
+        || url
+            .strip_prefix("https://github.com/")
+            .is_some_and(|path| archive(path, "archive"))
+}
+
 /// Why a git dependency that is not pinned to a full commit cannot be
 /// realized. The wording is persisted verbatim, down to its trailing tag: it
 /// is recorded as `git-dependency` exception detail in closures and store
@@ -70,20 +86,23 @@ pub(crate) fn git_repo_and_commit(url: &str) -> Option<(String, String)> {
         commit = fragment_commit;
     } else if let Some(path) = source.strip_prefix("https://codeload.github.com/") {
         let parts: Vec<&str> = path.split('/').collect();
+        // The commit an archive URL downloads is the one in its path. A
+        // fragment on it is Yarn 1's sha1 of the tarball bytes, not a commit.
         if parts.len() >= 4 && parts[2] == "tar.gz" {
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
-            commit =
-                fragment_commit.or_else(|| Some(parts[3].trim_end_matches(".tar.gz").to_string()));
+            commit = Some(parts[3].trim_end_matches(".tar.gz").to_string());
         }
     } else if let Some(path) = source.strip_prefix("https://github.com/") {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() >= 4 && parts[2] == "archive" {
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
-            commit =
-                fragment_commit.or_else(|| Some(parts[3].trim_end_matches(".tar.gz").to_string()));
-        } else if parts.len() >= 2 && parts[0] != "" && parts[1] != "" {
+            commit = Some(parts[3].trim_end_matches(".tar.gz").to_string());
+        } else if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
             // Yarn also emits the repository URL itself for some GitHub
-            // dependencies (not an immutable registry tarball).
+            // dependencies (not an immutable registry tarball). Only the
+            // bare repository counts: any deeper path, such as a release
+            // asset `/releases/download/<tag>/<file>.tgz#<sha1>`, is an
+            // ordinary tarball whose fragment is Yarn's sha1 of its bytes.
             repo = Some(format!("github.com/{}/{}", parts[0], parts[1]));
             commit = fragment_commit;
         }
