@@ -272,6 +272,7 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
         &plan_of(&selected, electron.clone()),
         artifacts,
         &selected,
+        &node::shipped_gyp_python().unwrap(),
     )
     .expect("a scriptless electron realizes without its release zip");
 
@@ -380,6 +381,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
         &plan_of(&selected, electron),
         &artifacts,
         &selected,
+        &node::shipped_gyp_python().unwrap(),
     )
     .expect("realize with consumed artifacts");
 
@@ -473,6 +475,7 @@ fn a_failed_provisioning_publishes_no_environment() {
         &plan_of(&selected, electron),
         &[],
         &selected,
+        &node::shipped_gyp_python().unwrap(),
     )
     .expect_err("a provisioning failure fails the realization");
 

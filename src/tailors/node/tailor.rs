@@ -142,7 +142,20 @@ impl Tailor for Node {
             config = node::parse_tog_config(&pkg)?;
         }
         let runtime = node::realize_runtime(store, platform, selected)?;
-        let env = node::realize_node_env_for(store, platform, &plan, &config.artifacts, selected)?;
+        // node-gyp runs on the Python this project's lock names when it has
+        // one; a Node-only project gets the shipped default.
+        let gyp_python = match request.helper("python") {
+            Some(python) => python.clone(),
+            None => node::shipped_gyp_python()?,
+        };
+        let env = node::realize_node_env_for(
+            store,
+            platform,
+            &plan,
+            &config.artifacts,
+            selected,
+            &gyp_python,
+        )?;
         let inputs = comforter::input_records(
             dir,
             &[dir.join("package.json"), dir.join(&plan.lock_source)],

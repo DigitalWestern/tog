@@ -330,8 +330,15 @@ leave with the dropped attribution frame and the error surfaces.
 
 npm lifecycle scripts (and npm's implicit `node-gyp rebuild`) run at realize
 time in a network-denied sandbox: writes confined to the package directory
-plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python the
-store CPython. This is a cooperative network-denial build sandbox, not
+plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python a
+store CPython: the one the project's `tog-toolchain.toml` names when the
+project also locks Python, the shipped 3.12 otherwise. Its object id is the
+`gyp_python` input of `node-env/5`, so a different interpreter is a different
+environment. Likewise a Python sdist with a Rust extension compiles with the
+project's locked Rust when the lock has a `rust` section, and with the shipped
+Rust its toolchain file resolves to otherwise; `sdist-build/4` already commits
+to that Rust object id through its `rust` input. Both helpers come from
+`kernel/provider/`. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
 get them via declared artifacts: the project pins `url` + `sha256`, tog
 prefetches through the verified cache and plants the file where the package's
@@ -437,6 +444,18 @@ input map would move the added input along with the drift and catch nothing.
 (A dropped `provisioned:` key was always caught: the `pkg:` value names the
 package, and the contract asks the producer's own provisioning decision
 whether that package must carry one.)
+
+`node-env/5` followed on its own. `node-env/4` named the Node object but not
+the CPython node-gyp ran on, which was the shipped pin: a pin change could
+rebuild a native addon under an unchanged id, and a project's locked Python
+was ignored. `/5` adds `gyp_python`, that interpreter's object id, written
+unconditionally (whether any package runs node-gyp is known only after
+extraction). It is an identity input and not a dependency, because the
+interpreter is realized only when a script runs. Every other `/4` input is
+unchanged, and the test goldens check that dropping `gyp_python` gives back the
+`/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the
+`rust` input was already the Rust object id, so honoring the project's
+selection changes the value and never the shape.
 
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes

@@ -672,3 +672,119 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project that locks Python builds its native addons on that Python.
+/// node-gyp's interpreter is the project's CPython 3.13, not the shipped
+/// 3.12 a Node-only project gets, and the `node-env/5` identity names it,
+/// so the two projects never share an environment object.
+#[test]
+#[ignore]
+fn node_gyp_builds_on_the_projects_locked_python() {
+    let _policy_guard = policy_guard();
+    if !cfg!(target_os = "linux") {
+        eprintln!("node_gyp_builds_on_the_projects_locked_python skipped: supported Linux only");
+        return;
+    }
+    let temp = TempDir::new();
+    let store = store_at(&temp.0);
+    let store_root = store.root.clone();
+    let record_python = "\"$PYTHON\" -c \"import sys; open('python-version.txt', 'w').write('%d.%d.%d' % sys.version_info[:3])\"";
+    let addon_package = serde_json::json!({
+        "name": "fixture-addon",
+        "version": "1.0.0",
+        "main": "index.js",
+        "scripts": {"postinstall": record_python}
+    })
+    .to_string();
+    let (addon_tarball, addon_sri) = make_fixture_tarball(
+        &temp.0,
+        "fixture-addon",
+        &addon_package,
+        &[
+            (
+                "binding.gyp",
+                br#"{"targets": [{"target_name": "addon", "sources": ["addon.c"]}]}"#,
+            ),
+            (
+                "addon.c",
+                br#"#include <node_api.h>
+static napi_value init(napi_env env, napi_value exports) { return exports; }
+NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
+"#,
+            ),
+            (
+                "index.js",
+                b"module.exports = require('./build/Release/addon.node');\n",
+            ),
+        ],
+    );
+    seed_verified_fixture(&store, &addon_tarball, &addon_sri);
+    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
+
+    let mut envs = Vec::new();
+    for (name, locked_python, expected) in [
+        ("locks-python", Some("3.13"), "3.13.15"),
+        ("node-only", None, "3.12.14"),
+    ] {
+        let project = temp.0.join(name);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0","private":true}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("package-lock.json"),
+            format!(
+                r#"{{"name":"{name}","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{{"":{{"name":"{name}","version":"1.0.0"}}}}}}"#
+            ),
+        )
+        .unwrap();
+        add_fixture_dependency(&project, "fixture-addon", &addon_sri);
+        if let Some(line) = locked_python {
+            std::fs::write(project.join(".python-version"), format!("{line}\n")).unwrap();
+            std::fs::write(
+                project.join("pyproject.toml"),
+                format!(
+                    "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nrequires-python = \">={line}\"\ndependencies = []\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let synced = tog(binary, &project, &store_root, &["sync"]);
+        assert_success(&synced, &format!("tog sync ({name})"));
+        let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+        assert_eq!(lock.contains("cpython"), locked_python.is_some(), "{lock}");
+
+        let closure = comforter::read_closure(&project, "node").unwrap();
+        let env_object = PathBuf::from(closure["env_object"].as_str().unwrap());
+        let addon = env_object.join("node_modules/fixture-addon");
+        assert!(addon.join("build/Release/addon.node").is_file(), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(addon.join("python-version.txt")).unwrap(),
+            expected,
+            "{name}: node-gyp ran on the wrong Python"
+        );
+        let id = env_object
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store_root.join("meta").join(format!("{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        let inputs = &meta["identity"]["inputs"];
+        assert_eq!(inputs["schema"], "node-env/5");
+        assert!(
+            inputs["gyp_python"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("-cpython-{expected}")),
+            "{name}: {inputs}"
+        );
+        envs.push(env_object);
+    }
+    assert_ne!(envs[0], envs[1]);
+}

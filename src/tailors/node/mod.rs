@@ -735,6 +735,17 @@ pub fn shipped_selection() -> io::Result<Selected> {
     crate::kernel::toolchain::shipped(&toolchain_catalog()?)
 }
 
+/// The CPython node-gyp runs on when the project's toolchain lock names no
+/// Python: the newest shipped 3.12. It is not a component of the Node
+/// release bundle, so a Node-only project takes it from the shipped Python
+/// catalog; a project that also locks Python builds its addons on that one.
+pub fn shipped_gyp_python() -> io::Result<Selected> {
+    crate::kernel::provider::cpython::shipped_selection(GYP_PYTHON_LINE)
+}
+
+/// The CPython line [`shipped_gyp_python`] takes the newest release of.
+const GYP_PYTHON_LINE: &str = "3.12";
+
 /// The store object id of the Node a selection names, from the selection's
 /// own row and without realizing it: the same id `realize_runtime` commits.
 pub fn runtime_object_id(platform: Platform, selected: &Selected) -> io::Result<String> {
@@ -1210,6 +1221,21 @@ pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
     Ok(out)
 }
 
+/// The Python node-gyp runs on in tests: the shipped default, the one a
+/// Node-only project gets.
+#[cfg(test)]
+pub(crate) fn test_gyp_python() -> Selected {
+    shipped_gyp_python().expect("shipped CPython for node-gyp")
+}
+
+/// [`test_gyp_python`]'s object id on `platform`, the `gyp_python` input a
+/// Node-only project's environment carries.
+#[cfg(test)]
+pub(crate) fn test_gyp_python_id(platform: Platform) -> String {
+    crate::kernel::provider::cpython::cpython_object_id(&test_gyp_python(), platform)
+        .expect("CPython object id for node-gyp")
+}
+
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     const SRI: &str =
@@ -1282,11 +1308,26 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         sha256: "a".repeat(64),
         path: ".npm/tool.tar.gz".into(),
     };
-    let empty = realize::node_env_identity(&store, platform, &node_object, &empty_plan, &[], None)
-        .expect("empty Node environment identity");
-    let packages =
-        realize::node_env_identity(&store, platform, &node_object, &package_plan, &[], None)
-            .expect("Node package environment identity");
+    let empty = realize::node_env_identity(
+        &store,
+        platform,
+        &node_object,
+        &empty_plan,
+        &[],
+        None,
+        &test_gyp_python_id(platform),
+    )
+    .expect("empty Node environment identity");
+    let packages = realize::node_env_identity(
+        &store,
+        platform,
+        &node_object,
+        &package_plan,
+        &[],
+        None,
+        &test_gyp_python_id(platform),
+    )
+    .expect("Node package environment identity");
     let multi_package = realize::node_env_identity(
         &store,
         platform,
@@ -1294,6 +1335,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         &multi_package_plan,
         &[],
         None,
+        &test_gyp_python_id(platform),
     )
     .expect("Node multi-package environment identity");
     let declared = realize::node_env_identity(
@@ -1303,6 +1345,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         &empty_plan,
         &[artifact],
         None,
+        &test_gyp_python_id(platform),
     )
     .expect("Node declared-artifact environment identity");
     let electron_version = "39.0.0";
@@ -1349,14 +1392,29 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         packages: vec![electron],
         ..empty_plan.clone()
     };
-    let provisioned =
-        realize::node_env_identity(&store, platform, &node_object, &electron_plan, &[], None)
-            .expect("Node Electron provisioned identity");
+    let provisioned = realize::node_env_identity(
+        &store,
+        platform,
+        &node_object,
+        &electron_plan,
+        &[],
+        None,
+        &test_gyp_python_id(platform),
+    )
+    .expect("Node Electron provisioned identity");
     let native_id =
         native_libs_identity_id(&store, platform, true).expect("Node native library conditional");
     let native = native_id.as_deref().map(|id| {
-        realize::node_env_identity(&store, platform, &node_object, &package_plan, &[], Some(id))
-            .expect("Node native environment identity")
+        realize::node_env_identity(
+            &store,
+            platform,
+            &node_object,
+            &package_plan,
+            &[],
+            Some(id),
+            &test_gyp_python_id(platform),
+        )
+        .expect("Node native environment identity")
     });
     let mut cases = vec![node, empty, packages, multi_package, declared, provisioned];
     if let Some(native) = native {
@@ -1522,14 +1580,17 @@ mod tests {
         );
     }
 
-    /// `node-env/4` goldens, on both platforms, from fixed inputs: a fixed
-    /// store root (a real identity input), two packages and one declared
-    /// artifact. The identity constructor is a pure function of its
-    /// platform argument, so the Darwin value is computed here and the
-    /// macOS gate only confirms it. The `/3` spelling of the same plan is a
-    /// different object id, so the bump reissues every environment; and the
+    /// `node-env/5` goldens, on both platforms, from fixed inputs: a fixed
+    /// store root (a real identity input), two packages, one declared
+    /// artifact and the shipped node-gyp Python. The identity constructor is
+    /// a pure function of its platform argument, so the Darwin value is
+    /// computed here and the macOS gate only confirms it.
+    ///
+    /// `/5` is `/4` plus `gyp_python`: taking that input away and spelling
+    /// the schema `/4` gives back the `/4` goldens byte for byte, so nothing
+    /// else moved. The `/3` spelling is a different object id again, and the
     /// two drifts `/3` could not see — one package or the declared artifact
-    /// dropped — are now contract errors.
+    /// dropped — stay contract errors.
     #[test]
     fn node_env_identity_goldens_and_dropped_plan_entries() {
         crate::tailors::install_kinds();
@@ -1552,13 +1613,15 @@ mod tests {
             sha256: "a".repeat(64),
             path: ".npm/tool.tar.gz".into(),
         };
-        for (platform, golden) in [
+        for (platform, golden, golden_v4) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
+                "3999dd6a1940ed182bcfffefd41dedcfed9fb429-env-24.20.0",
                 "26333746f02786ed4d81de465ca6ee4c43e07000-env-24.20.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,
+                "a0aaa1a6f2b11c672252154e50b87ceba0c0eb37-env-24.20.0",
                 "aa486e4a07068ad33e42126fc5b58b042200b055-env-24.20.0",
             ),
         ] {
@@ -1581,23 +1644,45 @@ mod tests {
                 &plan,
                 std::slice::from_ref(&artifact),
                 None,
+                &test_gyp_python_id(platform),
             )
             .unwrap();
-            assert_eq!(identity.inputs["schema"], "node-env/4");
+            assert_eq!(identity.inputs["schema"], "node-env/5");
             assert_eq!(identity.inputs["native"], realize::NATIVE_NONE);
+            assert_eq!(
+                identity.inputs["gyp_python"],
+                test_gyp_python_id(platform),
+                "{}",
+                platform.triple()
+            );
             assert_eq!(identity.object_id(), golden, "{}", platform.triple());
             assert_eq!(
                 crate::kernel::objmeta::check_identity_grammar(&identity),
                 Ok(())
             );
 
+            // Without the node-gyp Python, the `/4` identity is unchanged.
+            let mut v4 = identity.clone();
+            v4.inputs.insert("schema".into(), "node-env/4".into());
+            v4.inputs.remove("gyp_python");
+            assert_eq!(v4.object_id(), golden_v4, "{}", platform.triple());
+
             // The `/3` spelling of the same plan: a different object id,
-            // which is the store-wide rebuild this bump accepts.
-            let mut old = identity.clone();
+            // which is the store-wide rebuild that bump accepted.
+            let mut old = v4.clone();
             old.inputs.insert("schema".into(), "node-env/3".into());
             old.inputs.remove("plan_digest");
             old.inputs.remove("native");
-            assert_ne!(old.object_id(), identity.object_id());
+            assert_ne!(old.object_id(), v4.object_id());
+
+            // `gyp_python` must name a CPython object.
+            let mut foreign = identity.clone();
+            foreign.inputs.insert("gyp_python".into(), node.object_id());
+            let reason = crate::kernel::objmeta::check_identity_grammar(&foreign).unwrap_err();
+            assert!(reason.contains("Node gyp python"), "{reason}");
+            let mut missing = identity.clone();
+            missing.inputs.remove("gyp_python");
+            assert!(crate::kernel::objmeta::check_identity_grammar(&missing).is_err());
 
             // The two drifts `/3` could not see.
             for key in ["pkg:node_modules/example", "artifact:.npm/tool.tar.gz"] {
@@ -1654,9 +1739,16 @@ mod tests {
                 lock_source: "fixture".into(),
             };
             let artifacts = std::slice::from_ref(&artifact);
-            let honest =
-                realize::node_env_identity(&store, platform, &node_object, &plan, artifacts, None)
-                    .unwrap();
+            let honest = realize::node_env_identity(
+                &store,
+                platform,
+                &node_object,
+                &plan,
+                artifacts,
+                None,
+                &test_gyp_python_id(platform),
+            )
+            .unwrap();
 
             for skipped in [
                 "pkg:node_modules/second-example",
@@ -1669,6 +1761,7 @@ mod tests {
                     &plan,
                     artifacts,
                     None,
+                    &test_gyp_python_id(platform),
                     skipped,
                 )
                 .unwrap();
@@ -1694,11 +1787,18 @@ mod tests {
                             &smaller,
                             artifacts,
                             None,
+                            &test_gyp_python_id(platform),
                         )
                     }
-                    None => {
-                        realize::node_env_identity(&store, platform, &node_object, &plan, &[], None)
-                    }
+                    None => realize::node_env_identity(
+                        &store,
+                        platform,
+                        &node_object,
+                        &plan,
+                        &[],
+                        None,
+                        &test_gyp_python_id(platform),
+                    ),
                 }
                 .unwrap();
                 assert_eq!(
@@ -1751,6 +1851,7 @@ mod tests {
                 &plan,
                 &[],
                 None,
+                &test_gyp_python_id(Platform::Aarch64AppleDarwin),
             )
             .unwrap()
         };
@@ -1916,12 +2017,27 @@ mod tests {
             lock_source: "package-lock.json".into(),
         };
         let platform = Platform::Aarch64AppleDarwin;
-        let env = realize_node_env_with_node_object(&store, platform, &plan, &[], &node_obj)
-            .expect("cold realization");
+        let env = realize_node_env_with_node_object(
+            &store,
+            platform,
+            &plan,
+            &[],
+            &node_obj,
+            &test_gyp_python(),
+        )
+        .expect("cold realization");
 
-        let expected = node_env_identity(&store, platform, &node_obj, &plan, &[], None)
-            .unwrap()
-            .object_id();
+        let expected = node_env_identity(
+            &store,
+            platform,
+            &node_obj,
+            &plan,
+            &[],
+            None,
+            &test_gyp_python_id(platform),
+        )
+        .unwrap()
+        .object_id();
         assert_eq!(env.file_name().unwrap().to_string_lossy(), expected);
         assert_eq!(
             fs::read_to_string(env.join("node_modules/a/package.json")).unwrap(),
@@ -1939,8 +2055,15 @@ mod tests {
         );
 
         // A second call is a cache hit and returns the same object.
-        let again = realize_node_env_with_node_object(&store, platform, &plan, &[], &node_obj)
-            .expect("warm realization");
+        let again = realize_node_env_with_node_object(
+            &store,
+            platform,
+            &plan,
+            &[],
+            &node_obj,
+            &test_gyp_python(),
+        )
+        .expect("warm realization");
         assert_eq!(again, env);
         crate::kernel::store::remove_tree(&root).unwrap();
     }
@@ -2014,6 +2137,7 @@ mod tests {
             &plan,
             &[],
             None,
+            &test_gyp_python(),
             &mut consumed,
             &mut cleanup,
         )
@@ -2071,6 +2195,8 @@ mod tests {
             &plan,
             &[],
             None,
+            // The realization below is for Darwin, so is its node-gyp Python.
+            &test_gyp_python_id(Platform::Aarch64AppleDarwin),
         )
         .unwrap();
         let staged = store.stage().unwrap();
@@ -2094,6 +2220,7 @@ mod tests {
             &plan,
             &[],
             &node_obj,
+            &test_gyp_python(),
         )
         .unwrap();
         assert_eq!(realized, expected);
@@ -2103,6 +2230,75 @@ mod tests {
                 .count(),
             0
         );
+        crate::kernel::store::remove_tree(&root).unwrap();
+    }
+
+    /// The Python node-gyp runs on is the one the environment names: a
+    /// project that locks Python 3.13 gets an environment keyed on that
+    /// interpreter, a Node-only project one keyed on the shipped default, and
+    /// the two never share an object. Offline: the warm path returns at the
+    /// cache lookup, before any interpreter is realized.
+    #[test]
+    fn the_environment_is_keyed_on_the_python_node_gyp_runs_on() {
+        crate::tailors::install_kinds();
+        let root = std::env::temp_dir().join(format!("tog-npm-gyp-python-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for subdir in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store {
+            root: root.canonicalize().unwrap(),
+        };
+        let platform = Platform::Aarch64AppleDarwin;
+        let node_obj = store.object_path("node-cache");
+        std::fs::create_dir_all(&node_obj).unwrap();
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![NpmPackage {
+                path: "node_modules/unreachable".into(),
+                name: "unreachable".into(),
+                version: "1.0.0".into(),
+                url: "https://127.0.0.1:9/never-requested.tgz".into(),
+                integrity: TEST_SRI.into(),
+                bin: Vec::new(),
+                optional: false,
+                patch: None,
+                git: None,
+            }],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let locked = crate::kernel::provider::cpython::shipped_selection("3.13").unwrap();
+        assert_eq!(locked.version("cpython").unwrap(), "3.13.15");
+        let default = test_gyp_python();
+        assert_eq!(default.version("cpython").unwrap(), "3.12.14");
+
+        let mut published = Vec::new();
+        for python in [&locked, &default] {
+            let python_id =
+                crate::kernel::provider::cpython::cpython_object_id(python, platform).unwrap();
+            let identity =
+                node_env_identity(&store, platform, &node_obj, &plan, &[], None, &python_id)
+                    .unwrap();
+            assert_eq!(identity.inputs["gyp_python"], python_id);
+            let staged = store.stage().unwrap();
+            std::fs::create_dir_all(staged.join("node_modules")).unwrap();
+            let (expected, _) = store
+                .commit_with_deps(
+                    &identity,
+                    &staged,
+                    &[],
+                    &crate::kernel::store::ObjectDeps::new(),
+                )
+                .unwrap();
+            let realized =
+                realize_node_env_with_node_object(&store, platform, &plan, &[], &node_obj, python)
+                    .unwrap();
+            assert_eq!(realized, expected, "{}", python.describe());
+            published.push(realized);
+        }
+        assert_ne!(published[0], published[1]);
         crate::kernel::store::remove_tree(&root).unwrap();
     }
 
@@ -2144,6 +2340,7 @@ mod tests {
             &plan,
             &[],
             None,
+            &test_gyp_python_id(Platform::host().unwrap()),
         )
         .unwrap();
         let staged = store.stage().unwrap();
@@ -2170,6 +2367,7 @@ mod tests {
             &plan,
             &[],
             &node_obj,
+            &test_gyp_python(),
         )
         .unwrap();
         assert_eq!(realized, expected);

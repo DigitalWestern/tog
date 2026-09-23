@@ -44,7 +44,7 @@ pub static KINDS: &[KindAdapter] = &[
     KindAdapter {
         kind: "node-env",
         schema: Some("node-env/4"),
-        superseded_by: None,
+        superseded_by: Some("node-env/5"),
         live_required: &[
             "schema",
             "store_root",
@@ -62,6 +62,29 @@ pub static KINDS: &[KindAdapter] = &[
             groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
         },
         adapt: node_env_v4,
+    },
+    KindAdapter {
+        kind: "node-env",
+        schema: Some("node-env/5"),
+        superseded_by: None,
+        live_required: &[
+            "schema",
+            "store_root",
+            "nodejs",
+            "workspaces",
+            "plan_digest",
+            "native",
+            "gyp_python",
+        ],
+        live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
+        legacy_only: &[],
+        live_contract: Some(node_env_v5_contract),
+        grammar: Grammar {
+            required: &["schema", "nodejs", "plan_digest", "native", "gyp_python"],
+            optional: &["store_root", "layout", "workspaces", "native_libs"],
+            groups: &[("pkg:", None), ("provisioned:", None), ("artifact:", None)],
+        },
+        adapt: node_env_v5,
     },
 ];
 
@@ -167,6 +190,38 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
     Ok(())
 }
 
+/// `node-env/5` adds one unconditional input to the `/4` shape: `gyp_python`,
+/// the object id of the CPython node-gyp runs on. Under `/4` that interpreter
+/// was the shipped pin and named nowhere, so a pin change could rebuild a
+/// native addon under an unchanged id; now it is the project's locked Python
+/// (or the shipped default) and the id commits to it.
+fn node_env_v5_contract(identity: &Identity) -> Result<(), String> {
+    node_env_v4_contract(identity)?;
+    let gyp_python = identity
+        .inputs
+        .get("gyp_python")
+        .ok_or_else(|| "Node gyp python: no gyp_python input".to_string())?;
+    if !is_cpython_object_id(gyp_python) {
+        return Err(format!(
+            "Node gyp python: gyp_python {gyp_python:?} is not a CPython object id"
+        ));
+    }
+    Ok(())
+}
+
+/// `<40 hex>-cpython-<version>`: the spelling every `cpython` object id has.
+fn is_cpython_object_id(value: &str) -> bool {
+    value
+        .split_once("-cpython-")
+        .is_some_and(|(hash, version)| {
+            hash.len() == 40
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                && !version.is_empty()
+        })
+}
+
 /// The `<name>@<version>` field of a `pkg:` value. The producer writes
 /// `<algo>:<hex>:<name>@<version>:patch[..]:bin[..]` for a registry package
 /// and `git:<object id>:<name>@<version>:...` for a git package; the name may
@@ -214,6 +269,29 @@ fn node_env_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
             "native_libs",
             "plan_digest",
             "native",
+        ],
+    )
+}
+
+/// `node-env/5`: the `/4` byte sources. `gyp_python` names the interpreter
+/// install scripts ran on, which is realized only when a package runs one
+/// and never executed by the finished tree, so it is an identity input and
+/// not a dependency: a pure-JavaScript environment must not pull in a
+/// CPython just to be retained.
+fn node_env_v5(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
+    node_env_inner(
+        record,
+        index,
+        &[
+            "schema",
+            "store_root",
+            "nodejs",
+            "layout",
+            "workspaces",
+            "native_libs",
+            "plan_digest",
+            "native",
+            "gyp_python",
         ],
     )
 }

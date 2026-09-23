@@ -108,18 +108,6 @@ by position.
   tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
   default would make it registry-driven, the way `Tailor::registry_tool`
   did for `x`. It is its own design review: deps edits user manifests.
-- **Two cross-tailor edges, allow-listed in `tests/architecture.rs`.**
-  `tailors/python/build.rs` uses the cargo tailor's pinned toolchain to
-  build sdists with Rust extensions. `tailors/node/` uses the Python tailor's
-  CPython pin, `artifacts`, and `nativelibs` for node-gyp install scripts.
-  A kernel-level toolchain/artifact provider would remove both. Each move is
-  its own PR: relocate the module, keep object ids byte-identical, then
-  delete the allow-list row. Both edges sit outside the toolchain lock: the
-  node-gyp CPython and the sdist Rust are the shipped pins, not the
-  project's selection, and neither object id is part of the `node-env` or
-  sdist identity, so a shipped-pin change can alter a native build under an
-  unchanged id. Threading the selection through both and adding the helper
-  object to the identity is the same PR as the move (#135, with #63 and #64).
 - **Rust targets and components are outside the lock.** Only the channel is
   a lock row; `targets` and `components` are enforced per run from
   `rust-toolchain.toml`, a component tog does not ship is a permissive

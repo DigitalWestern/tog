@@ -21,6 +21,7 @@ use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,6 +49,19 @@ pub struct SyncRequest<'a> {
     pub fresh: bool,
     pub frozen: bool,
     pub toolchain: &'a Selected,
+    /// Every selection the project resolved, keyed by lock ecosystem. A
+    /// tailor that builds with another ecosystem's toolchain (node-gyp's
+    /// Python, an sdist's Rust) reads it through [`SyncRequest::helper`].
+    pub selections: &'a BTreeMap<String, Selected>,
+}
+
+impl SyncRequest<'_> {
+    /// The project's own selection for a helper ecosystem (`python`,
+    /// `rust`), when its toolchain lock names one. `None` means the project
+    /// has no such section, and the caller uses the shipped default.
+    pub fn helper(&self, lock_ecosystem: &str) -> Option<&Selected> {
+        self.selections.get(lock_ecosystem)
+    }
 }
 
 /// One `tog doctor` line contributed by a tailor.

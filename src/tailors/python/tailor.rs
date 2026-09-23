@@ -73,7 +73,10 @@ impl Tailor for Python {
         let selected = request.toolchain;
         let (plan, selection, inputs) = inputs::read_plan(platform, dir, store, selected)?;
         let runtime = python::realize_runtime(store, platform, selected)?;
-        let env = super::env::realize_env_for(store, platform, &plan, selected)?;
+        // An sdist with a Rust extension builds on the Rust this project's
+        // lock names when the project has one, not on the shipped pin.
+        let env =
+            super::env::realize_env_with(store, platform, &plan, selected, request.helper("rust"))?;
         super::env::project_env_with_inputs(
             dir,
             &env,

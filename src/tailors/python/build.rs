@@ -403,6 +403,7 @@ pub(crate) fn plan_sdist_identity_input(
     platform: Platform,
     pkg: &LockedPackage,
     selected: &Selected,
+    rust: Option<&Selected>,
     runtime_plan: Option<&Plan>,
 ) -> io::Result<SdistIdentityPlan> {
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
@@ -435,7 +436,8 @@ pub(crate) fn plan_sdist_identity_input(
     // Planning the nested environment may inspect more sdists and acquire
     // the same GC lock.
     drop(sdist);
-    let build_env_id = super::env::planned_env_object_id(store, platform, &build_plan, selected)?;
+    let build_env_id =
+        super::env::planned_env_object_id(store, platform, &build_plan, selected, rust)?;
     let native_libs_id =
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     let identity = if info.rust_build {
@@ -445,7 +447,7 @@ pub(crate) fn plan_sdist_identity_input(
             let source =
                 build_requires::extract_sdist_for(store, &sdist, &work.join("source"), &info)?;
             drop(sdist);
-            let rust = rust_plan_inputs(store, platform, &pkg.sha256, &source, &info, &work)?;
+            let rust = rust_plan_inputs(store, platform, rust, &pkg.sha256, &source, &info, &work)?;
             Ok(isolated_sdist_identity_from_ids(
                 platform,
                 pkg,
@@ -485,7 +487,7 @@ pub(crate) fn sdist_identity_input(
     selected: &Selected,
     runtime_plan: Option<&Plan>,
 ) -> io::Result<String> {
-    Ok(plan_sdist_identity_input(store, platform, pkg, selected, runtime_plan)?.input)
+    Ok(plan_sdist_identity_input(store, platform, pkg, selected, None, runtime_plan)?.input)
 }
 
 fn stderr_tail(path: &Path) -> Option<String> {
@@ -556,6 +558,9 @@ fn generate_cargo_lock(
 }
 
 struct RustPlanInputs {
+    /// The Rust this build compiles with: the project's locked selection, or
+    /// the shipped release the sdist's toolchain file resolves to.
+    rust: Selected,
     rust_version: String,
     rust_id: String,
     vendor_id: String,
@@ -566,6 +571,7 @@ struct RustPlanInputs {
 fn rust_plan_inputs(
     store: &Store,
     platform: Platform,
+    project_rust: Option<&Selected>,
     sdist_sha256: &str,
     source: &Path,
     info: &ArchiveInfo,
@@ -578,9 +584,21 @@ fn rust_plan_inputs(
         )
     })?;
     let manifest = source.join(manifest_rel);
-    let rust_version =
-        crate::kernel::provider::rust::resolve_toolchain(platform, source)?.to_string();
-    let rust_id = crate::kernel::provider::rust::rust_object_id(platform, &rust_version)?;
+    let rust = match project_rust {
+        // The project's lock decides the compiler, as it does for a cargo
+        // project. The sdist's toolchain file still refuses a foreign target
+        // and records the components tog does not provide; its channel is
+        // not read, because the lock already answered it.
+        Some(selected) => {
+            crate::kernel::provider::rust::toolchain_file_components(platform, source)?;
+            selected.clone()
+        }
+        None => crate::kernel::provider::rust::shipped_selection(
+            crate::kernel::provider::rust::resolve_toolchain(platform, source)?,
+        )?,
+    };
+    let rust_version = rust.version("rustc")?.to_string();
+    let rust_id = crate::kernel::provider::rust::runtime_object_id(platform, &rust)?;
     let generated_path =
         store.cache_path("cargo-lock", &cargo_lock_cache_key(sdist_sha256, &rust_id));
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
@@ -607,8 +625,7 @@ fn rust_plan_inputs(
     } else {
         // This is the one cold path that must invoke Cargo. Persist the lock
         // before any later wheel-cache lookup so warm rebuilds stay offline.
-        let rust_obj =
-            crate::kernel::provider::rust::ensure_rust_for(store, platform, &rust_version)?;
+        let rust_obj = crate::kernel::provider::rust::realize_runtime(store, platform, &rust)?;
         let plan_home = work.join("cargo-plan-home");
         let lock = generate_cargo_lock(store, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
@@ -619,6 +636,7 @@ fn rust_plan_inputs(
     let cargo_plan = crate::kernel::provider::crates::plan_cargo(&lock_text, &rust_version)?;
     let vendor_id = crate::kernel::provider::crates::vendor_object_id(&cargo_plan)?;
     Ok(RustPlanInputs {
+        rust,
         rust_version,
         rust_id,
         vendor_id,
@@ -640,8 +658,7 @@ fn prepare_rust(
             "Rust build trigger found, but the sdist has no Cargo.toml",
         )
     })?;
-    let rust_obj =
-        crate::kernel::provider::rust::ensure_rust_for(store, platform, &inputs.rust_version)?;
+    let rust_obj = crate::kernel::provider::rust::realize_runtime(store, platform, &inputs.rust)?;
     let cargo_plan =
         crate::kernel::provider::crates::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
     let vendor_obj = crate::kernel::provider::crates::realize_vendor(store, &cargo_plan)?;
@@ -758,7 +775,7 @@ pub fn build_sdist_wheel(
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(store, platform, pkg, selected, None, 0)
+    build_sdist_wheel_at_depth(store, platform, pkg, selected, None, None, 0)
 }
 
 /// Public runtime-aware entry point for callers that are building one sdist
@@ -772,7 +789,7 @@ pub fn build_sdist_wheel_with_runtime_plan(
     runtime_plan: &Plan,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(store, platform, pkg, selected, Some(runtime_plan), 0)
+    build_sdist_wheel_at_depth(store, platform, pkg, selected, None, Some(runtime_plan), 0)
 }
 
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
@@ -839,6 +856,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     platform: Platform,
     pkg: &LockedPackage,
     selected: &Selected,
+    rust: Option<&Selected>,
     runtime_plan: Option<&Plan>,
     depth: usize,
 ) -> io::Result<PathBuf> {
@@ -877,7 +895,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     // this sdist's cache lease while it acquires the same GC lock.
     drop(sdist);
     let build_env =
-        super::env::realize_env_at_depth(store, platform, &build_plan, selected, depth)?;
+        super::env::realize_env_at_depth(store, platform, &build_plan, selected, rust, depth)?;
     // Native library identity is pure. Realization is deferred until after
     // the wheel cache lookup, so planning never downloads the libset.
     let native_libs_id =
@@ -908,6 +926,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         Some(rust_plan_inputs(
             store,
             platform,
+            rust,
             &pkg.sha256,
             source,
             &info,
@@ -1083,6 +1102,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     )
     .expect("generic isolated sdist identity");
     let rust_inputs = RustPlanInputs {
+        rust: crate::kernel::provider::rust::shipped_selection("1.96.1")
+            .expect("shipped Rust release"),
         rust_version: "1.96.1".into(),
         rust_id: "rust-object".into(),
         vendor_id: "vendor-object".into(),
@@ -1104,14 +1125,15 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     if platform == Platform::X86_64UnknownLinuxGnu {
         let store = test_store("matrix-native");
         let native_pkg = local_native_sdist_for_test(&store, "matrix-native");
-        let planned = plan_sdist_identity_input(&store, platform, &native_pkg, &selected, None)
-            .expect("native sdist identity plan");
+        let planned =
+            plan_sdist_identity_input(&store, platform, &native_pkg, &selected, None, None)
+                .expect("native sdist identity plan");
         cases.push(planned.identity);
         let _ = crate::kernel::store::remove_tree(&store.root);
     } else if platform.is_macos() {
         let store = test_store("matrix-rust-darwin");
         let rust_pkg = local_rust_sdist_for_test(&store, "matrix-rust-darwin");
-        let planned = plan_sdist_identity_input(&store, platform, &rust_pkg, &selected, None)
+        let planned = plan_sdist_identity_input(&store, platform, &rust_pkg, &selected, None, None)
             .expect("Darwin Rust sdist identity plan");
         // Cargo.toml makes info.rust_build true, so plan_sdist_identity_input
         // takes the isolated-build path even though Darwin has no native-libs pin.
@@ -1213,6 +1235,58 @@ fn find_wheel(dir: &Path) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A project that locks Rust builds its sdists' Rust extensions on that
+    /// selection: the `rust` input is the locked object's id, not the one the
+    /// shipped pin would give. A lock naming the shipped release changes
+    /// nothing, so every existing `sdist-build/4` id is kept.
+    #[test]
+    fn a_locked_rust_selection_is_the_rust_an_sdist_builds_with() {
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::tailors::install_kinds();
+        let platform = crate::kernel::platform::Platform::host().unwrap();
+        let store = super::test_store("locked-rust");
+        let pkg = super::local_rust_sdist_for_test(&store, "locked-rust");
+        let python =
+            crate::tailors::python::shipped_selection("3.12.14").expect("shipped CPython release");
+        let plan = |rust: Option<&crate::kernel::toolchain::Selected>| {
+            super::plan_sdist_identity_input(&store, platform, &pkg, &python, rust, None)
+                .expect("Rust sdist identity plan")
+                .identity
+        };
+        let rust_id = |selected: &crate::kernel::toolchain::Selected| {
+            crate::kernel::provider::rust::runtime_object_id(platform, selected).unwrap()
+        };
+
+        let shipped_rust = crate::kernel::provider::rust::shipped_selection(
+            crate::kernel::provider::rust::RUST_VERSION,
+        )
+        .unwrap();
+        let unlocked = plan(None);
+        assert_eq!(unlocked.inputs["schema"], "sdist-build/4");
+        assert_eq!(unlocked.inputs["rust"], rust_id(&shipped_rust));
+        assert_eq!(plan(Some(&shipped_rust)).inputs, unlocked.inputs);
+
+        // A lock whose rustc row names other bytes than today's pin.
+        let mut locked = shipped_rust.clone();
+        locked.source = crate::kernel::toolchain::Source::Lock;
+        for row in &mut locked.bundle.artifacts {
+            if row.component == "rustc" && row.platform == platform {
+                row.digest = crate::kernel::fetch::Digest::sha256(&"e".repeat(64)).unwrap();
+            }
+        }
+        let planned = plan(Some(&locked));
+        assert_eq!(planned.inputs["rust"], rust_id(&locked));
+        assert_ne!(planned.inputs["rust"], unlocked.inputs["rust"]);
+        assert_ne!(planned.object_id(), unlocked.object_id());
+        assert_eq!(
+            crate::kernel::objmeta::check_identity_grammar(&planned),
+            Ok(())
+        );
+        let _ = crate::kernel::store::remove_tree(&store.root);
+    }
+
     /// The local sdist fixtures are byte-identical across stores and runs,
     /// so every identity derived from them is reproducible; on Linux the
     /// planned native sdist identity is checked input for input.
@@ -1247,20 +1321,38 @@ mod tests {
         {
             let selected = crate::tailors::python::shipped_selection("3.12.14")
                 .expect("shipped CPython release");
-            let planned_first =
-                super::plan_sdist_identity_input(&first_store, platform, &first, &selected, None)
-                    .expect("first native sdist plan");
-            let planned_again =
-                super::plan_sdist_identity_input(&first_store, platform, &first, &selected, None)
-                    .expect("repeated native sdist plan");
+            let planned_first = super::plan_sdist_identity_input(
+                &first_store,
+                platform,
+                &first,
+                &selected,
+                None,
+                None,
+            )
+            .expect("first native sdist plan");
+            let planned_again = super::plan_sdist_identity_input(
+                &first_store,
+                platform,
+                &first,
+                &selected,
+                None,
+                None,
+            )
+            .expect("repeated native sdist plan");
             assert_eq!(planned_first.identity.inputs, planned_again.identity.inputs);
             assert_eq!(planned_first.input, planned_again.input);
             // The build-env and native-libs object ids are store-root
             // addressed, so only the archive-derived input is expected to
             // agree across two different stores.
-            let planned_elsewhere =
-                super::plan_sdist_identity_input(&second_store, platform, &second, &selected, None)
-                    .expect("second-store native sdist plan");
+            let planned_elsewhere = super::plan_sdist_identity_input(
+                &second_store,
+                platform,
+                &second,
+                &selected,
+                None,
+                None,
+            )
+            .expect("second-store native sdist plan");
             assert_eq!(
                 planned_first.identity.inputs["sdist_sha256"],
                 planned_elsewhere.identity.inputs["sdist_sha256"]
@@ -1318,6 +1410,7 @@ mod tests {
             Platform::Aarch64AppleDarwin,
             &pkg,
             &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
+            None,
             None,
         )
         .unwrap();
@@ -1508,6 +1601,7 @@ mod tests {
             &pkg,
             &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
             None,
+            None,
             4,
         )
         .unwrap_err();
@@ -1543,6 +1637,7 @@ mod tests {
             foreign,
             &pkg,
             &crate::tailors::python::shipped_selection("3.12.14").unwrap(),
+            None,
             None,
             0,
         )

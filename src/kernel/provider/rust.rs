@@ -358,7 +358,7 @@ pub fn realize_runtime(
 /// The shipped catalog's release for one exact Rust version, as a selection.
 /// This is what a caller outside any project gets: there is no lock to
 /// honor, so the compiled pin table is both the catalog and the answer.
-fn shipped_selection(version: &str) -> io::Result<Selected> {
+pub fn shipped_selection(version: &str) -> io::Result<Selected> {
     if version != RUST_VERSION {
         return Err(err(format!(
             "internal: resolved Rust {version} but only {RUST_VERSION} is realizable"
@@ -381,18 +381,6 @@ fn shipped_selection(version: &str) -> io::Result<Selected> {
         lock_sha256: None,
         source: crate::kernel::toolchain::Source::Shipped,
     })
-}
-
-/// Ensure the shipped Rust toolchain is realized in the store, for callers
-/// with no project selection to honor: the Python sdist build environment,
-/// `tog deps`, and tests. A run inside a project realizes through
-/// [`realize_runtime`] with the toolchain its lock selected.
-pub fn ensure_rust(store: &Store, version: &str) -> io::Result<PathBuf> {
-    ensure_rust_for(store, Platform::host()?, version)
-}
-
-pub fn ensure_rust_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
-    realize_runtime(store, platform, &shipped_selection(version)?)
 }
 
 fn extract_rust_components_for(
@@ -479,9 +467,10 @@ struct ToolchainSpec {
 /// Resolve the nearest rustup-style toolchain file to the pinned version.
 ///
 /// This is the pre-lock answer, and the only callers left are the ones that
-/// have no project selection to honor: the Python sdist build, which builds
-/// a vendored Rust crate out of a store scratch directory that is nobody's
-/// tog project, and `tog deps`, which reports on a project it never syncs.
+/// have no project selection to honor: the Python sdist build of a project
+/// whose toolchain lock names no Rust, which builds a vendored Rust crate out
+/// of a store scratch directory that is nobody's tog project, and `tog deps`,
+/// which reports on a project it never syncs.
 /// Every entry point that is handed a [`Selected`] takes the version from it
 /// instead (`toolchain.version("rustc")`), so the lock decides the toolchain
 /// and the file only contributes the components below.

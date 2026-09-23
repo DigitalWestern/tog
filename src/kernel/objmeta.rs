@@ -1652,6 +1652,44 @@ mod tests {
         assert_eq!(cache, expected_cache);
     }
 
+    /// The `node-env/5` adapter: the `/4` byte sources, and the node-gyp
+    /// Python named by `gyp_python` is not among them. It is realized only
+    /// when a package runs a script, so retaining it would pull a CPython
+    /// into every pure-JavaScript environment's closure.
+    #[test]
+    fn adapter_node_env_node_env_5_leaves_the_gyp_python_out_of_the_dependencies() {
+        let node = oid('1', "nodejs");
+        let libs = oid('2', "libset");
+        let python = oid('4', "cpython-3.12.14");
+        let integrity = sha512('5');
+        let (objects, cache) = proven(
+            ident(
+                "node-env",
+                "env",
+                "24.20.0",
+                &[
+                    ("schema", "node-env/5"),
+                    ("store_root", "/tmp/store"),
+                    ("nodejs", &node),
+                    ("workspaces", ""),
+                    ("native_libs", &libs),
+                    ("native", "native-libs"),
+                    ("plan_digest", &format!("sha256:{}", sha256('8'))),
+                    ("gyp_python", &python),
+                    (
+                        "pkg:node_modules/left-pad",
+                        &format!("sha512:{integrity}:left-pad@1.3.0:patch[]:bin[]"),
+                    ),
+                ],
+            ),
+            vec![stub(&node), stub(&libs)],
+        );
+        let mut expected_objects = vec![node, libs];
+        expected_objects.sort();
+        assert_eq!(objects, expected_objects);
+        assert_eq!(cache, vec![format!("sha512:{integrity}")]);
+    }
+
     /// `plan_digest` and `native` belong to `/4` alone: a `/3` record that
     /// carries either is a shape no producer ever wrote.
     #[test]
@@ -2796,9 +2834,10 @@ mod tests {
             assert!(reason.contains("superseded by"), "{reason}");
             assert!(reason.contains(successor), "{reason}");
         }
-        // The four bumped in one change: a row silently losing its marker
-        // would otherwise make this test vacuous.
-        assert_eq!(seen, 4);
+        // The four bumped in one change, and `node-env/4` again when node-gyp's
+        // Python joined the identity: a row silently losing its marker would
+        // otherwise make this test vacuous.
+        assert_eq!(seen, 5);
     }
 
     fn live_identity_cases(platform: Platform) -> Vec<Identity> {
@@ -2900,12 +2939,12 @@ mod tests {
             "BEAM relocation relation",
         );
 
-        let node_empty = case_with_input(&linux, "node-env", Some("node-env/4"), "layout");
+        let node_empty = case_with_input(&linux, "node-env", Some("node-env/5"), "layout");
         assert_relation_breaks(&node_empty, &["layout"], "Node layout/package relation");
         let node_packages = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/4"),
+            Some("node-env/5"),
             "pkg:node_modules/example",
         );
         assert_relation_breaks(
@@ -2913,7 +2952,7 @@ mod tests {
             &["pkg:node_modules/example"],
             "Node layout/package relation",
         );
-        let node_native = case_with_input(&linux, "node-env", Some("node-env/4"), "native_libs");
+        let node_native = case_with_input(&linux, "node-env", Some("node-env/5"), "native_libs");
         assert_relation_breaks(
             &node_native,
             &["pkg:node_modules/example"],
@@ -2922,7 +2961,7 @@ mod tests {
         let node_provisioned = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/4"),
+            Some("node-env/5"),
             "provisioned:node_modules/electron",
         );
         assert_relation_breaks(
@@ -2940,7 +2979,7 @@ mod tests {
         let mut node_darwin_native = case_with_input(
             &darwin,
             "node-env",
-            Some("node-env/4"),
+            Some("node-env/5"),
             "pkg:node_modules/example",
         );
         node_darwin_native
@@ -3109,7 +3148,7 @@ mod tests {
             .iter()
             .find(|identity| {
                 identity.kind == "node-env"
-                    && schema_input_of(identity) == Some("node-env/4")
+                    && schema_input_of(identity) == Some("node-env/5")
                     && identity
                         .inputs
                         .keys()
@@ -3141,7 +3180,7 @@ mod tests {
         let declared = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/4"),
+            Some("node-env/5"),
             "artifact:.npm/tool.tar.gz",
         );
         let mut dropped = declared.clone();
@@ -3159,7 +3198,7 @@ mod tests {
             let provisioned = case_with_input(
                 &cases,
                 "node-env",
-                Some("node-env/4"),
+                Some("node-env/5"),
                 "provisioned:node_modules/electron",
             );
             let mut dropped = provisioned.clone();
@@ -3182,7 +3221,7 @@ mod tests {
     #[test]
     fn node_env_native_libs_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let native = case_with_input(&linux, "node-env", Some("node-env/4"), "native_libs");
+        let native = case_with_input(&linux, "node-env", Some("node-env/5"), "native_libs");
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
 

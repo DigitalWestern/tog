@@ -191,7 +191,15 @@ impl RegistryTool for NodeTool {
             )));
         }
         let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
-        let env = node::realize_node_env_for(store, platform, &plan, &[], toolchain)?;
+        // `x` runs outside any project lock, so node-gyp gets the shipped Python.
+        let env = node::realize_node_env_for(
+            store,
+            platform,
+            &plan,
+            &[],
+            toolchain,
+            &node::shipped_gyp_python()?,
+        )?;
         node::project_node_env(root, &env, platform, &plan, &[], false, attribution)?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())

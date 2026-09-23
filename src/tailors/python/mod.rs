@@ -179,6 +179,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         &empty_plan,
         &cpython.object_id(),
         &selected,
+        None,
     )
     .expect("empty Python environment identity");
     let env_wheel = env::environment_identity(
@@ -187,6 +188,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         &wheel_plan,
         &cpython.object_id(),
         &selected,
+        None,
     )
     .expect("Python wheel environment identity");
     let mut cases = vec![cpython.clone(), uv, env_empty, env_wheel];
@@ -202,6 +204,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             &native_plan,
             &cpython.object_id(),
             &selected,
+            None,
         )
         .expect("Python native-sdist environment identity");
         cases.push(env_native);
