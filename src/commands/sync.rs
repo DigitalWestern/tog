@@ -89,9 +89,7 @@ fn preflight_detected(
     // detected ecosystems are consulted, so a stray symlink for an ecosystem
     // the project does not use cannot stop its sync.
     let root = ProjectRoot::open(dir)?;
-    for tailor in present {
-        tailor.check_inputs(dir)?;
-    }
+    check_inputs(dir, present)?;
     // Host support next: an ecosystem that cannot run here at all says so
     // in its own words, before selection reports the same project as
     // unsatisfiable in the catalog's words.
@@ -234,7 +232,9 @@ pub(crate) fn ensure_current(
 /// does not stop the build. Inputs are still checked and the toolchain
 /// lock resolved for all of them, so the committed lock stays whole and an
 /// unrelated ecosystem whose version request is malformed or whose lock
-/// section is stale refuses as before.
+/// section is stale refuses as before. When the built ecosystem is already
+/// synced and no sync runs, the same whole-project check runs on its own
+/// (`check_whole_project`), so it never depends on the built row.
 pub(crate) fn ensure_current_for(
     ctx: &Context,
     cwd: &Path,
@@ -256,8 +256,39 @@ pub(crate) fn ensure_current_for(
             Some(ecosystem) => run_in_only(ctx, &dir, strict, frozen, ecosystem)?,
             None => run_in(ctx, &dir, false, strict, frozen)?,
         }
+    } else if only.is_some() {
+        // No sync runs, but the rows above were narrowed to the built
+        // ecosystem: the project as a whole must still be consistent. A
+        // malformed version request or a stale lock section elsewhere
+        // refuses the build exactly as the scoped sync would have.
+        check_whole_project(ctx.platform, &dir)?;
     }
     Ok(projected_root(cwd))
+}
+
+/// The half of `preflight_detected` no scope narrows, for a command that
+/// is not about to sync: every detected ecosystem's inputs are
+/// well-formed and every committed lock section matches them. Read-only:
+/// nothing is selected into a file, nothing is host-preflighted, and a
+/// directory with nothing detected is left to the caller.
+fn check_whole_project(platform: Platform, dir: &Path) -> io::Result<()> {
+    let present = tailors::detected(dir)?;
+    if present.is_empty() {
+        return Ok(());
+    }
+    let root = ProjectRoot::open(dir)?;
+    check_inputs(dir, &present)?;
+    let inputs = ecosystem_inputs(dir, &present)?;
+    project_toolchain::resolve(&root, platform, inputs, Mode::ReadOnly, false).map(|_| ())
+}
+
+/// Every detected ecosystem's toolchain inputs, checked whatever the
+/// command's scope.
+fn check_inputs(dir: &Path, present: &[&dyn Tailor]) -> io::Result<()> {
+    for tailor in present {
+        tailor.check_inputs(dir)?;
+    }
+    Ok(())
 }
 
 /// The build's sync: host preflight, prepare and realize the named tailor
@@ -1049,6 +1080,58 @@ mod tests {
         ) -> crate::kernel::toolchain::LegacyEvidence {
             Self::real().legacy_toolchain_evidence(ecosystem, platform, body)
         }
+    }
+
+    /// A build whose own ecosystem is synced runs no sync, so the
+    /// whole-project half of preflight runs on its own: a stale Python
+    /// lock section or a malformed Python request refuses, read-only.
+    #[test]
+    fn a_synced_build_still_checks_the_whole_project() {
+        // `commit` installs a process-global guard; same locks as
+        // `first_sync_preflight_selects_and_commit_writes_the_lock`.
+        let _supervision = crate::kernel::supervise::SUPERVISION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _attribution = policy::attribution_test_lock();
+        let temp = TempDir::new();
+        let project = temp.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let pyproject = "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n";
+        std::fs::write(project.join("pyproject.toml"), pyproject).unwrap();
+        std::fs::write(project.join(".python-version"), "3.12\n").unwrap();
+        let platform = Platform::host().unwrap();
+        let (_, mut toolchain) =
+            preflight_sync(platform, &project, Mode::Writable, Scope::All).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        drop(project_toolchain::commit(&root, &mut toolchain, &Mode::Writable).unwrap());
+        let lock = std::fs::read(project.join("tog-toolchain.toml")).unwrap();
+        check_whole_project(platform, &project).unwrap();
+
+        std::fs::write(project.join(".python-version"), "3.13\n").unwrap();
+        let error = check_whole_project(platform, &project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tog-toolchain.toml is stale for python"),
+            "{error}"
+        );
+
+        std::fs::write(project.join(".python-version"), "3.12\n").unwrap();
+        std::fs::write(
+            project.join("pyproject.toml"),
+            format!("{pyproject}requires-python = \"invalid\"\n"),
+        )
+        .unwrap();
+        check_whole_project(platform, &project).unwrap_err();
+        assert_eq!(
+            std::fs::read(project.join("tog-toolchain.toml")).unwrap(),
+            lock
+        );
     }
 
     /// Host preflight follows the scope (#159); the input check and lock

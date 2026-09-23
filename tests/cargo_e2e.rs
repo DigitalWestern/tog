@@ -294,6 +294,39 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     assert!(lock.contains("[toolchain.python]"), "{lock}");
     assert!(lock.contains("[toolchain.rust]"), "{lock}");
 
+    // Cargo is synced now, so the next build runs no sync; the whole
+    // project is still checked. A changed Python toolchain input (stale
+    // lock section) or a malformed one refuses, and the lock is untouched.
+    let pyproject = std::fs::read_to_string(project.join("pyproject.toml")).unwrap();
+    std::fs::write(project.join(".python-version"), "3.13\n").unwrap();
+    for (label, expected) in [
+        (
+            "stale python section",
+            "tog-toolchain.toml is stale for python",
+        ),
+        ("malformed requires-python", "invalid"),
+    ] {
+        if label.starts_with("malformed") {
+            std::fs::remove_file(project.join(".python-version")).unwrap();
+            std::fs::write(
+                project.join("pyproject.toml"),
+                pyproject.replace("[project]\n", "[project]\nrequires-python = \"invalid\"\n"),
+            )
+            .unwrap();
+        }
+        let output = tog_with_tmp(&binary, &project, &store, &tmp, &["build", "cargo"]);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(!output.status.success(), "{label}: build succeeded");
+        assert!(!stderr.contains("syncing first"), "{label}: {stderr}");
+        assert!(stderr.contains(expected), "{label}: {stderr}");
+        assert_eq!(
+            std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap(),
+            lock,
+            "{label}: the lock changed"
+        );
+    }
+    std::fs::write(project.join("pyproject.toml"), &pyproject).unwrap();
+
     let output = tog_with_tmp(&binary, &project, &store, &tmp, &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
