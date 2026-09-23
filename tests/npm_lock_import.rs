@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use tog::kernel::platform::Platform;
+
 fn copy_tree(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {
@@ -126,4 +128,119 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
             assert_ok(&root_dep, "root is-number");
         }
     }
+}
+
+const SRI: &str =
+    "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
+
+fn scratch_project(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tog-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn node_version() -> &'static str {
+    tog::tailors::node::node_pin(Platform::X86_64UnknownLinuxGnu)
+        .unwrap()
+        .version
+}
+
+/// vitejs/vite's shape (#50): a workspace importer depends on `file:` a
+/// directory that is itself an importer, whose own `file:` dependency then
+/// was planted at `<link>/node_modules/...`. Projection created that path
+/// through the link, i.e. a real `node_modules` directory inside the user's
+/// source tree, and then refused to project the importer's own
+/// `node_modules` symlink over it. pnpm installs each importer's
+/// dependencies into that importer's own `node_modules`; nothing is ever
+/// written beneath a link.
+#[test]
+fn pnpm_links_never_plant_packages_inside_the_linked_source_directory() {
+    let dir = scratch_project("pnpm-link-nesting");
+    for sub in ["license/dep-mit", "license/dep-nested", "ws/vendor/a"] {
+        fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let lock = format!(
+        r#"lockfileVersion: '9.0'
+importers:
+  .: {{}}
+  license:
+    dependencies:
+      '@t/dep-mit':
+        specifier: file:./dep-mit
+        version: file:license/dep-mit
+  license/dep-mit:
+    dependencies:
+      '@t/dep-nested':
+        specifier: file:../dep-nested
+        version: file:license/dep-nested
+  license/dep-nested: {{}}
+  ws:
+    dependencies:
+      a:
+        specifier: file:./vendor/a
+        version: file:ws/vendor/a
+packages:
+  '@t/dep-mit@file:license/dep-mit':
+    resolution: {{directory: license/dep-mit, type: directory}}
+  '@t/dep-nested@file:license/dep-nested':
+    resolution: {{directory: license/dep-nested, type: directory}}
+  a@file:ws/vendor/a:
+    resolution: {{directory: ws/vendor/a, type: directory}}
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  '@t/dep-mit@file:license/dep-mit':
+    dependencies:
+      '@t/dep-nested': file:license/dep-nested
+  '@t/dep-nested@file:license/dep-nested': {{}}
+  a@file:ws/vendor/a:
+    dependencies:
+      b: 1.0.0
+  b@1.0.0: {{}}
+"#
+    );
+    let plan = tog::tailors::node::lock_import::plan_pnpm(
+        Platform::X86_64UnknownLinuxGnu,
+        &lock,
+        &dir,
+        node_version(),
+    )
+    .unwrap();
+    let link_paths = plan
+        .links
+        .iter()
+        .map(|link| link.path.as_str())
+        .collect::<Vec<_>>();
+    for path in plan
+        .packages
+        .iter()
+        .map(|package| package.path.as_str())
+        .chain(link_paths.iter().copied())
+    {
+        for link in &link_paths {
+            assert!(
+                !path.starts_with(&format!("{link}/")),
+                "{path} is inside the linked source directory {link}: {:?}",
+                plan.links
+            );
+        }
+    }
+    // The importer's own dependency is projected from its own node_modules.
+    assert!(
+        plan.links.iter().any(
+            |link| link.path == "license/dep-mit/node_modules/@t/dep-nested"
+                && link.target == "license/dep-nested"
+        ),
+        "{:?}",
+        plan.links
+    );
+    // A local package that is not an importer still gets its registry
+    // dependency, placed where Node finds it from the package's real path.
+    assert!(
+        plan.packages.iter().any(|package| package.name == "b"),
+        "{:?}",
+        plan.packages
+    );
+    let _ = fs::remove_dir_all(dir);
 }

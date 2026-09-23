@@ -606,10 +606,20 @@ fn build_plan(
                 }
             }
         } else if let Target::Link(target) = &dependency.target {
-            if expanded.insert((path.clone(), format!("link:{target}"))) {
+            // A link is the user's own source directory, so nothing may be
+            // planted beneath it: `<link>/node_modules/...` would be written
+            // through the symlink into that source tree. Node resolves a
+            // linked package from its real path, so:
+            // - a target that is itself an importer already gets its own
+            //   dependencies from its own projected node_modules, exactly as
+            //   pnpm installs every importer; expanding again adds nothing;
+            // - any other local package gets its dependencies placed beside
+            //   the link, from the link's own parent.
+            let importer = target == "." || workspace_paths.contains(target);
+            if !importer && expanded.insert((parent.clone(), format!("link:{target}"))) {
                 if let Some(children) = graph.local_link_deps.get(target) {
                     for child in children {
-                        queue.push_back((path.clone(), child.clone(), None));
+                        queue.push_back((parent.clone(), child.clone(), None));
                     }
                 }
             }
@@ -619,6 +629,29 @@ fn build_plan(
     let packages = resolved_packages(occupied, &graph.nodes)?;
     for link in links.values() {
         crate::tailors::node::validate_lock_path(&link.path)?;
+    }
+    // Projection plants packages and links by creating directories along
+    // their paths; one beneath a link would land in the user's source tree.
+    let link_dirs = links
+        .keys()
+        .map(|link| format!("{link}/"))
+        .collect::<Vec<_>>();
+    let beneath_link = |path: &str| {
+        link_dirs
+            .iter()
+            .find(|link| path.starts_with(link.as_str()))
+            .map(|link| link.trim_end_matches('/').to_string())
+    };
+    for path in packages
+        .iter()
+        .map(|package| &package.path)
+        .chain(links.keys())
+    {
+        if let Some(link) = beneath_link(path) {
+            return Err(err(format!(
+                "{path} would be placed inside the linked source directory {link}; refusing to write into it"
+            )));
+        }
     }
     Ok(NpmPlan {
         node_version: node_version.to_string(),

@@ -138,7 +138,11 @@ cannot mutate them.
 locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
 `lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
-`npm install --package-lock-only`. Lifecycle scripts run hermetically (below).
+`npm install --package-lock-only`. A `file:`/`link:` dependency is a
+symlink into the user's source, so nothing is ever placed beneath one: a
+target that is itself an importer gets its dependencies from its own
+projected `node_modules` (as pnpm installs it), any other local package gets
+them beside the link. Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over
 ranged manifests, so a bare machine needs nothing installed besides tog.
 
