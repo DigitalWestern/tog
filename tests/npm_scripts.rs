@@ -242,6 +242,24 @@ fn assert_success(output: &Output, label: &str) {
     );
 }
 
+/// Publish the `tog-toolchain.toml` section a writable sync of `project`
+/// would write for `ecosystem` (a tailor id), through the same selection and
+/// writer the binary uses.
+fn commit_toolchain_lock(project: &Path, ecosystem: &str) {
+    use tog::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+    let tailor = tog::tailors::by_id(ecosystem).unwrap();
+    let lock_ecosystem = tailor.lock_ecosystem();
+    let root = tog::kernel::fsroot::ProjectRoot::open(project).unwrap();
+    let rows = tog::kernel::toolchain::input::discover(&root, lock_ecosystem).unwrap();
+    let catalog = tailor.toolchain_catalog().unwrap();
+    let bundle = tog::kernel::toolchain::select_for(&catalog, lock_ecosystem, &rows).unwrap();
+    let mut lock = ToolchainLock::read_via(&root)
+        .unwrap()
+        .unwrap_or_else(|| ToolchainLock::new(env!("CARGO_PKG_VERSION")));
+    lock.set_ecosystem(lock_ecosystem, bundle, &rows).unwrap();
+    std::fs::write(project.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+}
+
 fn tog(bin: &Path, project: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .current_dir(project)
@@ -507,6 +525,9 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     add_fixture_dependency(project, "fixture-addon", &addon_sri);
     add_fixture_dependency(project, "fixture-script", &script_sri);
 
+    // Strict policy never creates the toolchain lock, so the project commits
+    // one first, exactly as a user runs `tog` once before CI goes strict.
+    commit_toolchain_lock(project, "node");
     let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
     let synced = tog(binary, project, &store_root, &["sync", "--strict"]);
     assert_success(&synced, "tog --strict");

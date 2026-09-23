@@ -55,12 +55,13 @@ deny = [
     # built. Denied: re-lock so the lock and the manifest agree.
     "lock-disagreement",
 
-    # A package's install-time download did not happen: either the project
-    # did not declare the artifact (url + sha256) so its download was
-    # skipped, or tog tried to provision a declared artifact and failed.
-    # Either way the package is present but the binary it wanted is not in
-    # the closure. Denied: declare (or fix) the artifact so it is fetched
-    # through the verified cache, or drop the package.
+    # A package's install-time download was deliberately skipped
+    # (puppeteer- and cypress-class packages, through their documented skip
+    # switch): the package is present but the binary it wanted is not in
+    # the closure. Denied: declare the artifact (url + sha256) so it is
+    # fetched through the verified cache, or drop the package. A download tog
+    # provisions itself (electron) or a declared artifact that fails to
+    # fetch records nothing: the sync fails instead.
     "artifact-not-provisioned",
 ]
 

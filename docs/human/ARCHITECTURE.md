@@ -324,7 +324,9 @@ store CPython. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
 get them via declared artifacts: the project pins `url` + `sha256`, tog
 prefetches through the verified cache and plants the file where the package's
-downloader looks. Linux builds needing C libraries get one pinned
+downloader looks. Electron's release zip is provisioned by tog itself, and
+because the env identity names that zip, a failed provisioning fails the
+sync rather than publishing an env without it. Linux builds needing C libraries get one pinned
 `native-libs/libset/3` object, a fixed conda-forge closure (zlib, OpenSSL,
 freetype, cairo, ...) with prefixes relocated at staging; the set id is an
 input of every derivation that mounts it. macOS arm64 has no native pin yet
@@ -353,6 +355,11 @@ it, so preview and sweep are the same phases over the same snapshot.
 Whether an object may be deleted is decided by `meta/<id>.json`
 (`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
 digests, and an `evidence` marker, `"explicit"` or `"adapted:<kind>@<n>"`.
+Explicit evidence names what the realization actually read, which can be
+less than its identity names: a node env's identity carries every declared
+artifact and provisioned download the plan could use, but only the ones an
+install script was given are cache dependencies, because a commit refuses to
+claim a cache entry that is not present.
 Adapters in `src/kernel/objmeta.rs` upgrade legacy records to this form; each is a
 pure function of one record plus a read-only index, dispatched on the
 (kind, schema) pair, and never guesses from a current default pin. Unknown

@@ -107,6 +107,10 @@ pub struct Provisioning {
     pub envs: Vec<(String, String)>,
     /// (subject, detail) pairs the caller records as policy exceptions.
     pub records: Vec<(String, String)>,
+    /// The verified cache entries provisioning read. The consuming object
+    /// names these as dependencies; an artifact that was never provisioned
+    /// is never fetched, so it must not be claimed.
+    pub cache_digests: Vec<crate::kernel::digest::Digest>,
 }
 
 fn electron_platform(platform: Platform) -> (&'static str, &'static str) {
@@ -258,6 +262,7 @@ pub fn provision(
             format!("electron@{version}"),
             format!("provisioned {zip_name} (sha256 {sha256}) from upstream SHASUMS256.txt"),
         )],
+        cache_digests: vec![crate::kernel::digest::Digest::sha256(&sha256)?],
     }))
 }
 

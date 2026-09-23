@@ -218,6 +218,13 @@ fn node_env_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
     )
 }
 
+/// `provisioned:` and `artifact:` digests are claimed unconditionally, which
+/// is a deliberate superset of what the producer now records (only the ones
+/// an install script was given; see `run_install_scripts`). Whether a script
+/// consumed one is not recoverable from the identity, and dropping a digest
+/// whose file is cached would narrow what the legacy reader retained, so the
+/// containment guard would refuse the upgrade anyway. Naming an absent
+/// digest retains nothing, so the superset costs nothing.
 fn node_env_inner(
     record: &Record,
     index: &MetaIndex,

@@ -184,7 +184,7 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   cargo, not tog.
 - **Skipped install-time downloads are not in the closure**: puppeteer- and cypress-class
   packages record `artifact-not-provisioned`, fetched unverified only when the user runs that
-  command.
+  command. Electron's zip is provisioned instead, and a failed provisioning fails the sync.
 - **Prebuilt binaries are compiled instead of downloaded; the result can differ from what npm
   would install. Wheel file-path collisions (`file-collision`), SHA-1 npm integrity, and pnpm 9
   MD5 patch hashes (`weak-integrity`) are permissive; strict via policy. Lifecycle scripts run in lockfile
