@@ -8,6 +8,8 @@ use crate::kernel::activity::ActivityMode;
 use crate::kernel::store;
 use std::io;
 
+// Reviewed site (tests/architecture.rs): operation boundary: command entry point.
+#[allow(clippy::disallowed_methods)]
 pub fn run(json: bool) -> io::Result<i32> {
     let store = store::Store::open()?;
     let _activity = store.activity(ActivityMode::Shared)?;

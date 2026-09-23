@@ -82,6 +82,8 @@ impl Store {
     /// Register a project whose closure was just written. Registry entries
     /// are keyed by the canonical project path, so moving a project creates a
     /// new root instead of accidentally retaining the old location.
+    // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
+    #[allow(clippy::disallowed_methods)]
     pub fn register_root(&self, project_dir: &Path) -> io::Result<RootEntry> {
         let activity = self.activity(ActivityMode::Exclusive)?;
         self.register_root_with_activity(&activity, project_dir)
@@ -119,6 +121,8 @@ impl Store {
     /// Publish a complete root/2 record atomically.  This is deliberately a
     /// separate entry point from `register_root`, which remains the
     /// pathname-only compatibility writer used by older callers and tests.
+    // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
+    #[allow(clippy::disallowed_methods)]
     pub fn register_root_record(&self, record: RootRecord) -> io::Result<RootEntry> {
         let activity = self.activity(ActivityMode::Exclusive)?;
         self.register_root_record_with_activity(&activity, record)
@@ -216,6 +220,8 @@ impl Store {
     /// Import all supported closure envelopes for a project into a durable
     /// root/2 record.  The reader is declarative: it never runs a planner,
     /// package manager, or project code.
+    // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
+    #[allow(clippy::disallowed_methods)]
     pub fn register_root_from_project(&self, project_dir: &Path) -> io::Result<RootEntry> {
         let activity = self.activity(ActivityMode::Exclusive)?;
         self.register_root_from_project_with_activity(&activity, project_dir)
@@ -547,6 +553,8 @@ impl Store {
         Ok(false)
     }
 
+    // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
+    #[allow(clippy::disallowed_methods)]
     pub fn remove_root_entry(&self, entry: &RootEntry) -> io::Result<()> {
         let activity = self.activity(ActivityMode::Exclusive)?;
         self.remove_root_entry_with_activity(&activity, entry)
@@ -695,6 +703,8 @@ impl Store {
     /// Only the record is removed: project files and store objects stay, so
     /// the project loses protection by explicit choice. Returns the removed
     /// entry.
+    // Reviewed site (tests/architecture.rs): operation boundary: lease-free public API; production uses the `_with_activity` form.
+    #[allow(clippy::disallowed_methods)]
     pub fn forget_root(&self, key: &str) -> io::Result<RootEntry> {
         let activity = self.activity(ActivityMode::Exclusive)?;
         self.forget_root_with_activity(&activity, key)

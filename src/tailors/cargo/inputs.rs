@@ -2,6 +2,7 @@
 //! discovery through the pinned Cargo, missing-lock generation, and the
 //! `CargoPlan`.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store;
 use crate::kernel::supervise;
@@ -29,7 +30,11 @@ pub struct CargoInputs {
 /// Workspace rooting is delegated to the pinned Cargo itself
 /// (`locate-project --workspace`): an ancestor-walk for Cargo.lock picks an
 /// unrelated outer lock when independent packages nest.
-pub fn locate_cargo_root(rust_obj: &Path, cwd: &Path, store: &store::Store) -> io::Result<PathBuf> {
+pub fn locate_cargo_root(
+    rust_obj: &Path,
+    cwd: &Path,
+    activity: &StoreActivity,
+) -> io::Result<PathBuf> {
     let mut command = std::process::Command::new(rust_obj.join("bin/cargo"));
     command
         .args([
@@ -43,7 +48,7 @@ pub fn locate_cargo_root(rust_obj: &Path, cwd: &Path, store: &store::Store) -> i
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
     ui::trace_command(&command);
-    let out = supervise::output_owned(&mut command, store)
+    let out = supervise::output(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store cargo locate-project: {e}")))?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
@@ -67,12 +72,13 @@ pub fn load_cargo_inputs(
     platform: Platform,
     cwd: &Path,
     store: &store::Store,
+    activity: &StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<CargoInputs> {
     let rust_version = toolchain.version("rustc")?;
     cargo::toolchain_file_components(platform, cwd)?;
-    let rust_obj = cargo::realize_runtime(store, platform, toolchain)?;
-    let root = locate_cargo_root(&rust_obj, cwd, store)?;
+    let rust_obj = cargo::realize_runtime(store, activity, platform, toolchain)?;
+    let root = locate_cargo_root(&rust_obj, cwd, activity)?;
     // Cargo is the one tailor whose registered root is not the directory
     // sync was run in: a member of a workspace sends its closure and its
     // record to the workspace root. The preflight checked the invocation
@@ -81,7 +87,7 @@ pub fn load_cargo_inputs(
     // registered and so cannot be protected.
     store::Store::check_registrable(&root)?;
     if !root.join("Cargo.lock").is_file() {
-        ensure_cargo_lock(&root, &rust_obj, store)?;
+        ensure_cargo_lock(&root, &rust_obj, activity)?;
     }
     let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
     let plan = cargo::plan_cargo(&lock, rust_version)?;
@@ -93,7 +99,7 @@ pub fn load_cargo_inputs(
     })
 }
 
-pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> io::Result<()> {
+pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, activity: &StoreActivity) -> io::Result<()> {
     ui::note(
         "no Cargo.lock; generating it with the store Rust toolchain \
          (network allowed, unsandboxed)...",
@@ -106,7 +112,7 @@ pub fn ensure_cargo_lock(root: &Path, rust_obj: &Path, store: &store::Store) -> 
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
     ui::trace_command(&command);
-    let status = supervise::status_owned(&mut command, store).map_err(|e| {
+    let status = supervise::status(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(

@@ -9,6 +9,9 @@
 //! the project directory, which happens after the lock has been published
 //! and before any network call.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};

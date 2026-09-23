@@ -25,6 +25,7 @@ use crate::commands::inspect;
 use crate::commands::shared::{project_dir, selected_toolchain};
 use crate::commands::sync;
 use crate::commands::x as xrun;
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::context::Context;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -491,6 +492,7 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
 /// delegate each group.
 pub fn edit(
     platform: Platform,
+    activity: &StoreActivity,
     cwd: &Path,
     request: Request,
     attribution: &mut policy::Attribution,
@@ -521,6 +523,8 @@ pub fn edit(
     }
     reject_mixed_sync_roots(request.verb, &project, &groups)?;
     let store = Store::open()?;
+    // Every delegated tool below runs under the command's own lease.
+    store.require_activity(activity, "dependency edit")?;
     let mut lines = Vec::new();
     let mut outcome_project = project.clone();
     for (eco, specs) in groups {
@@ -529,6 +533,7 @@ pub fn edit(
         let files = match eco {
             Eco::Python => python(
                 &store,
+                &activity,
                 platform,
                 &project,
                 request.verb,
@@ -540,6 +545,7 @@ pub fn edit(
             Eco::Node => {
                 let outcome = node(
                     &store,
+                    &activity,
                     platform,
                     &project,
                     request.verb,
@@ -552,6 +558,7 @@ pub fn edit(
             }
             Eco::Cargo => cargo_delegate(
                 &store,
+                &activity,
                 platform,
                 &project,
                 request.verb,
@@ -561,6 +568,7 @@ pub fn edit(
             )?,
             Eco::Go => go_delegate(
                 &store,
+                &activity,
                 platform,
                 &project,
                 request.verb,
@@ -570,6 +578,7 @@ pub fn edit(
             )?,
             Eco::Ruby => ruby_delegate(
                 &store,
+                &activity,
                 platform,
                 &project,
                 request.verb,
@@ -579,6 +588,7 @@ pub fn edit(
             )?,
             Eco::Elixir => elixir_delegate(
                 &store,
+                &activity,
                 platform,
                 &project,
                 request.verb,
@@ -706,6 +716,7 @@ fn python_line(texts: &[String]) -> String {
 
 fn python(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -759,7 +770,7 @@ fn python(
             },
             texts.join(" ")
         ))),
-        PyShape::Uv => python_uv(store, platform, project, verb, texts, dev, attribution),
+        PyShape::Uv => python_uv(store, activity, platform, project, verb, texts, dev, attribution),
         PyShape::PipCompile => {
             if dev {
                 return Err(other("--dev has no meaning for a requirements file"));
@@ -774,6 +785,7 @@ fn python(
             let upgrade = upgrade_flags(verb, names);
             uv_compile(
                 store,
+                activity,
                 platform,
                 project,
                 &input,
@@ -804,6 +816,7 @@ fn python(
             if verb == Verb::Update && lock.is_file() {
                 uv_compile(
                     store,
+                    activity,
                     platform,
                     project,
                     &path,
@@ -1093,11 +1106,16 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn uv_command(store: &Store, platform: Platform, project: &Path) -> io::Result<(Command, String)> {
+fn uv_command(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    project: &Path,
+) -> io::Result<(Command, String)> {
     let toolchain = selected_toolchain(platform, project, "python")?;
     let version = toolchain.version("cpython")?.to_string();
-    let uv = python::realize_uv(store, platform, &toolchain)?.join("uv");
-    let interpreter = python::realize_runtime(store, platform, &toolchain)?;
+    let uv = python::realize_uv(store, activity, platform, &toolchain)?.join("uv");
+    let interpreter = python::realize_runtime(store, activity, platform, &toolchain)?;
     let mut command = Command::new(uv);
     command
         .current_dir(project)
@@ -1113,9 +1131,9 @@ fn uv_command(store: &Store, platform: Platform, project: &Path) -> io::Result<(
     Ok((command, version))
 }
 
-fn run_inherited(store: &Store, mut command: Command, what: &str) -> io::Result<()> {
+fn run_inherited(activity: &StoreActivity, mut command: Command, what: &str) -> io::Result<()> {
     ui::trace_command(&command);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)
+    let status = crate::kernel::supervise::status(&mut command, activity)
         .map_err(|error| io::Error::new(error.kind(), format!("run {what}: {error}")))?;
     if !status.success() {
         return Err(other(format!(
@@ -1127,6 +1145,7 @@ fn run_inherited(store: &Store, mut command: Command, what: &str) -> io::Result<
 
 fn uv_compile(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     input: &Path,
@@ -1134,7 +1153,7 @@ fn uv_compile(
     extra: &[String],
     _attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
-    let (mut command, version) = uv_command(store, platform, project)?;
+    let (mut command, version) = uv_command(store, activity, platform, project)?;
     command
         .args(["pip", "compile"])
         .arg(input)
@@ -1148,11 +1167,12 @@ fn uv_compile(
         .arg("-o")
         .arg(output)
         .args(extra);
-    run_inherited(store, command, "store uv pip compile")
+    run_inherited(activity, command, "store uv pip compile")
 }
 
 fn python_uv(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -1161,7 +1181,7 @@ fn python_uv(
     _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
-    let (mut command, _) = uv_command(store, platform, project)?;
+    let (mut command, _) = uv_command(store, activity, platform, project)?;
     match verb {
         Verb::Add => {
             command.args(["add", "--no-sync"]);
@@ -1191,7 +1211,7 @@ fn python_uv(
             }
         }
     }
-    run_inherited(store, command, "store uv")?;
+    run_inherited(activity, command, "store uv")?;
     Ok(vec!["pyproject.toml".to_string(), "uv.lock".to_string()])
 }
 
@@ -1635,6 +1655,7 @@ struct NodeEdit {
 
 fn node(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -1660,6 +1681,7 @@ fn node(
     if lock_name == "package-lock.json" {
         let node_obj = node::realize_runtime(
             store,
+            activity,
             platform,
             &selected_toolchain(platform, project, "node")?,
         )?;
@@ -1698,7 +1720,7 @@ fn node(
                 std::env::var("PATH").unwrap_or_default()
             ),
         );
-        run_inherited(store, command, "store npm")?;
+        run_inherited(activity, command, "store npm")?;
         return Ok(NodeEdit {
             files: vec!["package.json".into(), "package-lock.json".into()],
             sync_project: project.to_path_buf(),
@@ -1712,6 +1734,7 @@ fn node(
     let mut node_attribution = attribution.nested("node")?;
     let (tool_root, _x_lock, realized) = xrun::realize_node_tool(
         store,
+        activity,
         platform,
         &lock_root,
         manager.name(),
@@ -1726,6 +1749,7 @@ fn node(
     }
     let node_obj = node::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "node")?,
     )?;
@@ -1745,7 +1769,7 @@ fn node(
     // cache) and the scratch its modules state is pointed at (see
     // `PnpmScratch`). It is removed when the delegate returns; a leftover
     // from a killed run carries the `stage-` name `tog gc` sweeps.
-    let stage = store.stage()?;
+    let stage = store.stage_with_activity(activity)?;
     let package_path = project.join("package.json");
     let result = (|| -> io::Result<()> {
         let scratch = pnpm_scratch(&stage, project, &lock_root)?;
@@ -1796,7 +1820,7 @@ fn node(
                 ("npm_config_ignore_scripts".into(), "true".into()),
             ],
         );
-        run_inherited(store, command, &format!("store {}", manager.name()))?;
+        run_inherited(activity, command, &format!("store {}", manager.name()))?;
         Ok(())
     })();
     let _ = crate::kernel::store::remove_tree(&stage);
@@ -1817,6 +1841,7 @@ fn node(
 
 fn cargo_delegate(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -1831,6 +1856,7 @@ fn cargo_delegate(
     cargo::toolchain_file_components(platform, project)?;
     let rust_obj = cargo::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "cargo")?,
     )?;
@@ -1866,7 +1892,7 @@ fn cargo_delegate(
         .env("CARGO_NET_OFFLINE", "false")
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
-    run_inherited(store, command, "store cargo")?;
+    run_inherited(activity, command, "store cargo")?;
     Ok(vec!["Cargo.toml".to_string(), "Cargo.lock".to_string()])
 }
 
@@ -1875,6 +1901,7 @@ fn cargo_delegate(
 
 fn go_delegate(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -1890,10 +1917,11 @@ fn go_delegate(
     }
     let go_obj = go::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "go")?,
     )?;
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(activity)?;
     let args: Vec<String> = match verb {
         Verb::Add => std::iter::once("get".to_string())
             .chain(texts.iter().cloned())
@@ -1911,7 +1939,7 @@ fn go_delegate(
         }
     };
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = go::run_checked(store, &go_obj, project, &scratch, false, &refs);
+    let result = go::run_checked(activity, &go_obj, project, &scratch, false, &refs);
     let _ = crate::kernel::store::remove_tree(&scratch);
     result?;
     Ok(vec!["go.mod".to_string(), "go.sum".to_string()])
@@ -1922,6 +1950,7 @@ fn go_delegate(
 
 fn ruby_delegate(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -1932,10 +1961,11 @@ fn ruby_delegate(
     validate_delegate_specs(texts)?;
     let ruby_obj = ruby::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "ruby")?,
     )?;
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(activity)?;
     let result = (|| -> io::Result<()> {
         match verb {
             Verb::Add => {
@@ -1948,14 +1978,14 @@ fn ruby_delegate(
                     if dev {
                         args.extend(["--group", "development"]);
                     }
-                    ruby::run_checked(store, &ruby_obj, project, &scratch, &args)?;
+                    ruby::run_checked(activity, &ruby_obj, project, &scratch, &args)?;
                 }
                 Ok(())
             }
             Verb::Remove => {
                 let mut args = vec!["bundle", "remove"];
                 args.extend(texts.iter().map(String::as_str));
-                ruby::run_checked(store, &ruby_obj, project, &scratch, &args)
+                ruby::run_checked(activity, &ruby_obj, project, &scratch, &args)
             }
             Verb::Update => {
                 let mut args = vec!["bundle", "update"];
@@ -1963,7 +1993,7 @@ fn ruby_delegate(
                     args.push("--all");
                 }
                 args.extend(texts.iter().map(String::as_str));
-                ruby::run_checked(store, &ruby_obj, project, &scratch, &args)
+                ruby::run_checked(activity, &ruby_obj, project, &scratch, &args)
             }
         }
     })();
@@ -1977,6 +2007,7 @@ fn ruby_delegate(
 
 fn elixir_delegate(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     project: &Path,
     verb: Verb,
@@ -2009,16 +2040,17 @@ fn elixir_delegate(
         Verb::Update => {
             let beam = elixir::realize_runtime(
                 store,
+                activity,
                 platform,
                 &selected_toolchain(platform, project, "elixir")?,
             )?;
-            let scratch = store.stage()?;
+            let scratch = store.stage_with_activity(activity)?;
             let mut args = vec!["mix", "deps.update"];
             if texts.is_empty() {
                 args.push("--all");
             }
             args.extend(texts.iter().map(String::as_str));
-            let result = elixir::run_checked(store, &beam, project, &scratch, false, &args);
+            let result = elixir::run_checked(activity, &beam, project, &scratch, false, &args);
             let _ = crate::kernel::store::remove_tree(&scratch);
             result?;
             Ok(vec!["mix.lock".to_string()])
@@ -2059,7 +2091,13 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool, strict: bool) -> io::
     // below would find it already set.
     policy::init(&cwd, strict)?;
     let mut edit_attribution = edit_attribution()?;
-    let outcome = edit(ctx.platform, &cwd, request, &mut edit_attribution)?;
+    let outcome = edit(
+        ctx.platform,
+        &ctx.activity,
+        &cwd,
+        request,
+        &mut edit_attribution,
+    )?;
     for line in &outcome.lines {
         ui::note(line);
     }

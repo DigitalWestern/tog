@@ -5,6 +5,10 @@
 //! per ecosystem, `comforter/` records closures and projects them, and
 //! `commands/` holds one file per verb, which is what the binary calls.
 
+// Tests spawn fixtures and take leases freely. Production code is still
+// checked: clippy lints the non-test build of this crate too (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod cli;
 pub mod comforter;
 pub mod kernel;

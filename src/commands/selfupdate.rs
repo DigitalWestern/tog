@@ -351,6 +351,8 @@ fn parse_sha256(text: &str, asset: &str) -> io::Result<String> {
 /// `<binary> --version`, so a download that does not run on this machine,
 /// or that is not the release it was published as, is refused before it
 /// replaces a binary that works.
+// Reviewed site (tests/architecture.rs): runs the downloaded tog before it is installed; no store.
+#[allow(clippy::disallowed_methods)]
 fn smoke_test(binary: &Path, expected: Version) -> io::Result<String> {
     let output = Command::new(binary)
         .arg("--version")

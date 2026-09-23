@@ -1,6 +1,9 @@
 //! Electron provisioning. Heavy: downloads the real release
 //! zip (~100 MB), so it is ignored by default.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
@@ -36,13 +39,16 @@ fn electron_is_provisioned_where_its_installer_looks() {
     )));
     std::fs::create_dir_all(&root.0).unwrap();
     let store = store_at(&root.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let scratch = root.0.join("scratch");
     std::fs::create_dir_all(&scratch).unwrap();
 
     // A real, published release.
     let version = "39.0.0";
     let provisioning = tog::kernel::provider::artifacts::provision(
-        &store, platform, "electron", version, &scratch,
+        &store, activity, platform, "electron", version, &scratch,
     )
     .expect("provision")
     .expect("electron is provisioned");

@@ -81,6 +81,8 @@ pub struct Report {
 
 /// Sweep the store, and its forest and backup projections when
 /// `options.project` is set.
+// Reviewed site (tests/architecture.rs): operation boundary: public GC for callers holding no lease.
+#[allow(clippy::disallowed_methods)]
 pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Result<Report> {
     let Some(activity) = store.try_activity_exclusive()? else {
         writeln!(out, "cleanup skipped: a Tog job is using this store")?;

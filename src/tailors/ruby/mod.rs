@@ -12,6 +12,7 @@
 pub mod objects;
 pub mod tailor;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 use crate::kernel::fetch::{download_verified_held, hash_file, Digest};
 use crate::kernel::platform::{no_pin, Platform};
@@ -344,7 +345,7 @@ fn validate_ruby_layout(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn extract_ruby_bottle(store: &Store, tarball: &Path, staged: &Path) -> io::Result<()> {
+fn extract_ruby_bottle(activity: &StoreActivity, tarball: &Path, staged: &Path) -> io::Result<()> {
     // The verified Linux and Darwin bottles both use
     // portable-ruby/<version>/<tree>; this is deliberately not Node's
     // strip count. The archive remains unchanged in the verified cache.
@@ -355,7 +356,7 @@ fn extract_ruby_bottle(store: &Store, tarball: &Path, staged: &Path) -> io::Resu
         .args(["-C"])
         .arg(staged)
         .args(["--strip-components", "2"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(err("portable-ruby extraction failed"));
     }
@@ -380,12 +381,16 @@ fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()>
 /// Ensure the shipped portable Ruby is realized (interpreter at
 /// <obj>/bin/ruby). For callers with no project selection: tests and the
 /// host-side lock generation `tog add` runs before a sync exists.
-pub fn ensure_ruby(store: &Store) -> io::Result<PathBuf> {
-    ensure_ruby_for(store, Platform::host()?)
+pub fn ensure_ruby(store: &Store, activity: &StoreActivity) -> io::Result<PathBuf> {
+    ensure_ruby_for(store, activity, Platform::host()?)
 }
 
-pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    realize_runtime(store, platform, &shipped_selection()?)
+pub fn ensure_ruby_for(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+) -> io::Result<PathBuf> {
+    realize_runtime(store, activity, platform, &shipped_selection()?)
 }
 
 /// Realize the Ruby the selection names: its bytes, its version, its
@@ -393,6 +398,7 @@ pub fn ensure_ruby_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
 /// nothing here reads the pin table.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
@@ -401,18 +407,18 @@ pub fn realize_runtime(
     let spec = ruby_spec(platform, selected)?;
     let identity = ruby_identity(&spec);
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_held(store, &spec.url, &spec.sha256)?;
-    let staged = store.stage()?;
-    if let Err(error) = extract_ruby_bottle(store, &tarball, &staged) {
+    let tarball = download_verified_held(store, activity, &spec.url, &spec.sha256)?;
+    let staged = store.stage_with_activity(activity)?;
+    if let Err(error) = extract_ruby_bottle(activity, &tarball, &staged) {
         let _ = crate::kernel::store::remove_tree(&staged);
         return Err(error);
     }
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(&spec.sha256)?);
             deps
@@ -469,14 +475,14 @@ pub fn run_env(
 /// Run a store Ruby tool for a delegated edit (`tog add` and friends):
 /// same environment as planning, failure carries the tool's stderr.
 pub(crate) fn run_checked(
-    store: &Store,
+    activity: &StoreActivity,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<()> {
     crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_ruby_edit(store, ruby_obj, cwd, gem_home, args)?;
+    let out = run_ruby_edit(activity, ruby_obj, cwd, gem_home, args)?;
     if crate::kernel::ui::verbose() {
         eprint!("{}", String::from_utf8_lossy(&out.stdout));
     }
@@ -491,17 +497,17 @@ pub(crate) fn run_checked(
 }
 
 fn run_ruby(
-    store: &Store,
+    activity: &StoreActivity,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
     args: &[&str],
 ) -> io::Result<std::process::Output> {
-    run_ruby_with_env(store, ruby_obj, cwd, args, forced_env(cwd, gem_home))
+    run_ruby_with_env(activity, ruby_obj, cwd, args, forced_env(cwd, gem_home))
 }
 
 fn run_ruby_edit(
-    store: &Store,
+    activity: &StoreActivity,
     ruby_obj: &Path,
     cwd: &Path,
     gem_home: &Path,
@@ -511,11 +517,11 @@ fn run_ruby_edit(
     if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "BUNDLE_FROZEN") {
         *value = "false".to_string();
     }
-    run_ruby_with_env(store, ruby_obj, cwd, args, env)
+    run_ruby_with_env(activity, ruby_obj, cwd, args, env)
 }
 
 fn run_ruby_with_env(
-    store: &Store,
+    activity: &StoreActivity,
     ruby_obj: &Path,
     cwd: &Path,
     args: &[&str],
@@ -532,7 +538,7 @@ fn run_ruby_with_env(
     cmd.env("PATH", path);
     force_env(&mut cmd, ENV_REMOVE_PREFIXES, ENV_REMOVE, &environment);
     cmd.stdin(std::process::Stdio::null());
-    crate::kernel::supervise::output_owned(&mut cmd, store)
+    crate::kernel::supervise::output(&mut cmd, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
 }
 
@@ -740,6 +746,7 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
 /// plan from the lock.
 pub fn plan_ruby(
     store: &Store,
+    activity: &StoreActivity,
     project_dir: &Path,
     ruby_obj: &Path,
     selected: &Selected,
@@ -750,8 +757,14 @@ pub fn plan_ruby(
     let lock_path = project_dir.join("Gemfile.lock");
     if !lock_path.is_file() {
         ui::note("no Gemfile.lock; resolving with the store bundler...");
-        let scratch = store.stage()?;
-        let out = run_ruby(store, ruby_obj, project_dir, &scratch, &["bundle", "lock"])?;
+        let scratch = store.stage_with_activity(activity)?;
+        let out = run_ruby(
+            activity,
+            ruby_obj,
+            project_dir,
+            &scratch,
+            &["bundle", "lock"],
+        )?;
         let _ = crate::kernel::store::remove_tree(&scratch);
         if !out.status.success() {
             return Err(err(format!(
@@ -765,7 +778,7 @@ pub fn plan_ruby(
     // authority. Planning re-derives from the lock every sync; the store's
     // object cache still makes realizes instant.
 
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(activity)?;
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
     let helper_path = helper
@@ -774,7 +787,7 @@ pub fn plan_ruby(
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
     let out = run_ruby(
-        store,
+        activity,
         ruby_obj,
         project_dir,
         &scratch,
@@ -798,7 +811,7 @@ pub fn plan_ruby(
     }
     // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
     let out = run_ruby(
-        store,
+        activity,
         ruby_obj,
         project_dir,
         &scratch,
@@ -897,6 +910,7 @@ pub fn plan_ruby(
 /// installs (native extensions compile here, network denied).
 pub fn realize_gems(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &RubyPlan,
     ruby_obj: &Path,
@@ -908,13 +922,13 @@ pub fn realize_gems(
     validate_plan(plan)?;
     let identity = ruby_gems_identity(&spec, plan);
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
     // Fetch + post-download spec verification first (all-or-nothing).
-    let scratch = store.stage()?;
+    let scratch = store.stage_with_activity(activity)?;
     let helper = scratch.join("helper.rb");
     fs::write(&helper, HELPER)?;
     let mut artifacts: Vec<(&RubyGem, PathBuf)> = Vec::new();
@@ -927,12 +941,12 @@ pub fn realize_gems(
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
         let url = gem_url(g);
-        let lease = download_verified_held(store, &url, &g.sha256)
+        let lease = download_verified_held(store, activity, &url, &g.sha256)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
         let file_path = lease.to_path_buf();
         _cache_leases.push(lease);
         let out = run_ruby(
-            store,
+            activity,
             ruby_obj,
             &scratch,
             &scratch,
@@ -985,7 +999,7 @@ pub fn realize_gems(
         artifacts.push((g, file_path));
     }
 
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(activity)?;
     let bin = staged.join("bin");
     fs::create_dir_all(&bin)?;
     for (g, file) in &artifacts {
@@ -1026,8 +1040,8 @@ pub fn realize_gems(
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
         };
-        crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, store).map_err(
-            |e| {
+        crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity)
+            .map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!(
@@ -1037,8 +1051,7 @@ pub fn realize_gems(
                         g.full_name
                     ),
                 )
-            },
-        )?;
+            })?;
     }
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -1047,12 +1060,13 @@ pub fn realize_gems(
         deps.cache_digest(Digest::sha256(&gem.sha256)?);
     }
     store
-        .commit_with_deps(&identity, &staged, &[], &deps)
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
         .map(|(path, _)| path)
 }
 
 /// Project provenance (closure envelope); enforcement is env, set at run.
 pub fn project_ruby_env(
+    activity: &StoreActivity,
     project_dir: &Path,
     ruby_obj: &Path,
     gems_obj: &Path,
@@ -1065,16 +1079,15 @@ pub fn project_ruby_env(
     let gems_obj = gems_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&ruby_obj)
         .ok_or_else(|| err("Ruby object is not in a Tog store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let mut refs = crate::comforter::ClosureRefs::new();
-    refs.object_path(&store, &activity, &ruby_obj)?;
-    refs.object_path(&store, &activity, &gems_obj)?;
+    refs.object_path(&store, activity, &ruby_obj)?;
+    refs.object_path(&store, activity, &gems_obj)?;
     crate::comforter::write_closure(
         project_dir,
         "ruby",
         closure_body(&ruby_obj, &gems_obj, plan, lock_sha256, selected)?,
         &store,
-        &activity,
+        activity,
         refs,
         attribution,
     )
@@ -1535,6 +1548,10 @@ mod tests {
         let store = Store {
             root: store_root.canonicalize().unwrap(),
         };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
         let ruby_id = format!("{}-ruby-{RUBY_VERSION}", "1".repeat(40));
         let gems_id = format!("{}-gems-1", "2".repeat(40));
         for id in [&ruby_id, &gems_id] {
@@ -1552,6 +1569,7 @@ mod tests {
         let project = temp.0.join("project");
         fs::create_dir_all(&project).unwrap();
         project_ruby_env(
+            activity,
             &project,
             &store.object_path(&ruby_id),
             &store.object_path(&gems_id),
@@ -1573,6 +1591,7 @@ mod tests {
         assert!(record.projections.is_empty(), "{:?}", record.projections);
 
         // `gc --register` rebuilds the same record from this closure alone.
+        drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);

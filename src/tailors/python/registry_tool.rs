@@ -114,7 +114,7 @@ impl RegistryTool for PythonTool {
         fs::write(&input, &spec)?;
         ui::note(&format!("resolving {} with the store uv...", spec.trim()));
         // The bundle names the uv build this environment resolves with.
-        let uv = python::realize_uv(store, platform, toolchain)?.join("uv");
+        let uv = python::realize_uv(store, activity, platform, toolchain)?.join("uv");
         let mut command = Command::new(uv);
         command
             .args(["pip", "compile"])
@@ -146,8 +146,8 @@ impl RegistryTool for PythonTool {
         }
         let text = fs::read_to_string(&output)?;
         let plan = pypi::plan_python(platform, &text, pin.version)?;
-        let env = env::realize_env_for(store, platform, &plan, toolchain)?;
-        env::project_env_with_selection(root, &env, &plan, &selection, attribution)?;
+        let env = env::realize_env_for(store, activity, platform, &plan, toolchain)?;
+        env::project_env_with_selection(activity, root, &env, &plan, &selection, attribution)?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())
     }
@@ -155,6 +155,7 @@ impl RegistryTool for PythonTool {
     fn launch_env(
         &self,
         _store: &Store,
+        _activity: &StoreActivity,
         _platform: Platform,
         root: &Path,
         _toolchain: &Selected,

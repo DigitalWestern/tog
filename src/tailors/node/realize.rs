@@ -8,10 +8,10 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-pub(super) fn tarball_has_binding_gyp(store: &Store, path: &Path) -> io::Result<bool> {
+pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> io::Result<bool> {
     let mut command = Command::new("/usr/bin/tar");
     command.args(["-tzf"]).arg(path);
-    let output = crate::kernel::supervise::output_owned(&mut command, store).map_err(|e| {
+    let output = crate::kernel::supervise::output(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("list npm tarball {}: {e}", path.display()),
@@ -192,6 +192,7 @@ pub(super) fn persisted_archive_classification(
 
 pub(super) fn classify_downloaded_archives(
     store: &Store,
+    activity: &StoreActivity,
     tarballs: &[(&NpmPackage, crate::kernel::fetch::CacheLease)],
 ) -> io::Result<bool> {
     let mut has_native = false;
@@ -199,7 +200,7 @@ pub(super) fn classify_downloaded_archives(
         let digest = Digest::from_sri(&package.integrity)?;
         // The tarball was returned by download_verified_digest, so inspect the
         // verified bytes and persist the result before planning the identity.
-        let binding_gyp = tarball_has_binding_gyp(store, tarball)?;
+        let binding_gyp = tarball_has_binding_gyp(activity, tarball)?;
         write_archive_classification(store, &digest, binding_gyp)?;
         has_native |= binding_gyp;
     }
@@ -208,6 +209,7 @@ pub(super) fn classify_downloaded_archives(
 
 pub(super) fn fetch_npm_tarballs<'a>(
     store: &Store,
+    activity: &StoreActivity,
     packages: &'a [NpmPackage],
 ) -> io::Result<Vec<(&'a NpmPackage, crate::kernel::fetch::CacheLease)>> {
     packages
@@ -215,9 +217,10 @@ pub(super) fn fetch_npm_tarballs<'a>(
         .filter(|p| p.git.is_none())
         .map(|p| {
             let digest = Digest::from_sri(&p.integrity)?;
-            let tarball = download_verified_digest_held(store, &p.url, &digest).map_err(|e| {
-                io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
-            })?;
+            let tarball =
+                download_verified_digest_held(store, activity, &p.url, &digest).map_err(|e| {
+                    io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+                })?;
             Ok((p, tarball))
         })
         .collect()
@@ -245,12 +248,14 @@ pub(super) fn native_libs_identity_id(
 /// uses `realize_node_env_for`.
 pub fn realize_node_env(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
 ) -> io::Result<PathBuf> {
     realize_node_env_for(
         store,
+        activity,
         platform,
         plan,
         artifacts,
@@ -265,6 +270,7 @@ pub fn realize_node_env(
 /// otherwise. Its object id is an input of the `node-env/5` identity.
 pub fn realize_node_env_for(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
@@ -273,9 +279,11 @@ pub fn realize_node_env_for(
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "node environment")?;
-    let node_obj = crate::tailors::node::realize_runtime(store, platform, selected)
+    let node_obj = crate::tailors::node::realize_runtime(store, activity, platform, selected)
         .map_err(wrap_ensure_node_error)?;
-    realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj, gyp_python)
+    realize_node_env_with_node_object(
+        store, activity, platform, plan, artifacts, &node_obj, gyp_python,
+    )
 }
 
 /// The producer's provisioning decision, exposed to the `node-env` identity
@@ -565,6 +573,7 @@ fn node_env_identity_inner(
 /// the caller keeps those leases until it no longer needs the cached bytes.
 fn resolve_native_libs_id<'a>(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &'a NpmPlan,
     classification: &mut Vec<(&'a NpmPackage, crate::kernel::fetch::CacheLease)>,
@@ -575,8 +584,8 @@ fn resolve_native_libs_id<'a>(
     let has_native = match persisted_archive_classification(store, &plan.packages)? {
         Some(has_native) => has_native,
         None => {
-            *classification = fetch_npm_tarballs(store, &plan.packages)?;
-            classify_downloaded_archives(store, classification)?
+            *classification = fetch_npm_tarballs(store, activity, &plan.packages)?;
+            classify_downloaded_archives(store, activity, classification)?
         }
     };
     native_libs_identity_id(store, platform, has_native)
@@ -593,6 +602,7 @@ fn resolve_native_libs_id<'a>(
 #[allow(clippy::type_complexity)]
 fn fetch_plan_sources(
     store: &Store,
+    activity: &StoreActivity,
     plan: &NpmPlan,
 ) -> io::Result<(
     Vec<crate::kernel::fetch::CacheLease>,
@@ -607,12 +617,13 @@ fn fetch_plan_sources(
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
         if let Some(source) = &p.git {
-            let object = crate::kernel::gitsrc::ensure_git_source(store, source).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{}: git source {}: {e}", p.path, source.url),
-                )
-            })?;
+            let object = crate::kernel::gitsrc::ensure_git_source(store, activity, source)
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("{}: git source {}: {e}", p.path, source.url),
+                    )
+                })?;
             crate::kernel::policy::record(
                 crate::kernel::policy::GIT_DEPENDENCY,
                 &format!("{}@{}", p.name, p.version),
@@ -626,9 +637,10 @@ fn fetch_plan_sources(
         let t = if let Some(t) = downloaded.get(&cache_key) {
             t.clone()
         } else {
-            let lease = download_verified_digest_held(store, &p.url, &digest).map_err(|e| {
-                io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
-            })?;
+            let lease =
+                download_verified_digest_held(store, activity, &p.url, &digest).map_err(|e| {
+                    io::Error::new(e.kind(), format!("{}: fetch {}: {e}", p.path, p.url))
+                })?;
             let path = lease.to_path_buf();
             leases.push(lease);
             downloaded.insert(cache_key, path.clone());
@@ -640,8 +652,12 @@ fn fetch_plan_sources(
 }
 
 /// The staged env skeleton: the root node_modules plus one per workspace.
-fn stage_env_skeleton(store: &Store, workspaces: &[String]) -> io::Result<PathBuf> {
-    let staged = store.stage()?;
+fn stage_env_skeleton(
+    store: &Store,
+    activity: &StoreActivity,
+    workspaces: &[String],
+) -> io::Result<PathBuf> {
+    let staged = store.stage_with_activity(activity)?;
     fs::create_dir_all(staged.join("node_modules"))?;
     for workspace in workspaces {
         fs::create_dir_all(
@@ -728,11 +744,12 @@ impl Drop for PatchSnapshot {
 /// the whole directory through `PatchSnapshot::drop`.
 fn snapshot_verified_patch(
     store: &Store,
+    activity: &StoreActivity,
     package_path: &str,
     patch: &NpmPatch,
 ) -> io::Result<PatchSnapshot> {
     let patch_bytes = read_verified_patch(package_path, patch)?;
-    let root = store.stage()?;
+    let root = store.stage_with_activity(activity)?;
     let path = root.join("patch");
     let snapshot = PatchSnapshot {
         root,
@@ -750,7 +767,7 @@ fn snapshot_verified_patch(
 }
 
 fn apply_verified_patch(
-    store: &Store,
+    activity: &StoreActivity,
     package_path: &str,
     snapshot: &PatchSnapshot,
     dest: &Path,
@@ -770,7 +787,7 @@ fn apply_verified_patch(
         .args(["-p1", "--batch", "--forward"])
         .current_dir(dest)
         .stdin(snapshot_file);
-    let status = crate::kernel::supervise::status_owned(&mut command, store).map_err(|e| {
+    let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -802,6 +819,7 @@ fn apply_verified_patch(
 /// already holds after sort, since "a/node_modules/b" sorts after "a").
 fn extract_tarball_packages(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     staged: &Path,
     tarballs: &mut [(NpmPackage, PathBuf)],
@@ -826,15 +844,15 @@ fn extract_tarball_packages(
             // identical either way.
             tar.arg("--delay-directory-restore");
         }
-        let status = crate::kernel::supervise::status_owned(&mut tar, store)?;
+        let status = crate::kernel::supervise::status(&mut tar, activity)?;
         if !status.success() {
             return Err(err(format!("{}: tarball extraction failed", p.path)));
         }
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
         if let Some(patch) = &p.patch {
-            let snapshot = snapshot_verified_patch(store, &p.path, patch)?;
-            apply_verified_patch(store, &p.path, &snapshot, &dest)?;
+            let snapshot = snapshot_verified_patch(store, activity, &p.path, patch)?;
+            apply_verified_patch(activity, &p.path, &snapshot, &dest)?;
         }
         if p.bin.is_empty() {
             if let Ok(manifest) = fs::read_to_string(dest.join("package.json")) {
@@ -862,7 +880,7 @@ fn extract_tarball_packages(
 /// tog does not, because that script is unsandboxed build logic with its
 /// own dependency needs — the exception says so rather than pretending.
 fn place_git_packages(
-    store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     staged: &Path,
     git_objects: &mut [(NpmPackage, PathBuf)],
@@ -897,7 +915,7 @@ fn place_git_packages(
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
         let _ = crate::kernel::store::remove_tree(&staging);
-        crate::comforter::clone_tree_for_store(store, &source_root, &staging, platform)
+        crate::comforter::clone_tree_with_activity(activity, &source_root, &staging, platform)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path)))?;
         for entry in fs::read_dir(&staging)? {
             let entry = entry?;
@@ -1035,13 +1053,14 @@ fn link_package_bins(staged: &Path, packages: &[(NpmPackage, PathBuf)]) -> io::R
 /// was not already a candidate.
 fn commit_env_object(
     store: &Store,
+    activity: &StoreActivity,
     identity: &Identity,
     staged: &Path,
     deps: &crate::kernel::store::ObjectDeps,
 ) -> io::Result<PathBuf> {
     let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
-        .commit_with_deps(identity, staged, &candidate, deps)
+        .commit_with_activity_and_deps(activity, identity, staged, &candidate, deps)
         .map_err(|e| io::Error::new(e.kind(), format!("commit env: {e}")))?;
     for exception in applied {
         if !candidate.contains(&exception) {
@@ -1053,6 +1072,7 @@ fn commit_env_object(
 
 pub(super) fn realize_node_env_with_node_object(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
@@ -1066,8 +1086,15 @@ pub(super) fn realize_node_env_with_node_object(
             .map_err(|e| io::Error::new(e.kind(), format!("python for node-gyp: {e}")))?;
     let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
         Vec::new();
-    let native_libs_id =
-        resolve_native_libs_id(store, platform, plan, &mut classification_tarballs)?;
+    // One lease for the whole realization: the archive children and the
+    // staged environment borrow it.
+    let native_libs_id = resolve_native_libs_id(
+        store,
+        activity,
+        platform,
+        plan,
+        &mut classification_tarballs,
+    )?;
     let identity = node_env_identity(
         store,
         platform,
@@ -1078,8 +1105,8 @@ pub(super) fn realize_node_env_with_node_object(
         &gyp_python_id,
     )?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -1089,19 +1116,19 @@ pub(super) fn realize_node_env_with_node_object(
     // cached bytes mid-extraction; `leases` is held to the end of this
     // function for exactly that reason.
     drop(classification_tarballs);
-    let (_leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, plan)?;
+    let (_leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, activity, plan)?;
 
     let native_libs = if native_libs_id.is_some() {
         Some(crate::kernel::provider::nativelibs::ensure_native_libs(
-            store, platform,
+            store, activity, platform,
         )?)
     } else {
         None
     };
 
-    let staged = stage_env_skeleton(store, &workspaces)?;
-    extract_tarball_packages(store, platform, &staged, &mut tarballs)?;
-    place_git_packages(store, platform, &staged, &mut git_objects)?;
+    let staged = stage_env_skeleton(store, activity, &workspaces)?;
+    extract_tarball_packages(store, activity, platform, &staged, &mut tarballs)?;
+    place_git_packages(activity, platform, &staged, &mut git_objects)?;
     // Capture provenance before the package vectors are merged and dropped.
     let mut deps = env_object_deps(plan, node_obj, native_libs_id.as_deref(), &git_objects)?;
 
@@ -1114,6 +1141,7 @@ pub(super) fn realize_node_env_with_node_object(
     drop(tarballs);
     run_install_scripts(
         store,
+        activity,
         platform,
         &staged,
         &node_obj,
@@ -1124,7 +1152,7 @@ pub(super) fn realize_node_env_with_node_object(
         &mut deps,
     )?;
 
-    commit_env_object(store, &identity, &staged, &deps)
+    commit_env_object(store, activity, &identity, &staged, &deps)
 }
 
 pub(super) enum LifecycleFailure {
@@ -1161,6 +1189,7 @@ pub(super) fn classify_lifecycle_result(result: io::Result<()>) -> Result<(), Li
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_install_scripts(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     staged: &Path,
     node_obj: &Path,
@@ -1176,6 +1205,7 @@ pub(super) fn run_install_scripts(
     let mut cleanup: Vec<PathBuf> = Vec::new();
     let result = run_install_scripts_staged(
         store,
+        activity,
         platform,
         staged,
         node_obj,
@@ -1227,6 +1257,7 @@ fn package_lifecycle_phases(pkg_dir: &Path) -> Option<Vec<(&'static str, String)
 /// a script can execute the node-gyp shim but never replace it.
 fn ensure_lifecycle_tools(
     store: &Store,
+    activity: &StoreActivity,
     node_obj: &Path,
     tools: &mut Option<PathBuf>,
     cleanup: &mut Vec<PathBuf>,
@@ -1236,7 +1267,7 @@ fn ensure_lifecycle_tools(
     }
     // A store stage dir: collision-proof and already canonical
     // (Seatbelt matches real paths).
-    let t = store.stage()?;
+    let t = store.stage_with_activity(activity)?;
     // node-gyp shim: npm normally injects this into PATH.
     let bin = t.join("bin");
     fs::create_dir_all(&bin)?;
@@ -1260,13 +1291,14 @@ fn ensure_lifecycle_tools(
 /// recorded in `consumed`.
 fn plant_declared_artifacts(
     store: &Store,
+    activity: &StoreActivity,
     artifacts: &[DeclaredArtifact],
     tmp: &Path,
     consumed: &mut crate::kernel::store::ObjectDeps,
 ) -> io::Result<()> {
     for a in artifacts {
         consumed.cache_digest(Digest::sha256(&a.sha256)?);
-        let src = download_verified_held(store, &a.url, &a.sha256)
+        let src = download_verified_held(store, activity, &a.url, &a.sha256)
             .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
         let dest = tmp.join(&a.path);
         fs::create_dir_all(dest.parent().unwrap())?;
@@ -1285,6 +1317,7 @@ fn plant_declared_artifacts(
 /// (`gyp_python`), realized lazily, only when a package runs a script.
 fn ensure_gyp_python(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     gyp_python: &crate::kernel::toolchain::Selected,
     python_obj: &mut Option<PathBuf>,
@@ -1292,8 +1325,9 @@ fn ensure_gyp_python(
     if let Some(p) = python_obj {
         return Ok(p.clone());
     }
-    let p = crate::kernel::provider::cpython::realize_runtime(store, platform, gyp_python)
-        .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
+    let p =
+        crate::kernel::provider::cpython::realize_runtime(store, activity, platform, gyp_python)
+            .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
     Ok(python_obj.insert(p).clone())
 }
 
@@ -1377,6 +1411,7 @@ fn lifecycle_base_envs(
 /// supply the artifact, the package is really installed rather than skipped.
 fn apply_artifact_policy(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     p: &NpmPackage,
     tmp: &Path,
@@ -1397,8 +1432,9 @@ fn apply_artifact_policy(
         a.path.split('/').any(|segment| segment == p.name)
             || a.url.contains(&format!("/{}/", p.name))
     });
-    let provisioned =
-        crate::kernel::provider::artifacts::provision(store, platform, &p.name, &p.version, tmp);
+    let provisioned = crate::kernel::provider::artifacts::provision(
+        store, activity, platform, &p.name, &p.version, tmp,
+    );
     if let Some(provisioning) = require_provisioning(p, provisioned)? {
         envs.extend(provisioning.envs);
         for digest in provisioning.cache_digests {
@@ -1527,6 +1563,7 @@ fn run_package_phases(
 
 pub(super) fn run_install_scripts_staged(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     staged: &Path,
     node_obj: &Path,
@@ -1537,7 +1574,6 @@ pub(super) fn run_install_scripts_staged(
     consumed: &mut crate::kernel::store::ObjectDeps,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     // Deepest first: nested deps build before their dependents.
     let mut pkgs: Vec<&NpmPackage> = plan.packages.iter().collect();
     pkgs.sort_by_key(|p| std::cmp::Reverse(p.path.matches("node_modules/").count()));
@@ -1552,22 +1588,22 @@ pub(super) fn run_install_scripts_staged(
             continue;
         };
 
-        let tools_dir = ensure_lifecycle_tools(store, node_obj, &mut tools, cleanup)?;
+        let tools_dir = ensure_lifecycle_tools(store, activity, node_obj, &mut tools, cleanup)?;
         // Fresh scratch HOME per package: no shared writable state between
         // one package's scripts and the next.
-        let tmp = store.stage()?;
+        let tmp = store.stage_with_activity(activity)?;
         cleanup.push(tmp.clone());
-        plant_declared_artifacts(store, artifacts, &tmp, consumed)?;
+        plant_declared_artifacts(store, activity, artifacts, &tmp, consumed)?;
 
         // Snapshot lives in its own stage dir: neither readable nor writable
         // inside the sandbox, so a failing script cannot tamper with what
         // gets restored.
-        let snapshot_root = store.stage()?;
+        let snapshot_root = store.stage_with_activity(activity)?;
         cleanup.push(snapshot_root.clone());
         let snapshot = snapshot_root.join("package");
-        crate::comforter::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
+        crate::comforter::clone_tree_with_activity(activity, &pkg_dir, &snapshot, platform)?;
 
-        let python = ensure_gyp_python(store, platform, gyp_python, &mut python_obj)?;
+        let python = ensure_gyp_python(store, activity, platform, gyp_python, &mut python_obj)?;
         // The script is handed `$PYTHON` and may leave a symlink or wrapper
         // to it, or link libpython, so the interpreter it ran with is
         // evidence the environment keeps alive.
@@ -1577,7 +1613,7 @@ pub(super) fn run_install_scripts_staged(
         let path_env = lifecycle_path_env(&tools_dir, node_obj, staged, &p.path);
         let mut envs = lifecycle_base_envs(platform, node_obj, &python_bin, &tmp, p);
         apply_artifact_policy(
-            store, platform, p, &tmp, artifacts, &phases, &mut envs, consumed,
+            store, activity, platform, p, &tmp, artifacts, &phases, &mut envs, consumed,
         )?;
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {
@@ -1598,7 +1634,7 @@ pub(super) fn run_install_scripts_staged(
         };
         run_package_phases(
             platform, staged, plan, p, &pkg_dir, &snapshot, &tmp, &phases, &envs, path_env,
-            &sandbox, &activity,
+            &sandbox, activity,
         )?;
     }
     Ok(())
@@ -1711,6 +1747,9 @@ mod patch_snapshot_tests {
         std::env::set_var("TOG_STORE", temp.0.join("store"));
         let _store_env = StoreEnv(old_store);
         let store = Store::open().unwrap();
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
 
         let dest = temp.0.join("dest/node_modules/example");
         fs::create_dir_all(&dest).unwrap();
@@ -1728,7 +1767,8 @@ mod patch_snapshot_tests {
 
         let snapshot_root;
         {
-            let snapshot = snapshot_verified_patch(&store, "node_modules/example", &patch).unwrap();
+            let snapshot =
+                snapshot_verified_patch(&store, activity, "node_modules/example", &patch).unwrap();
             snapshot_root = snapshot.root.clone();
 
             let tampered_patch =
@@ -1743,7 +1783,15 @@ mod patch_snapshot_tests {
             drop(original);
             assert_eq!(fs::metadata(&original_path).unwrap().ino(), original_inode);
 
-            apply_verified_patch(&store, "node_modules/example", &snapshot, &dest).unwrap();
+            apply_verified_patch(
+                &store
+                    .activity(crate::kernel::activity::ActivityMode::Shared)
+                    .unwrap(),
+                "node_modules/example",
+                &snapshot,
+                &dest,
+            )
+            .unwrap();
         }
         assert!(!snapshot_root.exists(), "snapshot stage leaked");
         assert_eq!(

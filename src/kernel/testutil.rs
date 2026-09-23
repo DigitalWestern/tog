@@ -39,3 +39,16 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// A lease on an empty scratch store, for a test whose code under test takes
+/// the caller's activity token but must return before touching any store.
+/// The directory is removed when the `TempDir` drops.
+pub(crate) fn detached_lease() -> (TempDir, crate::kernel::activity::StoreActivity) {
+    let temp = TempDir::new();
+    let activity = crate::kernel::activity::StoreActivity::acquire(
+        &temp.0,
+        crate::kernel::activity::ActivityMode::Shared,
+    )
+    .unwrap();
+    (temp, activity)
+}

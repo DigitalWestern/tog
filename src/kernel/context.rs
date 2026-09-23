@@ -15,9 +15,10 @@ pub struct Context {
     pub store: Store,
     project_dir: Option<PathBuf>,
     /// Keeps the operation protected from its first store read through its
-    /// final child/projection use. Individual `Store` helpers acquire a
-    /// short compatibility lease when called directly; this long-lived lease
-    /// is what prevents GC from racing a CLI job.
+    /// final child/projection use, which is what prevents GC from racing a
+    /// CLI job. Every store helper borrows this lease as a `&StoreActivity`
+    /// parameter; only the lease-free root-registry calls (`register_root`
+    /// and friends) take their own.
     pub activity: StoreActivity,
 }
 
@@ -39,6 +40,8 @@ impl Context {
         Self::open_with_project_dir(platform, Some(project_dir.to_path_buf()), maintenance)
     }
 
+    // Reviewed site (tests/architecture.rs): operation boundary: the shared lease every command borrows via `Context`.
+    #[allow(clippy::disallowed_methods)]
     fn open_with_project_dir(
         platform: Platform,
         project_dir: Option<PathBuf>,

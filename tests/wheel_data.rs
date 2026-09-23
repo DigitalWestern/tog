@@ -1,6 +1,9 @@
 //! End-to-end wheel `.data` scheme coverage. Heavy: resolves greenlet and
 //! realizes CPython plus the selected manylinux/macosx wheel, so it is ignored.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

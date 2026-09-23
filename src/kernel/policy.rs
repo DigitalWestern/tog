@@ -851,6 +851,9 @@ pub fn object_exceptions() -> Vec<Exception> {
 }
 
 /// Refuse a cached object when its recorded exceptions are denied now.
+/// Test-only: production borrows its caller's lease through
+/// `check_cached_with_activity`.
+#[cfg(test)]
 pub fn check_cached(store: &Store, id: &str) -> io::Result<()> {
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     check_cached_with_activity(store, &activity, id)

@@ -2,6 +2,9 @@
 //! sdist-only on PyPI) must build into a wheel inside the network-denied
 //! sandbox. Heavy; run: cargo test --test sdist_build -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 use tog::kernel::types::*;
@@ -12,6 +15,9 @@ use tog::tailors::python::build;
 #[ignore]
 fn docopt_sdist_builds_in_sandbox() {
     let store = Store::open().expect("store");
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let pkg = LockedPackage {
         name: "docopt".into(),
         version: "0.6.2".into(),
@@ -23,6 +29,7 @@ fn docopt_sdist_builds_in_sandbox() {
     };
     let wheel = build::build_sdist_wheel(
         &store,
+        activity,
         Platform::host().unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),

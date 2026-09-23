@@ -1,6 +1,9 @@
 //! End-to-end Cargo tailor test. Heavy: downloads the pinned Rust toolchain
 //! and crates.io closure on first run.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tog::kernel::platform::Platform;

@@ -62,7 +62,7 @@ impl Tailor for Python {
 
     fn plan(&self, ctx: &Context, dir: &Path, selected: &Selected) -> io::Result<Option<String>> {
         let (plan, _selection, _inputs) =
-            inputs::read_plan(ctx.platform, dir, &ctx.store, selected)?;
+            inputs::read_plan(ctx.platform, dir, &ctx.store, &ctx.activity, selected)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -73,19 +73,28 @@ impl Tailor for Python {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let activity = &ctx.activity;
         let platform = ctx.platform;
         let store = &ctx.store;
         // The interpreter and the resolver this sync uses are the rows the
         // project's toolchain selection names, not the pin table.
         let selected = request.toolchain;
-        let (plan, selection, inputs) = inputs::read_plan(platform, dir, store, selected)?;
-        let runtime = python::realize_runtime(store, platform, selected)?;
+        let (plan, selection, inputs) =
+            inputs::read_plan(platform, dir, store, &ctx.activity, selected)?;
+        let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
         let helpers = request.helpers(self)?;
-        let env =
-            super::env::realize_env_with(store, platform, &plan, selected, helpers.get("rust"))?;
+        let env = super::env::realize_env_with(
+            store,
+            activity,
+            platform,
+            &plan,
+            selected,
+            helpers.get("rust"),
+        )?;
         super::env::project_env_with_inputs(
+            activity,
             dir,
             &env,
             &plan,

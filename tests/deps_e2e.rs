@@ -4,6 +4,9 @@
 //! ignored because each test may download a toolchain and resolve a package
 //! from its registry.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

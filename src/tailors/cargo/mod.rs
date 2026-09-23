@@ -7,6 +7,7 @@ pub mod objects;
 pub mod rustfmt;
 pub mod tailor;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{LegacyEvidence, Selected};
@@ -31,18 +32,23 @@ pub use crate::kernel::provider::rust::{
 /// `kernel::provider::rust::realize_runtime`.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::provider::rust::realize_runtime(store, platform, selected)
+    crate::kernel::provider::rust::realize_runtime(store, activity, platform, selected)
 }
 
 /// Realize the registry closure as a Cargo directory source; see
 /// `kernel::provider::crates::realize_vendor`.
-pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
+pub fn realize_vendor(
+    store: &Store,
+    activity: &StoreActivity,
+    plan: &CargoPlan,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::provider::crates::realize_vendor(store, plan)
+    crate::kernel::provider::crates::realize_vendor(store, activity, plan)
 }
 
 /// A pre-lock cargo closure records the toolchain under `plan.rust_version`;
@@ -218,6 +224,7 @@ pub(crate) fn merge_record(body: &mut serde_json::Value, record: serde_json::Val
 /// selection the run honored: the closure records it so the release this
 /// Rust object came from is readable without re-deriving it from the plan.
 pub fn project_cargo_env(
+    activity: &StoreActivity,
     project_dir: &Path,
     rust_obj: &Path,
     vendor_obj: &Path,
@@ -235,7 +242,6 @@ pub fn project_cargo_env(
     let vendor_obj = vendor_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&rust_obj)
         .ok_or_else(|| err("Rust object is not in a Tog store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let meta_dir = project_dir.join(".tog");
     fs::create_dir_all(&meta_dir)?;
     let cargo_home = project_child_dir(&project_dir, ".tog/cargo-home")?;
@@ -319,14 +325,14 @@ pub fn project_cargo_env(
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `rust_object` are the same object; the direct
     // reference is what keeps it alive across a GC.
-    refs.object_path(&store, &activity, &rust_obj)?;
-    refs.object_path(&store, &activity, &vendor_obj)?;
+    refs.object_path(&store, activity, &rust_obj)?;
+    refs.object_path(&store, activity, &vendor_obj)?;
     crate::comforter::write_closure(
         &project_dir,
         "cargo",
         body,
         &store,
-        &activity,
+        activity,
         refs,
         attribution,
     )
@@ -335,13 +341,15 @@ pub fn project_cargo_env(
 /// Build a Cargo project in the network-denied sandbox.
 pub fn build_sandboxed(
     platform: Platform,
+    activity: &StoreActivity,
     project_dir: &Path,
     rust_obj: &Path,
     vendor_obj: &Path,
     args: &[String],
 ) -> io::Result<()> {
-    let store = Store::open()?;
     reject_user_config(args)?;
+    let store = Store::open()?;
+    store.require_activity(activity, "cargo build")?;
     let project_dir = project_dir.canonicalize()?;
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
@@ -402,7 +410,7 @@ pub fn build_sandboxed(
         scratch: scratch.clone(),
         path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
     };
-    let result = crate::kernel::sandbox::run_build_spec_on_for_store(platform, &spec, &store);
+    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity);
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
         io::Error::new(e.kind(), format!(
@@ -907,6 +915,8 @@ checksum = "{hash_b}"
         let store = Store {
             root: temp.path().join("absent-store"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let platform = Platform::host().unwrap();
 
         let foreign = Selected {
@@ -915,7 +925,7 @@ checksum = "{hash_b}"
             lock_sha256: None,
             source: crate::kernel::toolchain::Source::Lock,
         };
-        let error = realize_runtime(&store, platform, &foreign)
+        let error = realize_runtime(&store, activity, platform, &foreign)
             .unwrap_err()
             .to_string();
         assert!(error.contains("python selection"), "{error}");
@@ -939,7 +949,7 @@ checksum = "{hash_b}"
             lock_sha256: None,
             source: crate::kernel::toolchain::Source::Lock,
         };
-        let error = realize_runtime(&store, platform, &unknown)
+        let error = realize_runtime(&store, activity, platform, &unknown)
             .unwrap_err()
             .to_string();
         assert!(error.contains("recipe example/1"), "{error}");
@@ -952,7 +962,7 @@ checksum = "{hash_b}"
             lock_sha256: None,
             source: crate::kernel::toolchain::Source::Lock,
         };
-        let error = realize_runtime(&store, platform, &one_platform)
+        let error = realize_runtime(&store, activity, platform, &one_platform)
             .unwrap_err()
             .to_string();
         assert!(error.contains("rustc"), "{error}");
@@ -1380,6 +1390,9 @@ checksum = "{hash_b}"
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
+            let activity = &store
+                .activity(crate::kernel::activity::ActivityMode::Shared)
+                .unwrap();
             let source = root.join("source");
             fs::create_dir_all(&source).unwrap();
             let (archive, hash) = make_crate(&source, "tiny", "1.0.0", false);
@@ -1394,7 +1407,7 @@ checksum = "{hash_b}"
                 }],
                 members: vec![],
             };
-            let object = realize_vendor(store, &plan).unwrap();
+            let object = realize_vendor(store, activity, &plan).unwrap();
             let crate_dir = object.join("tiny-1.0.0");
             assert_eq!(
                 fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -1418,6 +1431,9 @@ checksum = "{hash_b}"
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         with_temp_store(|store, root| {
+            let activity = &store
+                .activity(crate::kernel::activity::ActivityMode::Shared)
+                .unwrap();
             let source = root.join("source");
             fs::create_dir_all(&source).unwrap();
             let (archive, hash) = make_crate(&source, "tiny", "1.0.0", true);
@@ -1432,7 +1448,9 @@ checksum = "{hash_b}"
                 }],
                 members: vec![],
             };
-            let error = realize_vendor(store, &plan).unwrap_err().to_string();
+            let error = realize_vendor(store, activity, &plan)
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("tiny@1.0.0"));
             assert!(error.contains("symlink"));
         });
@@ -1454,7 +1472,10 @@ checksum = "{hash_b}"
             crates: vec![],
             members: vec!["member".into()],
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let error = project_cargo_env(
+            activity,
             &root,
             &temp.path().join("absent-rust"),
             &temp.path().join("absent-vendor"),
@@ -1490,7 +1511,10 @@ checksum = "{hash_b}"
             members: vec!["app".into()],
         };
         let digest = lock_digest("version = 4\n");
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         project_cargo_env(
+            activity,
             &project,
             &rust,
             &vendor,
@@ -1572,7 +1596,10 @@ checksum = "{hash_b}"
             crates: vec![],
             members: vec![],
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let result = project_cargo_env(
+            activity,
             &project,
             &rust,
             &vendor,
@@ -1606,6 +1633,10 @@ checksum = "{hash_b}"
         let store = Store {
             root: store_root.canonicalize().unwrap(),
         };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
         let rust_id = format!("{}-rust-{RUST_VERSION}", "1".repeat(40));
         let vendor_id = format!("{}-vendor-0", "2".repeat(40));
         for id in [&rust_id, &vendor_id] {
@@ -1629,6 +1660,7 @@ checksum = "{hash_b}"
             members: vec!["app".into()],
         };
         project_cargo_env(
+            activity,
             &project,
             &store.object_path(&rust_id),
             &store.object_path(&vendor_id),
@@ -1647,6 +1679,7 @@ checksum = "{hash_b}"
         assert!(record.projections.is_empty(), "{:?}", record.projections);
 
         // `gc --register` rebuilds the same record from this closure alone.
+        drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
@@ -1654,9 +1687,11 @@ checksum = "{hash_b}"
 
     #[test]
     fn build_rejects_user_config_flag() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
         for bad in ["--config", "--config=net.offline=false"] {
             let error = build_sandboxed(
                 Platform::Aarch64AppleDarwin,
+                &activity,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),

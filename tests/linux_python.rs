@@ -1,6 +1,9 @@
 //! Linux Python round-trip test. Heavy: downloads CPython, uv, and the
 //! manylinux wheels into a throwaway store, so it is ignored.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tog::kernel::platform::Platform;
@@ -124,7 +127,10 @@ fn linux_python_sync_run_and_uv_round_trip() {
     let store = Store {
         root: store_path.canonicalize().unwrap(),
     };
-    let uv = python::ensure_uv_for(&store, Platform::host().unwrap()).unwrap();
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let uv = python::ensure_uv_for(&store, activity, Platform::host().unwrap()).unwrap();
     let uv_version = Command::new(uv.join("uv"))
         .arg("--version")
         .output()

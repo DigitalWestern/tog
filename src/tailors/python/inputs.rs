@@ -3,6 +3,7 @@
 //! the project-local plan cache.
 
 use crate::comforter;
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
@@ -94,6 +95,7 @@ pub fn read_plan(
     platform: Platform,
     dir: &Path,
     store: &store::Store,
+    activity: &StoreActivity,
     selected: &Selected,
 ) -> io::Result<PythonPlan> {
     let project = ProjectRoot::open(dir)?;
@@ -106,7 +108,9 @@ pub fn read_plan(
     let mut selection = pyselect::locked(platform, version, &manifest.python)?;
     if manifest.requires_setup() {
         let dynamic_dependencies = manifest.dynamic_dependencies;
-        if let Err(error) = manifest.prepare_setup(platform, dir, &project, store, selected) {
+        if let Err(error) =
+            manifest.prepare_setup(platform, dir, &project, store, activity, selected)
+        {
             // Every ordinary failure in here is already `InvalidData`
             // (`unreadable` in the manifest layer hardcodes it, and it
             // wraps the sandboxed egg_info probe), so the kind cannot
@@ -240,6 +244,7 @@ pub fn read_plan(
                     dir,
                     &project,
                     store,
+                    activity,
                     &input,
                     &resolver_source,
                     selected,
@@ -265,6 +270,7 @@ pub fn read_plan(
             dir,
             &project,
             store,
+            activity,
             &input,
             &resolver_source,
             selected,
@@ -375,11 +381,13 @@ pub fn is_fully_pinned(text: &str) -> bool {
 
 /// Resolve ranged requirements to a hash-pinned lock via uv, cached in
 /// requirements.lock.txt and regenerated when the source input changes.
+#[allow(clippy::too_many_arguments)]
 pub fn locked_requirements(
     platform: Platform,
     dir: &Path,
     project: &ProjectRoot,
     store: &store::Store,
+    activity: &StoreActivity,
     input: &str,
     source: &str,
     selected: &Selected,
@@ -411,7 +419,7 @@ pub fn locked_requirements(
         "{input} is not hash-pinned; resolving with the store uv..."
     ));
     // Store-pinned uv, not host uv: a bare machine needs only tog.
-    let uv = python::realize_uv(store, platform, selected)?.join("uv");
+    let uv = python::realize_uv(store, activity, platform, selected)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut command = std::process::Command::new(&uv);
     command.args(["pip", "compile", compile_input, "--generate-hashes"]);
@@ -433,7 +441,7 @@ pub fn locked_requirements(
         .env_remove("PIP_TRUSTED_HOST")
         .env_remove("PIP_FIND_LINKS");
     ui::trace_command(&command);
-    let status = supervise::status_owned(&mut command, store)
+    let status = supervise::status(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
     if !status.success() {
         return Err(io::Error::other("uv pip compile failed"));
@@ -463,6 +471,15 @@ pub fn lock_source_hash(pyver: &str, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lease on `store` itself, for the case that runs a child against it.
+    /// The other cases use a store that is absent or not a directory on
+    /// purpose, so they borrow `testutil::detached_lease` instead.
+    fn test_activity(store: &store::Store) -> StoreActivity {
+        store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap()
+    }
 
     /// The selection these tests plan with: the shipped release for the
     /// interpreter the fixtures expect. Choosing it is the kernel's job.
@@ -550,9 +567,15 @@ mod tests {
         let store = store::Store {
             root: temp.0.join("absent-store"),
         };
-        let e = read_plan(Platform::host().unwrap(), &project, &store, &selected())
-            .unwrap_err()
-            .to_string();
+        let e = read_plan(
+            Platform::host().unwrap(),
+            &project,
+            &store,
+            &crate::kernel::testutil::detached_lease().1,
+            &selected(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("not a real directory"), "{e}");
         assert!(!store.root.exists(), "a refused cache touched the store");
         assert!(
@@ -612,9 +635,15 @@ mod tests {
         std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
         let store = store_with_stub_uv(&temp.0.join("store"));
 
-        let error = read_plan(Platform::host().unwrap(), &project_dir, &store, &selected())
-            .unwrap_err()
-            .to_string();
+        let error = read_plan(
+            Platform::host().unwrap(),
+            &project_dir,
+            &store,
+            &test_activity(&store),
+            &selected(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("not a real directory"), "{error}");
         // uv's own lock landed in the project; only tog's stamp was refused.
         assert!(project_dir.join("requirements.lock.txt").is_file());
@@ -681,8 +710,14 @@ mod tests {
             )
             .unwrap();
 
-        let (planned, selection, inputs) =
-            read_plan(platform, &project_dir, &store, &selected()).unwrap();
+        let (planned, selection, inputs) = read_plan(
+            platform,
+            &project_dir,
+            &store,
+            &crate::kernel::testutil::detached_lease().1,
+            &selected(),
+        )
+        .unwrap();
         assert_eq!(planned.python_version, version);
         assert_eq!(selection.pin.version, version);
         assert!(
@@ -713,9 +748,15 @@ mod tests {
             root: temp.0.join("absent-store"),
         };
 
-        let error = read_plan(Platform::host().unwrap(), &project_dir, &store, &selected())
-            .unwrap_err()
-            .to_string();
+        let error = read_plan(
+            Platform::host().unwrap(),
+            &project_dir,
+            &store,
+            &crate::kernel::testutil::detached_lease().1,
+            &selected(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("not a real directory"), "{error}");
         assert!(!store.root.exists(), "a refused snapshot touched the store");
         assert!(

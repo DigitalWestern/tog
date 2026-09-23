@@ -1,6 +1,9 @@
 //! End-to-end Go tailor test. Heavy: downloads the pinned Go toolchain and
 //! module closure on first run.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

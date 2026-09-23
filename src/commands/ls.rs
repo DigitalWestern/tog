@@ -7,6 +7,8 @@ use crate::kernel::store;
 use crate::kernel::ui;
 use std::io;
 
+// Reviewed site (tests/architecture.rs): operation boundary: command entry point.
+#[allow(clippy::disallowed_methods)]
 pub fn run(ecosystem: Option<&str>, json: bool) -> io::Result<i32> {
     let store = store::Store::open()?;
     let _activity = store.activity(ActivityMode::Shared)?;

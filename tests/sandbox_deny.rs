@@ -4,6 +4,9 @@
 //! tests/acceptance.sh runs it with a shared TOG_STORE:
 //!     cargo test --test sandbox_deny -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tog::kernel::platform::Platform;
@@ -34,6 +37,9 @@ fn network_access_during_build_fails() {
     let sha = hex::encode(Sha256::digest(&bytes));
 
     let store = Store::open().expect("store");
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let pkg = LockedPackage {
         name: "evil".into(),
         version: "0.1".into(),
@@ -46,6 +52,7 @@ fn network_access_during_build_fails() {
 
     let result = build::build_sdist_wheel(
         &store,
+        activity,
         Platform::host().unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),

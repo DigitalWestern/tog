@@ -9,6 +9,7 @@
 pub mod status;
 pub mod toolchain;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
@@ -719,13 +720,12 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 
 /// Copy-on-write clone of a whole tree (macOS `cp -Rc` clonefile, Linux
 /// `cp -a --reflink=auto`, plain `cp -R` fallback), then restore user-write
-/// bits, which the clone inherits as read-only from the store. Used for
-/// writable projections of immutable objects (npm mutablePackages, elixir
-/// deps trees).
-pub fn clone_tree(src: &Path, dest: &Path) -> io::Result<()> {
-    clone_tree_for(src, dest, Platform::host()?)
-}
-
+/// bits, which the clone inherits as read-only from the store. This form
+/// takes no lease, so it is only for trees outside any store (the `None`
+/// arm of a caller's `Option<&StoreActivity>`); a clone that reads a store
+/// object or writes a managed projection uses `clone_tree_with_activity`.
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io::Result<()> {
     use std::process::Command;
     let clone = if platform.is_macos() {
@@ -757,7 +757,7 @@ pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io:
     crate::kernel::store::restore_write_bits(dest)
 }
 
-pub(crate) use crate::kernel::store::clone_tree_for_store;
+pub(crate) use crate::kernel::store::clone_tree_with_activity;
 
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded
@@ -765,6 +765,7 @@ pub(crate) use crate::kernel::store::clone_tree_for_store;
 /// closure must never inject arbitrary executable paths into `tog run`.
 pub fn closure_object(
     store: &crate::kernel::store::Store,
+    activity: &StoreActivity,
     closure: &serde_json::Value,
     key: &str,
     probe: &str,
@@ -785,7 +786,7 @@ pub fn closure_object(
     {
         return Err(bad("malformed id"));
     }
-    if !store.has(id)? {
+    if !store.has_with_activity(activity, id)? {
         return Err(bad("object not in the store"));
     }
     let path = store.object_path(id);
@@ -1298,6 +1299,9 @@ mod closure_platform_tests {
     }
 
     fn complete_object(store: &Store, name: &str) -> String {
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         crate::kernel::objmeta::register_test_kinds();
         let identity = crate::kernel::types::Identity {
             kind: "test".into(),
@@ -1306,10 +1310,11 @@ mod closure_platform_tests {
             inputs: Default::default(),
         };
         let id = identity.object_id();
-        let staged = store.stage().unwrap();
+        let staged = store.stage_with_activity(activity).unwrap();
         fs::write(staged.join("payload"), name).unwrap();
         store
-            .commit_with_deps(
+            .commit_with_activity_and_deps(
+                activity,
                 &identity,
                 &staged,
                 &[],

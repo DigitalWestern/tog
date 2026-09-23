@@ -3,6 +3,9 @@
 //! contract from CLI.md (exit status 0/1/2, help on stdout, errors on stderr
 //! with a next step, pass-through for `run`).
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

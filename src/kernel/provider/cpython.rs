@@ -12,6 +12,7 @@
 //! The pin rows and identity constructors are `pub` so the owning
 //! tailor keeps its identity goldens and object-kind rows beside it.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
@@ -357,25 +358,34 @@ pub fn uv_identity(pin: &PinnedUv) -> Identity {
 
 /// Ensure the shipped uv is realized in the store (binary at <obj>/uv), for
 /// work with no project selection to honor.
-pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    realize_uv(store, platform, &shipped_newest()?)
+pub fn ensure_uv_for(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+) -> io::Result<PathBuf> {
+    realize_uv(store, activity, platform, &shipped_newest()?)
 }
 
 /// Realize the uv this selection names (binary at <obj>/uv). uv is the
 /// resolver this tailor delegates to, so it is a component of the same
 /// release bundle as the interpreter.
-pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io::Result<PathBuf> {
+pub fn realize_uv(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::kernel::platform::require_host(platform, "uv")?;
     let spec = &row(selected, platform, "uv", UV_RECIPE)?;
     let identity = uv_identity_of(spec, platform)?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
     let sha256 = artifact_sha256(spec)?;
-    let tarball = download_verified_held(store, &spec.url, sha256)?;
-    let staged = store.stage()?;
+    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
+    let staged = store.stage_with_activity(activity)?;
     // Tarball root is platform-specific; strip it.
     let mut command = Command::new("/usr/bin/tar");
     command
@@ -384,12 +394,12 @@ pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io:
         .args(["-C"])
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() || !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(sha256)?);
             deps
@@ -405,6 +415,7 @@ pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io:
 /// refreshed catalog cannot change a locked project's interpreter.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
@@ -412,14 +423,14 @@ pub fn realize_runtime(
     let spec = &row(selected, platform, "cpython", CPYTHON_RECIPE)?;
     let identity = cpython_identity_of(spec, platform)?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
     let sha256 = artifact_sha256(spec)?;
-    let tarball = download_verified_held(store, &spec.url, sha256)?;
-    let staged = store.stage()?;
+    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
+    let staged = store.stage_with_activity(activity)?;
     // Tarball root is "python/"; strip it so the object root IS the prefix.
     let mut command = Command::new("/usr/bin/tar");
     command
@@ -428,7 +439,7 @@ pub fn realize_runtime(
         .args(["-C"])
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)?;
+    let status = crate::kernel::supervise::status(&mut command, activity)?;
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -436,7 +447,7 @@ pub fn realize_runtime(
         ));
     }
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(sha256)?);
             deps

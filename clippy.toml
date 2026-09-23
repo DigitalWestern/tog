@@ -1,0 +1,15 @@
+# Store protection, enforced by the compiler (tests/architecture.rs keeps a
+# token scan as a second check). A child process that touches a store path
+# runs through `kernel::supervise` with the caller's `&StoreActivity`, and
+# only the reviewed operation boundaries take a lease. Every allowed site
+# carries `#[allow(clippy::disallowed_methods)]` with its reason. CI denies
+# this lint: `cargo clippy --locked --all-targets -- -D clippy::disallowed_methods`.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "run store children through kernel::supervise with the caller's &StoreActivity" },
+    { path = "std::process::Command::status", reason = "run store children through kernel::supervise with the caller's &StoreActivity" },
+    { path = "std::process::Command::output", reason = "run store children through kernel::supervise with the caller's &StoreActivity" },
+    { path = "tog::kernel::store::Store::activity", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "tog::kernel::store::Store::try_activity_exclusive", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "tog::kernel::activity::StoreActivity::acquire", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "tog::kernel::activity::StoreActivity::try_exclusive", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+]

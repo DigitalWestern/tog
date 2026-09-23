@@ -13,6 +13,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+// Build script: reads the checkout's commit, never a store.
+#[allow(clippy::disallowed_methods)]
 fn git(args: &[&str]) -> Option<String> {
     let output = Command::new("git").args(args).output().ok()?;
     if !output.status.success() {

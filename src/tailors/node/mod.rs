@@ -31,6 +31,7 @@ pub use plan::*;
 pub use project::*;
 pub use realize::*;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -811,8 +812,12 @@ fn validate_node_layout(root: &Path) -> io::Result<()> {
 
 /// Realize the shipped Node, for work with no project selection to honor
 /// (`x` outside a project, `add`/`update`'s delegated npm, tests).
-pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    realize_runtime(store, platform, &shipped_selection()?)
+pub fn ensure_node_for(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+) -> io::Result<PathBuf> {
+    realize_runtime(store, activity, platform, &shipped_selection()?)
 }
 
 /// Realize the Node this selection names (interpreter at <obj>/bin/node).
@@ -821,6 +826,7 @@ pub fn ensure_node_for(store: &Store, platform: Platform) -> io::Result<PathBuf>
 /// independently fetched set: the lock's digest covers all three.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
@@ -829,15 +835,15 @@ pub fn realize_runtime(
     let spec = node_row(selected, platform)?;
     let identity = node_identity_of(&spec, platform);
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         validate_node_layout(&store.object_path(&id))?;
         return Ok(store.object_path(&id));
     }
     let sha256 = spec.digest.hex();
-    let tarball = download_verified_held(store, &spec.url, sha256)?;
+    let tarball = download_verified_held(store, activity, &spec.url, sha256)?;
     let staged = store
-        .stage()
+        .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
     let mut command = Command::new("/usr/bin/tar");
     command
@@ -846,14 +852,14 @@ pub fn realize_runtime(
         .arg("-C")
         .arg(&staged)
         .args(["--strip-components", "1"]);
-    let status = crate::kernel::supervise::status_owned(&mut command, store)
+    let status = crate::kernel::supervise::status(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("spawn tar: {e}")))?;
     if !status.success() {
         return Err(err("node tarball extraction failed"));
     }
     validate_node_layout(&staged)?;
     store
-        .commit_with_deps(&identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(Digest::sha256(sha256)?);
             deps
@@ -1944,6 +1950,9 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
 
         // A real store object stands in for the node toolchain: the env
         // records it as a dependency, so it has to be complete.
@@ -2019,6 +2028,7 @@ mod tests {
         let platform = Platform::Aarch64AppleDarwin;
         let env = realize_node_env_with_node_object(
             &store,
+            activity,
             platform,
             &plan,
             &[],
@@ -2057,6 +2067,7 @@ mod tests {
         // A second call is a cache hit and returns the same object.
         let again = realize_node_env_with_node_object(
             &store,
+            activity,
             platform,
             &plan,
             &[],
@@ -2090,6 +2101,9 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let node_obj = store.object_path("node-cache");
         fs::create_dir_all(&node_obj).unwrap();
         let staged = store.stage().unwrap();
@@ -2131,6 +2145,7 @@ mod tests {
         let mut consumed = crate::kernel::store::ObjectDeps::new();
         run_install_scripts_staged(
             &store,
+            activity,
             Platform::host().unwrap(),
             &staged,
             &node_obj,
@@ -2169,6 +2184,9 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let node_obj = store.object_path("node-cache");
         std::fs::create_dir_all(&node_obj).unwrap();
         let plan = NpmPlan {
@@ -2216,6 +2234,7 @@ mod tests {
 
         let realized = realize_node_env_with_node_object(
             &store,
+            activity,
             Platform::Aarch64AppleDarwin,
             &plan,
             &[],
@@ -2249,6 +2268,9 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let platform = Platform::Aarch64AppleDarwin;
         let node_obj = store.object_path("node-cache");
         std::fs::create_dir_all(&node_obj).unwrap();
@@ -2292,9 +2314,16 @@ mod tests {
                     &crate::kernel::store::ObjectDeps::new(),
                 )
                 .unwrap();
-            let realized =
-                realize_node_env_with_node_object(&store, platform, &plan, &[], &node_obj, python)
-                    .unwrap();
+            let realized = realize_node_env_with_node_object(
+                &store,
+                activity,
+                platform,
+                &plan,
+                &[],
+                &node_obj,
+                python,
+            )
+            .unwrap();
             assert_eq!(realized, expected, "{}", python.describe());
             published.push(realized);
         }
@@ -2312,6 +2341,9 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let node_obj = store.object_path("node-cache");
         std::fs::create_dir_all(&node_obj).unwrap();
         let plan = NpmPlan {
@@ -2363,6 +2395,7 @@ mod tests {
         // Linux warm lookup below.
         let realized = realize_node_env_with_node_object(
             &store,
+            activity,
             Platform::X86_64UnknownLinuxGnu,
             &plan,
             &[],
@@ -2410,6 +2443,8 @@ mod tests {
         let store = Store {
             root: PathBuf::from("/nonexistent/tog-test-store"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
             packages: Vec::new(),
@@ -2422,7 +2457,7 @@ mod tests {
             .iter()
             .find(|platform| **platform != host)
             .unwrap();
-        let error = realize_node_env(&store, foreign, &plan, &[]).unwrap_err();
+        let error = realize_node_env(&store, activity, foreign, &plan, &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains(foreign.triple()));
     }
@@ -2668,7 +2703,10 @@ mod tests {
             path: "package.json".into(),
             sha256: "abc".into(),
         }];
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         project_node_env_recorded(
+            activity,
             &project,
             &env,
             Platform::host().unwrap(),
@@ -2775,7 +2813,10 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         project_node_env_recorded(
+            activity,
             &project,
             &env,
             Platform::host().unwrap(),
@@ -2843,6 +2884,10 @@ mod tests {
         let store = Store {
             root: store_root.canonicalize().unwrap(),
         };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
         let selected = shipped_selection().unwrap();
         let env_id = format!("{}-npm-env-0", "1".repeat(40));
         let runtime_id = format!("{}-node-0", "2".repeat(40));
@@ -2897,6 +2942,7 @@ mod tests {
         };
         let runtime = store.object_path(&runtime_id);
         project_node_env_recorded(
+            activity,
             &project,
             &store.object_path(&env_id),
             Platform::host().unwrap(),
@@ -2942,6 +2988,7 @@ mod tests {
         // needed, and adds the forest's spelling in the legacy sibling
         // namespace. That namespace is never swept, so the extra reference
         // retains nothing; it is pinned here so a change to it is seen.
+        drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         let mut expected = record.projections.clone();
@@ -3002,7 +3049,10 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "pnpm-lock.yaml".into(),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         project_node_env(
+            activity,
             &project,
             &env,
             Platform::host().unwrap(),
@@ -3029,7 +3079,10 @@ mod tests {
             lock_source: "pnpm-lock.yaml".into(),
         };
         let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         project_node_env(
+            activity,
             &project,
             &env,
             Platform::host().unwrap(),
@@ -3560,6 +3613,8 @@ mod toolchain_tests {
         let store = Store {
             root: std::env::temp_dir().join("tog-node-recipe-refusal"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         // The row check is per platform; realization can only run for the
         // host, which `require_host` refuses first for the other one.
         for platform in Platform::ALL {
@@ -3570,14 +3625,19 @@ mod toolchain_tests {
             assert!(error.contains("upgrade tog"), "{error}");
         }
         let platform = Platform::host().unwrap();
-        let error = realize_runtime(&store, platform, &with_recipe(platform, "nodejs/2"))
-            .unwrap_err()
-            .to_string();
+        let error = realize_runtime(
+            &store,
+            activity,
+            platform,
+            &with_recipe(platform, "nodejs/2"),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("recipe nodejs/2"), "{error}");
 
         let mut python = shipped_selection().unwrap();
         python.ecosystem = "python".into();
-        let error = realize_runtime(&store, platform, &python)
+        let error = realize_runtime(&store, activity, platform, &python)
             .unwrap_err()
             .to_string();
         assert!(error.contains("a python toolchain"), "{error}");

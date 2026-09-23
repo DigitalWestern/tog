@@ -9,6 +9,7 @@ use crate::comforter::{
     reserve_backup_real_dir_for_store, store_from_object_path, write_closure_with_project_lock,
     ClosureRefs, InputRecord,
 };
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::download_verified_held;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
@@ -29,9 +30,14 @@ use std::path::{Path, PathBuf};
 /// Realize the environment for a caller that holds no selection: the
 /// shipped catalog release for the plan's interpreter. `x` outside a
 /// project and tests use this; a project sync uses `realize_env_for`.
-pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result<PathBuf> {
+pub fn realize_env(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    plan: &Plan,
+) -> io::Result<PathBuf> {
     let shipped = python::shipped_selection(&plan.python_version)?;
-    realize_env_for(store, platform, plan, &shipped)
+    realize_env_for(store, activity, platform, plan, &shipped)
 }
 
 /// Realize the environment for `plan` with the toolchain the project's
@@ -40,11 +46,12 @@ pub fn realize_env(store: &Store, platform: Platform, plan: &Plan) -> io::Result
 /// identical env already exists.
 pub fn realize_env_for(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
-    realize_env_with(store, platform, plan, selected, None)
+    realize_env_with(store, activity, platform, plan, selected, None)
 }
 
 /// [`realize_env_for`], building any sdist with a Rust extension on `rust`:
@@ -52,13 +59,14 @@ pub fn realize_env_for(
 /// keeps the shipped Rust the sdist's toolchain file resolves to.
 pub fn realize_env_with(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     selected: &Selected,
     rust: Option<&Selected>,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    realize_env_at_depth(store, platform, plan, selected, rust, 0)
+    realize_env_at_depth(store, activity, platform, plan, selected, rust, 0)
 }
 
 /// A plan and the toolchain realizing it must name one CPython. They are
@@ -168,13 +176,16 @@ fn package_digest_of_plan(
 /// interpreter object's id during execution; every other input is shared.
 pub(super) fn environment_identity(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
     selected: &Selected,
     rust: Option<&Selected>,
 ) -> io::Result<Identity> {
-    environment_identity_inner(store, platform, plan, cpython_id, selected, rust, None)
+    environment_identity_inner(
+        store, activity, platform, plan, cpython_id, selected, rust, None,
+    )
 }
 
 /// The exact producer drift `python-env/3` exists to catch: the plan names
@@ -183,6 +194,7 @@ pub(super) fn environment_identity(
 #[cfg(test)]
 pub(super) fn environment_identity_skipping_input(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
@@ -191,6 +203,7 @@ pub(super) fn environment_identity_skipping_input(
 ) -> io::Result<Identity> {
     environment_identity_inner(
         store,
+        activity,
         platform,
         plan,
         cpython_id,
@@ -202,6 +215,7 @@ pub(super) fn environment_identity_skipping_input(
 
 fn environment_identity_inner(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     cpython_id: &str,
@@ -233,13 +247,16 @@ fn environment_identity_inner(
                 // archive's hash (a pure function of the commit's tree).
                 let owned;
                 let p = if p.git.is_some() {
-                    owned = crate::tailors::python::build::git_sdist_package(store, platform, p)?;
+                    owned = crate::tailors::python::build::git_sdist_package(
+                        store, activity, platform, p,
+                    )?;
                     &owned
                 } else {
                     *p
                 };
                 let sdist = crate::tailors::python::build::plan_sdist_identity_input(
                     store,
+                    activity,
                     platform,
                     p,
                     selected,
@@ -303,13 +320,17 @@ fn environment_identity_inner(
 /// into the parent before the parent cache lookup.
 pub(crate) fn planned_env_object_id(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     selected: &Selected,
     rust: Option<&Selected>,
 ) -> io::Result<String> {
     let cpython_id = crate::tailors::python::cpython_object_id(selected, platform)?;
-    Ok(environment_identity(store, platform, plan, &cpython_id, selected, rust)?.object_id())
+    Ok(
+        environment_identity(store, activity, platform, plan, &cpython_id, selected, rust)?
+            .object_id(),
+    )
 }
 
 /// Internal realization entry point used by sdist build environments. The
@@ -317,6 +338,7 @@ pub(crate) fn planned_env_object_id(
 /// pathological chain cannot recurse forever.
 pub(crate) fn realize_env_at_depth(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &Plan,
     selected: &Selected,
@@ -326,7 +348,7 @@ pub(crate) fn realize_env_at_depth(
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Python environment")?;
     agreeing(plan, selected)?;
-    let python_obj = python::realize_runtime(store, platform, selected)?;
+    let python_obj = python::realize_runtime(store, activity, platform, selected)?;
 
     // Identity planning and realization use exactly the same input builder.
     // In particular, native sdist requirements contribute the pure libset id;
@@ -336,10 +358,11 @@ pub(crate) fn realize_env_at_depth(
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let identity = environment_identity(store, platform, plan, &cpython_id, selected, rust)?;
+    let identity =
+        environment_identity(store, activity, platform, plan, &cpython_id, selected, rust)?;
     let id = identity.object_id();
-    if store.has(&id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -354,7 +377,7 @@ pub(crate) fn realize_env_at_depth(
     for &p in &packages {
         let wheel_file = match p.kind {
             ArtifactKind::Wheel => {
-                let lease = download_verified_held(store, &p.url, &p.sha256)?;
+                let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
                 let path = lease.to_path_buf();
                 drop(lease);
                 path
@@ -363,13 +386,16 @@ pub(crate) fn realize_env_at_depth(
             ArtifactKind::Sdist => {
                 let owned;
                 let source = if p.git.is_some() {
-                    owned = crate::tailors::python::build::git_sdist_package(store, platform, p)?;
+                    owned = crate::tailors::python::build::git_sdist_package(
+                        store, activity, platform, p,
+                    )?;
                     &owned
                 } else {
                     p
                 };
                 crate::tailors::python::build::build_sdist_wheel_at_depth(
                     store,
+                    activity,
                     platform,
                     source,
                     selected,
@@ -386,7 +412,7 @@ pub(crate) fn realize_env_at_depth(
     // extraction and publication.
     for (p, path) in &mut artifacts {
         if p.kind == ArtifactKind::Wheel {
-            let lease = download_verified_held(store, &p.url, &p.sha256)?;
+            let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
             *path = lease.to_path_buf();
             _cache_leases.push(lease);
         }
@@ -398,7 +424,7 @@ pub(crate) fn realize_env_at_depth(
         .take(2)
         .collect::<Vec<_>>()
         .join(".");
-    let staged = store.stage()?;
+    let staged = store.stage_with_activity(activity)?;
     let bin = staged.join("bin");
     let site = staged.join(format!("lib/python{minor}/site-packages"));
     fs::create_dir_all(&bin)?;
@@ -458,7 +484,8 @@ pub(crate) fn realize_env_at_depth(
             }
         }
     }
-    let (object, applied) = store.commit_with_deps(&identity, &staged, &candidate, &deps)?;
+    let (object, applied) =
+        store.commit_with_activity_and_deps(activity, &identity, &staged, &candidate, &deps)?;
     for exception in applied {
         if !candidate.contains(&exception) {
             crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
@@ -516,6 +543,7 @@ fn python_closure_body(
 /// the bundle it came from and the interpreter object it realized, which
 /// the closure records so a later run resolves the same bytes.
 pub fn project_env_with_inputs(
+    activity: &StoreActivity,
     project_dir: &Path,
     env_obj: &Path,
     plan: &Plan,
@@ -526,6 +554,7 @@ pub fn project_env_with_inputs(
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
+        activity,
         project_dir,
         env_obj,
         plan,
@@ -542,6 +571,7 @@ pub fn project_env_with_inputs(
 /// retain the exact interpreter constraint that led to the selected pin.
 /// `tog x` uses this: it has a selection but no recorded input files.
 pub fn project_env_with_selection(
+    activity: &StoreActivity,
     project_dir: &Path,
     env_obj: &Path,
     plan: &Plan,
@@ -549,6 +579,7 @@ pub fn project_env_with_selection(
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
+        activity,
         project_dir,
         env_obj,
         plan,
@@ -561,6 +592,7 @@ pub fn project_env_with_selection(
 }
 
 pub(super) fn project_env_inner(
+    activity: &StoreActivity,
     project_dir: &Path,
     env_obj: &Path,
     plan: &Plan,
@@ -575,18 +607,17 @@ pub(super) fn project_env_inner(
     let venv = project_dir.join(".venv");
     let store = store_from_object_path(env_obj)
         .ok_or_else(|| io::Error::other("environment object is not in a Tog store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let project_lock = store.project_lock(project_dir)?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
     let mut refs = ClosureRefs::new();
-    refs.object_path(&store, &activity, &env_obj)?;
+    refs.object_path(&store, activity, &env_obj)?;
     // The interpreter is referenced directly, not only through the
     // environment, so gc keeps the object a later run resolves.
     let runtime_record = match toolchain {
         Some((selected, runtime)) => {
-            refs.object_path(&store, &activity, runtime)?;
+            refs.object_path(&store, activity, runtime)?;
             let mut record = crate::comforter::toolchain::closure_record(selected, runtime);
             if !helpers.is_null() {
                 record["toolchain"]["helpers"] = helpers.clone();
@@ -602,14 +633,14 @@ pub(super) fn project_env_inner(
                 "native library closure reference has no object id",
             )
         })?;
-        refs.object_id(&store, &activity, native_id)?;
+        refs.object_id(&store, activity, native_id)?;
     }
     if let Some(backup) = backup.as_ref() {
-        refs.backup(&store, &activity, backup)?;
+        refs.backup(&store, activity, backup)?;
     }
     // Durable protection precedes both the user-data move and the visible
     // .venv switch. A failed later step therefore over-retains safely.
-    persist_root_for_refs_with_project_lock(project_dir, &store, &activity, &refs, &project_lock)?;
+    persist_root_for_refs_with_project_lock(project_dir, &store, activity, &refs, &project_lock)?;
     if let Some(backup) = backup.as_ref() {
         move_reserved_backup(&venv, backup)?;
     }
@@ -632,7 +663,7 @@ pub(super) fn project_env_inner(
         "python",
         body,
         &store,
-        &activity,
+        activity,
         refs,
         &project_lock,
         attribution,
@@ -711,6 +742,10 @@ mod tests {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         let store = test_store("closure-refs");
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
         for sub in ["roots", "backups"] {
             fs::create_dir_all(store.root.join(sub)).unwrap();
         }
@@ -752,6 +787,7 @@ mod tests {
         let selected = selected_3_12();
         let runtime = store.object_path(&runtime_id);
         project_env_inner(
+            activity,
             &project,
             &store.object_path(&env_id),
             &plan,
@@ -784,6 +820,7 @@ mod tests {
         );
 
         // `gc --register` rebuilds the same record from this closure alone.
+        drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
@@ -921,6 +958,8 @@ mod tests {
         let store = Store {
             root: PathBuf::from("/fixture/tog-store"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let empty_plan = Plan {
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
@@ -951,6 +990,7 @@ mod tests {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
             let empty = environment_identity(
                 &store,
+                activity,
                 platform,
                 &empty_plan,
                 &cpython,
@@ -960,6 +1000,7 @@ mod tests {
             .unwrap();
             let wheel = environment_identity(
                 &store,
+                activity,
                 platform,
                 &wheel_plan,
                 &cpython,
@@ -1013,6 +1054,8 @@ mod tests {
         let store = Store {
             root: PathBuf::from("/fixture/tog-store"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let empty_plan = Plan {
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
@@ -1039,6 +1082,7 @@ mod tests {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
             let empty = environment_identity(
                 &store,
+                activity,
                 platform,
                 &empty_plan,
                 &cpython,
@@ -1048,6 +1092,7 @@ mod tests {
             .unwrap();
             let one = environment_identity(
                 &store,
+                activity,
                 platform,
                 &one_wheel_plan,
                 &cpython,
@@ -1064,6 +1109,7 @@ mod tests {
             ] {
                 let drifted = environment_identity_skipping_input(
                     &store,
+                    activity,
                     platform,
                     plan,
                     &cpython,
@@ -1090,6 +1136,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("fast-golden");
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let fast = local_sdist(&store, "fast-golden", "\"setuptools>=40.8\"");
         let plan = Plan {
             ecosystem: "python".into(),
@@ -1098,6 +1147,7 @@ mod tests {
         };
         let actual = planned_env_object_id(
             &store,
+            activity,
             Platform::host().unwrap(),
             &plan,
             &selected_3_12(),
@@ -1142,6 +1192,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("isolated-input");
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let isolated = local_sdist(&store, "isolated-input", "\"setuptools~=83.1\"");
         let fast = local_sdist(&store, "fast-input", "\"setuptools>=40.8\"");
         let plan = Plan {
@@ -1152,6 +1205,7 @@ mod tests {
         let key = cached_build_plan(&store, "setuptools~=83.1", &"a".repeat(64));
         let first = planned_env_object_id(
             &store,
+            activity,
             Platform::host().unwrap(),
             &plan,
             &selected_3_12(),
@@ -1161,6 +1215,7 @@ mod tests {
         cached_build_plan(&store, "setuptools~=83.1", &"b".repeat(64));
         let second = planned_env_object_id(
             &store,
+            activity,
             Platform::host().unwrap(),
             &plan,
             &selected_3_12(),
@@ -1189,6 +1244,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let store = test_store("native-sdist-identity");
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let platform = Platform::host().unwrap();
         let native = local_native_sdist(&store, "native-sdist-identity");
         let plan = Plan {
@@ -1197,11 +1255,19 @@ mod tests {
             packages: vec![native],
         };
         let planned =
-            planned_env_object_id(&store, platform, &plan, &selected_3_12(), None).unwrap();
-        let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
-        let realized =
-            environment_identity(&store, platform, &plan, &cpython_id, &selected_3_12(), None)
+            planned_env_object_id(&store, activity, platform, &plan, &selected_3_12(), None)
                 .unwrap();
+        let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
+        let realized = environment_identity(
+            &store,
+            activity,
+            platform,
+            &plan,
+            &cpython_id,
+            &selected_3_12(),
+            None,
+        )
+        .unwrap();
         assert_eq!(planned, realized.object_id());
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
             let native_id =

@@ -36,7 +36,8 @@ impl Tailor for Go {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let inputs = inputs::load_go_inputs(ctx.platform, dir, &ctx.store, toolchain)?;
+        let inputs =
+            inputs::load_go_inputs(ctx.platform, dir, &ctx.store, &ctx.activity, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&inputs.plan)?))
     }
 
@@ -47,13 +48,21 @@ impl Tailor for Go {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let activity = &ctx.activity;
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, dir, store, toolchain)?;
-        let modcache =
-            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
+        let inputs = inputs::load_go_inputs(platform, dir, store, &ctx.activity, toolchain)?;
+        let modcache = go::realize_modcache(
+            store,
+            &ctx.activity,
+            platform,
+            toolchain,
+            &inputs.plan,
+            &inputs.go_obj,
+        )?;
         go::project_go_env(
+            activity,
             dir,
             &inputs.go_obj,
             &modcache,
@@ -93,12 +102,20 @@ impl Tailor for Go {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let activity = &ctx.activity;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let inputs = inputs::load_go_inputs(platform, root, store, toolchain)?;
-        let modcache =
-            go::realize_modcache(store, platform, toolchain, &inputs.plan, &inputs.go_obj)?;
+        let inputs = inputs::load_go_inputs(platform, root, store, &ctx.activity, toolchain)?;
+        let modcache = go::realize_modcache(
+            store,
+            &ctx.activity,
+            platform,
+            toolchain,
+            &inputs.plan,
+            &inputs.go_obj,
+        )?;
         go::project_go_env(
+            activity,
             root,
             &inputs.go_obj,
             &modcache,
@@ -107,7 +124,14 @@ impl Tailor for Go {
             toolchain,
             attribution,
         )?;
-        go::build_sandboxed(platform, root, &inputs.go_obj, &modcache, args)
+        go::build_sandboxed(
+            platform,
+            &ctx.activity,
+            root,
+            &inputs.go_obj,
+            &modcache,
+            args,
+        )
     }
 
     fn run_env(
@@ -118,11 +142,14 @@ impl Tailor for Go {
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let activity = &ctx.activity;
         let mut prefix = Vec::new();
         if dir.join(".tog/closures/go.json").exists() {
             let closure = comforter::read_closure(dir, "go")?;
-            let go_obj = comforter::closure_object(&ctx.store, &closure, "go_object", "bin/go")?;
-            let modcache = comforter::closure_object(&ctx.store, &closure, "modcache_object", "")?;
+            let go_obj =
+                comforter::closure_object(&ctx.store, activity, &closure, "go_object", "bin/go")?;
+            let modcache =
+                comforter::closure_object(&ctx.store, activity, &closure, "modcache_object", "")?;
             prefix.push(go_obj.join("bin").to_string_lossy().into_owned());
             for (k, v) in go::go_env(&go_obj, &modcache, true) {
                 if v.is_empty() {

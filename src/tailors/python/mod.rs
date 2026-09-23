@@ -16,6 +16,7 @@ pub mod registry_tool;
 pub mod tailor;
 pub mod wheel;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::{LegacyEvidence, Selected};
@@ -39,23 +40,33 @@ pub use crate::kernel::provider::cpython::{
 /// `<path>/bin/python3`); see `kernel::provider::cpython::realize_runtime`.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::provider::cpython::realize_runtime(store, platform, selected)
+    crate::kernel::provider::cpython::realize_runtime(store, activity, platform, selected)
 }
 
 /// Realize the uv this selection names (binary at `<obj>/uv`).
-pub fn realize_uv(store: &Store, platform: Platform, selected: &Selected) -> io::Result<PathBuf> {
+pub fn realize_uv(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    crate::kernel::provider::cpython::realize_uv(store, platform, selected)
+    crate::kernel::provider::cpython::realize_uv(store, activity, platform, selected)
 }
 
 /// Ensure the shipped uv is realized in the store (binary at <obj>/uv), for
 /// work with no project selection to honor.
-pub fn ensure_uv_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    realize_uv(store, platform, &shipped_newest()?)
+pub fn ensure_uv_for(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+) -> io::Result<PathBuf> {
+    realize_uv(store, activity, platform, &shipped_newest()?)
 }
 
 pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython> {
@@ -156,6 +167,9 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             .canonicalize()
             .expect("canonical Python identity fixture store"),
     };
+    let activity = &store
+        .activity(crate::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let empty_plan = Plan {
         ecosystem: "python".into(),
         python_version: cpython_pin.version.into(),
@@ -175,6 +189,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     };
     let env_empty = env::environment_identity(
         &store,
+        activity,
         platform,
         &empty_plan,
         &cpython.object_id(),
@@ -184,6 +199,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     .expect("empty Python environment identity");
     let env_wheel = env::environment_identity(
         &store,
+        activity,
         platform,
         &wheel_plan,
         &cpython.object_id(),
@@ -200,6 +216,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         };
         let env_native = env::environment_identity(
             &store,
+            activity,
             platform,
             &native_plan,
             &cpython.object_id(),
@@ -311,10 +328,11 @@ pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {
 /// shipped catalog row for that pin's version.
 pub fn ensure_python_for(
     store: &Store,
+    activity: &StoreActivity,
     pin: &PinnedPython,
     platform: Platform,
 ) -> io::Result<PathBuf> {
-    realize_runtime(store, platform, &shipped_selection(pin.version)?)
+    realize_runtime(store, activity, platform, &shipped_selection(pin.version)?)
 }
 
 #[cfg(test)]
@@ -498,6 +516,8 @@ mod toolchain_tests {
         let store = Store {
             root: std::env::temp_dir().join("tog-python-recipe-refusal"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         // The row check is per platform; realization can only run for the
         // host, which `require_host` refuses first for the other one.
         for platform in Platform::ALL {
@@ -515,6 +535,7 @@ mod toolchain_tests {
         let platform = Platform::host().unwrap();
         let error = realize_runtime(
             &store,
+            activity,
             platform,
             &with_recipe(platform, "cpython", "cpython/2"),
         )
@@ -522,14 +543,19 @@ mod toolchain_tests {
         .to_string();
         assert!(error.contains("recipe cpython/2"), "{error}");
         assert!(error.contains("upgrade tog"), "{error}");
-        let error = realize_uv(&store, platform, &with_recipe(platform, "uv", "uv/2"))
-            .unwrap_err()
-            .to_string();
+        let error = realize_uv(
+            &store,
+            activity,
+            platform,
+            &with_recipe(platform, "uv", "uv/2"),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("recipe uv/2"), "{error}");
 
         let mut node = shipped_selection("3.12.14").unwrap();
         node.ecosystem = "node".into();
-        let error = realize_runtime(&store, platform, &node)
+        let error = realize_runtime(&store, activity, platform, &node)
             .unwrap_err()
             .to_string();
         assert!(error.contains("a node toolchain"), "{error}");

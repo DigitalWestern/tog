@@ -1,6 +1,7 @@
 //! Verified downloads into the store (kernel layer): fetch a URL, check
 //! its digest, and hold the bytes as a store object.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 pub use crate::kernel::digest::Digest;
 use crate::kernel::store::{self, Store};
@@ -78,14 +79,21 @@ impl AsRef<OsStr> for CacheLease {
 /// Fetch a cache entry by sha256, RE-VERIFYING its content (never trust a
 /// cache hit: read-only bits stop accidents, not same-user replacement).
 /// A poisoned entry is deleted and the call fails.
-pub fn cache_verified(store: &Store, sha256: &str) -> io::Result<PathBuf> {
-    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    cache_verified_held(store, sha256).map(CacheLease::into_path)
+pub fn cache_verified(
+    store: &Store,
+    activity: &StoreActivity,
+    sha256: &str,
+) -> io::Result<PathBuf> {
+    cache_verified_held(store, activity, sha256).map(CacheLease::into_path)
 }
 
-pub(crate) fn cache_verified_held(store: &Store, sha256: &str) -> io::Result<CacheLease> {
+pub(crate) fn cache_verified_held(
+    store: &Store,
+    activity: &StoreActivity,
+    sha256: &str,
+) -> io::Result<CacheLease> {
     let digest = Digest::sha256(sha256)?;
-    cache_verified_digest_held(store, &digest).map_err(|error| {
+    cache_verified_digest_held(store, activity, &digest).map_err(|error| {
         if error.kind() == io::ErrorKind::InvalidData {
             io::Error::new(
                 error.kind(),
@@ -97,8 +105,13 @@ pub(crate) fn cache_verified_held(store: &Store, sha256: &str) -> io::Result<Cac
     })
 }
 
-pub(crate) fn cache_verified_digest_held(store: &Store, digest: &Digest) -> io::Result<CacheLease> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+pub(crate) fn cache_verified_digest_held(
+    store: &Store,
+    activity: &StoreActivity,
+    digest: &Digest,
+) -> io::Result<CacheLease> {
+    store.require_activity(activity, "a cache read")?;
+    let activity = activity.clone();
     let gc_lock = acquire_gc_lock(store)?;
     let path = store.cache_path(digest.algo(), digest.hex());
     match hash_file(&path, digest.algo) {
@@ -135,8 +148,12 @@ pub(crate) fn cache_verified_digest_held(store: &Store, digest: &Digest) -> io::
 /// Read an integrity-addressed cache entry while retaining the verification
 /// lease through the read, so GC cannot remove it between verification and
 /// use.
-pub(crate) fn read_cache_verified_digest(store: &Store, digest: &Digest) -> io::Result<Vec<u8>> {
-    let lease = cache_verified_digest_held(store, digest)?;
+pub(crate) fn read_cache_verified_digest(
+    store: &Store,
+    activity: &StoreActivity,
+    digest: &Digest,
+) -> io::Result<Vec<u8>> {
+    let lease = cache_verified_digest_held(store, activity, digest)?;
     fs::read(&lease.path)
 }
 
@@ -428,25 +445,34 @@ pub fn download_file(url: &str, dest: &Path, sha256: &str) -> io::Result<()> {
 /// Sha256-hex convenience for callers outside the store. Internal extraction
 /// paths use `download_verified_held` so their lease lasts through
 /// consumption.
-pub fn download_verified(store: &Store, url: &str, sha256: &str) -> io::Result<PathBuf> {
-    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    download_verified_held(store, url, sha256).map(CacheLease::into_path)
+pub fn download_verified(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    sha256: &str,
+) -> io::Result<PathBuf> {
+    download_verified_held(store, activity, url, sha256).map(CacheLease::into_path)
 }
 
 pub(crate) fn download_verified_held(
     store: &Store,
+    activity: &StoreActivity,
     url: &str,
     sha256: &str,
 ) -> io::Result<CacheLease> {
-    download_verified_digest_held(store, url, &Digest::sha256(sha256)?)
+    download_verified_digest_held(store, activity, url, &Digest::sha256(sha256)?)
 }
 
 /// Insert a local file into the verified artifact cache by its computed
 /// sha256 (for artifacts obtained through delegated tools and then verified
 /// by tog — e.g. Go module zips h1-checked by dirhash). Returns
 /// (sha256 hex, cache path). Publication mirrors download_verified.
-pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String, PathBuf)> {
-    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+pub fn cache_insert(
+    store: &Store,
+    activity: &StoreActivity,
+    src: &std::path::Path,
+) -> io::Result<(String, PathBuf)> {
+    store.require_activity(activity, "a cache insert")?;
     let hex = hash_file(src, Algo::Sha256)?;
     let _gc_lock = acquire_gc_lock(store)?;
     let dest = store.cache_path("sha256", &hex);
@@ -492,17 +518,23 @@ pub fn cache_insert(store: &Store, src: &std::path::Path) -> io::Result<(String,
 /// Download `url`, verify its digest, and place it in the store's artifact
 /// cache (keyed by algo/hex). Idempotent; an existing entry short-circuits
 /// (offline reconstruction). file:// URLs read local files (mirrors, tests).
-pub fn download_verified_digest(store: &Store, url: &str, digest: &Digest) -> io::Result<PathBuf> {
-    let _activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    download_verified_digest_held(store, url, digest).map(CacheLease::into_path)
+pub fn download_verified_digest(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    digest: &Digest,
+) -> io::Result<PathBuf> {
+    download_verified_digest_held(store, activity, url, digest).map(CacheLease::into_path)
 }
 
 pub(crate) fn download_verified_digest_held(
     store: &Store,
+    activity: &StoreActivity,
     url: &str,
     digest: &Digest,
 ) -> io::Result<CacheLease> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    store.require_activity(activity, "a verified download")?;
+    let activity = activity.clone();
     let gc_lock = acquire_gc_lock(store)?;
     let dest = store.cache_path(digest.algo(), digest.hex());
     if dest.is_file() {
@@ -792,14 +824,17 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let input = root.join("artifact");
         fs::write(&input, b"hello").unwrap();
         let expected = Digest::from_sri("sha1-qvTGHdzF6KLavt4PO0gs2a6pQ00=").unwrap();
         let url = format!("file://{}", input.display());
-        assert!(download_verified_digest(&store, &url, &expected).is_ok());
+        assert!(download_verified_digest(&store, activity, &url, &expected).is_ok());
 
         let wrong = Digest::from_sri("sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
-        let error = download_verified_digest(&store, &url, &wrong).unwrap_err();
+        let error = download_verified_digest(&store, activity, &url, &wrong).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let _ = fs::remove_dir_all(root);
     }
@@ -820,6 +855,9 @@ mod tests {
         let store = Store {
             root: root.canonicalize().unwrap(),
         };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let input = root.join("artifact");
         fs::write(&input, b"hello").unwrap();
         let digest = hex::encode(Sha256::digest(b"hello"));
@@ -832,6 +870,7 @@ mod tests {
 
         let lease = download_verified_digest_held(
             &store,
+            activity,
             &format!("file://{}", input.display()),
             &Digest::sha256(&digest).unwrap(),
         )

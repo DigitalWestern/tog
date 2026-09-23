@@ -1,6 +1,9 @@
 //! E2e for interpreter selection and warm lock/plan caches (network tests
 //! are ignored; the preflight refusal runs offline).
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tog::kernel::platform::Platform;

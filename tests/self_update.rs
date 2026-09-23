@@ -6,6 +6,9 @@
 //! binary being replaced is always a copy in a throwaway HOME, never the
 //! one cargo built.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

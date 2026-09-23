@@ -155,6 +155,8 @@ impl Store {
     /// Acquire operation-level protection for this store. The root is
     /// canonicalized before the lease is created so aliases cannot bypass
     /// the in-process coordinator or the on-disk lock.
+    // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
+    #[allow(clippy::disallowed_methods)]
     pub fn activity(&self, mode: ActivityMode) -> io::Result<StoreActivity> {
         StoreActivity::acquire(&self.root, mode)
     }
@@ -162,6 +164,8 @@ impl Store {
     /// Try to acquire exclusive activity without waiting. Maintenance and GC
     /// use this form so a running job can be reported as busy instead of
     /// making cleanup contend with an unbounded command.
+    // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
+    #[allow(clippy::disallowed_methods)]
     pub fn try_activity_exclusive(&self) -> io::Result<Option<StoreActivity>> {
         StoreActivity::try_exclusive(&self.root)
     }

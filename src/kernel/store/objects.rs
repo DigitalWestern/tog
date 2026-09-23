@@ -197,14 +197,17 @@ impl Store {
     /// root read-only, and metadata written (in that commit order). A
     /// crash mid-publication leaves an invalid object, which is swept and
     /// rebuilt instead of trusted.
+    ///
+    /// Test-only: it takes a lease of its own, and production code borrows
+    /// its caller's through `has_with_activity`.
+    #[cfg(test)]
     pub fn has(&self, id: &str) -> io::Result<bool> {
         let activity = self.activity(ActivityMode::Shared)?;
         self.has_with_activity(&activity, id)
     }
 
-    /// Activity-aware form used by long-lived operations. The compatibility
-    /// `has` wrapper above is intentionally fallible too, so a lock failure
-    /// cannot be mistaken for a cache miss.
+    /// Activity-aware lookup: the caller's lease covers the check. It is
+    /// fallible, so a lock failure cannot be mistaken for a cache miss.
     pub fn has_with_activity(&self, activity: &StoreActivity, id: &str) -> io::Result<bool> {
         self.require_activity(activity, "store object lookup")?;
         let _lock = self.publish_lock()?;
@@ -243,6 +246,9 @@ impl Store {
     /// Collision-proof: SystemTime ticks in microseconds on macOS, so two
     /// threads can draw the same timestamp — create_dir (not _all) makes a
     /// collision an AlreadyExists we retry with a sequence number.
+    ///
+    /// Test-only, like `has`: production uses `stage_with_activity`.
+    #[cfg(test)]
     pub fn stage(&self) -> io::Result<PathBuf> {
         let activity = self.activity(ActivityMode::Shared)?;
         self.stage_with_activity(&activity)
@@ -278,6 +284,10 @@ impl Store {
     /// an inferred set is a guess, and `commit_internal_impl` stamps what it
     /// is given as `evidence: "explicit"`. Certifying a guess as explicit is
     /// exactly the failure this explicit-evidence boundary prevents.
+    ///
+    /// Test-only, like `has`: production uses
+    /// `commit_with_activity_and_deps`.
+    #[cfg(test)]
     pub fn commit_with_deps(
         &self,
         identity: &Identity,

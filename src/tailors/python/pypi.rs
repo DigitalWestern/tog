@@ -2,6 +2,7 @@
 //! requirement to one exact PyPI artifact (wheel preferred, sdist
 //! fallback), cutting the pattern (Plan) the kernel realizes.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
@@ -42,6 +43,8 @@ fn parse_glibc_version(text: &str) -> Option<Glibc> {
     Some(Glibc(major, minor))
 }
 
+// Reviewed site (tests/architecture.rs): host probe (`getconf`); no store.
+#[allow(clippy::disallowed_methods)]
 fn detect_host_glibc() -> Result<Glibc, String> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -770,14 +773,16 @@ pub fn plan_python(
 /// resolution uses it; project locking runs uv in the project directory.
 pub(crate) fn lock_requirement_text_with_uv(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     requirements_text: &str,
     selected: &crate::kernel::toolchain::Selected,
     constraints: Option<&str>,
 ) -> io::Result<String> {
     let python_version = selected.version("cpython")?;
-    let uv = crate::tailors::python::realize_uv(store, platform, selected)?.join("uv");
-    let scratch = store.stage()?;
+    let uv = crate::tailors::python::realize_uv(store, activity, platform, selected)?.join("uv");
+    // One lease covers the scratch directory and the uv child.
+    let scratch = store.stage_with_activity(activity)?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");
     let constraints_path = scratch.join("constraints.txt");
@@ -807,7 +812,7 @@ pub(crate) fn lock_requirement_text_with_uv(
         }
         let uv_output = {
             command.arg(&input).args(["-o"]).arg(&output);
-            crate::kernel::supervise::output_owned(&mut command, store).map_err(|e| {
+            crate::kernel::supervise::output(&mut command, activity).map_err(|e| {
                 io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
             })?
         };

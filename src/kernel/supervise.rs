@@ -23,7 +23,6 @@
 pub(crate) static SUPERVISION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::store::Store;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -604,6 +603,8 @@ fn reap_after_error(child: &mut Child) {
 /// Spawn a command with inherited stdio and reap its direct child before
 /// returning. The activity argument is borrowed for the whole interval so
 /// the caller cannot accidentally end store protection before reaping.
+// Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
+#[allow(clippy::disallowed_methods)]
 pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<ExitStatus> {
     let _ = activity.mode();
     let session = Session::new()?;
@@ -643,6 +644,8 @@ pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<Exi
 /// without putting a large build log behind a pipe that the child could fill.
 /// The returned stderr is bounded to the same prefix used by the sandbox
 /// classifier; all bytes are also relayed to the caller's stderr.
+// Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
+#[allow(clippy::disallowed_methods)]
 pub fn status_with_stderr(
     command: &mut Command,
     activity: &StoreActivity,
@@ -742,15 +745,6 @@ fn drain_stderr(
     }
 }
 
-/// Convenience boundary for store-consuming helpers that do not otherwise
-/// receive their caller's operation token. The short shared lease spans the
-/// complete supervised child interval; callers with a long-lived activity
-/// lease should prefer `status` directly.
-pub fn status_owned(command: &mut Command, store: &Store) -> io::Result<ExitStatus> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    status(command, &activity)
-}
-
 fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Result<bool> {
     let Some(reader) = reader else {
         return Ok(false);
@@ -771,6 +765,8 @@ fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Resu
 
 /// Spawn a command, drain captured stdout/stderr without waiting on a full
 /// pipe, and reap its direct child before returning.
+// Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
+#[allow(clippy::disallowed_methods)]
 pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Output> {
     let _ = activity.mode();
     let session = Session::new()?;
@@ -867,12 +863,6 @@ pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Out
             return Err(error);
         }
     }
-}
-
-/// Captured-output counterpart to `status_owned`.
-pub fn output_owned(command: &mut Command, store: &Store) -> io::Result<Output> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    output(command, &activity)
 }
 
 #[cfg(test)]
