@@ -302,8 +302,16 @@ impl Session {
             // child itself, `try_wait` fails with ECHILD, and the exit status
             // tog exists to report is gone. The handler replaces it for the
             // session only: `prepare_child` hands the child the inherited
-            // SIG_IGN back and teardown restores the saved action, so neither
-            // the child nor tog after the session sees a difference.
+            // SIG_IGN back and teardown restores the saved action. One
+            // difference remains. While the handler is installed, any other
+            // child of this process (say, spawned by another thread) that
+            // exits without being waited for becomes a zombie instead of
+            // being auto-reaped, and restoring SIG_IGN afterwards does not
+            // reap it. The default disposition does exactly that to the
+            // same child anyway, so this only makes the inherited-SIG_IGN
+            // case behave like the default one during a session. Such a
+            // zombie is cleared when tog exits, and production code waits
+            // for every child it spawns.
             if ignored && number != libc::SIGCHLD {
                 continue;
             }
