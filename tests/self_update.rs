@@ -160,7 +160,8 @@ fn install_copy(home: &Path) -> PathBuf {
 }
 
 fn run(binary: &Path, home: &Path, manifest: &str, args: &[&str]) -> Output {
-    Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .current_dir(home)
         .env("HOME", home)
@@ -169,21 +170,30 @@ fn run(binary: &Path, home: &Path, manifest: &str, args: &[&str]) -> Output {
         .env_remove("TOG_POLICY")
         .env_remove("TOG_STRICT")
         .env_remove("TOG_SIGNING_KEY")
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("spawn tog")
+        .env("NO_COLOR", "1");
+    output_of(&mut command)
+}
+
+/// Run a binary this test just wrote. Another test thread that forks
+/// while our copy is still open for writing holds that descriptor until
+/// its child execs, and exec of a file open for writing fails with
+/// ETXTBSY; the window is short, so wait it out.
+fn output_of(command: &mut Command) -> Output {
+    for _ in 0..50 {
+        match command.output() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            result => return result.expect("spawn tog"),
+        }
+    }
+    command.output().expect("spawn tog")
 }
 
 fn version_of(binary: &Path) -> String {
-    text(
-        &Command::new(binary)
-            .arg("--version")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .trim()
-    .to_string()
+    text(&output_of(Command::new(binary).arg("--version")).stdout)
+        .trim()
+        .to_string()
 }
 
 /// Nothing named `.tog.update.*` may survive next to the binary, whatever
