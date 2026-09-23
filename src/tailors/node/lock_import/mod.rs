@@ -539,13 +539,27 @@ fn build_plan(
 ) -> io::Result<NpmPlan> {
     let workspace_paths = graph.workspace_paths.clone();
     let mut occupied = BTreeMap::<String, Occupied>::new();
-    let mut queue = VecDeque::<(String, Dependency, Option<String>)>::new();
+    // (parent, dependency, workspace, local package that needs it)
+    let mut queue = VecDeque::<(String, Dependency, Option<String>, Option<String>)>::new();
     let enqueue_roots = |roots: Vec<RootDependency>, queue: &mut VecDeque<_>| {
         for root in roots {
             let parent = root.workspace.clone().unwrap_or_default();
-            queue.push_back((parent, root.dependency, root.workspace));
+            queue.push_back((parent, root.dependency, root.workspace, None));
         }
     };
+    // (who needs it, the context Node resolves it from, the dependency).
+    // Every importer's own dependencies and every local package's are
+    // checked against the final layout, so a later placement cannot shadow
+    // one of them unnoticed.
+    let mut requirements = Vec::<(String, String, Dependency)>::new();
+    for root in graph.roots.iter().chain(&graph.workspace_roots) {
+        let context = root.workspace.clone().unwrap_or_default();
+        let who = match &root.workspace {
+            Some(workspace) => format!("importer {workspace}"),
+            None => "the root importer".to_string(),
+        };
+        requirements.push((who, context, root.dependency.clone()));
+    }
     enqueue_roots(graph.roots, &mut queue);
     let mut workspace_queue = VecDeque::new();
     enqueue_roots(graph.workspace_roots, &mut workspace_queue);
@@ -556,7 +570,13 @@ fn build_plan(
         if queue.is_empty() {
             std::mem::swap(&mut queue, &mut workspace_queue);
         }
-        let (parent, dependency, workspace) = queue.pop_front().unwrap();
+        let (parent, dependency, workspace, needed_by) = queue.pop_front().unwrap();
+        let for_local = |error: io::Error| match &needed_by {
+            Some(target) => err(format!(
+                "{error} (needed by the local package {target}, resolved from its real path)"
+            )),
+            None => error,
+        };
         let in_workspace =
             workspace.is_some() || (!parent.is_empty() && !parent.starts_with("node_modules/"));
         let (path, should_expand) = match &dependency.target {
@@ -579,7 +599,8 @@ fn build_plan(
                     &mut occupied,
                     &graph.nodes,
                     &workspace_paths,
-                )?;
+                )
+                .map_err(for_local)?;
                 (path, true)
             }
             Target::Link(target) => {
@@ -591,7 +612,8 @@ fn build_plan(
                     &mut occupied,
                     &mut links,
                     &graph.nodes,
-                )?;
+                )
+                .map_err(for_local)?;
                 (path, false)
             }
         };
@@ -602,7 +624,7 @@ fn build_plan(
             if expanded.insert((path.clone(), node_key.clone())) {
                 if let Some(node) = graph.nodes.get(&node_key) {
                     for child in &node.deps {
-                        queue.push_back((path.clone(), child.clone(), None));
+                        queue.push_back((path.clone(), child.clone(), None, None));
                     }
                 }
             }
@@ -614,19 +636,69 @@ fn build_plan(
             // - a target that is itself an importer already gets its own
             //   dependencies from its own projected node_modules, exactly as
             //   pnpm installs every importer; expanding again adds nothing;
-            // - any other local package gets its dependencies placed beside
-            //   the link, from the link's own parent.
+            // - any other local package gets its dependencies placed where
+            //   Node looks from the target's real path, wherever the link
+            //   itself sits: the nearest enclosing importer's node_modules,
+            //   then the importers above it. The only node_modules tog
+            //   projects into source are importers', so that chain is the
+            //   whole lookup; reachability is checked after placement.
             let importer = target == "." || workspace_paths.contains(target);
-            if !importer && expanded.insert((parent.clone(), format!("link:{target}"))) {
+            if !importer && expanded.insert((String::new(), format!("link:{target}"))) {
+                let context = workspace_parent_context(target, &workspace_paths);
                 if let Some(children) = graph.local_link_deps.get(target) {
                     for child in children {
-                        queue.push_back((parent.clone(), child.clone(), None));
+                        requirements.push((
+                            format!("local package {target}"),
+                            context.clone(),
+                            child.clone(),
+                        ));
+                        queue.push_back((
+                            context.clone(),
+                            child.clone(),
+                            None,
+                            Some(target.clone()),
+                        ));
                     }
                 }
             }
         }
     }
 
+    // Node walks up from each requirer's real path and stops at the first
+    // node_modules/<name>; that first hit must be what the lock gave it.
+    for (who, context, dependency) in &requirements {
+        if matches!(dependency.target, Target::External(_)) {
+            continue;
+        }
+        let found = existing_ancestor(
+            context,
+            &dependency.name,
+            &dependency.target,
+            &occupied,
+            &graph.nodes,
+            &workspace_paths,
+        );
+        if found.is_err() {
+            return Err(err(format!(
+                "{who} needs its own {name}, but Node resolving from its real path would find a different {name} first; tog cannot project this layout",
+                name = dependency.name
+            )));
+        }
+    }
+    // A link below a package would be planted inside that package's
+    // directory, which projection reaches through a symlink into a
+    // read-only store object.
+    for (path, link) in &links {
+        if let Some(package) = occupied.iter().find_map(|(package, entry)| {
+            (matches!(entry, Occupied::Package { .. }) && path.starts_with(&format!("{package}/")))
+                .then_some(package)
+        }) {
+            return Err(err(format!(
+                "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package",
+                link.target
+            )));
+        }
+    }
     let packages = resolved_packages(occupied, &graph.nodes)?;
     for link in links.values() {
         crate::tailors::node::validate_lock_path(&link.path)?;

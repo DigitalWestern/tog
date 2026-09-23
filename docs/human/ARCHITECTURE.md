@@ -141,8 +141,12 @@ recorded); with none of these, the store node's bundled npm runs
 `npm install --package-lock-only`. A `file:`/`link:` dependency is a
 symlink into the user's source, so nothing is ever placed beneath one: a
 target that is itself an importer gets its dependencies from its own
-projected `node_modules` (as pnpm installs it), any other local package gets
-them beside the link. pnpm `patchedDependencies` follow pnpm's precedence
+projected `node_modules` (as pnpm installs it), and any other local package
+gets them in the nearest enclosing importer's `node_modules`, where Node
+looks from the package's real path. Every importer's and local package's
+dependencies are then checked against that lookup chain, and a layout where
+one would shadow another, or a link that would sit inside a registry
+package, is refused. pnpm `patchedDependencies` follow pnpm's precedence
 (exact version, then the one npm semver range the version satisfies, then a
 bare name that covers every version), and any snapshot whose recorded
 `patch_hash` disagrees with the selected patch is refused. Lifecycle scripts run hermetically (below).

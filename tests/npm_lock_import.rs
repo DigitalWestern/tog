@@ -131,6 +131,64 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
     }
 }
 
+/// Local `file:` packages run under the pinned Node and see the versions the
+/// lock gives them, resolved from their real paths: one inside the importer
+/// that depends on it, one inside a different importer. Both need
+/// is-number@6 while the root has 7.
+#[test]
+#[ignore]
+fn pnpm_local_packages_resolve_their_dependencies_from_their_real_paths() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let scratch = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("scratch/tmp");
+    fs::create_dir_all(&scratch).unwrap();
+    let store = scratch.join("nx7-store");
+    let binary = Path::new(env!("CARGO_BIN_EXE_tog"));
+    let project = scratch.join("nx7-proj-pnpm-local");
+    if project.exists() {
+        fs::remove_dir_all(&project).unwrap();
+    }
+    copy_tree(&root.join("tests/fixtures/proj-pnpm-local"), &project);
+    assert_ok(&run(binary, &project, &store, &["sync"], &scratch), "sync");
+
+    let app = project.join("packages/app");
+    let check = run_from(
+        binary,
+        &app,
+        &store,
+        &[
+            "run",
+            "node",
+            "-e",
+            "const same = require('local-same'), cross = require('local-cross'); \
+             if (same !== '6.0.0' || cross !== '6.0.0') { console.error(same, cross); process.exit(1) }",
+        ],
+        &scratch,
+    );
+    assert_ok(&check, "local packages see is-number@6");
+    let root_check = run(
+        binary,
+        &project,
+        &store,
+        &[
+            "run",
+            "node",
+            "-e",
+            "if (require('is-number/package.json').version !== '7.0.0') process.exit(1)",
+        ],
+        &scratch,
+    );
+    assert_ok(&root_check, "the root keeps is-number@7");
+    for source in ["packages/app/vendor/same", "packages/lib/vendor/cross"] {
+        assert!(
+            !project.join(source).join("node_modules").exists(),
+            "nothing may be written into {source}"
+        );
+    }
+}
+
 const SRI: &str =
     "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
@@ -244,6 +302,169 @@ snapshots:
         plan.packages
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+fn plan_local(
+    name: &str,
+    dirs: &[&str],
+    lock: &str,
+) -> std::io::Result<tog::tailors::node::NpmPlan> {
+    let dir = scratch_project(name);
+    for sub in dirs {
+        fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let plan = tog::tailors::node::lock_import::plan_pnpm(
+        Platform::X86_64UnknownLinuxGnu,
+        lock,
+        &dir,
+        node_version(),
+    );
+    let _ = fs::remove_dir_all(dir);
+    plan
+}
+
+/// A local package's dependencies go where Node finds them from the
+/// package's real path, not from wherever the link to it sits.
+#[test]
+fn local_package_dependencies_follow_the_real_path_lookup_chain() {
+    // The link is hoisted to node_modules/a because a registry package
+    // (host) depends on it; a needs b@2 while the root has b@1. Placing b@2
+    // under host would leave Node, resolving from vendor/a, on the root b@1.
+    let hoisted = format!(
+        r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      b:
+        specifier: 1.0.0
+        version: 1.0.0
+      host:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  b@2.0.0:
+    resolution: {{integrity: {SRI}}}
+  host@1.0.0:
+    resolution: {{integrity: {SRI}}}
+snapshots:
+  b@1.0.0: {{}}
+  b@2.0.0: {{}}
+  host@1.0.0:
+    dependencies:
+      a: file:vendor/a
+  a@file:vendor/a:
+    dependencies:
+      b: 2.0.0
+"#
+    );
+    let error = plan_local("local-hoisted", &["vendor/a"], &hoisted).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("needed by the local package vendor/a"),
+        "{error}"
+    );
+
+    // Same shape, but the root already links `a` elsewhere, so the second
+    // link would nest inside host's directory: a store object.
+    let nested = hoisted
+        .replace(
+            "      host:\n",
+            "      a:\n        specifier: link:vendor/other\n        version: link:vendor/other\n      host:\n",
+        )
+        .replace("      b: 2.0.0\n", "      b: 1.0.0\n");
+    let error = plan_local("local-nested", &["vendor/a", "vendor/other"], &nested).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("would be planted inside the package node_modules/host"),
+        "{error}"
+    );
+
+    // Cross-workspace: app links a package that lives inside the lib
+    // importer. Node looks in packages/lib/node_modules, then the root.
+    let cross = format!(
+        r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      b:
+        specifier: 1.0.0
+        version: 1.0.0
+  packages/app:
+    dependencies:
+      cross:
+        specifier: file:../lib/vendor/cross
+        version: file:packages/lib/vendor/cross
+  packages/lib: {{}}
+packages:
+  b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  b@2.0.0:
+    resolution: {{integrity: {SRI}}}
+  cross@file:packages/lib/vendor/cross:
+    resolution: {{directory: packages/lib/vendor/cross, type: directory}}
+snapshots:
+  b@1.0.0: {{}}
+  b@2.0.0: {{}}
+  cross@file:packages/lib/vendor/cross:
+    dependencies:
+      b: 2.0.0
+"#
+    );
+    let plan = plan_local(
+        "local-cross",
+        &["packages/app", "packages/lib/vendor/cross"],
+        &cross,
+    )
+    .unwrap();
+    let placed = |path: &str| {
+        plan.packages
+            .iter()
+            .find(|package| package.path == path)
+            .map(|package| package.version.as_str())
+    };
+    assert_eq!(
+        placed("packages/lib/node_modules/b"),
+        Some("2.0.0"),
+        "{:?}",
+        plan.packages
+    );
+    assert_eq!(
+        placed("packages/app/node_modules/b"),
+        None,
+        "{:?}",
+        plan.packages
+    );
+    assert_eq!(placed("node_modules/b"), Some("1.0.0"));
+}
+
+/// The only place a local package inside app can get is-number@6 is app's
+/// own node_modules, which would shadow the is-number@7 app itself declares.
+/// That layout is not representable, so it is refused, not half-projected.
+#[test]
+fn a_local_package_may_not_shadow_its_importers_own_dependency() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lock = fs::read_to_string(root.join("tests/fixtures/proj-pnpm-local/pnpm-lock.yaml"))
+        .unwrap()
+        .replace(
+            "  packages/app:\n    dependencies:\n",
+            "  packages/app:\n    dependencies:\n      is-number:\n        specifier: 7.0.0\n        version: 7.0.0\n",
+        );
+    let error = plan_local(
+        "local-shadow",
+        &["packages/app/vendor/same", "packages/lib/vendor/cross"],
+        &lock,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("importer packages/app needs its own is-number"),
+        "{error}"
+    );
 }
 
 fn write_patch(dir: &Path, name: &str, bytes: &[u8]) -> String {

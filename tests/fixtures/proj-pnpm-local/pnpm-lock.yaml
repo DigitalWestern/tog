@@ -1,0 +1,41 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+  .:
+    dependencies:
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+  packages/app:
+    dependencies:
+      local-cross:
+        specifier: file:../lib/vendor/cross
+        version: file:packages/lib/vendor/cross
+      local-same:
+        specifier: file:./vendor/same
+        version: file:packages/app/vendor/same
+  packages/lib: {}
+
+packages:
+  is-number@6.0.0:
+    resolution: {integrity: sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg==}
+  is-number@7.0.0:
+    resolution: {integrity: sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==}
+  local-cross@file:packages/lib/vendor/cross:
+    resolution: {directory: packages/lib/vendor/cross, type: directory}
+  local-same@file:packages/app/vendor/same:
+    resolution: {directory: packages/app/vendor/same, type: directory}
+
+snapshots:
+  is-number@6.0.0: {}
+  is-number@7.0.0: {}
+  local-cross@file:packages/lib/vendor/cross:
+    dependencies:
+      is-number: 6.0.0
+  local-same@file:packages/app/vendor/same:
+    dependencies:
+      is-number: 6.0.0
