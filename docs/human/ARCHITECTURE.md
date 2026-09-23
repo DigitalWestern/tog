@@ -292,7 +292,9 @@ candidate. A `||` range (`engines.node`, Poetry's `python`) lowers to one
 `AnyOf` request whose alternatives each AND their terms, so it too takes the
 first candidate any alternative admits; a `*` alternative in either
 reader, and an empty or `x` alternative in `engines.node`, drops the
-constraint. `engines.node` reads node semver's partials throughout: a bare
+constraint. `engines.node` is parsed by the same `kernel/semver.rs` the
+pnpm patch keys use, then lowered with the toolchain's own refusals on
+top (no prerelease or build, no `>*` or `<*`). It reads node semver's partials throughout: a bare
 or `=` partial is its whole line (`24` is `>=24,<25`, only three
 components are exact), a zero-bearing X-range keeps every stated
 component (`24.0.x` is `>=24.0,<24.1`), and `>`, `<=`, `^`, `~` and
