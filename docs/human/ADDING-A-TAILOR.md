@@ -60,10 +60,9 @@ These name ecosystems outside the registry; keep them in step:
   `add`/`remove`/`update` (a `Tailor::edit_manifest` method is the
   planned replacement; see FOLLOW-UPS.md).
 - `tog x`, only if the ecosystem implements `Tailor::registry_tool`: the
-  `--py`/`--npm` and `py:`/`npm:` spellings in `src/cli/parse.rs`, and in
-  `src/commands/x.rs` the project-detection choice, the cached-projection
-  check, and `--clean`'s legacy-root recovery. Resolution, realization,
-  projection, and the launch environment live in the tailor.
+  `--py`/`--npm` flags and `py:`/`npm:` prefixes in `src/cli/parse.rs` and
+  `src/cli/spec.rs`. Everything else `x` needs lives in the tailor's
+  `RegistryTool`.
 
 ## 4. Tests and evidence
 

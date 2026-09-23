@@ -20,7 +20,7 @@ use sha2::{Digest, Sha224, Sha256, Sha512};
 
 use crate::comforter;
 use crate::commands::inspect;
-use crate::commands::shared::registry_tool;
+use crate::commands::shared::{registry_tool, registry_tools};
 use crate::kernel::context::Context;
 use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
@@ -658,38 +658,60 @@ fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
             break;
         }
     }
-    Err(other(format!(
-        "x: say which registry provides '{}': 'tog x py:{0}' (PyPI) or 'tog x npm:{0}' (npm)",
-        request.tool
-    )))
+    Err(say_which_registry(&request.tool))
+}
+
+/// `x: say which registry provides 'ruff': 'tog x py:ruff' (PyPI) or ...`,
+/// one alternative per registry tool.
+fn say_which_registry(tool: &str) -> io::Error {
+    let choices: Vec<String> = registry_tools()
+        .iter()
+        .map(|(_, registry)| {
+            format!(
+                "'tog x {}:{tool}' ({})",
+                registry.spelling(),
+                registry.registry_name()
+            )
+        })
+        .collect();
+    other(format!(
+        "x: say which registry provides '{tool}': {}",
+        choices.join(" or ")
+    ))
 }
 
 fn choose_from_project(request: &Request, present: &[&str]) -> io::Result<&'static str> {
+    let tools = registry_tools();
     if let Some(name) = request.ecosystem.as_deref() {
-        return match name {
-            "python" => Ok("python"),
-            "node" => Ok("node"),
-            other_name => Err(other(format!("x: unsupported ecosystem '{other_name}'"))),
-        };
+        return tools
+            .iter()
+            .find(|(id, _)| *id == name)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| other(format!("x: unsupported ecosystem '{name}'")));
     }
-    let python = present.contains(&"python");
-    let node = present.contains(&"node");
-    match (python, node) {
-        (true, true) => Err(other(
-            "x: both Python and Node projects are present; choose explicitly with --py or --npm",
-        )),
-        (true, false) => {
-            ui::trace("x: Python, because this project has a Python manifest");
-            Ok("python")
+    let found: Vec<_> = tools
+        .iter()
+        .filter(|(id, _)| present.contains(id))
+        .collect();
+    match found.as_slice() {
+        [] => Err(say_which_registry(&request.tool)),
+        [(id, registry)] => {
+            ui::trace(&format!("x: {}", registry.detection_reason()));
+            Ok(id)
         }
-        (false, true) => {
-            ui::trace("x: npm, because this project has a package.json");
-            Ok("node")
+        several => {
+            let labels: Vec<&str> = several.iter().map(|(_, r)| r.project_label()).collect();
+            let flags: Vec<String> = several
+                .iter()
+                .map(|(_, r)| format!("--{}", r.spelling()))
+                .collect();
+            Err(other(format!(
+                "x: {}{} projects are present; choose explicitly with {}",
+                if several.len() == 2 { "both " } else { "" },
+                labels.join(" and "),
+                flags.join(" or ")
+            )))
         }
-        (false, false) => Err(other(format!(
-            "x: say which registry provides '{}': 'tog x py:{0}' (PyPI) or 'tog x npm:{0}' (npm)",
-            request.tool
-        ))),
     }
 }
 
@@ -711,7 +733,7 @@ fn validate_package(ecosystem: &str, package: &str) -> io::Result<()> {
         || package
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
-        || (ecosystem == "python" && package.contains('/'))
+        || (package.contains('/') && !registry_tool(ecosystem)?.scoped_packages())
     {
         return Err(other(format!("x: invalid package '{package}'")));
     }
@@ -777,27 +799,6 @@ fn validate_from_bin(bin: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn canonical_link_target(path: &Path) -> Option<PathBuf> {
-    let target = fs::read_link(path).ok()?;
-    let target = if target.is_absolute() {
-        target
-    } else {
-        path.parent()?.join(target)
-    };
-    target.canonicalize().ok()
-}
-
-fn encoded_workspace(workspace: &str) -> Option<String> {
-    if workspace.is_empty()
-        || workspace
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return None;
-    }
-    Some(workspace.replace('%', "%25").replace('/', "%2F"))
-}
-
 fn check_projection_target(
     store: &Store,
     root: &Path,
@@ -805,77 +806,12 @@ fn check_projection_target(
     closure: &serde_json::Value,
     env_path: &Path,
 ) -> io::Result<()> {
-    let missing = || {
-        other(format!(
-            "x: cached {ecosystem} projection is missing or points elsewhere; run the command again"
-        ))
-    };
-    match ecosystem {
-        "python" => {
-            if canonical_link_target(&root.join(".venv")) != Some(env_path.to_path_buf()) {
-                return Err(missing());
-            }
-        }
-        "node" => {
-            if closure["projection_schema"] != "node-forest/2" {
-                return Err(missing());
-            }
-            let projection_id = closure["projection_id"].as_str().ok_or_else(missing)?;
-            if projection_id.is_empty() || !projection_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(missing());
-            }
-            let project_key =
-                hex::encode(Sha256::digest(root.canonicalize()?.as_os_str().as_bytes()));
-            // New projections are owned by the originating store. Keep a
-            // read-only compatibility candidate for pre-root/2 x records,
-            // whose forest lived beside the store under tog home.
-            let mut forest_bases = vec![store.root.join("forests")];
-            if let Some(home) = store.root.parent() {
-                let legacy = home.join("forests");
-                if legacy != forest_bases[0] {
-                    forest_bases.push(legacy);
-                }
-            }
-            let workspaces = closure["workspaces"].as_array();
-            let found = forest_bases
-                .into_iter()
-                .map(|base| base.join(&project_key[..32]).join(projection_id))
-                .any(|projection| {
-                    let Some(expected) = projection.join("node_modules").canonicalize().ok() else {
-                        return false;
-                    };
-                    if canonical_link_target(&root.join("node_modules")) != Some(expected) {
-                        return false;
-                    }
-                    workspaces.is_none_or(|workspaces| {
-                        workspaces.iter().all(|workspace| {
-                            let Some(source) = workspace.as_str() else {
-                                return false;
-                            };
-                            let Some(encoded) = encoded_workspace(source) else {
-                                return false;
-                            };
-                            let Some(expected) = projection
-                                .join("workspaces")
-                                .join(encoded)
-                                .join("node_modules")
-                                .canonicalize()
-                                .ok()
-                            else {
-                                return false;
-                            };
-                            canonical_link_target(&root.join(source).join("node_modules"))
-                                == Some(expected)
-                        })
-                    })
-                });
-            if !found {
-                return Err(missing());
-            }
-        }
-        _ => {}
+    if registry_tool(ecosystem)?.projection_points_at(store, root, closure, env_path)? {
+        return Ok(());
     }
-    Ok(())
+    Err(other(format!(
+        "x: cached {ecosystem} projection is missing or points elsewhere; run the command again"
+    )))
 }
 
 /// A cached `x` projection bypasses the normal realization functions. Check
@@ -1254,65 +1190,28 @@ enum CandidateMatch {
     Unrecoverable,
 }
 
-#[derive(Debug)]
-struct LegacyPackage {
-    package: String,
-    version: Option<String>,
-}
-
 /// Ecosystem recovered from a legacy generated manifest, for a root that
 /// carries no recorded request. The matcher and the summary must read this
 /// the same way: a legacy root that parses as both would otherwise be matched
 /// for deletion as one ecosystem and reported to the user as the other.
+/// Registry order decides between two readings.
 fn recovered_legacy_ecosystem(path: &Path) -> Option<&'static str> {
-    if legacy_packages(path, "python").is_some() {
-        Some("python")
-    } else if legacy_packages(path, "node").is_some() {
-        Some("node")
-    } else {
-        None
-    }
+    registry_tools()
+        .into_iter()
+        .find(|(_, tool)| tool.legacy_packages(path).is_some())
+        .map(|(id, _)| id)
 }
 
-fn legacy_packages(path: &Path, ecosystem: &str) -> Option<Vec<LegacyPackage>> {
-    match ecosystem {
-        "python" => {
-            let text = fs::read_to_string(path.join("requirements.in")).ok()?;
-            let first = text.lines().next()?.trim();
-            if first.is_empty() {
-                return None;
-            }
-            let (package, version) = match first.split_once("==") {
-                Some((package, version)) if !package.is_empty() && !version.is_empty() => {
-                    (package, Some(version.to_string()))
-                }
-                None => (first, None),
-                _ => return None,
-            };
-            if package.chars().any(char::is_whitespace) {
-                return None;
-            }
-            Some(vec![LegacyPackage {
-                package: package.to_string(),
-                version,
-            }])
-        }
-        "node" => {
-            let text = fs::read_to_string(path.join("package.json")).ok()?;
-            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-            let dependencies = value.get("dependencies")?.as_object()?;
-            let mut packages = Vec::with_capacity(dependencies.len());
-            for (package, version) in dependencies {
-                let version = version.as_str()?.to_string();
-                packages.push(LegacyPackage {
-                    package: package.clone(),
-                    version: Some(version),
-                });
-            }
-            Some(packages)
-        }
-        _ => None,
-    }
+/// The ecosystem whose registry tool names cache directories with the
+/// prefix `name` starts with (`py-ruff-…`).
+fn ecosystem_from_name(name: &str) -> Option<&'static str> {
+    registry_tools()
+        .into_iter()
+        .find(|(_, tool)| {
+            name.strip_prefix(tool.cache_prefix())
+                .is_some_and(|rest| rest.starts_with('-'))
+        })
+        .map(|(id, _)| id)
 }
 
 fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
@@ -1323,15 +1222,7 @@ fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
         let name_ecosystem = path
             .file_name()
             .and_then(|name| name.to_str())
-            .and_then(|name| {
-                if name.starts_with("py-") {
-                    Some("python")
-                } else if name.starts_with("npm-") {
-                    Some("node")
-                } else {
-                    None
-                }
-            });
+            .and_then(ecosystem_from_name);
         let recovered_ecosystem = recovered_legacy_ecosystem(path).or(name_ecosystem);
         return match recovered_ecosystem {
             Some(recovered) if recovered == ecosystem => CandidateMatch::Match,
@@ -1339,13 +1230,16 @@ fn old_root_matches(path: &Path, filter: &CleanFilter) -> CandidateMatch {
             None => CandidateMatch::Unrecoverable,
         };
     };
-    let ecosystems: Vec<&str> = filter
-        .ecosystem
-        .as_deref()
-        .map_or_else(|| vec!["python", "node"], |ecosystem| vec![ecosystem]);
     let mut recovered = false;
-    for ecosystem in ecosystems {
-        let Some(packages) = legacy_packages(path, ecosystem) else {
+    for (id, tool) in registry_tools() {
+        if filter
+            .ecosystem
+            .as_deref()
+            .is_some_and(|ecosystem| ecosystem != id)
+        {
+            continue;
+        }
+        let Some(packages) = tool.legacy_packages(path) else {
             continue;
         };
         recovered = true;
@@ -1386,23 +1280,15 @@ fn record_matches(record: &XRecord, filter: &CleanFilter) -> bool {
 /// generated name prefix.
 fn candidate_ecosystem(path: &Path) -> Option<&'static str> {
     if let Some(record) = read_x_request(path) {
-        return match record.ecosystem.as_str() {
-            "python" => Some("python"),
-            "node" => Some("node"),
-            _ => None,
-        };
+        return registry_tools()
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| *id == record.ecosystem);
     }
     if let Some(recovered) = recovered_legacy_ecosystem(path) {
         return Some(recovered);
     }
-    let name = path.file_name().and_then(|name| name.to_str())?;
-    if name.starts_with("npm-") {
-        Some("node")
-    } else if name.starts_with("py-") {
-        Some("python")
-    } else {
-        None
-    }
+    ecosystem_from_name(path.file_name().and_then(|name| name.to_str())?)
 }
 
 fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateMatch {
@@ -1711,7 +1597,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
     let mut matched = 0usize;
     let mut removed = 0usize;
     let mut skipped = 0usize;
-    let mut removed_node = false;
+    let mut notes: Vec<&'static str> = Vec::new();
     for candidate in candidates {
         match candidate_matches(&candidate, &filter) {
             CandidateMatch::Match => {}
@@ -1846,8 +1732,13 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         {
             return Err(io::Error::last_os_error());
         }
-        if ecosystem == Some("node") {
-            removed_node = true;
+        if let Some(note) = ecosystem
+            .and_then(|ecosystem| registry_tool(ecosystem).ok())
+            .and_then(|tool| tool.clean_note())
+        {
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
         }
         match registration {
             Registration::Found { store, entry } => {
@@ -1883,11 +1774,7 @@ pub fn clean(request: CleanRequest) -> io::Result<()> {
         // A removed node environment also orphans its
         // forests/<project-key>/<projection-id> node_modules forest in the
         // originating store, which plain `tog gc` never visits.
-        let forests = if removed_node {
-            ", and 'tog gc --project' also reclaims the node_modules forest each removed node environment used"
-        } else {
-            ""
-        };
+        let forests: String = notes.iter().map(|note| format!(", and {note}")).collect();
         println!(
             "tog: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'tog gc'{forests}"
         );

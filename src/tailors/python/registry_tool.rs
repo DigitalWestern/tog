@@ -2,6 +2,7 @@
 //! package with the store uv, realizes it as an ordinary env object, and
 //! projects it as `.venv` in the command's cache directory.
 
+use crate::comforter::status::canonical_symlink_target;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::Attribution;
@@ -9,7 +10,8 @@ use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use crate::tailors::python::{self, env, pypi, pyselect};
-use crate::tailors::{RegistryTool, ToolEnv};
+use crate::tailors::{LegacyPackage, RegistryTool, ToolEnv};
+use serde_json::Value;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -26,8 +28,58 @@ impl RegistryTool for PythonTool {
         python::runtime_object_id(platform, toolchain)
     }
 
+    fn spelling(&self) -> &'static str {
+        "py"
+    }
+
+    fn registry_name(&self) -> &'static str {
+        "PyPI"
+    }
+
+    fn project_label(&self) -> &'static str {
+        "Python"
+    }
+
+    fn detection_reason(&self) -> &'static str {
+        "Python, because this project has a Python manifest"
+    }
+
     fn bin_dir(&self, root: &Path) -> PathBuf {
         root.join(".venv").join("bin")
+    }
+
+    fn projection_points_at(
+        &self,
+        _store: &Store,
+        root: &Path,
+        _closure: &Value,
+        env_path: &Path,
+    ) -> io::Result<bool> {
+        Ok(canonical_symlink_target(&root.join(".venv")).as_deref() == Some(env_path))
+    }
+
+    /// The first line of the `requirements.in` an older `x` wrote:
+    /// `package` or `package==version`.
+    fn legacy_packages(&self, root: &Path) -> Option<Vec<LegacyPackage>> {
+        let text = fs::read_to_string(root.join("requirements.in")).ok()?;
+        let first = text.lines().next()?.trim();
+        if first.is_empty() {
+            return None;
+        }
+        let (package, version) = match first.split_once("==") {
+            Some((package, version)) if !package.is_empty() && !version.is_empty() => {
+                (package, Some(version.to_string()))
+            }
+            None => (first, None),
+            _ => return None,
+        };
+        if package.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some(vec![LegacyPackage {
+            package: package.to_string(),
+            version,
+        }])
     }
 
     fn realize(

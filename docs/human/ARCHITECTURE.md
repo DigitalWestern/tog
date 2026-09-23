@@ -532,10 +532,13 @@ commands iterate. See docs/human/ADDING-A-TAILOR.md.
 answers "tog x does not support <id>"; Python and Node return a
 `RegistryTool` (`registry_tool.rs` in each folder) that supplies the cache
 directory prefix (`py`, `npm`), the runtime object id in the cache key, the
-executable directory, resolve-realize-project for one package, and the
-launch environment. `commands/x.rs` keeps the `~/.tog/x` directory, the
-`x/3` key, the lifecycle lock, gc root registration, and the cached
-projection checks, and names no tailor module.
+command-line word and message labels, the executable directory,
+resolve-realize-project for one package, the launch environment, whether a
+cached projection still points at its environment, and the packages a
+pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
+directory, the `x/3` key, the lifecycle lock, gc root registration, and the
+policy checks on a cached hit, and is ecosystem-neutral except for the
+Corepack `pnpm` delegate path, which is Node by definition.
 
     python/mod.rs          pinned CPython provisioning
     python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)

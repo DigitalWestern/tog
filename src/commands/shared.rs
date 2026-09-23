@@ -123,6 +123,15 @@ pub(crate) fn registry_tool(ecosystem: &str) -> io::Result<&'static dyn Registry
         .registry_tool()
 }
 
+/// Every ecosystem `tog x` can run a tool from, as (tailor id, tool), in
+/// registry order.
+pub(crate) fn registry_tools() -> Vec<(&'static str, &'static dyn RegistryTool)> {
+    crate::tailors::registry()
+        .iter()
+        .filter_map(|tailor| Some((tailor.id(), tailor.registry_tool().ok()?)))
+        .collect()
+}
+
 pub(crate) fn child_status_code(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status

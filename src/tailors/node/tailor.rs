@@ -311,7 +311,7 @@ fn store_home_from_object(path: &Path) -> Option<PathBuf> {
     Some(objects.parent()?.parent()?.to_path_buf())
 }
 
-fn encoded_workspace(workspace: &str) -> Option<String> {
+pub(super) fn encoded_workspace(workspace: &str) -> Option<String> {
     if workspace.is_empty()
         || workspace
             .split('/')
