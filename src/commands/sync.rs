@@ -14,9 +14,37 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-/// Check every detected ecosystem can sync, touching no store. Returns the
-/// tailors it checked, so the sync runs exactly those, and the toolchain
-/// each one must use.
+/// Which detected tailors a sync is about: every one (the bare `tog`,
+/// `add`, `update`) or the one named (the build's sync, which realizes the
+/// ecosystem it builds and nothing else).
+///
+/// The scope decides host preflight and realization. It never narrows the
+/// toolchain lock: resolution always covers every detected ecosystem, so
+/// the lock `commit` publishes is never truncated and a stale section
+/// anywhere in the project still refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope<'a> {
+    All,
+    Only(&'a str),
+}
+
+impl Scope<'_> {
+    fn covers(self, tailor: &dyn Tailor) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Only(id) => tailor.id() == id,
+        }
+    }
+}
+
+/// Check the project can sync, touching no store. Returns every detected
+/// tailor and the toolchain each one must use; the caller narrows the
+/// tailors it runs to the same `scope` it passed here.
+///
+/// Host preflight runs for the tailors `scope` covers only: whether this
+/// host can run an ecosystem the caller is not going to realize says
+/// nothing about the one it is. The toolchain lock is resolved for every
+/// detected ecosystem whatever the scope (see `Scope`).
 ///
 /// Resolution happens here, before the store is opened: a stale or
 /// unresolvable toolchain must refuse without creating a store tree, taking
@@ -26,6 +54,7 @@ pub fn preflight_sync(
     platform: Platform,
     dir: &Path,
     mode: Mode,
+    scope: Scope<'_>,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
     // Syncing ends by registering this project as a GC root. Check that the
     // path can be recorded before realizing or projecting anything: a
@@ -47,7 +76,7 @@ pub fn preflight_sync(
     // Host support first: an ecosystem that cannot run here at all says so
     // in its own words, before selection reports the same project as
     // unsatisfiable in the catalog's words.
-    for tailor in &present {
+    for tailor in present.iter().filter(|tailor| scope.covers(**tailor)) {
         tailor.preflight(platform, dir)?;
     }
     let inputs = ecosystem_inputs(dir, &present)?;
@@ -80,7 +109,7 @@ pub(crate) fn run_in_mode(
 ) -> io::Result<()> {
     let dir = context::project_dir();
     let checked = directory_identity(&dir)?;
-    let (present, mut toolchain) = preflight(platform, &dir, strict, mode.clone())?;
+    let (present, mut toolchain) = preflight(platform, &dir, strict, mode.clone(), Scope::All)?;
     // Opening the store can wait on another process's lease. If the
     // directory was renamed or replaced meanwhile, the pathname no longer
     // names the project preflight checked: refuse rather than sync it. This
@@ -123,7 +152,7 @@ pub(crate) fn run_in_mode(
             let root = ProjectRoot::open(&dir)?;
             let _published = project_toolchain::commit(&root, &mut toolchain, &mode)?;
         }
-        let (present, mut toolchain) = preflight_sync(platform, &dir, Mode::Writable)?;
+        let (present, mut toolchain) = preflight_sync(platform, &dir, Mode::Writable, Scope::All)?;
         return sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &Mode::Writable);
     }
     sync_preflighted(&ctx, &dir, &present, &mut toolchain, fresh, &mode)
@@ -144,7 +173,7 @@ pub fn run(ctx: &Context, fresh: bool, strict: bool) -> io::Result<()> {
 /// found by walking up, which is not always the process cwd.
 fn run_in(ctx: &Context, dir: &Path, fresh: bool, strict: bool, frozen: bool) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
-    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone())?;
+    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone(), Scope::All)?;
     sync_preflighted(ctx, dir, &present, &mut toolchain, fresh, &mode)
 }
 
@@ -180,13 +209,13 @@ pub(crate) fn ensure_current(
 /// `ensure_current`, deciding on one ecosystem's row only when `only`
 /// names it. `build` uses one environment, so a stale or broken ecosystem
 /// it does not build (a Python docs tool in a Rust repo) does not start a
-/// sync in front of it. When the built ecosystem is stale the sync still
-/// preflights every ecosystem and resolves the toolchain lock for all of
-/// them, so the committed lock stays whole and an unrelated ecosystem this
-/// host cannot run, or whose lock section is stale, refuses as before; but
-/// only the built ecosystem is prepared and realized, so an unrelated one
-/// whose install fails (offline, a broken install script) no longer stops
-/// the build.
+/// sync in front of it. When the built ecosystem is stale the sync that
+/// runs is scoped to it (`Scope::Only`): only the built ecosystem is host
+/// preflighted, prepared and realized, so an unrelated one this host
+/// cannot run, or whose install fails (offline, a broken install script),
+/// does not stop the build. The toolchain lock is still resolved for all
+/// of them, so the committed lock stays whole and an unrelated ecosystem
+/// whose lock section is stale refuses as before.
 pub(crate) fn ensure_current_for(
     ctx: &Context,
     cwd: &Path,
@@ -212,11 +241,12 @@ pub(crate) fn ensure_current_for(
     Ok(projected_root(cwd))
 }
 
-/// The build's sync: preflight and resolve the whole project, so the lock
-/// `commit` publishes still names every detected ecosystem, but prepare
-/// and realize the named tailor only. Filtering after `commit` is what
-/// keeps the lock whole: resolving a subset would publish a lock with the
-/// other sections truncated.
+/// The build's sync: host preflight, prepare and realize the named tailor
+/// only, but resolve the toolchain lock for the whole project, so the lock
+/// `commit` publishes still names every detected ecosystem. Filtering the
+/// tailors rather than the lock inputs is what keeps the lock whole:
+/// resolving a subset would publish a lock with the other sections
+/// truncated.
 fn run_in_only(
     ctx: &Context,
     dir: &Path,
@@ -225,19 +255,21 @@ fn run_in_only(
     only: &str,
 ) -> io::Result<()> {
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
-    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone())?;
-    let scoped = scope_to(&present, only);
+    let scope = Scope::Only(only);
+    let (present, mut toolchain) = preflight(ctx.platform, dir, strict, mode.clone(), scope)?;
+    let scoped = scope_to(&present, scope);
     sync_preflighted(ctx, dir, &scoped, &mut toolchain, false, &mode)
 }
 
 /// The tailors one sync realizes: every detected one, or the named one.
-/// `only` always names a tailor the caller resolved first (the ecosystem
-/// being built), so it is present here; anything else scopes to nothing,
-/// and the empty slice fails closed in `sync_preflighted` (`no_inputs`).
-fn scope_to<'a>(present: &[&'a dyn Tailor], only: &str) -> Vec<&'a dyn Tailor> {
+/// `Scope::Only` always names a tailor the caller resolved first (the
+/// ecosystem being built), so it is present here; anything else scopes to
+/// nothing, and the empty slice fails closed in `sync_preflighted`
+/// (`no_inputs`).
+fn scope_to<'a>(present: &[&'a dyn Tailor], scope: Scope<'_>) -> Vec<&'a dyn Tailor> {
     present
         .iter()
-        .filter(|tailor| tailor.id() == only)
+        .filter(|tailor| scope.covers(**tailor))
         .copied()
         .collect()
 }
@@ -279,12 +311,13 @@ fn preflight(
     dir: &Path,
     strict: bool,
     mode: Mode,
+    scope: Scope<'_>,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
     policy::init(dir, strict)?;
     // A configured signing key that cannot be loaded fails here, before the
     // store is opened or any closure is written.
     crate::comforter::init_signing()?;
-    preflight_sync(platform, dir, mode)
+    preflight_sync(platform, dir, mode, scope)
 }
 
 pub(crate) fn sync_preflighted(
@@ -701,7 +734,12 @@ mod tests {
         let temp = TempDir::new();
         let project = temp.0.join("project ");
         std::fs::create_dir_all(&project).unwrap();
-        let Err(error) = preflight_sync(Platform::host().unwrap(), &project, Mode::Writable) else {
+        let Err(error) = preflight_sync(
+            Platform::host().unwrap(),
+            &project,
+            Mode::Writable,
+            Scope::All,
+        ) else {
             panic!("an unregistrable project path was accepted");
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -732,7 +770,8 @@ mod tests {
         .unwrap();
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         let platform = Platform::host().unwrap();
-        let (present, mut toolchain) = preflight_sync(platform, &project, Mode::Writable).unwrap();
+        let (present, mut toolchain) =
+            preflight_sync(platform, &project, Mode::Writable, Scope::All).unwrap();
         assert!(present.iter().any(|tailor| tailor.id() == "python"));
         assert!(!project.join("tog-toolchain.toml").exists());
         let selected = toolchain.get("python").unwrap();
@@ -753,7 +792,7 @@ mod tests {
         );
         drop(guard);
 
-        let (_, again) = preflight_sync(platform, &project, Mode::Writable).unwrap();
+        let (_, again) = preflight_sync(platform, &project, Mode::Writable, Scope::All).unwrap();
         let honored = again.get("python").unwrap();
         assert_eq!(honored.source, Source::Lock);
         assert_eq!(honored.bundle_id(), chosen);
@@ -784,7 +823,12 @@ mod tests {
         let victim = temp.0.join("victim");
         std::fs::write(&victim, "3.12.14\n").unwrap();
         std::os::unix::fs::symlink(&victim, project.join(".python-version")).unwrap();
-        let Err(error) = preflight_sync(Platform::host().unwrap(), &project, Mode::Writable) else {
+        let Err(error) = preflight_sync(
+            Platform::host().unwrap(),
+            &project,
+            Mode::Writable,
+            Scope::All,
+        ) else {
             panic!("a symlinked .python-version was read through");
         };
         assert!(error.to_string().contains("is a symlink"), "{error}");
@@ -793,7 +837,13 @@ mod tests {
         std::fs::remove_file(project.join(".python-version")).unwrap();
         std::fs::write(project.join(".python-version"), "3.12.14\n").unwrap();
         std::os::unix::fs::symlink(&victim, project.join(".ruby-version")).unwrap();
-        preflight_sync(Platform::host().unwrap(), &project, Mode::Writable).unwrap();
+        preflight_sync(
+            Platform::host().unwrap(),
+            &project,
+            Mode::Writable,
+            Scope::All,
+        )
+        .unwrap();
     }
 
     /// The reason line is the `status` vocabulary with the detail that
@@ -897,13 +947,14 @@ mod tests {
     fn build_sync_scopes_to_the_built_ecosystem() {
         let present = tailors::registry();
         assert!(present.len() > 1, "needs two ecosystems to scope");
-        let scoped = scope_to(present, "cargo");
+        assert_eq!(scope_to(present, Scope::All).len(), present.len());
+        let scoped = scope_to(present, Scope::Only("cargo"));
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].id(), "cargo");
         assert!(scoped.iter().all(|tailor| tailor.id() != "python"));
         // An unknown name scopes to nothing, which fails closed downstream
         // (`sync_preflighted` refuses an empty slice).
-        assert!(scope_to(present, "cobol").is_empty());
+        assert!(scope_to(present, Scope::Only("cobol")).is_empty());
     }
 
     #[test]

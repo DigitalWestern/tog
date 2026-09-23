@@ -1133,6 +1133,59 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     );
 }
 
+/// `tog build cargo` host-preflights the ecosystem it builds only (#159):
+/// a Python project beside it that fails its own host preflight does not
+/// stop the build, while the bare `tog` still refuses on it. The toolchain
+/// lock the build's sync publishes keeps both sections.
+#[test]
+fn build_skips_an_unrelated_ecosystems_host_preflight() {
+    let home = TempDir::new("build-preflight");
+    let project = TempDir::new("build-preflight-project");
+    std::fs::write(
+        project.0.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    // A target no pinned Rust has: the cargo sync refuses on it offline,
+    // before any toolchain is fetched, which is how this test sees the
+    // build's own sync was reached.
+    std::fs::write(
+        project.0.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"stable\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+    )
+    .unwrap();
+    // Python's host preflight refuses a non-string requires-python. The
+    // toolchain-input reader skips it, so lock resolution still selects
+    // a CPython: only the host preflight fails.
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = 3\n",
+    )
+    .unwrap();
+
+    let out = tog(&project.0, &home.0, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("requires-python must be a string"),
+        "{stderr}"
+    );
+    assert!(!project.0.join("tog-toolchain.toml").exists());
+
+    let out = tog(&project.0, &home.0, &["build", "cargo"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("syncing first: cargo"), "{stderr}");
+    assert!(!stderr.contains("requires-python"), "{stderr}");
+    assert!(
+        stderr.contains("\"wasm32-unknown-unknown\" is unsupported"),
+        "{stderr}"
+    );
+    let lock = std::fs::read_to_string(project.0.join("tog-toolchain.toml")).unwrap();
+    assert!(lock.contains("[toolchain.python]"), "{lock}");
+    assert!(lock.contains("[toolchain.rust]"), "{lock}");
+}
+
 #[test]
 fn inspect_verbs_offline() {
     let home = TempDir::new("inspect");

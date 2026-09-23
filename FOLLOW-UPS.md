@@ -27,10 +27,6 @@ by position.
   followed by the full help screen, which can scroll the sync result away.
   Watch daily use; the candidates are a short footer, the full screen only
   when nothing needed syncing, or leaving it.
-- **A build still refuses on an unrelated ecosystem's host preflight or
-  stale lock section (#159).** #155 narrowed the build's sync to realizing
-  the built ecosystem; preflight and lock resolution stay whole-project.
-  Recommended: preflight the built ecosystem only, keep the lock whole.
 - **Delegated-tool doors under company policy.** `add`/`remove`/`update` and
   missing-lock generation run the ecosystem's own tool unsandboxed with
   network, outside what `tog audit` can see. Decided 2026-09-23: design
@@ -61,9 +57,6 @@ by position.
   unsigned setup. Decided 2026-09-23: both an unsigned mode of `audit`
   and exceptions in `tog status`; then the exception summary can name a
   real fix again. Stays open until both land.
-- **End-to-end test for the build's narrowed sync (#158).** #155 covers
-  the filter only; two ecosystems with one failing install is by hand.
-  Needs #147, or an ignored case until then.
 - **An offline fixture where a sync succeeds (#147).** Every green-sync
   test downloads a toolchain and is ignored, so "bare `tog`, then the
   help" and anything else that runs after a successful sync is verified by
