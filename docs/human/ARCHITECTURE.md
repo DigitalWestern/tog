@@ -312,7 +312,9 @@ store CPython. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
 get them via declared artifacts: the project pins `url` + `sha256`, tog
 prefetches through the verified cache and plants the file where the package's
-downloader looks. Linux builds needing C libraries get one pinned
+downloader looks. Electron's release zip is provisioned by tog itself, and
+because the env identity names that zip, a failed provisioning fails the
+sync rather than publishing an env without it. Linux builds needing C libraries get one pinned
 `native-libs/libset/3` object, a fixed conda-forge closure (zlib, OpenSSL,
 freetype, cairo, ...) with prefixes relocated at staging; the set id is an
 input of every derivation that mounts it. macOS arm64 has no native pin yet

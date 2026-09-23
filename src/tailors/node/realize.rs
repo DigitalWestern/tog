@@ -1373,29 +1373,18 @@ fn apply_artifact_policy(
         a.path.split('/').any(|segment| segment == p.name)
             || a.url.contains(&format!("/{}/", p.name))
     });
-    match crate::tailors::python::artifacts::provision(store, platform, &p.name, &p.version, tmp) {
-        Ok(Some(provisioning)) => {
-            envs.extend(provisioning.envs);
-            for digest in provisioning.cache_digests {
-                consumed.cache_digest(digest);
-            }
-            for (subject, detail) in &provisioning.records {
-                crate::kernel::policy::record(
-                    crate::kernel::policy::ARTIFACT_PROVISIONED,
-                    subject,
-                    detail,
-                )?;
-            }
+    let provisioned =
+        crate::tailors::python::artifacts::provision(store, platform, &p.name, &p.version, tmp);
+    if let Some(provisioning) = require_provisioning(p, provisioned)? {
+        envs.extend(provisioning.envs);
+        for digest in provisioning.cache_digests {
+            consumed.cache_digest(digest);
         }
-        Ok(None) => {}
-        Err(error) => {
-            // A provisioning failure is not fatal: the install script still
-            // runs and fails loudly on its own if it needs the artifact.
-            // The exception below is the one warning this event gets.
+        for (subject, detail) in &provisioning.records {
             crate::kernel::policy::record(
-                crate::kernel::policy::ARTIFACT_NOT_PROVISIONED,
-                &format!("{}@{}", p.name, p.version),
-                &format!("provisioning failed: {error}"),
+                crate::kernel::policy::ARTIFACT_PROVISIONED,
+                subject,
+                detail,
             )?;
         }
     }
@@ -1417,6 +1406,31 @@ fn apply_artifact_policy(
         )?;
     }
     Ok(())
+}
+
+/// A provisioning failure fails the realization.
+///
+/// The env identity already names the artifact (`provisioned:<zip>:<sha256>`),
+/// so an env built without it would publish under an id that claims it, and
+/// every later sync would reuse that tree. It would also be a second,
+/// network-dependent shape of one identity: different content, different
+/// exceptions and different cache evidence, which a concurrent publisher of
+/// the other shape rejects. Failing here keeps one identity to one shape; a
+/// re-run once the download works realizes the real thing.
+fn require_provisioning(
+    p: &NpmPackage,
+    provisioned: io::Result<Option<crate::tailors::python::artifacts::Provisioning>>,
+) -> io::Result<Option<crate::tailors::python::artifacts::Provisioning>> {
+    provisioned.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{}@{}: provisioning the artifact its install script downloads failed: {error}; \
+                 re-run 'tog' once the download is reachable",
+                p.name, p.version
+            ),
+        )
+    })
 }
 
 /// Run one package's lifecycle phases in the sandbox, stopping at the first
@@ -1706,6 +1720,75 @@ mod patch_snapshot_tests {
         assert_eq!(
             fs::read(dest.join("index.js")).unwrap(),
             b"after verified\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::*;
+
+    /// A failed provisioning fails the realization instead of committing an
+    /// env without the artifact its identity names. Offline: the cached
+    /// checksum manifest does not list this platform's zip, so provisioning
+    /// fails before any download.
+    #[test]
+    fn a_failed_provisioning_fails_the_realization() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(temp.0.join("store").join(sub)).unwrap();
+        }
+        let store = Store {
+            root: temp.0.join("store").canonicalize().unwrap(),
+        };
+        let version = "42.5.0";
+        let release_url =
+            format!("https://github.com/electron/electron/releases/download/v{version}");
+        let sums = store.root.join("cache/electron-shasums").join(
+            crate::tailors::python::artifacts::electron_cache_directory(&release_url),
+        );
+        fs::create_dir_all(&sums).unwrap();
+        fs::write(
+            sums.join("SHASUMS256.txt"),
+            format!("{} *electron-v{version}-win32-x64.zip\n", "0".repeat(64)),
+        )
+        .unwrap();
+        let package = NpmPackage {
+            path: "node_modules/electron".into(),
+            name: "electron".into(),
+            version: version.into(),
+            url: "https://127.0.0.1:9/never-requested.tgz".into(),
+            integrity: "sha512-AAAA".into(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            optional: false,
+        };
+        let scratch = temp.0.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let mut envs = Vec::new();
+        let mut consumed = crate::kernel::store::ObjectDeps::new();
+
+        let error = apply_artifact_policy(
+            &store,
+            Platform::host().unwrap(),
+            &package,
+            &scratch,
+            &[],
+            &[("postinstall", "node install.js".to_string())],
+            &mut envs,
+            &mut consumed,
+        )
+        .expect_err("a provisioning failure is fatal");
+
+        assert!(
+            error.to_string().contains("electron@42.5.0: provisioning"),
+            "{error}"
+        );
+        assert_eq!(consumed, crate::kernel::store::ObjectDeps::new());
+        assert!(
+            envs.is_empty(),
+            "nothing was handed to the script: {envs:?}"
         );
     }
 }
