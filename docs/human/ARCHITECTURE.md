@@ -138,7 +138,25 @@ cannot mutate them.
 locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
 `lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
-`npm install --package-lock-only`. Lifecycle scripts run hermetically (below).
+`npm install --package-lock-only`. A `file:`/`link:` dependency is a
+symlink into the user's source, so nothing is ever placed beneath one: a
+target that is itself an importer gets its dependencies from its own
+projected `node_modules` (as pnpm installs it), and any other local package
+gets them in the nearest enclosing importer's `node_modules`, where Node
+looks from the package's real path. Every importer's and local package's
+dependencies are then checked against that lookup chain, and a layout where
+one would shadow another, or a link that would sit inside a registry
+package, is refused; a `file:` package whose dependencies conflict with its
+workspace member's is not supported yet. pnpm `patchedDependencies` follow
+pnpm's precedence (exact version, then the one npm semver range the version
+satisfies, then a bare name or `name@*` that covers every version, two of
+those settled by the snapshot's recorded hash, and refused when that hash
+covers different bytes), and any snapshot whose recorded `patch_hash`
+disagrees with the selected patch is refused. Keys are read as written:
+whitespace around a key, its name or its version is refused. Ranges
+are read by `kernel/semver.rs`, node-semver's grammar and `satisfies`,
+checked case by case against node-semver itself
+(`kernel/semver_cases.tsv`). Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over
 ranged manifests, so a bare machine needs nothing installed besides tog.
 
@@ -276,7 +294,9 @@ candidate. A `||` range (`engines.node`, Poetry's `python`) lowers to one
 `AnyOf` request whose alternatives each AND their terms, so it too takes the
 first candidate any alternative admits; a `*` alternative in either
 reader, and an empty or `x` alternative in `engines.node`, drops the
-constraint. `engines.node` reads node semver's partials throughout: a bare
+constraint. `engines.node` is parsed by the same `kernel/semver.rs` the
+pnpm patch keys use, then lowered with the toolchain's own refusals on
+top (no prerelease or build, no `>*` or `<*`). It reads node semver's partials throughout: a bare
 or `=` partial is its whole line (`24` is `>=24,<25`, only three
 components are exact), a zero-bearing X-range keeps every stated
 component (`24.0.x` is `>=24.0,<24.1`), and `>`, `<=`, `^`, `~` and

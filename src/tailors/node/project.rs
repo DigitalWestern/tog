@@ -483,6 +483,28 @@ fn link_workspace_sources(
             .unwrap_or_else(|| forest.to_path_buf());
         let rel = importer_relative_path(&l.path).trim_start_matches("node_modules/");
         let link = link_root.join(rel);
+        // Every directory between the forest root and the link must be the
+        // forest's own. A symlink on the way is a package's store object (or
+        // a source directory): creating the link through it would write
+        // into content tog must never modify.
+        let mut walked = link_root.clone();
+        for component in Path::new(rel)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+        {
+            walked.push(component);
+            if walked
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(err(format!(
+                    "workspace link {} would be created through {}, which is not a forest directory; refusing to write into it",
+                    l.path,
+                    walked.display()
+                )));
+            }
+        }
         if let Some(parent) = link.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -804,6 +826,66 @@ pub(super) fn normalize_modes(path: &Path) -> io::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o644))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link nested under a registry package would be created through the
+    /// forest's symlink into that package's store object. Projection refuses
+    /// it by name and leaves the object untouched; a top-level link is fine.
+    #[test]
+    fn workspace_links_are_never_created_through_a_package_symlink() {
+        let root =
+            std::env::temp_dir().join(format!("tog-link-through-package-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let project = root.join("project");
+        let forest = root.join("forest/node_modules");
+        let object = root.join("store/objects/parent");
+        for dir in [project.join("vendor/a"), forest.clone(), object.clone()] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(&object, forest.join("parent")).unwrap();
+        let plan = |path: &str| NpmPlan {
+            node_version: String::new(),
+            packages: Vec::new(),
+            links: vec![NpmLink {
+                path: path.to_string(),
+                target: "vendor/a".to_string(),
+            }],
+            workspaces: Vec::new(),
+            lock_source: "pnpm-lock.yaml".to_string(),
+        };
+
+        let error = link_workspace_sources(
+            &project,
+            &plan("node_modules/parent/node_modules/a"),
+            &root.join("forest"),
+            &forest,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("which is not a forest directory"),
+            "{error}"
+        );
+        assert!(
+            fs::read_dir(&object).unwrap().next().is_none(),
+            "nothing may be written into the store object"
+        );
+
+        link_workspace_sources(
+            &project,
+            &plan("node_modules/a"),
+            &root.join("forest"),
+            &forest,
+        )
+        .unwrap();
+        assert!(forest.join("a").symlink_metadata().unwrap().is_symlink());
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 pub(super) fn dir_size(path: &Path) -> io::Result<u64> {

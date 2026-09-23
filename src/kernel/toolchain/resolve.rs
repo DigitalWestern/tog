@@ -20,8 +20,7 @@ use std::io;
 const UPDATE_HINT: &str = "run `tog update --toolchain`";
 
 /// What `.python-version` accepts, spelled the way the refusal spells it.
-const PYTHON_HINT: &str =
-    "put an X.Y, X.Y.Z, or supported specifier in .python-version, then run `tog update --toolchain`";
+const PYTHON_HINT: &str = "put an X.Y, X.Y.Z, or supported specifier in .python-version, then run `tog update --toolchain`";
 
 /// The value a row holds, looked up by the (path, field) pair discovery
 /// recorded it under. A row with no value reads the same as no row.
@@ -173,50 +172,11 @@ fn poetry_python_alternative(text: &str) -> io::Result<VersionRequest> {
     specifier_set(FIELD, text.trim())
 }
 
-/// The largest component node semver accepts (`Number.MAX_SAFE_INTEGER`).
-const NODE_MAX_COMPONENT: u64 = 9_007_199_254_740_991;
-
 /// The refusal every unreadable `engines.node` range gets.
 fn node_unsupported(whole: &str) -> io::Error {
     invalid(format!(
         "engines.node range {whole} is not supported; put an exact version in .node-version"
     ))
-}
-
-/// A node semver partial version: one to three numeric components, any of
-/// them replaceable from some point on by `x`, `X` or `*` (`24`, `24.1.x`,
-/// `v24.1.2`, `*`). Returns the numeric components before the first
-/// wildcard, so `24.0.x` is `[24, 0]` and `*` is `[]`. Prerelease and build
-/// suffixes, a fourth component, leading zeros and components past node
-/// semver's limit are refused.
-fn node_partial(whole: &str, text: &str) -> io::Result<Vec<u64>> {
-    let text = text.strip_prefix('v').unwrap_or(text);
-    let pieces: Vec<&str> = text.split('.').collect();
-    if text.is_empty() || pieces.len() > 3 {
-        return Err(node_unsupported(whole));
-    }
-    let mut parts = Vec::new();
-    let mut wild = false;
-    for piece in pieces {
-        if matches!(piece, "x" | "X" | "*") {
-            wild = true;
-            continue;
-        }
-        if wild
-            || piece.is_empty()
-            || (piece.len() > 1 && piece.starts_with('0'))
-            || !piece.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err(node_unsupported(whole));
-        }
-        let value = piece
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value <= NODE_MAX_COMPONENT)
-            .ok_or_else(|| node_unsupported(whole))?;
-        parts.push(value);
-    }
-    Ok(parts)
 }
 
 fn node_version(whole: &str, parts: &[u64]) -> io::Result<Version> {
@@ -239,7 +199,7 @@ fn node_next(whole: &str, parts: &[u64], primitive: bool) -> io::Result<Version>
     let last = parts.last_mut().ok_or_else(|| node_unsupported(whole))?;
     *last = last
         .checked_add(1)
-        .filter(|next| primitive || *next <= NODE_MAX_COMPONENT)
+        .filter(|next| primitive || *next <= crate::kernel::semver::MAX_COMPONENT)
         .ok_or_else(|| node_unsupported(whole))?;
     node_version(whole, &parts)
 }
@@ -268,71 +228,6 @@ fn node_specifier(op: Op, version: Version) -> io::Result<VersionRequest> {
     .map_err(|error| invalid(format!("engines.node: {error}")))?]))
 }
 
-/// One `engines.node` comparator, lowered to the requests that all apply.
-/// An empty result admits every release (`*`, `>=0`). Partials read the way
-/// node semver reads them: a bare or `=` partial is its whole line (`24` is
-/// `>=24,<25`, only `24.1.2` is exact), `>X` is past all of X, `<=X` admits
-/// all of X, `^` bumps the first non-zero stated component and `~` the minor
-/// (or the major when only the major is stated).
-fn engines_node_term(whole: &str, term: &str) -> io::Result<Vec<VersionRequest>> {
-    for (op, rest) in [
-        (">=", term.strip_prefix(">=")),
-        ("<=", term.strip_prefix("<=")),
-        (">", term.strip_prefix('>')),
-        ("<", term.strip_prefix('<')),
-        ("^", term.strip_prefix('^')),
-        ("~", term.strip_prefix('~')),
-        ("=", term.strip_prefix('=')),
-    ] {
-        let Some(rest) = rest else { continue };
-        let parts = node_partial(whole, rest)?;
-        return match op {
-            ">=" if parts.is_empty() => Ok(Vec::new()),
-            ">=" => node_bounds(whole, Some(&parts[..]), None),
-            "<=" if parts.is_empty() => Ok(Vec::new()),
-            "<=" => node_bounds(
-                whole,
-                None,
-                Some(node_next(whole, &parts, parts.len() == 3)?),
-            ),
-            // `>*` and `<*` admit nothing: refuse rather than lock nothing.
-            ">" | "<" if parts.is_empty() => Err(node_unsupported(whole)),
-            ">" => Ok(vec![node_specifier(
-                Op::Ge,
-                node_next(whole, &parts, parts.len() == 3)?,
-            )?]),
-            "<" => node_bounds(whole, None, Some(node_version(whole, &parts)?)),
-            "^" | "~" | "=" if parts.is_empty() => Ok(Vec::new()),
-            "^" => {
-                let keep = parts
-                    .iter()
-                    .position(|part| *part != 0)
-                    .map_or(parts.len(), |index| index + 1)
-                    .min(parts.len());
-                node_bounds(
-                    whole,
-                    Some(&parts[..]),
-                    Some(node_next(whole, &parts[..keep], false)?),
-                )
-            }
-            "~" => {
-                let keep = parts.len().min(2);
-                node_bounds(
-                    whole,
-                    Some(&parts[..]),
-                    Some(node_next(whole, &parts[..keep], false)?),
-                )
-            }
-            _ => node_line(whole, &parts),
-        };
-    }
-    let parts = node_partial(whole, term)?;
-    if parts.is_empty() {
-        return Ok(Vec::new());
-    }
-    node_line(whole, &parts)
-}
-
 /// A bare partial: exact at three components, otherwise its whole line.
 fn node_line(whole: &str, parts: &[u64]) -> io::Result<Vec<VersionRequest>> {
     if parts.len() == 3 {
@@ -341,53 +236,73 @@ fn node_line(whole: &str, parts: &[u64]) -> io::Result<Vec<VersionRequest>> {
     node_bounds(whole, Some(parts), Some(node_next(whole, parts, false)?))
 }
 
-/// One `||` alternative: space-joined comparators that all apply. An
-/// operator spelled apart from its version (`>= 20`) is one comparator, and
-/// `A - B` is a hyphen range: `>=A` (a partial `A` is zero-filled) and
-/// `<=B` (a partial `B` admits its whole line, so `- 2.3` is `<2.4`).
-fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<VersionRequest>> {
-    let mut tokens: Vec<String> = Vec::new();
-    let mut words = alternative.split_whitespace().peekable();
-    while let Some(word) = words.next() {
-        let bare_op = matches!(word, ">=" | "<=" | ">" | "<" | "=" | "^" | "~");
-        match (bare_op, words.peek()) {
-            (true, Some(next)) => {
-                tokens.push(format!("{word}{next}"));
-                words.next();
-            }
-            (true, None) => return Err(node_unsupported(whole)),
-            (false, _) => tokens.push(word.to_string()),
-        }
+/// The numeric components of a parsed partial, refusing what a toolchain
+/// request never takes: a prerelease suffix.
+fn kernel_parts(whole: &str, partial: &crate::kernel::semver::Partial) -> io::Result<Vec<u64>> {
+    if !partial.prerelease.is_empty() {
+        return Err(node_unsupported(whole));
     }
-    let mut terms = Vec::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        if tokens[index] == "-" {
-            return Err(node_unsupported(whole));
-        }
-        if tokens.get(index + 1).map(String::as_str) == Some("-") {
-            let high = tokens
-                .get(index + 2)
-                .ok_or_else(|| node_unsupported(whole))?;
-            let low = node_partial(whole, &tokens[index])?;
-            let high = node_partial(whole, high)?;
+    Ok(partial.parts.clone())
+}
+
+fn kernel_term(whole: &str, term: &crate::kernel::semver::Term) -> io::Result<Vec<VersionRequest>> {
+    use crate::kernel::semver::{Op as NpmOp, Term};
+    let (op, parts) = match term {
+        Term::Hyphen { low, high } => {
+            let low = kernel_parts(whole, low)?;
+            let high = kernel_parts(whole, high)?;
             let high = if high.is_empty() {
                 None
             } else {
                 Some(node_next(whole, &high, high.len() == 3)?)
             };
-            terms.extend(node_bounds(
+            return node_bounds(
                 whole,
                 Some(&low).filter(|low| !low.is_empty()).map(|low| &low[..]),
                 high,
-            )?);
-            index += 3;
-            continue;
+            );
         }
-        terms.extend(engines_node_term(whole, &tokens[index])?);
-        index += 1;
+        Term::Comparator { op, version } => (*op, kernel_parts(whole, version)?),
+    };
+    match op {
+        NpmOp::Ge if parts.is_empty() => Ok(Vec::new()),
+        NpmOp::Ge => node_bounds(whole, Some(&parts[..]), None),
+        NpmOp::Le if parts.is_empty() => Ok(Vec::new()),
+        NpmOp::Le => node_bounds(
+            whole,
+            None,
+            Some(node_next(whole, &parts, parts.len() == 3)?),
+        ),
+        // `>*` and `<*` admit nothing: refuse rather than lock nothing.
+        NpmOp::Gt | NpmOp::Lt if parts.is_empty() => Err(node_unsupported(whole)),
+        NpmOp::Gt => Ok(vec![node_specifier(
+            Op::Ge,
+            node_next(whole, &parts, parts.len() == 3)?,
+        )?]),
+        NpmOp::Lt => node_bounds(whole, None, Some(node_version(whole, &parts)?)),
+        _ if parts.is_empty() => Ok(Vec::new()),
+        NpmOp::Caret => {
+            let keep = parts
+                .iter()
+                .position(|part| *part != 0)
+                .map_or(parts.len(), |index| index + 1)
+                .min(parts.len());
+            node_bounds(
+                whole,
+                Some(&parts[..]),
+                Some(node_next(whole, &parts[..keep], false)?),
+            )
+        }
+        NpmOp::Tilde => {
+            let keep = parts.len().min(2);
+            node_bounds(
+                whole,
+                Some(&parts[..]),
+                Some(node_next(whole, &parts[..keep], false)?),
+            )
+        }
+        NpmOp::Eq => node_line(whole, &parts),
     }
-    Ok(terms)
 }
 
 /// Every `engines.node` term, which all apply together. `*` and an empty
@@ -398,9 +313,17 @@ fn engines_node_alternative(whole: &str, alternative: &str) -> io::Result<Vec<Ve
 /// every release.
 fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
     let text = text.trim();
+    let range = crate::kernel::semver::Range::parse(text).map_err(|_| node_unsupported(text))?;
+    // A toolchain request never takes build metadata.
+    if range.names_build() {
+        return Err(node_unsupported(text));
+    }
     let mut alternatives = Vec::new();
-    for alternative in text.split("||") {
-        let terms = engines_node_alternative(text, alternative.trim())?;
+    for alternative in range.alternatives() {
+        let mut terms = Vec::new();
+        for term in alternative {
+            terms.extend(kernel_term(text, term)?);
+        }
         if terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -547,7 +470,7 @@ pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unknown ecosystem '{other}'"),
-            ))
+            ));
         }
     }
     Ok(request)
@@ -1053,6 +976,38 @@ mod tests {
             select_for(&catalog, "node", &pin).unwrap().release,
             "node-24.0.2"
         );
+    }
+
+    #[test]
+    fn node_engines_read_the_kernel_grammar_like_node_semver() {
+        // Spellings node-semver 7.8.5 accepts: `~>` is tilde, and a `[v=]*`
+        // prefix may sit before a partial or after `^`/`~`.
+        let line = |low: &str, high: &str| {
+            format!(
+                "[Specifiers([Specifier {{ op: Ge, version: Version([{low}]) }}]), \
+                 Specifiers([Specifier {{ op: Lt, version: Version([{high}]) }}])]"
+            )
+        };
+        for (text, low, high) in [
+            ("~>24.2", "24, 2", "24, 3"),
+            ("~> 24.2", "24, 2", "24, 3"),
+            ("==24", "24", "25"),
+            ("v=24", "24", "25"),
+            ("vv24", "24", "25"),
+            ("^=24", "24", "25"),
+            ("==1.2", "1, 2", "1, 3"),
+        ] {
+            assert_eq!(
+                format!("{:?}", engines_node(text).unwrap()),
+                line(low, high),
+                "{text}"
+            );
+        }
+        // Spellings node-semver 7.8.5 refuses: `==` before a full version,
+        // and a hyphen range mixed with other comparators.
+        for text in ["==1.2.3", "1 - 2 >=1.5", ">=1.5 1 - 2"] {
+            assert!(engines_node(text).is_err(), "{text}");
+        }
     }
 
     #[test]
