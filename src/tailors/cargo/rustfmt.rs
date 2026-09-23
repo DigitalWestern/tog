@@ -768,7 +768,14 @@ mod tests {
         let record = roots[0].record.as_ref().expect("root/2 record");
         assert_eq!(record.objects, BTreeSet::from([rust_id, rustfmt_id]));
         assert!(record.projections.is_empty(), "{:?}", record.projections);
+
+        // `gc --register` rebuilds the same record from this closure alone.
+        // Registration takes the exclusive lease, so the context's shared
+        // one goes first.
         drop(ctx);
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        assert_eq!(reimported.projections, record.projections);
         let _ = crate::kernel::store::remove_tree(&root);
     }
 }

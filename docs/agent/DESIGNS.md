@@ -1216,9 +1216,17 @@ They are the reason B.5's completion criteria are not cleared.
 ### Missing named tests
 
 The GC design named 26 tests for durable project records. None is missing
-now. Three behaviors are covered under other names, so no test carries the
+now. Four behaviors are covered under other names, so no test carries the
 design's name:
 
+- `register_imports_every_shipped_closure_schema`: each producer's
+  `closure_refs_name_every_object_this_producer_created` re-imports the
+  closure it really wrote and compares the record, and
+  `kernel::store::tests::register_imports_legacy_closure_bodies_of_every_ecosystem_together`
+  covers legacy body shapes. Re-importing a current Node closure adds one
+  `legacy-forests` reference the publisher never records (the importer
+  still follows the `node-forest/1` `projection_id` route). That namespace
+  is never swept, so it retains nothing; the Node test pins it.
 - `symlinked_registry_entry_is_a_malformed_record`:
   `kernel::store::tests::unreadable_records_are_reported_not_skipped` and
   `tests/gc_roots.rs::unreadable_records_block_the_sweep_instead_of_disappearing`.

@@ -1522,6 +1522,11 @@ mod tests {
             std::collections::BTreeSet::from([ruby_id, gems_id])
         );
         assert!(record.projections.is_empty(), "{:?}", record.projections);
+
+        // `gc --register` rebuilds the same record from this closure alone.
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        assert_eq!(reimported.projections, record.projections);
     }
 
     #[test]

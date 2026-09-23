@@ -753,6 +753,11 @@ mod tests {
                 .projection_ref(crate::kernel::store::ProjectionBase::Backups, &backups[0])
                 .unwrap()])
         );
+
+        // `gc --register` rebuilds the same record from this closure alone.
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        assert_eq!(reimported.projections, record.projections);
         let _ = crate::kernel::store::remove_tree(&store.root);
         let _ = fs::remove_dir_all(&project);
     }

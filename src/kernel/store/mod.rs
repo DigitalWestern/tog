@@ -164,6 +164,22 @@ impl Store {
     }
 }
 
+/// Test support for producer tests: drop `project`'s root record and rebuild
+/// it the way `gc --register` does, from the closures on disk alone. A
+/// producer test compares the result with the record it published directly,
+/// so a closure shape the importer cannot read back fails where it is made.
+/// The caller must not hold an activity lease: registration takes the
+/// exclusive one.
+#[cfg(test)]
+pub(crate) fn reimport_root_for_test(store: &Store, project: &Path) -> io::Result<RootRecord> {
+    let key = Store::root_key(project)?;
+    fs::remove_file(store.root.join("roots").join(&key))?;
+    store
+        .register_root_from_project(project)?
+        .record
+        .ok_or_else(|| io::Error::other("registration wrote no root/2 record"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,10 +955,15 @@ mod tests {
         assert_eq!(store.roots().unwrap().len(), 1);
     }
 
-    /// `gc --register` reads every closure body a shipped producer writes,
-    /// declaratively, and records every object and projection they name.
+    /// `gc --register` over a project holding one closure per ecosystem at
+    /// once, each in its oldest, sparsest shape: bare object paths, the
+    /// `{"path", "id"}` pair, and a Node forest known only by the legacy
+    /// `projection_id` route, with no `forest_path`. Every object and
+    /// projection lands in one record. Each producer's current closure is
+    /// re-imported by its own `closure_refs_name_every_object_this_producer_created`
+    /// test; this one covers the legacy shapes and the cross-ecosystem union.
     #[test]
-    fn register_imports_every_shipped_closure_schema() {
+    fn register_imports_legacy_closure_bodies_of_every_ecosystem_together() {
         let temp = TempDir::new();
         let store = store_in(&temp);
         let project = temp.0.join("project");

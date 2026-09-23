@@ -2161,6 +2161,28 @@ mod tests {
                     .unwrap(),
             ])
         );
+
+        // `gc --register` rebuilds the same record from this closure alone,
+        // plus one reference the publisher never makes: the importer also
+        // follows the `projection_id` route that `node-forest/1` closures
+        // needed, and adds the forest's spelling in the legacy sibling
+        // namespace. That namespace is never swept, so the extra reference
+        // retains nothing; it is pinned here so a change to it is seen.
+        let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
+        assert_eq!(reimported.objects, record.objects);
+        let mut expected = record.projections.clone();
+        let proj_id = forest.parent().unwrap();
+        expected.insert(
+            crate::kernel::store::ProjectionRef::new(
+                crate::kernel::store::ProjectionBase::LegacyForests,
+                vec![
+                    proj_id.parent().unwrap().file_name().unwrap().into(),
+                    proj_id.file_name().unwrap().into(),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(reimported.projections, expected);
         let _ = crate::kernel::store::remove_tree(&root);
     }
 
