@@ -279,4 +279,8 @@ impl Tailor for Elixir {
     fn object_kinds(&self) -> &'static [KindAdapter] {
         super::objects::KINDS
     }
+
+    fn toolchain_kinds(&self) -> &'static [&'static str] {
+        &["beam"]
+    }
 }

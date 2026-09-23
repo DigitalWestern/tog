@@ -30,6 +30,22 @@ const NODE_INPUTS: &[&str] = &[
 
 pub struct Node;
 
+/// The package.json `tog run` reads scripts from, as (canonical path,
+/// text): only under a `node_modules` projection whose closure reads back,
+/// and only when `dir` has a package.json.
+pub fn projected_package_json(dir: &Path, cwd: &Path) -> io::Result<Option<(PathBuf, String)>> {
+    let (node_projected, _) = projected_node_modules(dir, cwd);
+    if !node_projected {
+        return Ok(None);
+    }
+    comforter::read_closure(dir, "node")?;
+    let path = dir.join("package.json");
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(None);
+    }
+    Ok(Some((path.canonicalize()?, std::fs::read_to_string(path)?)))
+}
+
 /// Is `dir/node_modules` a tog projection, and which `node_modules`
 /// between `cwd` and `dir` should lead PATH? `tog run` works from
 /// workspace subdirectories like npm run does: the nearest projected
@@ -194,6 +210,10 @@ impl Tailor for Node {
         Ok(true)
     }
 
+    fn refused_command(&self, cmd: &[String]) -> Option<String> {
+        super::run_refusal::refused_command(cmd)
+    }
+
     fn run_env(
         &self,
         ctx: &Context,
@@ -312,6 +332,10 @@ impl Tailor for Node {
 
     fn object_kinds(&self) -> &'static [KindAdapter] {
         super::objects::KINDS
+    }
+
+    fn toolchain_kinds(&self) -> &'static [&'static str] {
+        &["nodejs"]
     }
 }
 

@@ -108,6 +108,10 @@ impl Tailor for Python {
         Ok(true)
     }
 
+    fn refused_command(&self, cmd: &[String]) -> Option<String> {
+        python::run_refusal::refused_command(cmd)
+    }
+
     fn run_env(
         &self,
         _ctx: &Context,
@@ -203,5 +207,9 @@ impl Tailor for Python {
 
     fn object_kinds(&self) -> &'static [KindAdapter] {
         super::objects::KINDS
+    }
+
+    fn toolchain_kinds(&self) -> &'static [&'static str] {
+        &["cpython", "uv", "native-libs"]
     }
 }

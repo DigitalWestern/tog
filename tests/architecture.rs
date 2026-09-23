@@ -1,6 +1,7 @@
 //! The layering rules of docs/human/ARCHITECTURE.md ("Layering rules"),
 //! enforced by a source scan: `commands → tailors → comforter → kernel`, one
-//! direction only, and no tailor names another tailor.
+//! direction only, and no tailor names another tailor. A command file does
+//! not name a tailor by string either (the tokens scan below).
 //!
 //! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
 //! may wire the whole crate together. Size budgets (layering rule 5) are
@@ -534,6 +535,8 @@ fn agent_docs_are_two_files() {
 enum Token {
     Ident(String),
     Punct(char),
+    /// A string literal, with its contents as written (escapes unprocessed).
+    Str(String),
     Lit,
 }
 
@@ -567,19 +570,20 @@ fn tokenize(text: &str) -> Vec<Token> {
                     i += 1;
                 }
             }
-        } else if let Some(end) = raw_string_end(&chars, i) {
-            out.push(Token::Lit);
-            i = end;
+        } else if let Some((start, end, close)) = raw_string_end(&chars, i) {
+            out.push(Token::Str(chars[start..end.min(n)].iter().collect()));
+            i = close;
         } else if c == '"' || (c == 'b' && i + 1 < n && chars[i + 1] == '"') {
             i += if c == 'b' { 2 } else { 1 };
+            let start = i;
             while i < n && chars[i] != '"' {
                 if chars[i] == '\\' {
                     i += 1;
                 }
                 i += 1;
             }
+            out.push(Token::Str(chars[start..i.min(n)].iter().collect()));
             i += 1;
-            out.push(Token::Lit);
         } else if c == '\'' || (c == 'b' && i + 1 < n && chars[i + 1] == '\'') {
             let start = if c == 'b' { i + 1 } else { i };
             // A char literal closes within a few characters; otherwise this
@@ -634,9 +638,9 @@ fn tokenize(text: &str) -> Vec<Token> {
     out
 }
 
-/// Where a raw string literal (`r"…"`, `r#"…"#`, `br"…"`) starting at `i`
-/// ends, if one does.
-fn raw_string_end(chars: &[char], i: usize) -> Option<usize> {
+/// Where the contents of a raw string literal (`r"…"`, `r#"…"#`, `br"…"`)
+/// starting at `i` begin and end, and where the literal ends, if one does.
+fn raw_string_end(chars: &[char], i: usize) -> Option<(usize, usize, usize)> {
     let n = chars.len();
     let mut j = i;
     if chars[j] == 'b' {
@@ -658,13 +662,14 @@ fn raw_string_end(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     j += 1;
+    let start = j;
     while j < n {
         if chars[j] == '"' && (1..=hashes).all(|k| j + k < n && chars[j + k] == '#') {
-            return Some(j + 1 + hashes);
+            return Some((start, j, j + 1 + hashes));
         }
         j += 1;
     }
-    Some(n)
+    Some((start, n, n))
 }
 
 fn is_ident(token: Option<&Token>, name: &str) -> bool {
@@ -1003,6 +1008,114 @@ fn the_scan_sees_every_spelling() {
             "value",
             "acquire",
             "acquire"
+        ]
+    );
+}
+
+/// Every word that names a tailor: its id and lock ecosystem, and the
+/// command-line word and cache prefix of its registry tool. Read from the
+/// registry, so a new tailor is covered without editing this test.
+fn tailor_words() -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for tailor in tog::tailors::registry() {
+        words.push(tailor.id().into());
+        words.push(tailor.lock_ecosystem().into());
+        if let Ok(tool) = tailor.registry_tool() {
+            words.push(tool.spelling().into());
+            words.push(tool.cache_prefix().into());
+        }
+    }
+    words.sort();
+    words.dedup();
+    words
+}
+
+/// Per-function counts of string literals in `text` that are exactly one
+/// of `words`, outside `#[cfg(test)]` items.
+fn literal_sites(relative: &str, text: &str, words: &[String]) -> Vec<(String, String, usize)> {
+    let mut counts: Vec<(String, String, usize)> = Vec::new();
+    for (token, owner) in production_tokens(text) {
+        let Token::Str(literal) = &token else {
+            continue;
+        };
+        if !words.contains(literal) {
+            continue;
+        }
+        match counts
+            .iter_mut()
+            .find(|(_, function, _)| *function == owner)
+        {
+            Some(entry) => entry.2 += 1,
+            None => counts.push((relative.to_string(), owner, 1)),
+        }
+    }
+    counts
+}
+
+/// The command-file functions that still name a tailor by string, with how
+/// many times, each row owned by the open issue that removes it. The table
+/// only shrinks: the counts must match exactly, so the fix that removes a
+/// literal also removes its row, and a new literal fails even in a listed
+/// function.
+const TAILOR_NAMING_DEBT: &[(&str, &str, usize)] = &[
+    // #61: add/remove/update are per-ecosystem code in the command until
+    // `Tailor::edit_manifest` exists; `Eco` is its hand-written table.
+    ("src/commands/deps.rs", "cargo_delegate", 1),
+    ("src/commands/deps.rs", "elixir_delegate", 1),
+    ("src/commands/deps.rs", "go_delegate", 1),
+    ("src/commands/deps.rs", "name", 7),
+    ("src/commands/deps.rs", "node", 3),
+    ("src/commands/deps.rs", "prefix", 4),
+    ("src/commands/deps.rs", "registry", 1),
+    ("src/commands/deps.rs", "ruby_delegate", 1),
+    ("src/commands/deps.rs", "uv_command", 1),
+    // #169: the Corepack/pnpm delegate path `deps` uses to realize pnpm.
+    ("src/commands/x.rs", "node_cache_root", 1),
+    ("src/commands/x.rs", "realize_node_tool", 4),
+    ("src/commands/x.rs", "verify_corepack_hash", 1),
+];
+
+/// A command reaches an ecosystem through the `Tailor` trait and the
+/// registry, never by spelling its name: a `"python"` or `"npm"` literal
+/// in `src/commands/` is a branch or lookup the import scan above cannot
+/// see, and it drifts back into tailor-specific code (layering rule 3).
+/// Text that merely mentions a tailor inside a longer message is not a
+/// match; only a literal that *is* the name counts.
+#[test]
+fn commands_do_not_name_tailors_by_string() {
+    let words = tailor_words();
+    let mut found: Vec<(String, String, usize)> = all_sources()
+        .into_iter()
+        .filter(|(relative, _)| relative.starts_with("src/commands/"))
+        .flat_map(|(relative, text)| literal_sites(&relative, &text, &words))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        expected_sites(TAILOR_NAMING_DEBT),
+        "a command names a tailor by string ({words:?}); ask the tailor through a \
+         `Tailor` or `RegistryTool` method instead (or, when a row's issue lands, \
+         delete the row)"
+    );
+}
+
+/// The literal scan reads string contents through every spelling and skips
+/// comments, char literals and test-only items.
+#[test]
+fn the_literal_scan_sees_every_spelling() {
+    let words = vec!["node".to_string(), "py".to_string()];
+    let text = "fn plain() { f(\"node\"); }\n\
+        fn raw() { f(r#\"node\"#); f(r\"py\"); }\n\
+        fn byte() { f(b\"py\"); }\n\
+        fn escaped() { f(\"say \\\"node\\\"\"); f(\"node:\"); }\n\
+        fn comment() { // \"node\"\n /* \"py\" */ f('n'); }\n\
+        #[cfg(test)]\nfn test_only() { f(\"node\"); }";
+    assert_eq!(
+        literal_sites("f.rs", text, &words),
+        [
+            ("f.rs".to_string(), "plain".to_string(), 1),
+            ("f.rs".to_string(), "raw".to_string(), 2),
+            ("f.rs".to_string(), "byte".to_string(), 1),
         ]
     );
 }

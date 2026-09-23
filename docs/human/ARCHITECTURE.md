@@ -625,11 +625,16 @@ tailor; Python environment realization lives in `tailors/python/env.rs`.
 
 Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
 folder has `tailor.rs` (its `impl Tailor`, the one blueprint every
-ecosystem answers: detect, preflight, plan, sync, build, run_env, listing,
-closure_state, sbom_components, object_kinds) and `objects.rs` (the store
+ecosystem answers: detect, preflight, plan, sync, build, run_env,
+refused_command, listing, closure_state, sbom_components, object_kinds,
+toolchain_kinds) and `objects.rs` (the store
 object kinds it produces, with their live and migration identity grammars and
 legacy-metadata adapters); `src/tailors/mod.rs` holds the trait and the registry the
-commands iterate. See docs/human/ADDING-A-TAILOR.md.
+commands iterate. See docs/human/ADDING-A-TAILOR.md. A command file never
+spells a tailor's name as a string: `tests/architecture.rs` fails on a
+literal in `src/commands/` that is a tailor id, lock ecosystem, or registry
+word (read from the registry), except the rows its debt table keeps for
+the open issues that remove them.
 
 `Tailor::registry_tool` is how `tog x` reaches an ecosystem. Its default
 answers "tog x does not support <id>"; Python and Node return a
@@ -641,7 +646,11 @@ cached projection still points at its environment, and the packages a
 pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
 directory, the `x/3`/`x/4` key, the lifecycle lock, gc root registration, and the
 policy checks on a cached hit, and is ecosystem-neutral except for the
-Corepack `pnpm` delegate path, which is Node by definition.
+Corepack `pnpm` delegate path, which is Node by definition. The grammar
+cannot ask the registry (the cli layer names no tailor), so
+`cli::spec::X_REGISTRIES` mirrors each registry tool's `spelling` for the
+`--<word>`/`--<id>` flags and the `<word>:` prefix, and a parser test fails
+when the two differ.
 
     python/mod.rs          CPython pin lookup over kernel/provider/cpython.rs
     python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)
@@ -655,12 +664,14 @@ Corepack `pnpm` delegate path, which is Node by definition.
     python/build.rs        sandboxed sdist-to-wheel builds
     python/build_requires.rs  PEP 517 build requirements
     python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
+    python/run_refusal.rs  `tog run` refusals: pip install into a projected .venv
     node/mod.rs            pins, plan types, scripts, path helpers
     node/plan.rs           package-lock.json planning
     node/realize.rs        env realization and sandboxed install scripts
     node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
+    node/run_refusal.rs    `tog run` refusals: npm-family installs over node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
     cargo/mod.rs           project Cargo env + sandboxed build over
                            kernel/provider/{rust,crates}.rs

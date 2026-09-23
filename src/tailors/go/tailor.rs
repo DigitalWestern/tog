@@ -251,6 +251,10 @@ impl Tailor for Go {
     fn object_kinds(&self) -> &'static [KindAdapter] {
         super::objects::KINDS
     }
+
+    fn toolchain_kinds(&self) -> &'static [&'static str] {
+        &["go"]
+    }
 }
 
 /// Compare the selected Go version in go.mod with the one recorded in the

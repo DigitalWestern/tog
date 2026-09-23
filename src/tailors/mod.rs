@@ -249,6 +249,14 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
+    /// `tog run`: why `cmd` is refused before any environment is looked
+    /// up, when it is one of this ecosystem's package-manager verbs that
+    /// would write into a projection (`pip install`, `npm install`). The
+    /// refusal is the same in every project, so it needs no projection.
+    fn refused_command(&self, _cmd: &[String]) -> Option<String> {
+        None
+    }
+
     /// `tog ls`: what a closure of this ecosystem lists.
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing;
 
@@ -279,6 +287,13 @@ pub trait Tailor: Sync {
     /// Every kind a tailor commits must have a row here or GC refuses to
     /// certify its records.
     fn object_kinds(&self) -> &'static [KindAdapter] {
+        &[]
+    }
+
+    /// The object kinds among `object_kinds` that are this ecosystem's
+    /// realized toolchain (`cpython`, `nodejs`, ...), which `tog doctor`
+    /// lists from the store's metadata.
+    fn toolchain_kinds(&self) -> &'static [&'static str] {
         &[]
     }
 
