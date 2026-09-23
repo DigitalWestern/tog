@@ -580,19 +580,7 @@ impl Sandbox<'_> {
             OsString::from("--new-session"),
             OsString::from("--clearenv"),
         ];
-        push_bind(&mut args, "--ro-bind", "/usr", "/usr");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/bin");
-        push_arg(&mut args, "/bin");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/lib");
-        push_arg(&mut args, "/lib");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/lib64");
-        push_arg(&mut args, "/lib64");
-        push_arg(&mut args, "--symlink");
-        push_arg(&mut args, "usr/sbin");
-        push_arg(&mut args, "/sbin");
+        args.extend(system_root_args(Path::new("/"))?);
 
         for item in [
             "/etc/ld.so.cache",
@@ -723,14 +711,16 @@ fn bwrap_unavailable() -> String {
 /// `/usr`; a failure to exec anything else is a property of that command.
 const PROBE_TARGET: &str = "/usr/bin/true";
 
-/// A bubblewrap that starts but cannot exec. Ubuntu 22.04's bubblewrap
-/// cannot resolve tog's merged-/usr bind layout, so the raw
-/// `execvp /usr/bin/true: No such file or directory` reads like a missing
-/// file in the user's project rather than a host limitation.
+/// A bubblewrap that starts but cannot exec. The probe target is in the
+/// ro-bound `/usr`, so failing to exec it means the system runtime tog
+/// mirrors into the sandbox (`system_root_args`) does not hold together on
+/// this host, e.g. an ELF interpreter reached through an entry tog does not
+/// recreate. The raw `execvp /usr/bin/true: No such file or directory`
+/// would read like a missing file in the user's project instead.
 ///
 /// Only the probe's own target gets that explanation. bwrap prints the
 /// same line when a build spec names a binary that is not in the closure,
-/// and blaming Ubuntu for that would send the user to the wrong place.
+/// and blaming the host for that would send the user to the wrong place.
 fn explained_bwrap_stderr(stderr: &str) -> String {
     let raw = stderr.trim_end();
     if !raw.contains("execvp") || !raw.contains("No such file or directory") {
@@ -738,15 +728,47 @@ fn explained_bwrap_stderr(stderr: &str) -> String {
     }
     if raw.contains(PROBE_TARGET) {
         return format!(
-            "the sandbox starts but cannot exec inside it ({raw}): this host's bubblewrap does \
-             not resolve tog's /usr bind layout, known on Ubuntu 22.04 and fixed by a newer \
-             bubblewrap (Ubuntu 24.04, Debian 13); sandboxed work stays unavailable until then"
+            "the sandbox starts but cannot exec inside it ({raw}): tog's copy of this host's \
+             system layout (/usr, /bin, /lib, /lib64) does not let {PROBE_TARGET} load; \
+             please report it with the output of 'ls -ld /bin /lib /lib64 /usr/lib64'"
         );
     }
     format!(
-        "the sandbox started but could not exec the command ({raw}): either that binary is not \
-         in the closure bound into the sandbox, or this host's bubblewrap does not resolve \
-         tog's /usr bind layout (known on Ubuntu 22.04; a newer bubblewrap fixes it)"
+        "the sandbox started but could not exec the command ({raw}): that binary, or the \
+         interpreter it names, is not in the closure bound into the sandbox"
+    )
+}
+
+/// Ubuntu 23.10 and later ship an AppArmor switch that denies unprivileged
+/// user namespaces to any program without its own profile, and bwrap needs
+/// one. When the switch is on it is the likeliest reason the probe failed,
+/// and bwrap's own words ("setting up uid map: Permission denied") do not
+/// name it.
+fn apparmor_restricts_userns() -> bool {
+    fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// bwrap's words when the kernel refused it a user namespace or the uid map
+/// that goes with it, the failures the AppArmor switch causes. Anything
+/// later (an execvp failure, say) proves the namespace was created.
+fn is_userns_denial(stderr: &str) -> bool {
+    let denied = stderr.contains("Permission denied") || stderr.contains("Operation not permitted");
+    let namespace_step = stderr.contains("uid map")
+        || stderr.contains("namespace")
+        || stderr.contains("RTM_NEWADDR");
+    denied && namespace_step
+}
+
+fn with_userns_restriction_note(message: String, stderr: &str, restricted: bool) -> String {
+    if !restricted || !is_userns_denial(stderr) {
+        return message;
+    }
+    format!(
+        "{message} (AppArmor restricts unprivileged user namespaces on this host: \
+         kernel.apparmor_restrict_unprivileged_userns=1; install an AppArmor profile \
+         for bwrap, or set that sysctl to 0)"
     )
 }
 
@@ -968,7 +990,9 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
         if !version_ok {
             return Err(bwrap_unavailable());
         }
-        let probe_args = [
+        // The same system runtime the real sandbox mounts, so the probe
+        // cannot pass or fail on a layout builds never see.
+        let mut probe_args: Vec<OsString> = [
             "--unshare-user",
             "--unshare-net",
             "--unshare-pid",
@@ -980,21 +1004,16 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             "--die-with-parent",
             "--new-session",
             "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            PROBE_TARGET,
-        ];
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        probe_args.extend(system_root_args(Path::new("/")).map_err(|error| error.to_string())?);
+        probe_args.extend(
+            ["--dev", "/dev", "--proc", "/proc", PROBE_TARGET]
+                .into_iter()
+                .map(OsString::from),
+        );
         let mut probe_command = bwrap_command(&path).map_err(|error| error.to_string())?;
         probe_command
             .args(probe_args)
@@ -1012,14 +1031,19 @@ fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result
             }
         };
         if probe_output.0.success() {
-            Ok(path)
-        } else if probe_output.1.starts_with(b"bwrap:") {
-            Err(explained_bwrap_stderr(&String::from_utf8_lossy(
-                &probe_output.1,
-            )))
-        } else {
-            Err(bwrap_unavailable())
+            return Ok(path);
         }
+        let stderr = String::from_utf8_lossy(&probe_output.1);
+        let message = if stderr.starts_with("bwrap:") {
+            explained_bwrap_stderr(&stderr)
+        } else {
+            bwrap_unavailable()
+        };
+        Err(with_userns_restriction_note(
+            message,
+            &stderr,
+            apparmor_restricts_userns(),
+        ))
     }) {
         Ok(path) => Ok(path.as_path()),
         Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
@@ -1058,6 +1082,157 @@ fn find_bwrap() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The top-level entries a dynamically linked program may reach outside
+/// `/usr`: `/bin/sh` shebangs, and the ELF interpreter path
+/// (`/lib64/ld-linux-x86-64.so.2`) baked into every x86_64 binary.
+const SYSTEM_ROOT_ENTRIES: [&str; 6] = ["bin", "sbin", "lib", "lib64", "lib32", "libx32"];
+
+/// The system runtime every sandbox gets: a read-only `/usr`, then each
+/// top-level entry in `SYSTEM_ROOT_ENTRIES` recreated the way `host_root`
+/// has it. A symlink becomes the same symlink (merged-/usr hosts), a real
+/// directory is read-only bound (split-/usr hosts), and a missing entry
+/// stays missing.
+///
+/// Mirroring matters because distros chain these differently. Fedora's
+/// `/lib64/ld-linux-x86-64.so.2` is a file under `/usr/lib64`; Ubuntu's is a
+/// symlink to `/lib/x86_64-linux-gnu/...`, so a sandbox without `/lib`
+/// cannot start any dynamically linked program (issue #87).
+///
+/// A copied symlink is only as good as what it points at: every symlinked
+/// entry must resolve, through any chain of links, into `/usr` or into an
+/// entry that is itself bound. A host with `/bin -> /opt/base/bin` would
+/// otherwise get a dangling `/bin/sh` in the sandbox while the
+/// `/usr/bin/true` probe still passes, so setup refuses it (fail closed)
+/// rather than widening the mounts. Only a missing entry is skipped; any
+/// other error reading the host layout fails setup too.
+///
+/// `host_root` is `/` in production; tests pass a fake host layout.
+fn system_root_args(host_root: &Path) -> io::Result<Vec<OsString>> {
+    let mut bound = vec![PathBuf::from("/usr")];
+    let mut entries = Vec::new();
+    for name in SYSTEM_ROOT_ENTRIES {
+        let host = host_root.join(name);
+        let inside = Path::new("/").join(name);
+        let metadata = match fs::symlink_metadata(&host) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(host_layout_error(&host, error)),
+        };
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&host).map_err(|error| host_layout_error(&host, error))?;
+            entries.push(("--symlink", target.into_os_string(), inside));
+        } else if metadata.is_dir() {
+            bound.push(inside.clone());
+            entries.push(("--ro-bind", host.into_os_string(), inside));
+        }
+    }
+
+    let mut args = Vec::new();
+    push_arg(&mut args, "--ro-bind");
+    args.push(host_root.join("usr").into_os_string());
+    push_arg(&mut args, "/usr");
+    for (flag, source, inside) in entries {
+        if flag == "--symlink" {
+            let resolved = resolve_host_path(host_root, &inside)?;
+            if !bound.iter().any(|root| resolved.starts_with(root)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "host {} resolves to {}, outside /usr and the system directories the \
+                         sandbox binds; it would dangle inside the sandbox",
+                        inside.display(),
+                        resolved.display()
+                    ),
+                ));
+            }
+        }
+        push_arg(&mut args, flag);
+        args.push(source);
+        args.push(inside.into_os_string());
+    }
+    Ok(args)
+}
+
+fn host_layout_error(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "cannot read host {} for the sandbox: {error}",
+            path.display()
+        ),
+    )
+}
+
+/// Linux's own limit on symlinks followed in one lookup (MAXSYMLINKS).
+const SYMLINK_HOP_LIMIT: usize = 40;
+
+/// Resolve `path` (absolute, as seen from `/`) the way the kernel would on
+/// the host rooted at `host_root`: follow symlinks component by component,
+/// absolute targets restarting at `host_root`. A missing component ends
+/// lookup and the rest is kept lexically. A chain longer than
+/// `SYMLINK_HOP_LIMIT` is a loop and an error, as in the kernel (ELOOP).
+fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<PathBuf> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    let mut pending: VecDeque<OsString> = VecDeque::new();
+    let push_front = |pending: &mut VecDeque<OsString>, path: &Path| {
+        let parts: Vec<OsString> = path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part.to_os_string()),
+                Component::ParentDir => Some(OsString::from("..")),
+                _ => None,
+            })
+            .collect();
+        for part in parts.into_iter().rev() {
+            pending.push_front(part);
+        }
+    };
+    push_front(&mut pending, path);
+    let mut resolved = PathBuf::from("/");
+    let mut hops = 0;
+    let mut missing = false;
+    while let Some(part) = pending.pop_front() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let candidate = resolved.join(&part);
+        if missing {
+            resolved = candidate;
+            continue;
+        }
+        let host = host_root.join(candidate.strip_prefix("/").unwrap_or(&candidate));
+        match fs::symlink_metadata(&host) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                hops += 1;
+                if hops > SYMLINK_HOP_LIMIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "host {} is a symlink loop; the sandbox cannot mirror it",
+                            path.display()
+                        ),
+                    ));
+                }
+                let target =
+                    fs::read_link(&host).map_err(|error| host_layout_error(&host, error))?;
+                if target.is_absolute() {
+                    resolved = PathBuf::from("/");
+                }
+                push_front(&mut pending, &target);
+            }
+            Ok(_) => resolved = candidate,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing = true;
+                resolved = candidate;
+            }
+            Err(error) => return Err(host_layout_error(&host, error)),
+        }
+    }
+    Ok(resolved)
 }
 
 fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
@@ -1887,15 +2062,277 @@ mod tests {
         );
     }
 
-    /// The Ubuntu 22.04 failure is a host limitation, not a missing file in
-    /// the user's project. Doctor and every sandboxed build must say which,
-    /// keep the raw bwrap line for the bug report, and name the fix.
+    fn rendered(args: io::Result<Vec<OsString>>) -> Vec<String> {
+        args.unwrap()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Fedora and Ubuntu 22.04 are both merged-/usr, but Ubuntu reaches its
+    /// ELF interpreter through `/lib64 -> usr/lib64` and then an absolute
+    /// `/lib/x86_64-linux-gnu/...` link, so `/lib` must exist in the sandbox
+    /// (issue #87). Each host's own links are recreated, not Fedora's.
+    #[test]
+    fn system_root_mirrors_merged_usr_symlinks() {
+        let fedora = temp_dir("fedora-root");
+        fs::create_dir_all(fedora.join("usr/lib64")).unwrap();
+        for (name, target) in [
+            ("bin", "usr/bin"),
+            ("sbin", "usr/sbin"),
+            ("lib", "usr/lib"),
+            ("lib64", "usr/lib64"),
+        ] {
+            std::os::unix::fs::symlink(target, fedora.join(name)).unwrap();
+        }
+        let usr = fedora.join("usr").to_string_lossy().into_owned();
+        assert_eq!(
+            rendered(system_root_args(&fedora)),
+            [
+                "--ro-bind",
+                &usr,
+                "/usr", //
+                "--symlink",
+                "usr/bin",
+                "/bin", //
+                "--symlink",
+                "usr/sbin",
+                "/sbin", //
+                "--symlink",
+                "usr/lib",
+                "/lib", //
+                "--symlink",
+                "usr/lib64",
+                "/lib64",
+            ]
+        );
+
+        let ubuntu = temp_dir("ubuntu-root");
+        fs::create_dir_all(ubuntu.join("usr/lib64")).unwrap();
+        for (name, target) in [
+            ("bin", "usr/bin"),
+            ("sbin", "usr/sbin"),
+            ("lib", "usr/lib"),
+            ("lib32", "usr/lib32"),
+            ("lib64", "usr/lib64"),
+            ("libx32", "usr/libx32"),
+        ] {
+            std::os::unix::fs::symlink(target, ubuntu.join(name)).unwrap();
+        }
+        let usr = ubuntu.join("usr").to_string_lossy().into_owned();
+        assert_eq!(
+            rendered(system_root_args(&ubuntu)),
+            [
+                "--ro-bind",
+                &usr,
+                "/usr", //
+                "--symlink",
+                "usr/bin",
+                "/bin", //
+                "--symlink",
+                "usr/sbin",
+                "/sbin", //
+                "--symlink",
+                "usr/lib",
+                "/lib", //
+                "--symlink",
+                "usr/lib64",
+                "/lib64", //
+                "--symlink",
+                "usr/lib32",
+                "/lib32", //
+                "--symlink",
+                "usr/libx32",
+                "/libx32",
+            ]
+        );
+        fs::remove_dir_all(fedora).unwrap();
+        fs::remove_dir_all(ubuntu).unwrap();
+    }
+
+    /// A split-/usr host (older Debian, some containers) has real `/bin` and
+    /// `/lib` directories: they are bound read-only, and an entry the host
+    /// lacks is not invented.
+    #[test]
+    fn system_root_binds_real_directories_and_skips_missing_ones() {
+        let root = temp_dir("split-root");
+        for directory in ["usr", "bin", "lib", "lib64"] {
+            fs::create_dir(root.join(directory)).unwrap();
+        }
+        std::os::unix::fs::symlink("usr/sbin", root.join("sbin")).unwrap();
+        let host = |name: &str| root.join(name).to_string_lossy().into_owned();
+        assert_eq!(
+            rendered(system_root_args(&root)),
+            [
+                "--ro-bind",
+                &host("usr"),
+                "/usr",
+                "--ro-bind",
+                &host("bin"),
+                "/bin",
+                "--symlink",
+                "usr/sbin",
+                "/sbin",
+                "--ro-bind",
+                &host("lib"),
+                "/lib",
+                "--ro-bind",
+                &host("lib64"),
+                "/lib64",
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn fake_root(test_name: &str, dirs: &[&str], links: &[(&str, &str)]) -> PathBuf {
+        let root = temp_dir(test_name);
+        for directory in dirs {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for (name, target) in links {
+            std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+        }
+        root
+    }
+
+    /// Absolute links, relative links, and chains through other entries
+    /// are copied as the host has them when they end in `/usr` or in a
+    /// bound directory.
+    #[test]
+    fn system_root_accepts_links_that_land_in_bound_directories() {
+        let root = fake_root(
+            "chains-root",
+            &["usr/bin", "usr/lib", "lib"],
+            &[
+                ("bin", "/usr/bin"),       // absolute
+                ("sbin", "bin"),           // multi-hop: sbin -> bin -> /usr/bin
+                ("lib64", "./lib/../lib"), // into a bound real directory
+                ("lib32", "usr/lib32"),    // relative, target missing but in /usr
+            ],
+        );
+        assert_eq!(
+            rendered(system_root_args(&root))[3..],
+            [
+                "--symlink",
+                "/usr/bin",
+                "/bin",
+                "--symlink",
+                "bin",
+                "/sbin",
+                "--ro-bind",
+                &root.join("lib").to_string_lossy().into_owned(),
+                "/lib",
+                "--symlink",
+                "./lib/../lib",
+                "/lib64",
+                "--symlink",
+                "usr/lib32",
+                "/lib32",
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A link whose chain leaves the mounted set would dangle inside the
+    /// sandbox (a broken `/bin/sh` while the probe still passes), so setup
+    /// refuses the host instead of widening the mounts.
+    #[test]
+    fn system_root_refuses_links_that_leave_the_mounted_set() {
+        let outside = fake_root(
+            "outside-root",
+            &["usr", "opt/base/bin"],
+            &[("bin", "/opt/base/bin")],
+        );
+        let error = system_root_args(&outside).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        let message = error.to_string();
+        assert!(
+            message.contains("host /bin resolves to /opt/base/bin"),
+            "{message}"
+        );
+        fs::remove_dir_all(outside).unwrap();
+
+        // Multi-hop: each link looks harmless, the chain ends in /opt.
+        let chained = fake_root(
+            "multi-hop-root",
+            &["usr", "opt/base/lib"],
+            &[("lib64", "lib"), ("lib", "alt/lib"), ("alt", "/opt/base")],
+        );
+        let message = system_root_args(&chained).unwrap_err().to_string();
+        assert!(
+            message.contains("host /lib resolves to /opt/base/lib"),
+            "{message}"
+        );
+        fs::remove_dir_all(chained).unwrap();
+    }
+
+    /// A symlink cycle is an error, as the kernel's ELOOP would be.
+    #[test]
+    fn system_root_refuses_symlink_loops() {
+        let root = fake_root("loop-root", &["usr"], &[("bin", "sbin"), ("sbin", "/bin")]);
+        let error = system_root_args(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("symlink loop"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Only a missing entry is skipped. An unreadable host layout fails
+    /// setup rather than silently shrinking the sandbox's system runtime.
+    #[test]
+    fn system_root_propagates_errors_other_than_missing() {
+        let root = fake_root("locked-root", &["usr"], &[]);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::symlink_metadata(root.join("bin"))
+            .map(|_| true)
+            .unwrap_or_else(|error| error.kind() != io::ErrorKind::PermissionDenied);
+        let result = system_root_args(&root);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        if readable {
+            eprintln!("skip: running as a user that ignores directory permissions");
+            return;
+        }
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("cannot read host"), "{error}");
+    }
+
+    /// Doctor names the AppArmor switch only when it is on and bwrap was
+    /// refused a namespace. An execvp failure proves the namespace existed.
+    #[test]
+    fn userns_restriction_is_named_only_for_namespace_denials() {
+        let note = "apparmor_restrict_unprivileged_userns";
+        for denial in [
+            "bwrap: setting up uid map: Permission denied",
+            "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+            "bwrap: Creating new namespace failed: Permission denied",
+        ] {
+            let message = denial.to_string();
+            assert_eq!(
+                with_userns_restriction_note(message.clone(), denial, false),
+                message
+            );
+            let noted = with_userns_restriction_note(message.clone(), denial, true);
+            assert!(noted.starts_with(denial), "{noted}");
+            assert!(noted.contains(note), "{noted}");
+        }
+        let exec = format!("bwrap: execvp {PROBE_TARGET}: No such file or directory");
+        let explained = explained_bwrap_stderr(&exec);
+        assert_eq!(
+            with_userns_restriction_note(explained.clone(), &exec, true),
+            explained
+        );
+    }
+
+    /// Failing to exec the probe's own target is a host layout problem, not
+    /// a missing file in the user's project. Doctor and every sandboxed
+    /// build must say which and keep the raw bwrap line for the bug report.
     #[test]
     fn a_bwrap_that_cannot_exec_is_explained_not_forwarded_raw() {
         let raw = format!("bwrap: execvp {PROBE_TARGET}: No such file or directory");
         let explained = explained_bwrap_stderr(&raw);
         assert!(explained.contains(&raw), "{explained}");
-        assert!(explained.contains("Ubuntu 22.04"), "{explained}");
+        assert!(explained.contains("system layout"), "{explained}");
         assert!(explained.contains("cannot exec inside it"), "{explained}");
 
         // bwrap prints the same line when a build spec names a binary the

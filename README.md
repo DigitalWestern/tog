@@ -62,9 +62,10 @@ sudo pacman -S bubblewrap base-devel pkgconf patch zlib libxcrypt
 xcode-select --install
 ```
 
-`tog doctor` prints the command for the host it runs on. Ubuntu 22.04's
-bubblewrap cannot run tog's sandbox (issue #87); Ubuntu 24.04 and
-Debian 13 work.
+`tog doctor` prints the command for the host it runs on. Ubuntu 23.10
+and later restrict unprivileged user namespaces through AppArmor, which
+bubblewrap needs; when bubblewrap is refused a namespace and that switch
+is on, `tog doctor` names it.
 
 ## Install
 

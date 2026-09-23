@@ -22,3 +22,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo build --locked
       - run: cargo test --locked
+      # The offline suite skips sandbox checks bwrap cannot run; here a
+      # skip is a failure, so CI proves the Linux sandbox works.
+      - name: Linux sandbox (required)
+        env:
+          TOG_SANDBOX_TESTS: required
+        run: |
+          cargo test --locked --lib sandbox
+          cargo test --locked --test sandbox_deny

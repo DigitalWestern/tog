@@ -454,7 +454,7 @@ fn doctor_reports_the_build_and_whether_a_release_is_newer() {
         "{stdout}"
     );
     // A stale binary is a warning, not a failure. Other rows may fail on
-    // the host running this (the Ubuntu 22.04 sandbox, issue #87), so only
+    // the host running this (no bubblewrap, no C toolchain), so only
     // the version row is judged.
     assert!(
         !stdout.lines().any(|line| line.starts_with("fail  version")),
