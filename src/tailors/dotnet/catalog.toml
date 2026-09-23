@@ -1,0 +1,1547 @@
+# The shipped dotnet toolchain catalog. Generated and verified by
+# `python3 tools/catalog.py dotnet`: regenerate it, do not edit it by hand.
+# Rows are append-only; `default` is what a project with no pin gets.
+schema = 1
+ecosystem = "dotnet"
+primary = ["dotnet-sdk"]
+default = "dotnet-sdk-9.0.317"
+
+[[release]]
+key = "dotnet-sdk-10.0.401"
+components = [
+  { name = "dotnet-sdk", version = "10.0.401" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.401", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-osx-arm64.tar.gz", digest = "sha512:69f64eb00dc045398755c440b152225d544301a345a146a16e86a56a0c52b7c94b2c331520e976dbb821f18d31930aafbd25bb85961e3517e0665414ce0cbcff" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.401", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-linux-x64.tar.gz", digest = "sha512:51c8b999af9e8dd9998c9edc5944e19a90788862068acd38694e098889054ce8c23d4f0c5cccfa16bf187d044562359e5ee69a9f8ad0bbe913ba90311fbce25b" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.400"
+components = [
+  { name = "dotnet-sdk", version = "10.0.400" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.400", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.400/dotnet-sdk-10.0.400-osx-arm64.tar.gz", digest = "sha512:e440e9a58d4ff7741c8342ac3e086fa9ee2dadc25e01c0449a88317a74cfbd63625b8092c3b2a131ae14b16ab3401e9cc470e578e4c65a72a0b5786bd2308cde" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.400", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.400/dotnet-sdk-10.0.400-linux-x64.tar.gz", digest = "sha512:1033977dd837150e0814cf0c5d5b17ceb63925fda7ba2158b47258a4bd7c048cf82eac3bc1166f3146f53124a3f5fba09db1de1260d2ce96399860303b404b48" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.303"
+components = [
+  { name = "dotnet-sdk", version = "10.0.303" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.303", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.303/dotnet-sdk-10.0.303-osx-arm64.tar.gz", digest = "sha512:9b1f05664654f339090bde1b64e0edc12e814012dc3898a1d01876c65754ef18d59ec7dd98405d9c6ba6ce735696dfa96add89cd7f4c51636e2200e8cd691d10" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.303", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.303/dotnet-sdk-10.0.303-linux-x64.tar.gz", digest = "sha512:538df11ceb9d86bdda061bab6ede3d1f6d46bb9ba087ae905643f3d456afe982949d1b952bceb305a5d22d2d6e69cc0e5100216ffcc709aaa86e867f2d9cdf9a" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.302"
+components = [
+  { name = "dotnet-sdk", version = "10.0.302" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.302", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.302/dotnet-sdk-10.0.302-osx-arm64.tar.gz", digest = "sha512:b2286dec9177e8b5543ff2fe95c84db358b87ec2a36a0d34a29033d70279940fd1134af56c4299648f8950db2d6ce35237698cf2818d9abc670c2c1664c92ac0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.302", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.302/dotnet-sdk-10.0.302-linux-x64.tar.gz", digest = "sha512:10069bec8783596484a610332f090d562802a41b9b40e3327a5a5688b572e10c296ae300f940d40461f23c157ed1b0843c2f8e6b3f20d8d8d9d83432d8143bac" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.301"
+components = [
+  { name = "dotnet-sdk", version = "10.0.301" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.301", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.301/dotnet-sdk-10.0.301-osx-arm64.tar.gz", digest = "sha512:7978737378704435bcb46d1aabf4824f4bac4c72b559b0c5796fadcf15aa2ac7e18fd3e5c983c0bcb48c60793bd554bcfb0caa9972132cf899c97ccd7465d938" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.301", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.301/dotnet-sdk-10.0.301-linux-x64.tar.gz", digest = "sha512:cfbeec3a3a1d3ad3e168e37a77c4cc26c23125acd84a86d014047da3ecffce4c368a9acac4d7c950a047fa3d98989ce8aea69f8e5842cb6d330e8911e1c335a7" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.300"
+components = [
+  { name = "dotnet-sdk", version = "10.0.300" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.300", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.300/dotnet-sdk-10.0.300-osx-arm64.tar.gz", digest = "sha512:6b3b86af17e833f90069461e463d75f1923cc62f4ebf79cd605097b155dcfea2257a321c1ae9d20f75f75920c5beb8232b68ce5b2993aedc33312b41ff09abf5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.300", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.300/dotnet-sdk-10.0.300-linux-x64.tar.gz", digest = "sha512:a0c404c1a2f85d70e32392ce297eb388c0310c519521b538a031a895469444c67f347d4f9ca1f8441f525967a89c9b75e2cd1676da486f95118cf4025c38d904" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.204"
+components = [
+  { name = "dotnet-sdk", version = "10.0.204" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.204", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.204/dotnet-sdk-10.0.204-osx-arm64.tar.gz", digest = "sha512:f4ab9ade88d28f05f3f89f064bc2e0b7d9ea0c579f974cee514059710cfcab391e1cc19134320aa8781a5a1a512d4b9018c5b0ce23e06adf92d4c80d67fa535c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.204", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.204/dotnet-sdk-10.0.204-linux-x64.tar.gz", digest = "sha512:54822b15db93c3ea654aa485397126b19753414db38dbaac902d446673077c567a4d7ee3488b5eb6eef0747e9b557f88dcfdc9cce55784c43930e8e0810f58c4" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.203"
+components = [
+  { name = "dotnet-sdk", version = "10.0.203" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.203", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.203/dotnet-sdk-10.0.203-osx-arm64.tar.gz", digest = "sha512:73de158cf9578c97d6aaec645457f7539615228a9974f8854816833fbc33861f31ef48d47786387eea2c1e45d7ce96c98ab760ec9f5b76009d91d83e3b87c035" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.203", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.203/dotnet-sdk-10.0.203-linux-x64.tar.gz", digest = "sha512:fdc36a27285b6f39b625814454f4dd3e76f2259c1279d0317d7fa297514bba607de323290d42caf67f62b9081ab26b6edb079e00f2b8c709c5826d3349a451d9" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.202"
+components = [
+  { name = "dotnet-sdk", version = "10.0.202" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.202", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.202/dotnet-sdk-10.0.202-osx-arm64.tar.gz", digest = "sha512:23addc6c020e2b8012b3b7bc92050d6d29e3afcef33b5d72011416f96418b223075e898fe438efe5967e985ecfcd245729bdd38bff1c56be389d7e38c7118815" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.202", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.202/dotnet-sdk-10.0.202-linux-x64.tar.gz", digest = "sha512:6690c6eaf18b5b8fa2d004b4047e7052a35afd6c75074399a000972a5ca0e7c536daa24f378b0c1da1926eaa3828013502f467b005a86c3015c75cf6b12d7ed6" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.201"
+components = [
+  { name = "dotnet-sdk", version = "10.0.201" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.201", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.201/dotnet-sdk-10.0.201-osx-arm64.tar.gz", digest = "sha512:e5f11184cbde97e69ba903ca67e4e9ed2deddbc712d3f57304048d16d23838ef3cd51838619ab4f5021fe942d97074175edb7f90d41f60ea15bfb3b83c00ac6e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.201", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.201/dotnet-sdk-10.0.201-linux-x64.tar.gz", digest = "sha512:a33354e3291aa21ea5e1983733f001d45264c31ee3c0dc4a85509d4cb6d4896cfec57fd2143a7b54c93bc42b328e059b16802b4085257a367ef2652f1c8fa424" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.200"
+components = [
+  { name = "dotnet-sdk", version = "10.0.200" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.200", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.200/dotnet-sdk-10.0.200-osx-arm64.tar.gz", digest = "sha512:9f8d1106c5bd5cf7f642137cfd2c180dd9bb3b76c27c38ebf4f72af70c6cc2ccbd7e92741860b2b3f20e983214573d49abef87cfbf52403da8652d99d2e21c56" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.200", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.200/dotnet-sdk-10.0.200-linux-x64.tar.gz", digest = "sha512:48738fed91d6a47daf778b5729fe169d65a1ba43d5ecc3e4da139712b66d2c62c516878700f5e2749f4af8f816ca3562f3d93367b03e369b6faffafc11bce69b" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.112"
+components = [
+  { name = "dotnet-sdk", version = "10.0.112" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.112", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.112/dotnet-sdk-10.0.112-osx-arm64.tar.gz", digest = "sha512:1cfe12a1ae383ee15fa4636c1630da7861963ddc4d0522c412d63c90570ea87d101e6bdff7bdc2703fc42a5d9ce32e73b5459841c2990128279a0ae642094a38" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.112", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.112/dotnet-sdk-10.0.112-linux-x64.tar.gz", digest = "sha512:1ac949dfd3929855e3a102a5b12f843967a784ad2d911dfcfff6abdf81a2e78bccf25ddc055547de02b36133bf792aaf97fcba8db8aa6b52ac2e018b86935d05" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.111"
+components = [
+  { name = "dotnet-sdk", version = "10.0.111" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.111", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.111/dotnet-sdk-10.0.111-osx-arm64.tar.gz", digest = "sha512:023124678e8bb9ba686e2f287bccf14c2bdf466aeb114819ae4256a8eed44a4fbb888a57aee1f077b8070fa58c611fd33b0be894fc8b0cab2ece4adcd403ea31" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.111", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.111/dotnet-sdk-10.0.111-linux-x64.tar.gz", digest = "sha512:aae221be96a3b510d5b6fffefc69d8ad2fa595a1430299419316bb71c65f260a457ca9af24d044e1709b28a9118798caafec535ccfe58f7767c5acb735c00392" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.110"
+components = [
+  { name = "dotnet-sdk", version = "10.0.110" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.110", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.110/dotnet-sdk-10.0.110-osx-arm64.tar.gz", digest = "sha512:a02fe7ab4251b9a94e5373772f9982f2cfe5b1e91acd33079ad4f11ae286a202b5d632e5f39a530d62345aa920514f152a31c7aff21df230663f58381bac0bb1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.110", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.110/dotnet-sdk-10.0.110-linux-x64.tar.gz", digest = "sha512:05e5a22cef9f41748bbd63602a6b595322b91214d03b9a00da43d698501648136f1fb2a4fe6ce6ad9c684aa1698376821c8753af0c42e336b8f753f6c078fb28" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.109"
+components = [
+  { name = "dotnet-sdk", version = "10.0.109" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.109", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.109/dotnet-sdk-10.0.109-osx-arm64.tar.gz", digest = "sha512:3ed5134faa36f04851174c203fc6278f43ef330f80cad135f1839865695fe6d0822c918c5714200b3f33e88652870d29b4b045e05631e15723a253530da14309" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.109", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.109/dotnet-sdk-10.0.109-linux-x64.tar.gz", digest = "sha512:5648e8edbdd8127452828964ca8be631ba19b75aa4020bc3352f3ab861b8b5982d823fd6a3bb3b741ec4e3fdc6c0de9ec8a52e8dcedacccf9e8754250579dc2d" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.108"
+components = [
+  { name = "dotnet-sdk", version = "10.0.108" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.108", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.108/dotnet-sdk-10.0.108-osx-arm64.tar.gz", digest = "sha512:d2b118980ed4086009105dfd55e80f0bffe6b351d82b11dcbd18b7982119c1c3bc3325aeb20c2e9cb3ab55517d308a6408002d28707bcf0f6d403d577da9326f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.108", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.108/dotnet-sdk-10.0.108-linux-x64.tar.gz", digest = "sha512:e32f76b768017718aa5a3a51fcac4b617ab4428c5f2d10b1b30f07dd7f1ea3dad4df917df48d855d78a347d635e48ce0ec309787899c53a32c4c10dd216b6b19" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.107"
+components = [
+  { name = "dotnet-sdk", version = "10.0.107" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.107", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.107/dotnet-sdk-10.0.107-osx-arm64.tar.gz", digest = "sha512:dafa2da7e77d71fd27faffbf7462702b87daf8dfd9b317ba28aa658e6f2be9e9fd769251b14622b12100575f19533fe5779047e14db52584763655661b2c7f02" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.107", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.107/dotnet-sdk-10.0.107-linux-x64.tar.gz", digest = "sha512:a92ed9b9c81902c54b5e05fa10effcd325976bab2b0b3ab412889723056e9c8b83714b4e956b00f8d2ee316431287b74af398817a6725c406c612146d0ac116a" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.106"
+components = [
+  { name = "dotnet-sdk", version = "10.0.106" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.106", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.106/dotnet-sdk-10.0.106-osx-arm64.tar.gz", digest = "sha512:1744795e27736946cc1d465a05d163aa9bb76b8fe49b41cca570f848d99844072143eceef9efac210de05c49f86edd0ef761e011341083ee4678b967757ca595" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.106", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.106/dotnet-sdk-10.0.106-linux-x64.tar.gz", digest = "sha512:81da8114537ca62d456559733dded61c851852622921b43d3c06e347abeb9bd7cc8301b100ef1f09d10ee1731e8ac67356b4d74c639b15ab20de85022c380da0" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.105"
+components = [
+  { name = "dotnet-sdk", version = "10.0.105" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.105", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.105/dotnet-sdk-10.0.105-osx-arm64.tar.gz", digest = "sha512:9058bc17aaf76d02e66a62e126eada0c343075e400731eb741552f17b9cc3a33f1854115d96e937d4e3918e9c805db5bf2ad309bc45c892228c4e75348392d61" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.105", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.105/dotnet-sdk-10.0.105-linux-x64.tar.gz", digest = "sha512:2b0ed13106e4c859ccb9e3a5f1a450e84605ebd89bd84ac3453b30810ecfa62b6957baaa2ed041cc2e932f512113e16e3ae200fe5c4b48be66767747a06f4e41" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.104"
+components = [
+  { name = "dotnet-sdk", version = "10.0.104" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.104", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.104/dotnet-sdk-10.0.104-osx-arm64.tar.gz", digest = "sha512:5126058de09a80fe735413372856fc71715d24d711393cc792aee695fc4a665c6307275fe96f9834d06c65ccf56a0818c7c53bbcb84839d3e324117f7d2c3c67" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.104", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.104/dotnet-sdk-10.0.104-linux-x64.tar.gz", digest = "sha512:dc475e85c6d5c34c27c25772a3c93a94eec09bcccb8409b610d3fae016a9043ceb99ff60f3a003443c6e99257e237bf9f0cb5c509049ec707e92498776d1e35f" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.103"
+components = [
+  { name = "dotnet-sdk", version = "10.0.103" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.103", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.103/dotnet-sdk-10.0.103-osx-arm64.tar.gz", digest = "sha512:72ad818d165c1a07898b81f9f989d761dff2c7b7b5d21cc2a151621d2fc2081c7bbe066cb59cac654c19373603c7a129f7c7c7a11ce51bd1cdf48e05a4de78ca" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.103", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.103/dotnet-sdk-10.0.103-linux-x64.tar.gz", digest = "sha512:bab94f13c57b2ac821d4924fe66084be9b44c41761ff7ff64522c8f7aba345659d31258401dcec31cc3cf6ccae1d012623075aca1c9b9165bcfe5ba9abda1c0c" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.102"
+components = [
+  { name = "dotnet-sdk", version = "10.0.102" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.102", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.102/dotnet-sdk-10.0.102-osx-arm64.tar.gz", digest = "sha512:5adb12a72ccfd327fe94ce99104ee7b9b56dbe40e354440a0b28313a4996ff34cc8560d605c1f30c247d364ae429de55d8c3b30ea19da04a716a059eb62b98ed" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.102", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.102/dotnet-sdk-10.0.102-linux-x64.tar.gz", digest = "sha512:7adf40e8e5547970391cfbe474c3874c6918ce3575ac398f376c78502134e1c8a2fa3da9aca281fdaeda81671f56c851ebe9e74c5b57c5a298bd45deba63565d" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.101"
+components = [
+  { name = "dotnet-sdk", version = "10.0.101" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.101", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.101/dotnet-sdk-10.0.101-osx-arm64.tar.gz", digest = "sha512:11507ced6f52f3a93da0f123ae5e89ad955cf3cfabc9b3ef197c68a99bca5b45e79a825cf93ca6ab03ed1f8b7b1783308bbd35fab9f11721091b3515926f2bf3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.101", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.101/dotnet-sdk-10.0.101-linux-x64.tar.gz", digest = "sha512:0443602455d30af51c819d7805e9b45550101c3718acbb3ec5f991e73d18e79b18fb5bc7cdf77bc308936a96275176b23a56e96133e7de83ae60ca2240bc602f" },
+]
+
+[[release]]
+key = "dotnet-sdk-10.0.100"
+components = [
+  { name = "dotnet-sdk", version = "10.0.100" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.100", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.100/dotnet-sdk-10.0.100-osx-arm64.tar.gz", digest = "sha512:0ee9c774f9c63601844619b67d6ca829d70fa26b9949b808e801380c35edb12e4c9418baf8e2ef8ba1dc6dc7d307dbf5830fb0f4f97666032a391c5c097ee607" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "10.0.100", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.100/dotnet-sdk-10.0.100-linux-x64.tar.gz", digest = "sha512:f78dbac30c9af2230d67ff5c224de3a5dbf63f8a78d1c206594dedb80e6909d2cc8a9d865d5105c72c2fd2aa266fc0c6c77dedac60408cbccf272b116bd11b07" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.318"
+components = [
+  { name = "dotnet-sdk", version = "9.0.318" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.318", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.318/dotnet-sdk-9.0.318-osx-arm64.tar.gz", digest = "sha512:4305c929005f47a933f33c253b6f47f8b21fd6096c7e359e78495e0de7c8ed1c6700aec2785a983d76ac7c99a66b1422abedb4056259b00e748ffbe36f243532" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.318", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.318/dotnet-sdk-9.0.318-linux-x64.tar.gz", digest = "sha512:e8685293a3512178e0de1bb3c1663e31fdf9d761af705094bf833cc1ff6b9a18c543aa4141f0216503c98039c719585a6d32905b0bbb3279e93b7e7616e047c3" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.317"
+components = [
+  { name = "dotnet-sdk", version = "9.0.317" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.317", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-osx-arm64.tar.gz", digest = "sha512:f707a1c73e84c6d009baab2a274270bd11bbb58cd8244cf59594fe1662f50225d1665878d3af4e4b9649b6feccd95b693cf9cf28e127742b7a4e6287caa3eb2a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.317", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/dotnet-sdk-9.0.317-linux-x64.tar.gz", digest = "sha512:145bf69dcb88c4b905feb531cfdd7894a75fc875d2a030e958a13d1fb1131521c8cebd8a8a6e0fbd1a433ebae9cde86356b6adad07b1ad81efb92b36ff8a3333" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.316"
+components = [
+  { name = "dotnet-sdk", version = "9.0.316" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.316", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.316/dotnet-sdk-9.0.316-osx-arm64.tar.gz", digest = "sha512:bc4645bca4d263a1fd08848a1178c2c878a57b394c540b5e97dae3a443f5dec8893d09cc194b0d0adac7e9b9d7b18341a7651411999ce12ef9083ca9936c16f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.316", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.316/dotnet-sdk-9.0.316-linux-x64.tar.gz", digest = "sha512:5a8558afd648c14a835e00ae08fa556083f50e3ada164d3e73293fcd4850b0519a27c11f2dae95a9bbe4af432be33bf14451ef11ba69527e34f9cf3077a1c2b5" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.315"
+components = [
+  { name = "dotnet-sdk", version = "9.0.315" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.315", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.315/dotnet-sdk-9.0.315-osx-arm64.tar.gz", digest = "sha512:83196d6edc962164535a63283865b81b267a5a2cee0f6889741e35a46840496ecd2d3e05f104c9a11425424885b290176fac54ccaa59214c9e6851704dbda89d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.315", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.315/dotnet-sdk-9.0.315-linux-x64.tar.gz", digest = "sha512:1723a70563003566880600dc074f10366428bfb54db2a749b75c684f6dca0763d80a1cf9a2bfa014e5a41f7ab4e84f21d044e70152165a84ce86edbfa913afb1" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.314"
+components = [
+  { name = "dotnet-sdk", version = "9.0.314" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.314", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.314/dotnet-sdk-9.0.314-osx-arm64.tar.gz", digest = "sha512:daa941cf72b671148b2024037fe6aa4de2ebf7083d0e78c5d3e179b44554b049e3cd0454c39639db3a668dd3dba7e5240651233929fac3f5d1360c60579e7f56" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.314", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.314/dotnet-sdk-9.0.314-linux-x64.tar.gz", digest = "sha512:9cc8250b9e3bbc29b64e55866b1007d49a155e4a3790570e37315e4175fbfaea2e06ff38f6aabd89e35d943f9915b33b32d6aa33e8d419a8fb9d7188cec97a18" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.313"
+components = [
+  { name = "dotnet-sdk", version = "9.0.313" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.313", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.313/dotnet-sdk-9.0.313-osx-arm64.tar.gz", digest = "sha512:b85d62d8266aff46517ee26c2ae10a7bf5525a1c5512c765919a0a2b4a707f91e9cbb28ef3407a0ec38a2837f93ef5cf576282cd1c434829cab537bea64432e1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.313", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.313/dotnet-sdk-9.0.313-linux-x64.tar.gz", digest = "sha512:cb2f09cc3e44be152e8f7abdfeb18040f6de5d8195bc723f584483775af169bfa5f17c03ce0cb64fa53bcc7d29eb7810684a3fa4cf6b228fa52ad132bf89bf62" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.312"
+components = [
+  { name = "dotnet-sdk", version = "9.0.312" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.312", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.312/dotnet-sdk-9.0.312-osx-arm64.tar.gz", digest = "sha512:472b70f7496f901a6e1ce7f7d100581e8acead5f9cb46c102659c92f4134e4a693e9cd5416c991b55b3e83e8536280be87f86a8257552cbbfadc01e10d13d2db" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.312", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.312/dotnet-sdk-9.0.312-linux-x64.tar.gz", digest = "sha512:430aac61d509b020adc17f0adb7e81b5be85046d49784ab2ff927ca9108625c5cdf64a0e185a09df234c2ac1ecfeadb5b10714f0d9b5e0c1f72b5b20fbed7440" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.311"
+components = [
+  { name = "dotnet-sdk", version = "9.0.311" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.311", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.311/dotnet-sdk-9.0.311-osx-arm64.tar.gz", digest = "sha512:993663292b8b52b55d61ec6c907b633010f38782288a15e3fb360c040e3b1fc2b2b44e2943937b02f674dde27cfe60c8fee4b476a90bf149cd1203d59ad5f547" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.311", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.311/dotnet-sdk-9.0.311-linux-x64.tar.gz", digest = "sha512:ef6239f4b56a08bfd1eda82f877b9350d8b98d248a693c1ec4af85a2f09db19556f7cc4d4b2d3a8ff0cf9e0fcaebb3ec8daabe1774aff346740aacf4bb1e136f" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.310"
+components = [
+  { name = "dotnet-sdk", version = "9.0.310" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.310", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.310/dotnet-sdk-9.0.310-osx-arm64.tar.gz", digest = "sha512:5cfb0c0366b17be5839398ffadefd1deaa1b13d083aeda78d990b9a650fd9f902f2f6e799f16c3118eaac4cbe4aeb5d7a3a9ddbc160afc426effb5c78dd4bf10" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.310", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.310/dotnet-sdk-9.0.310-linux-x64.tar.gz", digest = "sha512:8203f566a23e09142381b2730ba2efed79a93240c096b02c9a8341e95d550a26d9c31496d9b11ce24ede61bbd7fb72131d4cf85880d101c90ae84d2442d0a596" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.309"
+components = [
+  { name = "dotnet-sdk", version = "9.0.309" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.309", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.309/dotnet-sdk-9.0.309-osx-arm64.tar.gz", digest = "sha512:c9a8a238e3bda00d3fe46b83549f0e138503ea7a0ad0aac9abf46669e892f3294853453158167b7d2d69e85f4c9525b591a10eaaaead23a4b8c120b32b7b9f38" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.309", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.309/dotnet-sdk-9.0.309-linux-x64.tar.gz", digest = "sha512:c00280165072e80fa1f6f84761c245228d3edc880bb9992fc5b4b5c3a317eda56bf01fe15f7844fe176b57a16660d21cd2635a20793569c22ebae27fd5cd2966" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.308"
+components = [
+  { name = "dotnet-sdk", version = "9.0.308" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.308", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.308/dotnet-sdk-9.0.308-osx-arm64.tar.gz", digest = "sha512:8d4b21ffa8047ebc4459b22a6090e4221fc8b3cab45ab638dcc61f1a5eb3bf2dff9f34db305b40c795ae2baf1732ba15f91ce5dfbd718a9f445561594d9c219e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.308", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.308/dotnet-sdk-9.0.308-linux-x64.tar.gz", digest = "sha512:3aacff096524a1dae9bc035f71a6805fa7ec3430d395771fc1c85505165a78361ce2cc9c9c35433376e5c30aec37e2eb2e77de0a6ba7ddd7dc6053baf2c2709a" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.307"
+components = [
+  { name = "dotnet-sdk", version = "9.0.307" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.307", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.307/dotnet-sdk-9.0.307-osx-arm64.tar.gz", digest = "sha512:2d294b836dd8bb48a15fabff29076bb9cebe578629e6dcbe60cc3b2eaf06071ea197e030fa50b1b9714cbc7030456ace2c380fc569e1c3eed1ec8aaa18b58842" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.307", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.307/dotnet-sdk-9.0.307-linux-x64.tar.gz", digest = "sha512:fcc178ac0026cfea1eb37320fb25ffd32e6bc2b1d48c091f6085b88a15f24080dae2a332343c51ca2421f613d5f7abde898346589f4959f1e51d619c2247d216" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.306"
+components = [
+  { name = "dotnet-sdk", version = "9.0.306" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.306", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.306/dotnet-sdk-9.0.306-osx-arm64.tar.gz", digest = "sha512:2bb5e6efe98bcee55c3385ac6bb3fddf2b76fe65ddf705edd1d71d63674dcf6aae8a862e2cfc90f23a6fa0b7c8fe12b053ec4622584bd890dd4ae93762f643f7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.306", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.306/dotnet-sdk-9.0.306-linux-x64.tar.gz", digest = "sha512:bbb6bdc3c8048e7cc189759b406257839e7d4bd6b8b1ba4bcdaeea8f92340e6855231043dd73f902130ca5357af72b810bb51a4da4d1315a2927ff85f831f1d5" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.305"
+components = [
+  { name = "dotnet-sdk", version = "9.0.305" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.305", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.305/dotnet-sdk-9.0.305-osx-arm64.tar.gz", digest = "sha512:57f3d64fcf03cfdcac4e4ce0fc8b553255dd538007b6e05daf7f425a286a044de54ff67b1ccca0e9601e67e322810cc059021ef805b02de83d5828b7872941cf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.305", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.305/dotnet-sdk-9.0.305-linux-x64.tar.gz", digest = "sha512:f9140e141d731d37de9b6e1eab0b25726f0b9de24d2888a4200649880e9e43671ebb3897a249f4324c214d56eb3e7f0ef0cfa56b32850a9c03811b21e6377bca" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.304"
+components = [
+  { name = "dotnet-sdk", version = "9.0.304" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.304", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.304/dotnet-sdk-9.0.304-osx-arm64.tar.gz", digest = "sha512:afd4e2581ed5bc53de60c10c5dca571588a51d95cc90b832e5892ba7dfac78e3812b75a132b53c395721737092935cea71ed0f40aaabe9d326457043c750598d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.304", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.304/dotnet-sdk-9.0.304-linux-x64.tar.gz", digest = "sha512:b087828d595d0c6886bf652c69f3910303f455accb1ac956403f795080c55caf59732f3be0e31fc744aff13591a92e1efeb646ef3ca6165ed17a3cd12a67b229" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.303"
+components = [
+  { name = "dotnet-sdk", version = "9.0.303" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.303", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.303/dotnet-sdk-9.0.303-osx-arm64.tar.gz", digest = "sha512:410999907d6092c52155afc59c3bcac149811851db7318f6fe215e37b377ac1b316cbb595bb21cb526791f396da4cd439e4b2db76d45a825b57cc2f4729a2e2e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.303", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.303/dotnet-sdk-9.0.303-linux-x64.tar.gz", digest = "sha512:e11518c184ab4f80b5d6411ecbca3e07e244a190e949e51ef73d36c521420f06107987947ada924618a44b9142caa097bd03659d973249f463aa5e58417ebfdc" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.302"
+components = [
+  { name = "dotnet-sdk", version = "9.0.302" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.302", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.302/dotnet-sdk-9.0.302-osx-arm64.tar.gz", digest = "sha512:07e8178659437d782301693a4f8572e4366ddd66ee932b309a8d6f02ea2134cc15bdc2a0f1d1924ba756dce4543d74e8188d9c52de0a17d639a9c393b4f4f194" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.302", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.302/dotnet-sdk-9.0.302-linux-x64.tar.gz", digest = "sha512:fe46a96e794388b345105e47896e4e91099ffd907a7127ff2cadf76adb3a7be0b43f0cd8d2c376ae455283d08f4751f7ef11890fd2697304ef114447ae209c88" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.301"
+components = [
+  { name = "dotnet-sdk", version = "9.0.301" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.301", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.301/dotnet-sdk-9.0.301-osx-arm64.tar.gz", digest = "sha512:36f1aeb7aff2aac117919f57abad725c89dacb879a3c3b8d41b01575602ceb2d5cad805d3c6d67a0fda0208b2477d0d58668c133215392ee65bf88586571e43c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.301", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.301/dotnet-sdk-9.0.301-linux-x64.tar.gz", digest = "sha512:7415a264843d3df78bd57fb2f17074e811e0b193976a45b4d6778d3ebb9266854c4e037c3cdf4b534de7b8c64799b0e58dce9fac6f3f3c6cacb3295555d31d4f" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.300"
+components = [
+  { name = "dotnet-sdk", version = "9.0.300" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.300", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.300/dotnet-sdk-9.0.300-osx-arm64.tar.gz", digest = "sha512:fec528cc70edf43e6d91f16f933c54b943776899e7c2d4de7efdfa581173d46793b233abf5bc9ed566e9d9e8d37a0f96b543783fdd581f63aaf18678b82ca426" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.300", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.300/dotnet-sdk-9.0.300-linux-x64.tar.gz", digest = "sha512:dcab6daef3164390d09edc169d4bf8ec3480af1288e9766c07d20d3c7b70517d263083c3900381fda59c3a7f0aef3fd75ee4f604173c889e8222d6449091d843" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.205"
+components = [
+  { name = "dotnet-sdk", version = "9.0.205" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.205", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.205/dotnet-sdk-9.0.205-osx-arm64.tar.gz", digest = "sha512:9c753021c26a0178cfbb4f7a2cf4be65e2ef1c6ce68912c5936c7cc992b0260f14a4490077314c363744f52be96f432f169838a2df4b5dd00bd3d3ff9855b4a1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.205", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.205/dotnet-sdk-9.0.205-linux-x64.tar.gz", digest = "sha512:df8e2d95a617051c44a524471137300868d52b523cc41e8f8d31aade968407ae406d5b6e47f484f603be52c0a6e567586f0f9c16ffc25944f3a8f42f88c3c781" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.204"
+components = [
+  { name = "dotnet-sdk", version = "9.0.204" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.204", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.204/dotnet-sdk-9.0.204-osx-arm64.tar.gz", digest = "sha512:c352d8cfc4bc50c5bd6e3bac204c2648ace7ff2db9f7e3bd9fb1944dc8452ea457a0acb5429098eb1d33224ee897af0e2c89a07e0e7c8c5a0bce8ca9a36f1da9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.204", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.204/dotnet-sdk-9.0.204-linux-x64.tar.gz", digest = "sha512:f32de3dcaff13cefce4e124c2eae4864178a74cc9cb3ce293241c9a7ac4a3b460af1655030ef0bb5c393deb9f075dbbfc3772e09c06c427f5f8cfbf411749dc8" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.203"
+components = [
+  { name = "dotnet-sdk", version = "9.0.203" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.203", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.203/dotnet-sdk-9.0.203-osx-arm64.tar.gz", digest = "sha512:50a7e19b0d55de868a9cc52f6ebc1ba39b9b787b3343df5581ec50cce27b86793bb1c63168b5e8843479605e35515b49d1aaeee3a469611c2e2fc966be8c3ae5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.203", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.203/dotnet-sdk-9.0.203-linux-x64.tar.gz", digest = "sha512:67d62c3274aae593b61780db57f07ac85a50da82d04707fdaca66f25889a1cc01eaa95bce173247d1a9f566a92eb7ede71a7306b5af6a17ed84ee9525823ddd3" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.202"
+components = [
+  { name = "dotnet-sdk", version = "9.0.202" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.202", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.202/dotnet-sdk-9.0.202-osx-arm64.tar.gz", digest = "sha512:63badde1614aea8a7551f8e56c4b7ba379b15f37e6c008133e22c08df0607eab8c3c2f0306e441e9fe60c2166dec953272a0cbd150eb5b0b77dac5b287880115" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.202", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.202/dotnet-sdk-9.0.202-linux-x64.tar.gz", digest = "sha512:0eb52300023d9df6494aadfbd8380dddf84e2f217d444ad9fe880292afbf378be3700d7fbeca3136ec95962ba355e44abfc9f8a679cd0d08e68f85cb0320ce73" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.201"
+components = [
+  { name = "dotnet-sdk", version = "9.0.201" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.201", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.201/dotnet-sdk-9.0.201-osx-arm64.tar.gz", digest = "sha512:225dc2dc67f1fc41c05209e49a315651b20196ff0287f95ee083e4c932c90eed7b78f68287a889a41fb3ed11f48d0b75f6285fd0e81612f984b59cfa73d0a7c3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.201", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.201/dotnet-sdk-9.0.201-linux-x64.tar.gz", digest = "sha512:93a8084ef38da810c3c96504c20ea2020a6b755b73a19f7acc6cd73a8b62ace0adda14452d11e6458f73dc7d58ffad22fcd151f111d2320cb23a10fd54dcb772" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.200"
+components = [
+  { name = "dotnet-sdk", version = "9.0.200" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.200", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.200/dotnet-sdk-9.0.200-osx-arm64.tar.gz", digest = "sha512:a45d5a6fe5f046e9cd0a4482a41f0884822903134bcd2f25face71e1322749dacc53221cee21f814c6171326da0f64f42204ebd79f633a3bd1075c04fa73d1bc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.200", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.200/dotnet-sdk-9.0.200-linux-x64.tar.gz", digest = "sha512:1af5f3a444419b3f5cf99cb03ee740722722478226d0aff27ad41b1d11e69d73497e25c07ef06a6df9e73fb0fbdc4b9baca9accec95654d9ee7be4d5a5c3ac23" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.121"
+components = [
+  { name = "dotnet-sdk", version = "9.0.121" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.121", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.121/dotnet-sdk-9.0.121-osx-arm64.tar.gz", digest = "sha512:6e34aaf5dbf1e484cbe94b088bc25cfb66fe20e8cdf5a141b0471ca15023e0883e0563da3bb68041268ad3fc257549f9010ee045e1d10f9b658256e892f95d2f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.121", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.121/dotnet-sdk-9.0.121-linux-x64.tar.gz", digest = "sha512:d66f2609b509a4eece4ad8efbac49e63cea58e07652f1daded72bbd100d70f6d5d58a9b95b9235e158cb7b1a77995311979ec4ddf2df4c6a3017d4a71f163778" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.120"
+components = [
+  { name = "dotnet-sdk", version = "9.0.120" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.120", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.120/dotnet-sdk-9.0.120-osx-arm64.tar.gz", digest = "sha512:0f9518075fb0faa7a3c583635823142f768acdb373424fb7947bfd5aa7c9942ee7b3d575bb57512eaaa1493163526ec2ae720d3cb4189a4e63493f3873895698" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.120", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.120/dotnet-sdk-9.0.120-linux-x64.tar.gz", digest = "sha512:dc3fe24e94f231675f8741b8331ae5ad5bfd5008816859ae9a61c08d338c60df02baeb976f17b83558c078d58da5554f5bac53f4cdf7939d8c34ddf0a26f56a7" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.119"
+components = [
+  { name = "dotnet-sdk", version = "9.0.119" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.119", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.119/dotnet-sdk-9.0.119-osx-arm64.tar.gz", digest = "sha512:f00ad2349d6bd3c806a79f8ccc5753a28aebc2a7c9a60bb87cd98685af8e4dee8f3e95fd1a935bf2e4ae88298f624f644c1d48663665b8861f64c04bbda1b57d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.119", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.119/dotnet-sdk-9.0.119-linux-x64.tar.gz", digest = "sha512:2771834178d4c5ca5f11e6c2aeac13d6b0f6f95dc6d1168509298a4be38376788535f74f9675deb3471749d4b7608a7e98e75f7c0f205aeaef0aeaa1f97b7222" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.118"
+components = [
+  { name = "dotnet-sdk", version = "9.0.118" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.118", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.118/dotnet-sdk-9.0.118-osx-arm64.tar.gz", digest = "sha512:5210fca24b59964e5cb5156f24054b5bb41d40313e75fe74903c4f22fe19bee6f68ba5ead3a5b95b6785b4c20ece2779883f7b92f3ec17d0c6c37f2e4643b29b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.118", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.118/dotnet-sdk-9.0.118-linux-x64.tar.gz", digest = "sha512:1c7bba718463cc4f8d162cb88808eba14ee1e72e26c84b5f3751c330c62a4a31af5f98afd5deeb5c272039b5dc649255cc89af201f8d7069bc021fab49d184c5" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.117"
+components = [
+  { name = "dotnet-sdk", version = "9.0.117" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.117", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.117/dotnet-sdk-9.0.117-osx-arm64.tar.gz", digest = "sha512:9da8c6d5aceb9a809381385928cc063028661c15fb9c01662a92f79694457ab5fba034fda419429bab03303e7c90b4703a5c37f78fa7364cd1e551fa1a578341" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.117", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.117/dotnet-sdk-9.0.117-linux-x64.tar.gz", digest = "sha512:7fffdf27c780fae77933b887fd6409166d9cff548a26c2b87285a6f0dc126feb1e910a214e9d726717e44d4dbf6d69336e792e6085b08cad843d7b3ad9f4e9d8" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.116"
+components = [
+  { name = "dotnet-sdk", version = "9.0.116" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.116", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.116/dotnet-sdk-9.0.116-osx-arm64.tar.gz", digest = "sha512:de2b4018512a11a9934265f06b0016397a570434eaeab3e9859802c67f52662f1b8688524b85f44bcdee22193527f10205bd973a58f51a012e5c4a84a4e2e6fd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.116", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.116/dotnet-sdk-9.0.116-linux-x64.tar.gz", digest = "sha512:a4105c0c7719f3299ea82299967c866ae6555e0296969edd965ecdc8bdf8d37751d1fe6eb30e457ce1711e6963b978643881e237a5b6fd9950bc200b3b4f3dda" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.115"
+components = [
+  { name = "dotnet-sdk", version = "9.0.115" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.115", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.115/dotnet-sdk-9.0.115-osx-arm64.tar.gz", digest = "sha512:794f900de558f30f2e2375965c08c00dd4990aad29e31bfd093b08b1d9a5bf57c78cc6f3db68cd853076f816892898c43d508e7844b4060b8a911dce9bcc775e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.115", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.115/dotnet-sdk-9.0.115-linux-x64.tar.gz", digest = "sha512:837f237b80fc58cdc97f80154c7cfe505a7328dc93c54140670761055ab56d41da11f8620e500aa4055786a7ee0b138b5b73606b4bce4e12c8601ba426d3ad83" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.114"
+components = [
+  { name = "dotnet-sdk", version = "9.0.114" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.114", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.114/dotnet-sdk-9.0.114-osx-arm64.tar.gz", digest = "sha512:ee1a24cdebb5f6c13bbff9164e6078b7024ff28226e7e7d2bbd0178108514baa7e44c3b391ceca4c87f9609cd4c1f9f4eeb34a0f0ba3f08ef9811753d61b7d82" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.114", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.114/dotnet-sdk-9.0.114-linux-x64.tar.gz", digest = "sha512:8b0de9f3c1127f3034730c266075f56a248005514ff7615ed15f81d3c3cc2c76d36307ac8594d82f6a09ec47a6bef6ac669bef18d32464c38f13d550ebefced3" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.113"
+components = [
+  { name = "dotnet-sdk", version = "9.0.113" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.113", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.113/dotnet-sdk-9.0.113-osx-arm64.tar.gz", digest = "sha512:55c8730aa4085ee00994fdf534d46a7f07dc8e86e0c180ee09c68520a426ee752770c4a6329667d6c5aef9248b51e4eb1460af6f49f576c0ec3cf591bf79d064" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.113", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.113/dotnet-sdk-9.0.113-linux-x64.tar.gz", digest = "sha512:15dad92350826ce541415ef35221cb31cc478d4a9c78539f077a9bc398f353ff73ef0e540f9ace952cad26a32d1576c403fcfbc7e2eebb84579499b430a38abf" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.112"
+components = [
+  { name = "dotnet-sdk", version = "9.0.112" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.112", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.112/dotnet-sdk-9.0.112-osx-arm64.tar.gz", digest = "sha512:02e24725078eaba63f7235cda9ed21ca46122738ca01e9461d50925952c66915778173c923c0b143c4889065fd88738fa1c278f152cc07200940d73a6ac7128e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.112", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.112/dotnet-sdk-9.0.112-linux-x64.tar.gz", digest = "sha512:803fd2a829a711c7119454640fa0a2783faaf485f355e0e1b82d16a906d52685ab119e6bec5c84e1d404d0d5f75a15612c862a3dc663676ea5f41cacdf070640" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.111"
+components = [
+  { name = "dotnet-sdk", version = "9.0.111" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.111", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.111/dotnet-sdk-9.0.111-osx-arm64.tar.gz", digest = "sha512:596dd33f5a0b911eae37bbb78ac49dec2134206e158613c9b3e34313a2ee1bd6678358ea5fc54e97896e70d24646a73c4d1aea4c0d814ffe3de08c19b5db0edb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.111", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.111/dotnet-sdk-9.0.111-linux-x64.tar.gz", digest = "sha512:927820957afdf38d2b4cdb3ca0d24ce71d67821f50a7f71413c38e627b87740c5a9bb0e240498beb7aba536bc1cbac0e7dd41b3025ecf8643c4ee40e973d2963" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.110"
+components = [
+  { name = "dotnet-sdk", version = "9.0.110" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.110", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.110/dotnet-sdk-9.0.110-osx-arm64.tar.gz", digest = "sha512:49cd598016b584efc9446fd6fc612799e5b462ac41fdc98799a6af8c701321a06199827e1e50d1269f1d7456e3932b11f604ff3b42f0d9a9c4ac7c20474a4990" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.110", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.110/dotnet-sdk-9.0.110-linux-x64.tar.gz", digest = "sha512:ed43a9425cb5424d96d4f4cc16554be86fa7a9ecd44cf102d77c75779d1036b36634b66fd885fca93380031818741b318f95322a3ca71e0d14cebdbfeb22e408" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.109"
+components = [
+  { name = "dotnet-sdk", version = "9.0.109" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.109", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.109/dotnet-sdk-9.0.109-osx-arm64.tar.gz", digest = "sha512:ae2ebc3f7740ab880af56e36d3d2a1ee5a54fc112b6fdcc2528f2c8c59808d36476d5fab5cdaa7d25819b0e4a9011745f3a9e5c72692cd932b300eb6fd85f5af" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.109", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.109/dotnet-sdk-9.0.109-linux-x64.tar.gz", digest = "sha512:cc386a8e7009855a6e9a3a8a153da1b5ce54c2e0b7b7ae305445ee9f0d5735518dfeef0d8ff32a444782e35f34a31675724e040536001a76c9dc1b755b5a2605" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.108"
+components = [
+  { name = "dotnet-sdk", version = "9.0.108" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.108", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.108/dotnet-sdk-9.0.108-osx-arm64.tar.gz", digest = "sha512:11e64b86a7ef8f23c0b0b7681357fffce8e2ad9a38d9280378a61b9f1525b2c37541370cd5598bde2bbc12451fb5b9f39251c5ecb20e4606c1343498bbe30710" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.108", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.108/dotnet-sdk-9.0.108-linux-x64.tar.gz", digest = "sha512:8c2d988e998b906c71684cbe9aec9cbf2b65cb31ed8c3eb15a6e65f961b031faeba32d71997f50d56e04e6f0081f860480722dc1693c6b015543eb61acdb5876" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.107"
+components = [
+  { name = "dotnet-sdk", version = "9.0.107" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.107", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.107/dotnet-sdk-9.0.107-osx-arm64.tar.gz", digest = "sha512:0c11882a8e720ce7a473fcbc5906192aa14ee8747e1a78acd55cfa0b0a337194093e60d53a87527fa3e1e7d420aabc332d3ab6ab09ed6ebb5cc6bfa179cef571" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.107", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.107/dotnet-sdk-9.0.107-linux-x64.tar.gz", digest = "sha512:588e8603dbe514c230edb0307c98522cbd6150a374242dc6a6167f9be879313a8a2895305282865784eaa296c8dee8cbde0a679edb8dcbf7adaa6c1f7a0b6206" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.106"
+components = [
+  { name = "dotnet-sdk", version = "9.0.106" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.106", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.106/dotnet-sdk-9.0.106-osx-arm64.tar.gz", digest = "sha512:db5e39cffd32be99b9a0ee28c6ede90637180338693701d11a702d056daff505bd82d4e7c8f0cb341e20fa02b9765612ea8808af40da3ebc6a16cd6d3fc1ea3e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.106", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.106/dotnet-sdk-9.0.106-linux-x64.tar.gz", digest = "sha512:f977c90a5e56c3db7b7d4e23844cdb496ee966bd31ad63f8b84363a7eff28a3fb14109350381bd836ddbc67d6750f3f7dd55471e4c5d00b0214341741856fb2d" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.105"
+components = [
+  { name = "dotnet-sdk", version = "9.0.105" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.105", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.105/dotnet-sdk-9.0.105-osx-arm64.tar.gz", digest = "sha512:75fbdcc62d13596d1781e90a44aa83147f70d15f70b173e588a012393ee4db299d5342f13176d95314cf24c41bdadb32d17b27103283c3f412afb8778980f1aa" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.105", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.105/dotnet-sdk-9.0.105-linux-x64.tar.gz", digest = "sha512:f795bb35f432b71f940eb62bfa4ca3df5d708f497467ae16a67d2d19817a8f7e8cf5e6faa791412eb0da017be59ff93a2ad723675b3f3152f39bff64d545f4c0" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.104"
+components = [
+  { name = "dotnet-sdk", version = "9.0.104" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.104", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.104/dotnet-sdk-9.0.104-osx-arm64.tar.gz", digest = "sha512:2145b705149186444948a69d10a95451c579ff7314c78477555e06f7659a792172630db4a16fd27401f720f5e994e082bed23f437efef3c7198f1c83e5c61d77" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.104", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.104/dotnet-sdk-9.0.104-linux-x64.tar.gz", digest = "sha512:99b6b1bcd46d3cd59896139054bfd6c15909b7aead7bb2f19d3e97bbf87a425db5bce4506d5f77bf6f7f1249b0cacafa679c9bc9c3b1e4f2ab2e79cb5d0b2c79" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.103"
+components = [
+  { name = "dotnet-sdk", version = "9.0.103" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.103", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.103/dotnet-sdk-9.0.103-osx-arm64.tar.gz", digest = "sha512:52f29d18f7789bc53d15b0e1e96b83b8811eaecb3eb6035dfb94e2d2f2bb1a011d08b46912805a2860c574913ad338f5f0808ad66310dd87cf78163c3b025925" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.103", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.103/dotnet-sdk-9.0.103-linux-x64.tar.gz", digest = "sha512:afda487365cf2d082f1dc462ff01607eae10657de8281c53c4e8775df72f5ed5b31b427ea8afd0917886e73b104a25db4c607e0510f8be3a761de9445d797b75" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.102"
+components = [
+  { name = "dotnet-sdk", version = "9.0.102" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.102", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.102/dotnet-sdk-9.0.102-osx-arm64.tar.gz", digest = "sha512:13632c9e58d8fa46f191256d180ed19089e08b242881825dd3682f082d65bcc6d9756629fefdab609c11265b6043dc11635263fe8761339b72d36608acb43574" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.102", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.102/dotnet-sdk-9.0.102-linux-x64.tar.gz", digest = "sha512:f093507ef635c3f8e572bf7b6ea7e144b85ccf6b7c6f914d3f182f782200a6088728663df5c9abe0638c9bd273fde3769ec824a6516f5fce734c4a4664ce3099" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.101"
+components = [
+  { name = "dotnet-sdk", version = "9.0.101" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.101", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.101/dotnet-sdk-9.0.101-osx-arm64.tar.gz", digest = "sha512:c6608ed280e5a76c46ce8f9b06b8c7014c7bdb54a9795c4585deb8e057db4d524037e4e82f9caf32444eede427c9cb5fdbb722508f389ef89a864f0bbae4766a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.101", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.101/dotnet-sdk-9.0.101-linux-x64.tar.gz", digest = "sha512:91b37efd64242e5f1f3c2025d183eb34e17f3a9271c5602f29ddf794845eee103723ef955ed869788ebf5a731e8ddc69328799c92c64cb118e1328d259a6ad01" },
+]
+
+[[release]]
+key = "dotnet-sdk-9.0.100"
+components = [
+  { name = "dotnet-sdk", version = "9.0.100" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.100", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.100/dotnet-sdk-9.0.100-osx-arm64.tar.gz", digest = "sha512:94dfa49652195a884f06d06ceb23ef6f7d7380fe0c4015b96e8f950b57a9558711fba61128710f9c8de0081dd91af48a90f7bd0f8b90038aeb5aeb24fb6724ff" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "9.0.100", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.100/dotnet-sdk-9.0.100-linux-x64.tar.gz", digest = "sha512:7f69bda047de1f952286be330a5e858171ded952d1aa24169e62212f90a27149e63b636c88ad313a6e3ec860da31f8c547ff4ab6808103a070f7fb26ba99c1c7" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.425"
+components = [
+  { name = "dotnet-sdk", version = "8.0.425" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.425", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-osx-arm64.tar.gz", digest = "sha512:d42156be70b489236479a415536013a89a9fd6eaca57d5716a7017612fcc65bdb459068973d7cffd6fe710f2799af8bee95b2046ba032762d47df176f5c4a7d6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.425", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-linux-x64.tar.gz", digest = "sha512:934b8060a7190e5909ad1fd0785db542f487b3bbf6cdd14826b02095fdd0d0394298b1634085eff302928fccc33f7c1a7253e9b87df555fc36fce819bcd2e798" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.424"
+components = [
+  { name = "dotnet-sdk", version = "8.0.424" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.424", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.424/dotnet-sdk-8.0.424-osx-arm64.tar.gz", digest = "sha512:975b686a2c6a5d62b20d95d04a233325670f38acc2ab5815d65126f05338783eb5988b16f504c9de516a63a550bcef0c061fc20fd25f128cc5b46be957065999" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.424", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.424/dotnet-sdk-8.0.424-linux-x64.tar.gz", digest = "sha512:6503fd9f464d5e3a4f43a881d2b74afc6a2c46ceda74d027f1565b7239f4b3ec884857c03c0dcd49eb52f384d5ae1fa5aaf135f0a6aabc5518103aceed643c74" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.423"
+components = [
+  { name = "dotnet-sdk", version = "8.0.423" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.423", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.423/dotnet-sdk-8.0.423-osx-arm64.tar.gz", digest = "sha512:aab7ecf40e6c8f25e0bef2e9c597d7d810cc304802b47dcf5cc72c4993f7d2d3c940951247d87b2a707c99d945f0b2e7dba6ede0c6f02c29c203fcc53b36cd32" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.423", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.423/dotnet-sdk-8.0.423-linux-x64.tar.gz", digest = "sha512:e94513dfe42271a85f01e87bd4272aa80b4ec13556f4531754802542225667775242c5e281a94837dae6cc65f7bcc457d2f663f240c0e2b7573fd909e786b1a5" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.422"
+components = [
+  { name = "dotnet-sdk", version = "8.0.422" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.422", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.422/dotnet-sdk-8.0.422-osx-arm64.tar.gz", digest = "sha512:c890cd092e4d72f79fcc7be361fa816a6c5b2482c85acb804086e1a386a9b8b35978ce63d1b6984f7d539a6e5a6ce0c9f9ca662865714b6ce7dded717b8a37ff" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.422", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.422/dotnet-sdk-8.0.422-linux-x64.tar.gz", digest = "sha512:5cde8b72ad98b910856207a19f6ffb0977f1f3b9ac76bbd03ed9e2f155370e2b7a950e589d38f55b3fd7799a2abc9ccbe4a3b180f1f628fe625634888449e07c" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.421"
+components = [
+  { name = "dotnet-sdk", version = "8.0.421" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.421", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.421/dotnet-sdk-8.0.421-osx-arm64.tar.gz", digest = "sha512:72818bac41459ae108dcf9d6fe8f2dadb3f334454de6c40e03c84ec9653c5e4f7cfad64c0b3b0897b7207ce2d3a8a6a6859134f192bc9641679ca6d1be396b67" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.421", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.421/dotnet-sdk-8.0.421-linux-x64.tar.gz", digest = "sha512:3bee18a8706f169178a2609cce7d31a4ec3e21ae0758c2387b9a0756dbc267342b60cf00024c76fe91518e49617b241f8ebf1e52cb3fa5644da5966b76589b22" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.420"
+components = [
+  { name = "dotnet-sdk", version = "8.0.420" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.420", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.420/dotnet-sdk-8.0.420-osx-arm64.tar.gz", digest = "sha512:21380d4e40cb6a4c5b35989cf9123d90102203da35de246eed67635844efa6b44f62e410789398bbce398061121f45e3370172fd12a320915579b9e4505c2d98" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.420", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.420/dotnet-sdk-8.0.420-linux-x64.tar.gz", digest = "sha512:36c68c1be9d5c6f24cd8e6bd4b6d36bfd7ab724ac7e3499fb13e42e70a9003310e5ee5759ed19ced1f0ecd3d26a55f135c7e72d6f788e7d44f5f0eaa72ad9a07" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.419"
+components = [
+  { name = "dotnet-sdk", version = "8.0.419" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.419", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.419/dotnet-sdk-8.0.419-osx-arm64.tar.gz", digest = "sha512:8a539eeefd2a8e7430c1967584a79dac366faad732541dfb8ed90192de776bd5be94170dfac493ee6b4a8ae2603de9952ce2d2b9022e90003c4b62d7aeb2379a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.419", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.419/dotnet-sdk-8.0.419-linux-x64.tar.gz", digest = "sha512:fcd6761101395fbda362a217545f3689e2b1ed42ed439bc39406df6d046d2bbcf60902833e868d5aed4d4a9b036628865e019450bb16d744d716e05fcac3c3cd" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.418"
+components = [
+  { name = "dotnet-sdk", version = "8.0.418" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.418", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.418/dotnet-sdk-8.0.418-osx-arm64.tar.gz", digest = "sha512:11d6adb204586e8b26374ade1c14e112a500d44197d3e96970ca7c3e0bf6eb7b40d453fb0b12140edcd4e70297be240062031f1ec740d565ff5e895292f1c9a0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.418", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.418/dotnet-sdk-8.0.418-linux-x64.tar.gz", digest = "sha512:fbd9fc9f0bca73f771e79c12d721a18da97ba23c43794b941b110ccaac0fcd16156c996a5b9cfc0650120601791f2909e93ecb268f687c7b82889934c766c2b9" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.417"
+components = [
+  { name = "dotnet-sdk", version = "8.0.417" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.417", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.417/dotnet-sdk-8.0.417-osx-arm64.tar.gz", digest = "sha512:3e23bb595e657058e35b831057710e581238c96485408ee6c298fd6f0a74bc1a5c96286c1c3f902dee1a46a144e2553bf86ed9731d36fb087a56e9a0c5ff0fe5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.417", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.417/dotnet-sdk-8.0.417-linux-x64.tar.gz", digest = "sha512:94cd8b2b13b6bbfd5bd2bb693014ef68c80f2d0c31bce8a0c563df4d0c83ded1926bb2669b3d11985db5904151104919049164bfc4ab6ad5c54a353fd8ed00eb" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.416"
+components = [
+  { name = "dotnet-sdk", version = "8.0.416" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.416", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.416/dotnet-sdk-8.0.416-osx-arm64.tar.gz", digest = "sha512:0ec6b51625e8c3238174e1b2e8759ce1d64c06688aee9680662ffe2cdd2b0898e8c81d25c9d134a8995fb53ab2c3431270087fb079cf327ba8045091fbf19614" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.416", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.416/dotnet-sdk-8.0.416-linux-x64.tar.gz", digest = "sha512:633cb85673e3519c825532f780f6750ff24ed248ef8df68885540e510b559b6adc2c8d940e4c349fc0cf2c9caf184f1efeaccbc5e952d6e435f3da027cae4188" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.415"
+components = [
+  { name = "dotnet-sdk", version = "8.0.415" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.415", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.415/dotnet-sdk-8.0.415-osx-arm64.tar.gz", digest = "sha512:3ff671ee2a0535a96c5feddc6e0e258de979d4eddb8228473bfd4b656ba57872e113572767b78a5e1e946261925c7eca7db1159fe3377606ee0aba8bd101dc07" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.415", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.415/dotnet-sdk-8.0.415-linux-x64.tar.gz", digest = "sha512:0fc0499a857f161f7c35775bb3f50ac6f0333f02f5df21d21147d538eb26a9a87282d4ba3707181c46f3c09d22cdc984e77820a5953a773525d6f7b332deb7f2" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.414"
+components = [
+  { name = "dotnet-sdk", version = "8.0.414" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.414", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.414/dotnet-sdk-8.0.414-osx-arm64.tar.gz", digest = "sha512:8e8a452eaa2e28195eb1bb33e0d9bff31e223e47d0fa4761ba339a47a6736f001013dc121695b580883845921e3c1151d5fd4693ebcaefc07f0d6500a0c01e36" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.414", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.414/dotnet-sdk-8.0.414-linux-x64.tar.gz", digest = "sha512:bdf6b151f787ac57d393e625e8b8fc8e19ac75902e76227da736f20e042cf7ff98bfd1a6669b77fdea7bfe678a0f23103e0cace1db83e9aee568ccd6f1b5b264" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.413"
+components = [
+  { name = "dotnet-sdk", version = "8.0.413" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.413", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.413/dotnet-sdk-8.0.413-osx-arm64.tar.gz", digest = "sha512:fdaaea5e7fff2badbfc894ba117116a7b88a8cc04577ceae0a00b4d8c9aea53724b3a445df0d28c8b1771ac92b62b9cc68895c98ff1791eab6f8a3cf19bffd01" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.413", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.413/dotnet-sdk-8.0.413-linux-x64.tar.gz", digest = "sha512:f173346751b2922887bb2fb1eb48fc88df9ac62cb7e8eac697f9a4cde17ad84f926dd02fba896968f1425b566fba3127b781dabeb74a088ed29a951d427e178a" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.412"
+components = [
+  { name = "dotnet-sdk", version = "8.0.412" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.412", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.412/dotnet-sdk-8.0.412-osx-arm64.tar.gz", digest = "sha512:1027b5069c403b441cccfb7fc0f82584aa58220529861a1c4f2ae91c6f30b19ea84929de7658de92f5ccba57504fb6e2b28a760376e203279c84fab354b9f116" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.412", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.412/dotnet-sdk-8.0.412-linux-x64.tar.gz", digest = "sha512:48062e12222224845cb3f922d991c78c064a1dd056e4b1c892b606e24a27c1f5413dc42221cdcf4225dcb61e3ee025d2a77159006687009130335ac515f59304" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.411"
+components = [
+  { name = "dotnet-sdk", version = "8.0.411" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.411", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.411/dotnet-sdk-8.0.411-osx-arm64.tar.gz", digest = "sha512:d991c07a05c3f47ed4c8511d4f298cc93f5f6c60a552717cf5b9b8f8e33df6d3676a5ed33fff0997000f537d597599d1d8eeada8fa5775c6ac3c1d2ea8055444" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.411", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.411/dotnet-sdk-8.0.411-linux-x64.tar.gz", digest = "sha512:e7304c3798c3ad3278a23cfac7e3f873a760d6bfe0719eaafdf6a9666afeff8f2730e7c84f7ff597d34b5e26d1bccb08ecc6e23c7ef4376564c4ed568d6d2430" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.410"
+components = [
+  { name = "dotnet-sdk", version = "8.0.410" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.410", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.410/dotnet-sdk-8.0.410-osx-arm64.tar.gz", digest = "sha512:138c851ca6a314ae2a43d51c5c25472dff8f47697161d361c24b0592ea28addba2eb4a05ec720fe00533eed692c7105e6b3eaf2c19b9975a1144709756630cf6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.410", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.410/dotnet-sdk-8.0.410-linux-x64.tar.gz", digest = "sha512:757879ef16bf8dc0677e0222ed2fd87b6126aa5ef6370120fb6ee8dfb42a194a796d105d388320cc623548a2eebbd349b1badf3e53631d9f059edeafea1b83bf" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.409"
+components = [
+  { name = "dotnet-sdk", version = "8.0.409" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.409", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.409/dotnet-sdk-8.0.409-osx-arm64.tar.gz", digest = "sha512:377c52370342183ff575c18d3f49d10468325f272534b00c5246f3aadfb0e7601d61d4b42bb913e8d053965fb591fcdff9b1123f85f8d8973226bf25180df568" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.409", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.409/dotnet-sdk-8.0.409-linux-x64.tar.gz", digest = "sha512:fb855ff04db010594bb7da884e3a86da94e26a43cc5d858724cc0d3d8ee31f6d64eb09558bad3dba540a25082219ba41aa7feb40d1c4f3468c3720ea4c552fda" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.408"
+components = [
+  { name = "dotnet-sdk", version = "8.0.408" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.408", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.408/dotnet-sdk-8.0.408-osx-arm64.tar.gz", digest = "sha512:cec76e2598460fd0367a6d810cfad31dce7e64f52cb6471e05d9a69725827920c446015efaf4d11cd934884a6ba6bd90b8a872b4407cf518dee291d8006b2106" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.408", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.408/dotnet-sdk-8.0.408-linux-x64.tar.gz", digest = "sha512:a9a1e54d10a37f91e1bd9b2e9e8ce6ed31917559898e4d6d36296bd5324f67cc7a13a9106703003cbebc5a7ee50188747ba816f5d828c0cb3a4a9f9920ebac4a" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.407"
+components = [
+  { name = "dotnet-sdk", version = "8.0.407" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.407", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.407/dotnet-sdk-8.0.407-osx-arm64.tar.gz", digest = "sha512:1e0c8debe348e7e6dc3fb747207e94b5b8c526c9bad68b4465449b8c7bc2ab2259cf0444afb3946609947f960b29729ce58ab07b4a89abdb85c03beac3b99dbf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.407", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.407/dotnet-sdk-8.0.407-linux-x64.tar.gz", digest = "sha512:eb62153ecc9e53a5422ff44f1c6966a89ee442a91f779e971aaa47ad6a66bb131af9b38e4ca012567547b9357b72b0476b77d2b7399a38a9224a8e6ca02a8155" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.406"
+components = [
+  { name = "dotnet-sdk", version = "8.0.406" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.406", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.406/dotnet-sdk-8.0.406-osx-arm64.tar.gz", digest = "sha512:dbd6bf870ca1776a8f463766bc5d0b584ac636e947f2da262708b79b21d48475d1f6af832df0f509e04b4e71d9bb2c37775e9878629debfced7eb6b376c2c449" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.406", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.406/dotnet-sdk-8.0.406-linux-x64.tar.gz", digest = "sha512:d6fdcfebd0df46959f7857cfb3beac7de6c8843515ece28b24802765fd9cfb6c7e9701b320134cb4907322937ab89cae914ddc21bf48b9b6313e9a9af5c1f24a" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.405"
+components = [
+  { name = "dotnet-sdk", version = "8.0.405" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.405", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.405/dotnet-sdk-8.0.405-osx-arm64.tar.gz", digest = "sha512:3610bdadd7bc0c137f283e95b01e45c186eeac765207fb76d22b10876a8f085190609080e074df9c8b1c70b3b647559f542b5e1313700125bff03f6c07d9f25e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.405", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.405/dotnet-sdk-8.0.405-linux-x64.tar.gz", digest = "sha512:2499faa1520e8fd9a287a6798755de1a3ffef31c0dc3416213c8a9bec64861419bfc818f1c1c410b86bb72848ce56d4b6c74839afd8175a922345fc649063ec6" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.404"
+components = [
+  { name = "dotnet-sdk", version = "8.0.404" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.404", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.404/dotnet-sdk-8.0.404-osx-arm64.tar.gz", digest = "sha512:6476531a63bf4bcc7bdde2f5a309fa2b2920bb630e08fa0aaeabd6578bb81d534b1dd3bad214617f72b5555a49a56b9ec770626d64122da7076dfc13f0c56cbc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.404", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.404/dotnet-sdk-8.0.404-linux-x64.tar.gz", digest = "sha512:2f166f7f3bd508154d72d1783ffac6e0e3c92023ccc2c6de49d22b411fc8b9e6dd03e7576acc1bb5870a6951181129ba77f3bf94bb45fe9c70105b1b896b9bb9" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.403"
+components = [
+  { name = "dotnet-sdk", version = "8.0.403" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.403", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.403/dotnet-sdk-8.0.403-osx-arm64.tar.gz", digest = "sha512:f3dafcc39e131de9bffff190aecc08d87aa0625a66245af55c019b5cb64d1593cdabf652c197ce4152bbd7c54cf68c273499d969a34885e3b7df0890bf5c9336" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.403", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.403/dotnet-sdk-8.0.403-linux-x64.tar.gz", digest = "sha512:7aa03678228b174f51c4535f18348cdf7a5d35e243b1f8cb28a4a30e402e47567d06df63c8f6da4bdc3c7e898f54f4acc08d9952bfa49d3f220d0353253ac3e9" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.402"
+components = [
+  { name = "dotnet-sdk", version = "8.0.402" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.402", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.402/dotnet-sdk-8.0.402-osx-arm64.tar.gz", digest = "sha512:a0e0726640a4829429d7ed95b00603635bdd56bba8163d26014488b5d2666c75ea954bd218a8f33922d38f3dde58f5b7b97e148d2bc69c79a3a3251d6005275d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.402", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.402/dotnet-sdk-8.0.402-linux-x64.tar.gz", digest = "sha512:a74f5cb0ac34ac3889c7616da7386563103e28a60fc8f767857f9b65c34c34d11301593de6b248d26c72557d63c18b0f7ce15bbcc0114f321c5e14dcec98008c" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.401"
+components = [
+  { name = "dotnet-sdk", version = "8.0.401" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.401", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.401/dotnet-sdk-8.0.401-osx-arm64.tar.gz", digest = "sha512:a3232c0693b41ee6b18dc3c8b26d82dd9116132bd7871dc9c0a0acc5e7995f352e760869fe91a08828417ea7b91fc27859aeea449b9efabc17c136a57737c93e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.401", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.401/dotnet-sdk-8.0.401-linux-x64.tar.gz", digest = "sha512:4d2180e82c963318863476cf61c035bd3d82165e7b70751ba231225b5575df24d30c0789d5748c3a379e1e6896b57e59286218cacd440ffb0075c9355094fd8c" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.400"
+components = [
+  { name = "dotnet-sdk", version = "8.0.400" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.400", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.400/dotnet-sdk-8.0.400-osx-arm64.tar.gz", digest = "sha512:29656a362ed6d74eec08d48aef930e5098c7456faa1bcaf178f9421f8423178838071b4ff81c0429155f1f834014cbdef8121eefe002a079443ff7a3193b4ee0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.400", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.400/dotnet-sdk-8.0.400-linux-x64.tar.gz", digest = "sha512:8a4c637746177c4da6ceec63e23a1f499d61d050aa72bc599841550557ff7b1a15a034044c3987b230fdca4e5113de12b1676f5a2366e9946bd94aec1e51a42b" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.319"
+components = [
+  { name = "dotnet-sdk", version = "8.0.319" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.319", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.319/dotnet-sdk-8.0.319-osx-arm64.tar.gz", digest = "sha512:827611848b4e2846479daf20296d156377c25b9373efb38b74a0bf917a5f3058069b3bedc6fcfd475ea96c6526bb8de2e3387ca614e512fa236a970b639d46a6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.319", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.319/dotnet-sdk-8.0.319-linux-x64.tar.gz", digest = "sha512:38c212b527f36802c896f47bc4f2dfda498511c2d5cc0800d9bddedfad35a10a88c0b5072bb0ab50d05d83be0a571349827a86cc7a7c3dace67d4d96b6f46df0" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.318"
+components = [
+  { name = "dotnet-sdk", version = "8.0.318" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.318", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.318/dotnet-sdk-8.0.318-osx-arm64.tar.gz", digest = "sha512:e262da9b4c1126ed036b097d13603b72e9b6475bbc5ce2846f5b9b13576ac828056fa0731fa688ba864e7c4891a6e393e2a6958fabf06b006b4d44c505541796" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.318", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.318/dotnet-sdk-8.0.318-linux-x64.tar.gz", digest = "sha512:032d1dc9bb192777b05379ceec2b0630d477899f65921a87458111ef8ab6ee71d03787d61564c26273e77dd1c9eb34da7d7962e95da0fec473ffcdfd1efb71b7" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.317"
+components = [
+  { name = "dotnet-sdk", version = "8.0.317" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.317", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.317/dotnet-sdk-8.0.317-osx-arm64.tar.gz", digest = "sha512:fd40a4efd8bc276bcd63906007525cec78edede05175fc2a9761ebe65811ee340b29890a1a1650a9666a4167fccbfcd88415853330e71fb6589a24acaf0bf126" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.317", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.317/dotnet-sdk-8.0.317-linux-x64.tar.gz", digest = "sha512:175bad499ed14374de3d6726f0fa20d2bf5d94b20eed5e0e0388647d765cf4a6183e22bf559e21ef5f5f7d6aa7d46d20c708da3e386765438a23014aa3348c59" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.316"
+components = [
+  { name = "dotnet-sdk", version = "8.0.316" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.316", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.316/dotnet-sdk-8.0.316-osx-arm64.tar.gz", digest = "sha512:46cdd68a6c7995d5fa8a822b7bd4d87381656b15e3f5a2358eb50fa3cef7952cd70ecaf282c3a790bf9c93e99669c761774d8304cb6812179887afe6dcbd7bbe" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.316", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.316/dotnet-sdk-8.0.316-linux-x64.tar.gz", digest = "sha512:e41065b03a45a1c9659ee44b7ef105a5d1278a10195adab1a6f0c8a7861a3b0d586eb80f06b71415f4587eadbbe304fffaa86ac02d52b4088705aae845a661e7" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.315"
+components = [
+  { name = "dotnet-sdk", version = "8.0.315" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.315", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.315/dotnet-sdk-8.0.315-osx-arm64.tar.gz", digest = "sha512:f53ec39e469c3ba0aab21de5cd3cf426214d0a22f7cc53779d6973dbc1f73ed6c800e0607624ba63f3af691ec5dcd3571fe7f62946001403ec5f397a00ea8eb9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.315", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.315/dotnet-sdk-8.0.315-linux-x64.tar.gz", digest = "sha512:5121f6e731d2ae7d1335629329fa3eb08c8b2e1bd6f10e6d4a54b8f83f49a2e43ab54fa4e0d087d95512cf3c6d59651fea638199bfdd34684ddc843790513c4e" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.314"
+components = [
+  { name = "dotnet-sdk", version = "8.0.314" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.314", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.314/dotnet-sdk-8.0.314-osx-arm64.tar.gz", digest = "sha512:8989415e7bd58c4d9a4e68cc78cc58b926cb8ee34784f579fadf41909c9a74c14c0100a7306ac2ff51dc32ca397704fe9c452af0ca6abb76ba2f6e11ff84608e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.314", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.314/dotnet-sdk-8.0.314-linux-x64.tar.gz", digest = "sha512:afbb0d70392e792c0b58b9f64d7dd6f945760c79bb3995d3bc5998c6d10f38794e56ce634d5207464301c0b0db60a96d3df6f83b68b6c8d66d7a76e466b4b120" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.313"
+components = [
+  { name = "dotnet-sdk", version = "8.0.313" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.313", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.313/dotnet-sdk-8.0.313-osx-arm64.tar.gz", digest = "sha512:2b7f6a59de003dda04004ecadbe88e9bf28fdefcafcfd04f8b4719c9e567432ac3342a266c5cdb53bf182b6a67dcb90cd104dac8a35d1263d6bbf2362ffb8770" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.313", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.313/dotnet-sdk-8.0.313-linux-x64.tar.gz", digest = "sha512:eaa3a43afba764c4aa7e704f171c6ad5aa37b2bc65f1c1699d8a8f7a0b9aa716170a11b55f036190ac688ec951a2b8be89225f36910cd29cb7378eeefdde2aa6" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.312"
+components = [
+  { name = "dotnet-sdk", version = "8.0.312" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.312", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.312/dotnet-sdk-8.0.312-osx-arm64.tar.gz", digest = "sha512:6d27ddda13e41a3a98f18dddff1fee994a969d97dae6601cfb6cbd2758b293da6fda0b85ba12cd1c29e3f7e9a1fa19f13cb2ba673b0c4f8e25d1a2c7d76c5b79" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.312", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.312/dotnet-sdk-8.0.312-linux-x64.tar.gz", digest = "sha512:6e1ff0e958303d1232a9a1ce2647e74aaabc28a5b93e10a15ddf012eed99db3e3192a3c91e7b1106db6e1b5b2adec8ba04f237457fa8cfaeb9d8bc9a0e890bb6" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.311"
+components = [
+  { name = "dotnet-sdk", version = "8.0.311" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.311", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.311/dotnet-sdk-8.0.311-osx-arm64.tar.gz", digest = "sha512:902514cf3c2f1754b2e8edfb16e275eea2c36b2e2f5a296010832c0efcb046e6d6fc8b6233c5f20a0b0727fd612bfef05571bfaea7b39d8b49ee485aa8cf3221" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.311", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.311/dotnet-sdk-8.0.311-linux-x64.tar.gz", digest = "sha512:7253306c34a0be2a059414cf8e741611e50644263c9e223a7f139447b7f757abaabfb37155a339346ea03debed70b4143362f40cf9b2617c6bd851ce307512e9" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.310"
+components = [
+  { name = "dotnet-sdk", version = "8.0.310" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.310", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.310/dotnet-sdk-8.0.310-osx-arm64.tar.gz", digest = "sha512:acb85e2bf9bcce54b9786af83da1083db26938c2c5fe95002c5e7b2cf3653d1df0d82d948dc9b4f4062e134c1a4691c5d8f72d79c425fedc85ef66b0b96816e8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.310", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.310/dotnet-sdk-8.0.310-linux-x64.tar.gz", digest = "sha512:39a5e14e5d16112f8e865bda88229f32f68858f802221327d057cbc941cbb082221885e0db5dd500b399a91f4834760b5b4fe3bdc8ebd0346a2429bde14252cd" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.309"
+components = [
+  { name = "dotnet-sdk", version = "8.0.309" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.309", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.309/dotnet-sdk-8.0.309-osx-arm64.tar.gz", digest = "sha512:6399bcef9eabd853a09ca69f168ba0a224b7443d193557f3bd224e9fe6fb4d05536d21fcdbbcf5a9ef211f61a1072a1e885044af531d67835cd55c2d867ac288" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.309", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.309/dotnet-sdk-8.0.309-linux-x64.tar.gz", digest = "sha512:f213aabc7f458ce20ca10f72a7e6000297c57737e61818005ef03c45c907d0bb3727cf9e828cabb9d6d3fb3bda4abc18bcd8e453bc5a00ac4d77e62b3237fcb4" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.308"
+components = [
+  { name = "dotnet-sdk", version = "8.0.308" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.308", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.308/dotnet-sdk-8.0.308-osx-arm64.tar.gz", digest = "sha512:487909e8a36df6f2b8a3c88676a2d804ccdae7d759bfb962d556ea46fd836e27fae6c0b24b00d54976d323f04dbeb271506bcd2ab284a564a465dcde5e9483b3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.308", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.308/dotnet-sdk-8.0.308-linux-x64.tar.gz", digest = "sha512:f26d4dabbc54e79264353d0d14a8df5df720203c1d0455e65f4d94571e85b1940b9111a9bbb156e6db1d46756e9534bb3c9f1840a20c961901d430b8f1bbe6b2" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.307"
+components = [
+  { name = "dotnet-sdk", version = "8.0.307" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.307", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.307/dotnet-sdk-8.0.307-osx-arm64.tar.gz", digest = "sha512:c522d9e22321d044bbb447ef24869b125753d2267a5dd5387059be099d37d7e981b38103c4de695210274b2c40a26edbf8658c838c26d20b44f31f521b45b5d5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.307", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.307/dotnet-sdk-8.0.307-linux-x64.tar.gz", digest = "sha512:94923a5cc2337b531bd3bdf08c99e7169ecd4c81a63a2b8ce204fb087c4eb526695218fc763860ea2930426c2b31c2328df13370d64217d375198b93fdf04c9d" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.306"
+components = [
+  { name = "dotnet-sdk", version = "8.0.306" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.306", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.306/dotnet-sdk-8.0.306-osx-arm64.tar.gz", digest = "sha512:306abf8eef3f16d889956f18433b0a71d9dfeecc3c063e4e0d33fdfe37d4f2d1106c27ccc44961a9e2e0588382c33d12192b9734621eaa4edae68e7ad41591a5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.306", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.306/dotnet-sdk-8.0.306-linux-x64.tar.gz", digest = "sha512:b59653508a7f1b7ff563c33d22d92e7e71d5fea2f01d600429df3ef262fdadf11d11cc251fcb349715ae86fe0eb3f8f35223f0f84d70dd2fe1c39a3f09f6e021" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.304"
+components = [
+  { name = "dotnet-sdk", version = "8.0.304" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.304", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.304/dotnet-sdk-8.0.304-osx-arm64.tar.gz", digest = "sha512:6993a950bc5bff0efe762ba2562a88761e93c61024d93633209950cbb68aeb5ff189fcbfe9247a1cdebbe37e738136123c7d4eda1050708608bb1ff0408eff4d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.304", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.304/dotnet-sdk-8.0.304-linux-x64.tar.gz", digest = "sha512:971c344379240ec4bfaaf1eca69c6667e594cdd0dfdcde6e8962cb7a41d669dff91c644e48eed3573d841b7b3e60ce02e0c27a7ce37b66cdec27bf3457087c4a" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.303"
+components = [
+  { name = "dotnet-sdk", version = "8.0.303" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.303", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.303/dotnet-sdk-8.0.303-osx-arm64.tar.gz", digest = "sha512:c1c2935ac0b6654805e8112ff88d31ca9aae7f345218c9a9d9e512c98d73e2bccdfdb006537832e4f20fd3a9ce4defaad537e5cb98deb538e95b54a2c76a9110" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.303", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.303/dotnet-sdk-8.0.303-linux-x64.tar.gz", digest = "sha512:814ff07ccdfc8160c4a24adfda6c815e7feace88c59722f827a5a27041719067538754911fc15cb46978e16566fe0938695891723d182055190e876131faedda" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.302"
+components = [
+  { name = "dotnet-sdk", version = "8.0.302" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.302", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.302/dotnet-sdk-8.0.302-osx-arm64.tar.gz", digest = "sha512:e3589d4da75b9fa4b84c9e6e23cdc97796d59dc27efe3c25e5dffd1fa074f770876eda7087d26eb221369355dcce89c7d7724426ee24269295ca1d4e6353bd7f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.302", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.302/dotnet-sdk-8.0.302-linux-x64.tar.gz", digest = "sha512:43d0ea1df12c15a0e47560d2a84857ab50eb04ac693ab41413c04c591719101c4c8165e052a42a66719c67bd07ac299ca47edbb4944a2901df765042e56b316f" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.301"
+components = [
+  { name = "dotnet-sdk", version = "8.0.301" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.301", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.301/dotnet-sdk-8.0.301-osx-arm64.tar.gz", digest = "sha512:8d56980b6a6ffd78618a6e9833126d7e67052ca6041bd5f167a32e277aac7094a5cd37b9e7e145d5c9b74da95561535189a077d074ddb0fe710a76c2a2c9b1eb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.301", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.301/dotnet-sdk-8.0.301-linux-x64.tar.gz", digest = "sha512:6e2e1ad5fe3f00e6974ad3eac9c5b74cd09521f19e06eb9aff45a44d6c55e4a2c1cd489364735215d2ea53cec2a7d45892a5ede344a8421be9ad15872c3496a2" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.300"
+components = [
+  { name = "dotnet-sdk", version = "8.0.300" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.300", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.300/dotnet-sdk-8.0.300-osx-arm64.tar.gz", digest = "sha512:98a9b56b2795bf6faa848062ed34d917b187eda220db50c8e73de1bfa37244dd68d8c3cbc598b5fc5be4620a2b92724f95d7c13299f8b873fdefe880890a1bbb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.300", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.300/dotnet-sdk-8.0.300-linux-x64.tar.gz", digest = "sha512:6ba966801ad3869275469b0f7ee7af0b88b659d018a37b241962335bd95ef6e55cb6741ab77d96a93c68174d30d0c270b48b3cda21b493270b0d6038ee3fe79e" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.206"
+components = [
+  { name = "dotnet-sdk", version = "8.0.206" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.206", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.206/dotnet-sdk-8.0.206-osx-arm64.tar.gz", digest = "sha512:c4a17c17b02d9559e0029328179d22617321e439e9360175f25385d60789f91582a4024ce41690439d85852e4c85f0d0ae20fe818c0f4acf0d7d48ffac2d2b5c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.206", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.206/dotnet-sdk-8.0.206-linux-x64.tar.gz", digest = "sha512:d03cbb5ea44a6f4957d7c1fa0f7c19e3df2efcbf569b071082e37ac86776af0729540c3bbddc44668ae2eedcfcb4b098883bb560d26418f1583a558d60c99ef5" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.205"
+components = [
+  { name = "dotnet-sdk", version = "8.0.205" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.205", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.205/dotnet-sdk-8.0.205-osx-arm64.tar.gz", digest = "sha512:2792e9b0cd4fd69373022c5e4c17bd128dd8e31db773f51b39c8696f37e72af8c4b67d0c017ee068587c0f664efa8bbd9a0bc4472b072a7897d2ff4ef8fafa58" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.205", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.205/dotnet-sdk-8.0.205-linux-x64.tar.gz", digest = "sha512:2ec774350ca3192e1c68c9c8ee62d0c089f9bd03fe1aaebb118fbe7625f2e0960f5dbd800ea3f974cc7ac7fba32830f41faec9ee1bae736497ba05d9c7addb59" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.204"
+components = [
+  { name = "dotnet-sdk", version = "8.0.204" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.204", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.204/dotnet-sdk-8.0.204-osx-arm64.tar.gz", digest = "sha512:db06baa1d076549e393a9a402c03e81834e15641d2b5fdbd5beb7c4a55b5ed979f5e58ac6baa2048bc55a3a7b3aabe0e3c518310c66a17ecd107b7bf0aaaf2b0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.204", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.204/dotnet-sdk-8.0.204-linux-x64.tar.gz", digest = "sha512:b45d3e3bc039d50764bfbe393b26cc929d93b22d69da74af6d35d4038ebcbc2f8410b047cdd0425c954d245e2594755c9f293c09f1ded3c97d33aebfaf878b5f" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.203"
+components = [
+  { name = "dotnet-sdk", version = "8.0.203" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.203", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.203/dotnet-sdk-8.0.203-osx-arm64.tar.gz", digest = "sha512:39fdb91136516f070b5f398b46a7503115493f1cc89d9bee7ea7ee4541ec9d69a4d673d87498e578ebb2cc81df8b062d05c4f7c8be80bc2b113cc61df1157c0d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.203", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.203/dotnet-sdk-8.0.203-linux-x64.tar.gz", digest = "sha512:78b1913b54a1a4c9f13cc2864a11540b5fd3bdf4ebb49837483e19c0906a1890f2dfcf173635a1c89714bf735cbcaa01db0f7ae90add5295da69a0638ed5e60e" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.202"
+components = [
+  { name = "dotnet-sdk", version = "8.0.202" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.202", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.202/dotnet-sdk-8.0.202-osx-arm64.tar.gz", digest = "sha512:cb140f98fee85802db2540b0a97bf5ffd3bdc871f4d88bd36d7c66491c9961da43bc08162dc43bfb8ef942f0d19dc70f1c92b22b55d1bead2fc757faab6d423d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.202", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.202/dotnet-sdk-8.0.202-linux-x64.tar.gz", digest = "sha512:e0e790c7cc6f8129913317d326c599ff8e8ed4927d4e0adccbe55c50be5c353fe3d83043e529973ced2b302b8432c2ab31533b94ffe9c363eaa9964a7160643a" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.201"
+components = [
+  { name = "dotnet-sdk", version = "8.0.201" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.201", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.201/dotnet-sdk-8.0.201-osx-arm64.tar.gz", digest = "sha512:7457d5413dfee375d9e418707ebd726ff8ca9dbb7c34476e9fe33fd77962fbed5827bcbcc6d7978e918faf58a4e2470456b7383df6c0e47ed3b49d00b563611e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.201", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.201/dotnet-sdk-8.0.201-linux-x64.tar.gz", digest = "sha512:310cf54f595698435b533931b12f86d49f89d27243cf7c87a5b926e0c676b80e869aa58aaff17b5095536c432f377c67d92bf0ca8941b9d891d4b3879637d488" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.200"
+components = [
+  { name = "dotnet-sdk", version = "8.0.200" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.200", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.200/dotnet-sdk-8.0.200-osx-arm64.tar.gz", digest = "sha512:9d62beadd090f940d7dbada4120aa01f0e1cde14c4ccef570a3fbd6a44dc347ffa27baa44efdae46bba7307e647700329aea15f8b79f3e96df906a267b98b13e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.200", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.200/dotnet-sdk-8.0.200-linux-x64.tar.gz", digest = "sha512:58417468b72c89a66ad0bf54a0e4af13f8a3a37f2aae6e28ef762b9cdd783af0c13ad62ce185446d920b2709ec73c980d888fd73a413a8dce154ac15cb0056a3" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.131"
+components = [
+  { name = "dotnet-sdk", version = "8.0.131" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.131", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.131/dotnet-sdk-8.0.131-osx-arm64.tar.gz", digest = "sha512:49461ad4c857e8bdea2035bcd2422cad5b71599a1f03bcdcf9edf4de543482e828a18f5f0cf0bc29e86ae89b5f23618fa55e50b4b3327dfe08762ad735fb9cf2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.131", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.131/dotnet-sdk-8.0.131-linux-x64.tar.gz", digest = "sha512:a6182d3f136c524485da248156b263012eba70179a0849131b5331548770fc149a42347f7865fdbd4f81057b28fa68c2395ab0e9549f2c8a268310f48a2304eb" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.130"
+components = [
+  { name = "dotnet-sdk", version = "8.0.130" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.130", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.130/dotnet-sdk-8.0.130-osx-arm64.tar.gz", digest = "sha512:ff6d2563135b76f4ca787352a33c550bd3f903f47e76a4d0c5f18712bbf61b040cba2fa51c1a550edebef89bc165d59f3fb30124f776b3d5a3b752cfa58e63f8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.130", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.130/dotnet-sdk-8.0.130-linux-x64.tar.gz", digest = "sha512:4f3ed7011a924fbe9d093cab087deff5ed9b19fc0de0222117fda7c1334605c31818b01ffbd445b69e59f294fb4d3383fd00fd19701e7142acb7bc88b9b4ecab" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.129"
+components = [
+  { name = "dotnet-sdk", version = "8.0.129" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.129", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.129/dotnet-sdk-8.0.129-osx-arm64.tar.gz", digest = "sha512:5f086c2645a7b7c9d43a5c16b631778f0a94c10e1d45db13cacde1cea7f1243e8d6ba9998e515b7f90a1a4c8fe981cd395134cf3ac3052c565241026f6cc3a95" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.129", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.129/dotnet-sdk-8.0.129-linux-x64.tar.gz", digest = "sha512:29a9620b9450a7547148c9d5431fe25ac0b736c3f2003fcb2512b6733efbe1a66c5201c6acf47f8bb2361d7cff32939f10e991d2b8cbdd833f7b33ac99e345c7" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.128"
+components = [
+  { name = "dotnet-sdk", version = "8.0.128" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.128", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.128/dotnet-sdk-8.0.128-osx-arm64.tar.gz", digest = "sha512:7bce5b0ade73789b73e3c87974b564a4c8b78725781a3ccbbd8e2004853c23e2b36c891f34a27df6e4c20ef0a2ed940572c91c78ba07c0d5e3e84f3254f19275" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.128", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.128/dotnet-sdk-8.0.128-linux-x64.tar.gz", digest = "sha512:171db9111863fbf0ae30b9c61745ad5d45706c829a26787da54be00394782acfb2015faf9a2ddc2510bfb7cabee3d8b9aa8bbb144b605cd8e469281950c5545f" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.127"
+components = [
+  { name = "dotnet-sdk", version = "8.0.127" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.127", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.127/dotnet-sdk-8.0.127-osx-arm64.tar.gz", digest = "sha512:0dafff5937ba44b9435f8e2884cd1c27185400c8d563907e84b31b31d9270d4be202994d67d737882f83a6d197f3fcc4dd8b93d1d2ef77b1469418fbac4ef800" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.127", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.127/dotnet-sdk-8.0.127-linux-x64.tar.gz", digest = "sha512:b19d8619dd03e516ac6671e0351eb7f00093003963eeef5bb3f07163a4c666b1641ea5afd4c146ddca4a385f1fc6a97c3711e07f00231b7e27ad1fdbd502fdd5" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.126"
+components = [
+  { name = "dotnet-sdk", version = "8.0.126" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.126", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.126/dotnet-sdk-8.0.126-osx-arm64.tar.gz", digest = "sha512:3df0910aa5dee9d962f14eef1f9ec76629d17c3e401c3c0d54cd5c1a7ea7e7aa429a5c245023aad9c3349e96512446ff32d6ead0517925809cb86f282bce2f47" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.126", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.126/dotnet-sdk-8.0.126-linux-x64.tar.gz", digest = "sha512:f054dd4851f56f98fb911a0e8d59a33c61f83b0bdb83fd1da0c31aef3d8069d6b27cd8f3242f95511b87934cfaa72f057824e811f306dec6f5e1e9d7ddce7ce1" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.125"
+components = [
+  { name = "dotnet-sdk", version = "8.0.125" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.125", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.125/dotnet-sdk-8.0.125-osx-arm64.tar.gz", digest = "sha512:f6ac4344f37434ce14fc988f4fbe7a3b92df49c8d07578c704b1415f404102b0a2ea44b3989579ef43e2de78e5b8c2523ad3050f26bd3eb1c3187c27c8400e98" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.125", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.125/dotnet-sdk-8.0.125-linux-x64.tar.gz", digest = "sha512:2973854ab90af54f2c626a8032f4dfb41bfedd5921f1d5b9a4b68328927e785e5c8aa693d24f739304ca46d9a4f5a84081fa94b8452e1f4f83040a8e582a2b37" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.124"
+components = [
+  { name = "dotnet-sdk", version = "8.0.124" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.124", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.124/dotnet-sdk-8.0.124-osx-arm64.tar.gz", digest = "sha512:f1e66e480fbb9e7b95cd0444e2cef84be5132da5951d15ce61586ceeae784660c317392ea661dc1bc2c07cfaedc0cc27c4e4d16f4cefbba1efd40507c6a28639" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.124", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.124/dotnet-sdk-8.0.124-linux-x64.tar.gz", digest = "sha512:ef2340c8a4fe808d139e70bc7579e946337d14968944d41277878f6ffad9f0f0ac4a57aec33a8833343726602c71dab3bb6f0f55c4d091f83410b028bdd31f83" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.123"
+components = [
+  { name = "dotnet-sdk", version = "8.0.123" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.123", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.123/dotnet-sdk-8.0.123-osx-arm64.tar.gz", digest = "sha512:5f62c8b9de94dd6ade31e57c3202c59f089ae0eab731edc358c9139c8a9d4afa99604f1ef46b1f394c2dd506dffbc372d584758d17e18c5434a0f2a167f0acbe" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.123", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.123/dotnet-sdk-8.0.123-linux-x64.tar.gz", digest = "sha512:76edde05e174f6a015b51c60c1c9bf91e9209176f44466e5bfa2b73e5bdda4cc1ffec26b3b6190d9cda7b380198c906ffe18fe2408e4953ea9dd7994c1311e3e" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.122"
+components = [
+  { name = "dotnet-sdk", version = "8.0.122" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.122", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.122/dotnet-sdk-8.0.122-osx-arm64.tar.gz", digest = "sha512:286a4d69823ed91bdc75bae25c326b3741503a78683f4eb09a977dee065c7929734e76c63974609ee6ea1f33764d980259a04b76a3ac0d2d09f4a0d4173d8e88" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.122", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.122/dotnet-sdk-8.0.122-linux-x64.tar.gz", digest = "sha512:336cc2e03fe332db214955f4b87d1122f08607638e71389fb2bb3030dc9fda2d562fd862a47195f96b7d98f34c630692863c7885d2cb70ee42aa46e8b5ef5da6" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.121"
+components = [
+  { name = "dotnet-sdk", version = "8.0.121" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.121", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.121/dotnet-sdk-8.0.121-osx-arm64.tar.gz", digest = "sha512:851f1a8d2fbf7212f0d9ddb9ce665f66df9801ecc15419cf325ad9efe03bb86ae099e7135b1c7ea17ed5ff9a14e9ac866037865178f7bef1e461465b5ba8c520" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.121", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.121/dotnet-sdk-8.0.121-linux-x64.tar.gz", digest = "sha512:5f3554066a9f738c3a137daba885ca6eb669f1e84d536cc7064864821acc7123f349eba2cf5d90c252878379cbc65e9214f65e01e2482f76e03c35e2d3c9b9a2" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.120"
+components = [
+  { name = "dotnet-sdk", version = "8.0.120" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.120", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.120/dotnet-sdk-8.0.120-osx-arm64.tar.gz", digest = "sha512:77de5652c86d7918b51c20140710dc6e978ecdaf46e074163db475e43d92ac294b50df3343895ac6480a7cda9751a9fb1e2683bc381c36f0b95b1bbda50b744c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.120", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.120/dotnet-sdk-8.0.120-linux-x64.tar.gz", digest = "sha512:2184f0f06e6b063e0c5adf62190f81f004c631cf9f340011e25517eceb03cd35a94c1876366e5a730bf9335d2734e1b7796cad1964154bc4dca5aba78fc6677e" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.119"
+components = [
+  { name = "dotnet-sdk", version = "8.0.119" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.119", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.119/dotnet-sdk-8.0.119-osx-arm64.tar.gz", digest = "sha512:34d1119aa7bf9aacc42606993aef02d290f5dc1e6c9e6d9a4db09bf492117bd1d7e15d50b7b869f00954cd4aa97e897a1e85ef45ef52efd4ed2e82dd2809e980" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.119", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.119/dotnet-sdk-8.0.119-linux-x64.tar.gz", digest = "sha512:2ffec3380a2ac23e801c7c7507b3962ffd232911ad06024b74b97ddacb6f46804d8f6319eb4c7fc7b025f716777d47110219caeebc30a3b1fe9223066ff8a8ca" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.118"
+components = [
+  { name = "dotnet-sdk", version = "8.0.118" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.118", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.118/dotnet-sdk-8.0.118-osx-arm64.tar.gz", digest = "sha512:f68b219257e502976309bb73794b67f29dce0e695f40544bd128274d6435c96f13bc7bfb3289619cdc52b81cb7196039ef9c517c6b3228732aa3d491f5ccbcb6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.118", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.118/dotnet-sdk-8.0.118-linux-x64.tar.gz", digest = "sha512:daf2f8052dcceaed00596d1f887b31b19932ea6fc64477006fadd7ebdb565b6ccaadac2b2c38d57ba58d6e156b72adb094a7350aea1d511e77ad967548321a6b" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.117"
+components = [
+  { name = "dotnet-sdk", version = "8.0.117" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.117", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.117/dotnet-sdk-8.0.117-osx-arm64.tar.gz", digest = "sha512:6ac8ed56e6bc5c0dab9e9d759efdfb8eab690e49da4f326aa657bba4f07320d8bb54033fc70d3500876b23db57d85aa68325d766535b92a8ab24ab9f482f7c6a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.117", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.117/dotnet-sdk-8.0.117-linux-x64.tar.gz", digest = "sha512:a6739b587b776b156ffe19d25711b141261b7b5becff00cb81aee5b2f0694f4600799c625eb844d5ba74203dd5a1211dc34bab62c54961fe7eb7a92e1a7dbf77" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.116"
+components = [
+  { name = "dotnet-sdk", version = "8.0.116" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.116", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.116/dotnet-sdk-8.0.116-osx-arm64.tar.gz", digest = "sha512:d87c937d81c7b415dc2bfedf315dace60896b0ff5bec64d017dab612aac1a54482adc7c59d8612527e622c2256d5e87005a211f3d33890d33fa3cfae001c75d5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.116", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.116/dotnet-sdk-8.0.116-linux-x64.tar.gz", digest = "sha512:96c634a0d1678429fede9930336ba0351d1510bc4d0456b9d7225c5c9d587d700e8f30e841dfd675fff8a8c709cbef209ca87d11cb657fcb2f212b5eefaec872" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.115"
+components = [
+  { name = "dotnet-sdk", version = "8.0.115" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.115", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.115/dotnet-sdk-8.0.115-osx-arm64.tar.gz", digest = "sha512:2a12f510a771676863b423da9d283d619fe103e2b4c372b758d956320be6cedb8a4029bb5a46c8ccda4ad0a1ec24be22428e92de4a537209f2b2c354dd48b24e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.115", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.115/dotnet-sdk-8.0.115-linux-x64.tar.gz", digest = "sha512:f3afa0c37fd0481f78eacbd8f326af665c4e6594067edac130996f50c527370cc2439d1a94843dccc2e3efdb3c446e6183496822ddfb68326577f26a804eac53" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.114"
+components = [
+  { name = "dotnet-sdk", version = "8.0.114" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.114", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.114/dotnet-sdk-8.0.114-osx-arm64.tar.gz", digest = "sha512:55161fe668b0d2883206bb74ce4d32c9d7019ce1bfc6644c1802b53d98774e63f58687a1a5f77b59dfddbed0c24b9839087ac5a0d958507cd8b3c64ef97c3415" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.114", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.114/dotnet-sdk-8.0.114-linux-x64.tar.gz", digest = "sha512:2bbb16670b6cafa1d74df3eb7b4feea1b4becaf00a690d81ae48e49e6d7421db660db8da42b82f15519a4583ade0f0e5e2f78ec7dcbcea6f1bea65bf6f7e34b7" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.113"
+components = [
+  { name = "dotnet-sdk", version = "8.0.113" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.113", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.113/dotnet-sdk-8.0.113-osx-arm64.tar.gz", digest = "sha512:18247479baa6b17392d6d8d3ea2350ea5786580b419d41e862f3b1a3b9dd65acc7302a6abf6b7cf159f07623756a849822d115041e721df039d17938260dee57" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.113", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.113/dotnet-sdk-8.0.113-linux-x64.tar.gz", digest = "sha512:e7c38145ca8edb23f9992aba238b6725ef0bfcc186c879e703c79450b77720976898751a28585a76d39b2a5b499e5763e8eb2165c88a5d2fab2c3129a353116f" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.112"
+components = [
+  { name = "dotnet-sdk", version = "8.0.112" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.112", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.112/dotnet-sdk-8.0.112-osx-arm64.tar.gz", digest = "sha512:e28fefa80e8a5eefa1b8ed7cc7bf7fa5921f381cfd3b16c2d77f15ed3b6188f2ded4e158281a92c27ee5349d04a0425e4ca64decea3ca0718b3047e1e7cbab78" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.112", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.112/dotnet-sdk-8.0.112-linux-x64.tar.gz", digest = "sha512:dec99628b67ca7ceee9d0be6e36dee76723a210138dec05aa781a45f4741027564442e74a986afe874919a2631c3e75555ec68e4c3e475bd2f807a6acaa989fd" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.111"
+components = [
+  { name = "dotnet-sdk", version = "8.0.111" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.111", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.111/dotnet-sdk-8.0.111-osx-arm64.tar.gz", digest = "sha512:b47fff1bf5d9e2b5ca7b684d72a0504c3ccf8b3374b8d7a2e38e41722f7e11748001fcd3448e626014b9fca78082bfed9c0e46f5ab141a646421ebc2191b9a5b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.111", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.111/dotnet-sdk-8.0.111-linux-x64.tar.gz", digest = "sha512:e46e39a771b29744dce665a87cd5322dfa912ab2904bcc10f0507dfcf4ca05684cf64c34e12c7084af49a784cc04eb532a3ad2be4ceb668176347feb4be37f81" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.110"
+components = [
+  { name = "dotnet-sdk", version = "8.0.110" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.110", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.110/dotnet-sdk-8.0.110-osx-arm64.tar.gz", digest = "sha512:6d64ea5c003814b0fef4b5bbe74caf9ea502677da22c676b2db01bb94053a2433ea9aa932067145809c5d98853a6c4a8074b3f24ae8b77c835940270898bfccc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.110", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.110/dotnet-sdk-8.0.110-linux-x64.tar.gz", digest = "sha512:3dc724aadded97bae639969f8b15601962654af6561a132fd650ec6a03a7473a1061f8f5f7606cb4b1a4b127e6cdbfb59354bc025bd3f07b56e0a8716b4b66ac" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.108"
+components = [
+  { name = "dotnet-sdk", version = "8.0.108" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.108", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.108/dotnet-sdk-8.0.108-osx-arm64.tar.gz", digest = "sha512:83b01276474b4b62bf0a282fbe11d2353a2191d90becd403b373cd6dfc95264442a907117ad8f615765b13969267b887d26a9f24dbd5f88d8b55daa94412d13c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.108", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.108/dotnet-sdk-8.0.108-linux-x64.tar.gz", digest = "sha512:5666ddf6fa9b65deaba4d7c5fcc2e2d56f631c4f5f6fb2a9f5919af0616ab2b420b12a828becc2e4b8628a76ac3dae824b55abde5c6d5ac59ee131d7eceae7c2" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.107"
+components = [
+  { name = "dotnet-sdk", version = "8.0.107" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.107", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.107/dotnet-sdk-8.0.107-osx-arm64.tar.gz", digest = "sha512:b293f8e3cad20278ee85e30b4b1baa615c30b0e7aba557b1d0248d9e5c4557e323b726afdde0386c0227d6cbc6f95c8ef5493e209cb5a42b64e8c7f6e495224e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.107", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.107/dotnet-sdk-8.0.107-linux-x64.tar.gz", digest = "sha512:10e0fbdc589e5e0de4fb0fe0e9c839bb2257c51948037a224d4358b8328b6791014ab4cb164beb617c83531a6ed774acb37b08e4a1b53f165e3eb853fd41a959" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.106"
+components = [
+  { name = "dotnet-sdk", version = "8.0.106" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.106", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.106/dotnet-sdk-8.0.106-osx-arm64.tar.gz", digest = "sha512:490c20abc3cf52f76fecf422a6fcc66c98b7500a56986f84e617860a2758f43ddc4b235647837fae69e4c46a9d1ab9177d4bbfe134258797599b69178f6b91f8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.106", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.106/dotnet-sdk-8.0.106-linux-x64.tar.gz", digest = "sha512:06eecc146b16eef0654fb4fd17faec06c6dc1b7236acc7e4a33e4b13cbea1d725faeb9eda41a0c12e65ec4c89d6624971429ca223638387c66f1d3e4dcd1407b" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.105"
+components = [
+  { name = "dotnet-sdk", version = "8.0.105" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.105", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.105/dotnet-sdk-8.0.105-osx-arm64.tar.gz", digest = "sha512:f910adb274065fef581728e7d043bc3f0c105a939f659865753c11a0dd0b550bdc4c0bc01e2ce6f710efcdebb3966ef138986113f595af4d6a9be8b15008abc6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.105", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.105/dotnet-sdk-8.0.105-linux-x64.tar.gz", digest = "sha512:60ff271ee7851ff9ab851f9dc3e3d0abc87ac9b982959abfc8f0a3b58301fb6a0ff7b9f07f8df18668e1e8182c688d0d661bb9cb1771a2d40a0015d02009fce8" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.104"
+components = [
+  { name = "dotnet-sdk", version = "8.0.104" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.104", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.104/dotnet-sdk-8.0.104-osx-arm64.tar.gz", digest = "sha512:376fda994997e3ebbf15cafbc910ff25a71debd2d31d088cf7947f813ff013568f3f47514ec53d2c02a3e3f8432a5ca9344dab3ee07cc0df650761a3dbc6be68" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.104", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.104/dotnet-sdk-8.0.104-linux-x64.tar.gz", digest = "sha512:cb7b5e509c16a7e27ccfc03b3a217460b9eac151ca973f262f82d4b4a494f7bdff3229e9aee91df1c110582ee8dd3d310dad39528c3bd292c5d9b7746ba3b6fd" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.103"
+components = [
+  { name = "dotnet-sdk", version = "8.0.103" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.103", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.103/dotnet-sdk-8.0.103-osx-arm64.tar.gz", digest = "sha512:cdfe17109e0b55777e2ed95e9a538bed67ca532edb0e56eb1c52cbb53eec73959141a9f744c1c1a6c5f9e2863d2f845296b65afa94c726c1a7b3274bda869a65" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.103", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.103/dotnet-sdk-8.0.103-linux-x64.tar.gz", digest = "sha512:5894942d53ff9acaacde589e6a761bd170f06b696cac465b2dc62b741bf9d9a635721ef4e7fe9477c52ff22feabc928bd8cbcd167a9ea92a6bf6a362c8b63daf" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.102"
+components = [
+  { name = "dotnet-sdk", version = "8.0.102" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.102", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.102/dotnet-sdk-8.0.102-osx-arm64.tar.gz", digest = "sha512:69d702b561ae7ddf4c47fe228c16472fd8d7065de1a4a206fc07c6906db49e7da25b21c06f0ef080f41658aeddc0f3c0a23ce1de7e65b830c308bfe13cf95fe8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.102", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.102/dotnet-sdk-8.0.102-linux-x64.tar.gz", digest = "sha512:f5928f5b947441065f2f34b25ae8de1fbf7dbae2c0ba918bfb4224d2d08849c79cbdc1825c0d42a5822f12757f78efa58e295a8ee0f0e6fce39cc7c6ed977b8f" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.101"
+components = [
+  { name = "dotnet-sdk", version = "8.0.101" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.101", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.101/dotnet-sdk-8.0.101-osx-arm64.tar.gz", digest = "sha512:a6048ca248aef3c430c8bdb65b534d5f58463a9d3c314fd70f5c7c4a9ac7eaabfba7786c40c76c73e5abc1a95ba957a682e73fb228e15bc9808adb47b4a1b291" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.101", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.101/dotnet-sdk-8.0.101-linux-x64.tar.gz", digest = "sha512:26df0151a3a59c4403b52ba0f0df61eaa904110d897be604f19dcaa27d50860c82296733329cb4a3cf20a2c2e518e8f5d5f36dfb7931bf714a45e46b11487c9a" },
+]
+
+[[release]]
+key = "dotnet-sdk-8.0.100"
+components = [
+  { name = "dotnet-sdk", version = "8.0.100" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.100", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.100/dotnet-sdk-8.0.100-osx-arm64.tar.gz", digest = "sha512:11a307ec17fa11fd8f133d697cd414c12b1d613ef9ec05db813630b10a00cb2ee0f703580688bc59b60c911e97a27eef8ae0d89fc2298c535e0bb15b5b997bc5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "dotnet-sdk", provider = "builds.dotnet.microsoft.com", build = "8.0.100", recipe = "dotnet-sdk/1", url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.100/dotnet-sdk-8.0.100-linux-x64.tar.gz", digest = "sha512:13905ea20191e70baeba50b0e9bbe5f752a7c34587878ee104744f9fb453bfe439994d38969722bdae7f60ee047d75dda8636f3ab62659450e9cd4024f38b2a5" },
+]

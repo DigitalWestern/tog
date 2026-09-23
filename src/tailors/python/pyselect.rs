@@ -6,11 +6,13 @@
 //! the host Python or a package index.
 
 use crate::kernel::platform::Platform;
-use crate::tailors::python::{canonical_release_len, PinnedPython, PYTHONS};
+use crate::kernel::provider::cpython::default_version;
+use crate::tailors::python::{canonical_release_len, pythons, PinnedPython};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
+#[cfg(test)]
 pub(crate) use crate::kernel::provider::cpython::DEFAULT_VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,7 +80,7 @@ pub struct PythonSelection {
 
 impl PythonSelection {
     pub fn is_default(&self) -> bool {
-        self.pin.version == DEFAULT_VERSION
+        default_version().is_ok_and(|default| self.pin.version == default)
     }
 
     /// Human-readable diagnostics are emitted by the caller so preflight and
@@ -248,7 +250,8 @@ pub fn select_python_with_inputs(
     platform: Platform,
     inputs: &PythonInputs,
 ) -> io::Result<PythonSelection> {
-    let pins: Vec<_> = PYTHONS
+    let default_version = default_version()?;
+    let pins: Vec<_> = pythons()?
         .iter()
         .filter(|pin| pin.platform == platform)
         .collect();
@@ -289,7 +292,7 @@ pub fn select_python_with_inputs(
     };
     let mut warnings = Vec::new();
     let (pin, explicit_request) = if let Some(explicit) = &inputs.explicit {
-        let matching = select_explicit_pin(&pins, &explicit.version);
+        let matching = select_explicit_pin(&pins, &explicit.version, default_version);
         let Some(pin) = matching else {
             if explicit.version.release_len() == 3 {
                 return Err(no_exact_satisfying_pin(platform, explicit, &pins));
@@ -335,7 +338,7 @@ pub fn select_python_with_inputs(
         let default = pins
             .iter()
             .copied()
-            .find(|pin| pin.version == DEFAULT_VERSION)
+            .find(|pin| pin.version == default_version)
             .ok_or_else(|| no_satisfying_pin(platform, "the default CPython", "pins", &pins))?;
         let pin = if parsed.is_empty() || satisfies(&&default) {
             default
@@ -379,11 +382,14 @@ pub fn select_python_with_inputs(
 
 /// Choose an explicit request from an already platform-filtered pin slice.
 /// Three-part requests match one pinned build; two-part requests choose the
-/// numerically newest patch for that minor. The caller validates the request's
-/// textual spelling before constructing its `Version`.
+/// shipped default when it is on that minor (as the catalog's selection
+/// does, so newer patches never move it) and the numerically newest patch
+/// otherwise. The caller validates the request's textual spelling before
+/// constructing its `Version`.
 fn select_explicit_pin<'a>(
     pins: &[&'a PinnedPython],
     requested: &crate::tailors::python::pep440::Version,
+    default_version: &str,
 ) -> Option<&'a PinnedPython> {
     match requested.release_len() {
         3 => pins.iter().copied().find(|pin| {
@@ -392,18 +398,27 @@ fn select_explicit_pin<'a>(
                 .cmp(requested)
                 .is_eq()
         }),
-        2 => pins
-            .iter()
-            .copied()
-            .filter(|pin| {
+        2 => {
+            let on_minor = |pin: &&&PinnedPython| {
                 let version = pinned_version(pin.version).expect("pinned CPython version");
                 version.major() == requested.major() && version.minor() == requested.minor()
-            })
-            .max_by(|left, right| {
-                pinned_version(left.version)
-                    .expect("pinned CPython version")
-                    .cmp(&pinned_version(right.version).expect("pinned CPython version"))
-            }),
+            };
+            if let Some(default) = pins
+                .iter()
+                .filter(on_minor)
+                .find(|pin| pin.version == default_version)
+            {
+                return Some(default);
+            }
+            pins.iter()
+                .copied()
+                .filter(|pin| on_minor(&pin))
+                .max_by(|left, right| {
+                    pinned_version(left.version)
+                        .expect("pinned CPython version")
+                        .cmp(&pinned_version(right.version).expect("pinned CPython version"))
+                })
+        }
         _ => None,
     }
 }
@@ -428,17 +443,43 @@ pub fn select_python_for_version(
     select_python_with_inputs(platform, &forced)
 }
 
+/// The pinned CPython builds, one entry per line, oldest first: `3.12.0 to
+/// 3.12.14` for a line with several patches. The catalog holds every
+/// verifiable patch of each maintained line, so the full list would bury
+/// the answer.
+fn pinned_lines(pins: &[&PinnedPython]) -> String {
+    let mut lines: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for pin in pins {
+        if let Some(version) = pinned_version(pin.version) {
+            lines
+                .entry((version.major(), version.minor()))
+                .or_default()
+                .push((version, pin.version));
+        }
+    }
+    lines
+        .into_values()
+        .map(|mut patches| {
+            patches.sort();
+            let first = patches.first().map(|(_, text)| *text).unwrap_or_default();
+            let last = patches.last().map(|(_, text)| *text).unwrap_or_default();
+            if first == last {
+                first.to_string()
+            } else {
+                format!("{first} to {last}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn no_satisfying_pin(
     platform: Platform,
     constraint: &str,
     source: &str,
     pins: &[&PinnedPython],
 ) -> io::Error {
-    let versions = pins
-        .iter()
-        .map(|pin| pin.version)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let versions = pinned_lines(pins);
     io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
@@ -453,20 +494,25 @@ fn no_exact_satisfying_pin(
     explicit: &ExplicitPython,
     pins: &[&PinnedPython],
 ) -> io::Error {
-    let versions = pins
-        .iter()
-        .map(|pin| pin.version)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let versions = pinned_lines(pins);
     let minor = format!("{}.{}", explicit.version.major(), explicit.version.minor());
-    let next_step = if pins.iter().any(|pin| {
-        pinned_version(pin.version).is_some_and(|pinned| {
+    let mut same_line: Vec<_> = pins
+        .iter()
+        .filter_map(|pin| pinned_version(pin.version).map(|pinned| (pinned, pin.version)))
+        .filter(|(pinned, _)| {
             pinned.major() == explicit.version.major() && pinned.minor() == explicit.version.minor()
         })
-    }) {
-        format!("pin {minor} to accept the pinned patch, or request one of: {versions}")
-    } else {
+        .collect();
+    same_line.sort();
+    let next_step = if same_line.is_empty() {
         format!("request one of: {versions}")
+    } else {
+        let patches = same_line
+            .iter()
+            .map(|(_, text)| *text)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("pin {minor} to accept the pinned patch, or request one of: {patches}")
     };
     io::Error::new(
         io::ErrorKind::Unsupported,
@@ -843,7 +889,7 @@ mod tests {
             ("==3.10.*", "3.10.21"),
             (">3.11", "3.12.14"),
             (">3.12", "3.12.14"),
-            ("==3.12", "error"),
+            ("==3.12", "3.12.0"),
             (">=3.8.0", "3.12.14"),
             ("~=3.10", "3.12.14"),
             ("~=3.10.2", "3.10.21"),
@@ -963,7 +1009,9 @@ mod tests {
 
     #[test]
     fn unpinned_patch_request_fails_closed() {
-        for request in ["3.11.4", "python3.11.4", "cpython@3.11.4"] {
+        // 3.11.2 is a real CPython release no python-build-standalone
+        // release publishes a verifiable build of.
+        for request in ["3.11.2", "python3.11.2", "cpython@3.11.2"] {
             let inputs = PythonInputs {
                 explicit: Some(parse_python_version_file(request, ".python-version").unwrap()),
                 constraints: Vec::new(),
@@ -1023,20 +1071,31 @@ mod tests {
         let minor = crate::tailors::python::pep440::Version::parse("3.11").unwrap();
         for pins in [[&older, &newer], [&newer, &older]] {
             assert_eq!(
-                select_explicit_pin(&pins, &minor).unwrap().version,
+                select_explicit_pin(&pins, &minor, "3.12.14")
+                    .unwrap()
+                    .version,
                 "3.11.16"
+            );
+            // The default wins its own minor over a newer patch.
+            assert_eq!(
+                select_explicit_pin(&pins, &minor, "3.11.9")
+                    .unwrap()
+                    .version,
+                "3.11.9"
             );
         }
 
         let pins = [&older, &newer];
         let exact = crate::tailors::python::pep440::Version::parse("3.11.9").unwrap();
         assert_eq!(
-            select_explicit_pin(&pins, &exact).unwrap().version,
+            select_explicit_pin(&pins, &exact, "3.11.16")
+                .unwrap()
+                .version,
             "3.11.9"
         );
 
         let unavailable = crate::tailors::python::pep440::Version::parse("3.11.4").unwrap();
-        assert!(select_explicit_pin(&pins, &unavailable).is_none());
+        assert!(select_explicit_pin(&pins, &unavailable, "3.11.16").is_none());
     }
 
     #[test]

@@ -288,8 +288,9 @@ checksum rule are `install.sh`'s, so the two read a release the same way. `TOG_R
 manifest URL (the tests use `file://`); nothing checks in the background.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
-mix. It re-reads the declarative toolchain sources, selects the newest
-compatible release for every ecosystem the project has — as discovery finds
+mix. It re-reads the declarative toolchain sources, selects the shipped
+default release when the sources admit it (else the newest compatible one)
+for every ecosystem the project has — as discovery finds
 them, which is how a newly added ecosystem gains its section — or only the
 named one (`python`, `node`, `rust` or `cargo`, `go`, `ruby`, `elixir`, `dotnet`),
 rewrites `tog-toolchain.toml` atomically, and then syncs. It takes no

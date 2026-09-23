@@ -217,8 +217,10 @@ impl fmt::Display for VersionRequest {
     }
 }
 
-/// A request over a bundle's primary components. An empty request is
-/// "newest"; BEAM requests may name `otp` and `elixir` separately.
+/// A request over a bundle's primary components. An empty request admits
+/// every release, so it selects the catalog's default (the newest release
+/// when the catalog names none); BEAM requests may name `otp` and `elixir`
+/// separately.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Request {
     pub components: Vec<(String, VersionRequest)>,
@@ -357,15 +359,16 @@ impl Catalog {
         Ok(self.ranked()?.into_iter().map(|r| r.bundle).collect())
     }
 
-    /// The first complete release, in selection order, that satisfies
-    /// `request`. Selection never consults the host platform.
+    /// The catalog's default when it satisfies `request`, otherwise the
+    /// first complete release, in selection order, that does. Preferring the
+    /// default keeps a range or a line prefix on it as newer rows are added;
+    /// only a request that excludes it reaches past it. Selection never
+    /// consults the host platform.
     pub fn select(&self, request: &Request) -> io::Result<&Bundle> {
         let ranked = self.ranked()?;
-        if let Some(preference) = self.preference() {
-            for candidate in &ranked {
-                if request.matches(candidate.bundle, &candidate.versions)?
-                    && preference.matches(candidate.bundle, &candidate.versions)?
-                {
+        if let Some(default) = self.default_release() {
+            if let Some(candidate) = ranked.iter().find(|c| c.bundle.release == default.release) {
+                if request.matches(candidate.bundle, &candidate.versions)? {
                     return Ok(candidate.bundle);
                 }
             }
@@ -661,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preference_wins_only_when_the_request_allows_it() {
+    fn the_default_wins_whenever_the_request_allows_it() {
         let catalog = Catalog::new(
             "python",
             vec![
@@ -671,15 +674,16 @@ mod tests {
             ],
         )
         .unwrap()
-        .with_preference(Request::exact("cpython", "3.12.14").unwrap());
-        // Empty and range requests take the preferred release, not the newest.
+        .with_default("py312")
+        .unwrap();
+        // Empty and range requests take the default, not the newest.
         assert_eq!(catalog.select(&Request::newest()).unwrap().release, "py312");
         let range = Request::newest().with(
             "cpython",
             VersionRequest::Specifiers(vec![Specifier::new(Op::Ge, v("3.11")).unwrap()]),
         );
         assert_eq!(catalog.select(&range).unwrap().release, "py312");
-        // A request the preference cannot satisfy falls back to the newest match.
+        // A request the default cannot satisfy falls back to the newest match.
         let newer = Request::newest().with(
             "cpython",
             VersionRequest::Specifiers(vec![Specifier::new(Op::Ge, v("3.13")).unwrap()]),
@@ -687,5 +691,36 @@ mod tests {
         assert_eq!(catalog.select(&newer).unwrap().release, "py314");
         let prefix = Request::newest().with("cpython", VersionRequest::Prefix(v("3.13")));
         assert_eq!(catalog.select(&prefix).unwrap().release, "py313");
+        // A line prefix the default belongs to keeps it, however many newer
+        // patches of that line the catalog grows.
+        let mut grown = catalog.bundles().to_vec();
+        grown.push(bundle("py312-new", "cpython", "3.12.15", Platform::ALL));
+        let grown = Catalog::new("python", grown)
+            .unwrap()
+            .with_default("py312")
+            .unwrap();
+        let line = Request::newest().with("cpython", VersionRequest::Prefix(v("3.12")));
+        assert_eq!(grown.select(&line).unwrap().release, "py312");
+        assert_eq!(grown.select(&Request::newest()).unwrap().release, "py312");
+        let exact = Request::exact("cpython", "3.12.15").unwrap();
+        assert_eq!(grown.select(&exact).unwrap().release, "py312-new");
+    }
+
+    #[test]
+    fn a_default_must_be_a_complete_release_of_the_catalog() {
+        let catalog = Catalog::new(
+            "python",
+            vec![
+                bundle("py312", "cpython", "3.12.14", Platform::ALL),
+                bundle("py313", "cpython", "3.13.15", &[DARWIN]),
+            ],
+        )
+        .unwrap();
+        let error = catalog.clone().with_default("py399").unwrap_err();
+        assert!(error.to_string().contains("not in the catalog"), "{error}");
+        let error = catalog.clone().with_default("py313").unwrap_err();
+        assert!(error.to_string().contains("not complete"), "{error}");
+        // With none named, the empty request is the newest complete release.
+        assert_eq!(catalog.select(&Request::newest()).unwrap().release, "py312");
     }
 }

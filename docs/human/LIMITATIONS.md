@@ -143,9 +143,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Python
 
-Selection covers the five pinned CPython builds per platform. A two-part `.python-version`
-  picks the newest pinned patch for the minor; a three-part request must match a pin
-  exactly.
+Selection covers every patch of each maintained CPython minor that python-build-standalone
+  published a checksummed build of for both platforms. A few patches never got one (3.10.0,
+  3.10.1, 3.10.10, 3.11.0, 3.11.2; `tools/catalog.py python` reports them) and are refused. A
+  two-part `.python-version` picks the default (3.12.14) on its minor, else the newest pinned
+  patch; a three-part request must match a pin exactly.
 - **RECORD files are left as shipped**: not verified on install; importlib listings can lie;
   project-local/editable and direct requirements are skipped (`requirement-skipped`). **Sdists
   with dynamic build requirements** (PEP 517 `get_requires_for_build_wheel`) are unsupported —
@@ -207,10 +209,11 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
 
 ## Go
 
-- **One exact Go pin is realizable per supported platform.** An unmatched `go.mod` selection
-  fails before store or network access. A non-default `toolchain` directive is a lower-bound
-  suggestion: the lowest satisfying pin wins, so a newer catalog row can replace an exact
-  upstream directive. **Fail-closed rows**: go.work workspaces (including ancestor detection);
+- **Only the Go lines go.dev lists as supported are realizable** (every release of each). An
+  unmatched `go.mod` selection fails before store or network access. A non-default
+  `toolchain` directive is exact; `go` alone is a minimum that takes the default (1.27.0) when
+  it satisfies, else the newest release, where go itself would take the lowest.
+  **Fail-closed rows**: go.work workspaces (including ancestor detection);
   local-path replace directives. Loud.
 - **Graph-only modules are excluded from the closure**, so modgraph introspection can hit
   GOPROXY=off errors. **Private modules are unsupported**: GOPROXY forced to proxy.golang.org,
@@ -232,8 +235,8 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   Rails-class app.
 - **System /etc/gemrc is still read** (GEMRC=/dev/null blocks only the user file).
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
-  contract, and its newest build (3.4.6) trails ruby-lang stable (3.4.10 security fixes in
-  bundled gems). **CHECKSUMS-section locks fail closed if bundler's checksum registry API
+  contract, and its builds trail ruby-lang: the newest 3.4 build (3.4.6, the default) lacks
+  the 3.4.10 security fixes in bundled gems, and Ruby 4.0 has no build at all. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
   drifts**; new bundler formats need code updates.
 
 ## Elixir
@@ -244,7 +247,9 @@ Selection covers the five pinned CPython builds per platform. A two-part `.pytho
   object was built on Fedora 44 (glibc 2.43 floor, OpenSSL 3.x); a store copied to an
   incompatible host fails only at execution time. Loud, but late.
 - **Fail-closed rows**: git deps; non-hexpm repos; legacy mix.lock entry shapes (3/6/7-field —
-  "refresh the lock"). **Umbrella projects are untested**. **No rebar3 build for OTP 29 exists
+  "refresh the lock"). **Umbrella projects are untested**. **Only OTP releases with a Linux build in
+  `tog-toolchains` are realizable** (OTP 29.0.5 today, with each Elixir 1.20 patch); erlef
+  publishes the Darwin builds for many more. **No rebar3 build for OTP 29 exists
   yet**: the pinned otp-28 escript runs on the 29 VM — a version-skew impurity until upstream
   ships otp-29 builds. **Mix's compilation lock is disabled in-sandbox**, so concurrent
   unsandboxed `mix compile` against one build root is unprotected; `tog build` runs

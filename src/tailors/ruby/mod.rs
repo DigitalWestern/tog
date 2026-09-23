@@ -15,10 +15,11 @@ pub mod tailor;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 use crate::kernel::fetch::{download_verified_held, hash_file, Digest};
-use crate::kernel::platform::{no_pin, Platform};
+use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::{force_env, BuildSpec};
 use crate::kernel::store::Store;
-use crate::kernel::toolchain::{ArtifactRow, Bundle, Catalog, Component, LegacyEvidence, Selected};
+use crate::kernel::toolchain::document::Shipped;
+use crate::kernel::toolchain::{ArtifactRow, Catalog, LegacyEvidence, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -29,10 +30,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RUBY_VERSION: &str = "3.4.6";
 // Homebrew portable-ruby: relocatable, bundler included; the ruby Homebrew
-// itself ships on. Newest PORTABLE artifact (ruby-lang 3.4.x source may be
-// newer; documented gap until a newer portable build exists).
+// itself ships on. The catalog holds every portable build of the ruby-lang
+// lines still maintained (ruby-lang source may be newer; documented gap
+// until a newer portable build exists).
 //
 // Both 3.4.6 bottles were inspected: root `portable-ruby/3.4.6/`,
 // no symlinks, `#!/bin/sh` wrappers that `exec "$bindir/ruby"` relative to
@@ -44,57 +45,21 @@ const RUBY_VERSION: &str = "3.4.6";
 // rewritten: no staging repair, hence no relocation-recipe identity input.
 // RubyGems reports `Gem::Platform.local` = `x86_64-linux` for that bottle,
 // which is neither the bottle tag (`x86_64_linux`) nor the Rust triple; the
-// plan records whatever the pinned interpreter says.
-struct RubyPin {
-    platform: Platform,
-    url: &'static str,
-    sha256: &'static str,
+// plan records whatever the pinned interpreter says. The generator checks
+// every bottle it adds for the same layout (one `portable-ruby/<tag>/` root,
+// no link leaving it, the entries `validate_ruby_layout` requires).
+static CATALOG: Shipped = Shipped::new(include_str!("catalog.toml"));
+
+/// The default Ruby's bottle for a platform: what a project with no Ruby
+/// pin realizes there.
+fn ruby_pin(platform: Platform) -> io::Result<&'static ArtifactRow> {
+    CATALOG.default_row(platform, "ruby")
 }
 
-const RUBY_PINS: &[RubyPin] = &[RubyPin {
-    platform: Platform::Aarch64AppleDarwin,
-    url: "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.arm64_big_sur.bottle.tar.gz",
-    sha256: "62fe925f284cc38aac68b9a42b02cd90de753f8832e8866be3fd60558dd70f67",
-}, RubyPin {
-    platform: Platform::X86_64UnknownLinuxGnu,
-    url: "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.x86_64_linux.bottle.tar.gz",
-    sha256: "40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259",
-}];
-
-fn ruby_pin(platform: Platform) -> io::Result<&'static RubyPin> {
-    RUBY_PINS
-        .iter()
-        .find(|pin| pin.platform == platform)
-        .ok_or_else(|| no_pin("ruby", platform))
-}
-
-/// The shipped Ruby catalog: the one pinned portable-ruby bottle per
-/// platform as a single release bundle.
+/// The shipped Ruby catalog: one release bundle per portable-ruby build,
+/// generated and verified by `tools/catalog.py ruby`, and its default.
 pub fn toolchain_catalog() -> io::Result<Catalog> {
-    let artifacts = RUBY_PINS
-        .iter()
-        .map(|pin| {
-            Ok(ArtifactRow::new(
-                pin.platform,
-                "ruby",
-                "homebrew-portable-ruby",
-                RUBY_VERSION,
-                "ruby-toolchain/1",
-                pin.url,
-                Digest::sha256(pin.sha256)?,
-            ))
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    Catalog::new(
-        "ruby",
-        vec![Bundle {
-            release: format!("ruby-{RUBY_VERSION}"),
-            revision: None,
-            primary: vec!["ruby".into()],
-            components: vec![Component::new("ruby", RUBY_VERSION)],
-            artifacts,
-        }],
-    )
+    CATALOG.catalog()
 }
 
 /// A pre-lock Ruby closure records the interpreter under `plan.ruby_version`
@@ -1136,9 +1101,14 @@ fn pin_spec(platform: Platform) -> RubySpec {
         platform: pin.platform,
         version: RUBY_VERSION.to_string(),
         url: pin.url.to_string(),
-        sha256: pin.sha256.to_string(),
+        sha256: pin.digest.hex().to_string(),
     }
 }
+
+/// The shipped default Ruby, the object-id golden the identity tests hold:
+/// adding a newer portable build to the catalog must not move it.
+#[cfg(test)]
+const RUBY_VERSION: &str = "3.4.6";
 
 #[cfg(test)]
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
@@ -1231,14 +1201,37 @@ mod tests {
 
     #[test]
     fn ruby_pins_cover_supported_platforms() {
-        assert_eq!(RUBY_PINS.len(), Platform::ALL.len());
+        let catalog = toolchain_catalog().unwrap();
+        assert!(
+            catalog.bundles().len() > 1,
+            "the catalog holds more than the default"
+        );
+        for bundle in catalog.bundles() {
+            for platform in Platform::ALL {
+                let row = bundle.artifact(*platform, "ruby").unwrap();
+                assert!(
+                    row.url.starts_with(&format!(
+                        "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/{}/portable-ruby-{}.",
+                        row.build, row.build
+                    )),
+                    "{}",
+                    row.url
+                );
+            }
+        }
+        // The default is unchanged by the newer rows around it.
         for platform in Platform::ALL {
             assert_eq!(ruby_pin(*platform).unwrap().platform, *platform);
+            assert_eq!(ruby_pin(*platform).unwrap().build, RUBY_VERSION);
         }
+        assert_eq!(
+            shipped_selection().unwrap().version("ruby").unwrap(),
+            RUBY_VERSION
+        );
         let linux = ruby_pin(Platform::X86_64UnknownLinuxGnu).unwrap();
         assert_eq!(linux.url, "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.x86_64_linux.bottle.tar.gz");
         assert_eq!(
-            linux.sha256,
+            linux.digest.hex(),
             "40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259"
         );
     }

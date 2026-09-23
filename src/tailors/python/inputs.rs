@@ -600,7 +600,11 @@ mod tests {
         };
         crate::tailors::install_kinds();
         let host = Platform::host().unwrap();
-        let pin = python::UV.iter().find(|pin| pin.platform == host).unwrap();
+        let pin = python::uv_pins()
+            .unwrap()
+            .iter()
+            .find(|pin| pin.platform == host)
+            .unwrap();
         let staged = store.stage().unwrap();
         let uv = staged.join("uv");
         std::fs::write(

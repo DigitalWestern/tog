@@ -33,8 +33,8 @@ use std::path::PathBuf;
 #[cfg(test)]
 pub(crate) use crate::kernel::provider::cpython::uv_identity;
 pub use crate::kernel::provider::cpython::{
-    cpython_identity, cpython_identity_input, cpython_object_id, runtime_object_id, shipped_newest,
-    shipped_selection, toolchain_catalog, PinnedPython, PinnedUv, PYTHONS, UV,
+    cpython_identity, cpython_identity_input, cpython_object_id, pythons, runtime_object_id,
+    shipped_newest, shipped_selection, toolchain_catalog, uv_pins, PinnedPython, PinnedUv,
 };
 
 /// Realize the CPython this selection names (interpreter at
@@ -71,7 +71,7 @@ pub fn ensure_uv_for(
 }
 
 pub fn lookup(platform: Platform, version: &str) -> Option<&'static PinnedPython> {
-    lookup_in_pins(PYTHONS, platform, version)
+    lookup_in_pins(pythons().ok()?, platform, version)
 }
 
 /// Return the number of release components when `version` is written in the
@@ -148,7 +148,9 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let cpython = cpython_identity(cpython_pin);
     let selected = shipped_selection(cpython_pin.version).expect("shipped CPython release");
     let uv = uv_identity(
-        UV.iter()
+        uv_pins()
+            .unwrap()
+            .iter()
             .find(|pin| pin.platform == platform)
             .expect("pinned uv for test platform"),
     );
@@ -339,7 +341,6 @@ pub fn ensure_python_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::provider::cpython::UV_VERSION;
 
     /// Drift check: the legacy adapter must reconstruct exactly what this
     /// producer supplies at commit. If it does not, a migrated record stops
@@ -349,11 +350,19 @@ mod tests {
     #[test]
     fn legacy_adapters_recover_the_pinned_cpython_and_uv_artifacts() {
         for platform in Platform::ALL {
-            for pin in PYTHONS.iter().filter(|pin| pin.platform == *platform) {
+            for pin in pythons()
+                .unwrap()
+                .iter()
+                .filter(|pin| pin.platform == *platform)
+            {
                 let expected = vec![format!("sha256:{}", pin.sha256)];
                 assert_eq!(recovered_cache(cpython_identity(pin)), expected);
             }
-            for pin in UV.iter().filter(|pin| pin.platform == *platform) {
+            for pin in uv_pins()
+                .unwrap()
+                .iter()
+                .filter(|pin| pin.platform == *platform)
+            {
                 let expected = vec![format!("sha256:{}", pin.sha256)];
                 assert_eq!(recovered_cache(uv_identity(pin)), expected);
             }
@@ -377,15 +386,21 @@ mod tests {
     }
 
     #[test]
-    fn pin_tables_have_five_cpython_and_one_uv_row_per_platform() {
+    fn every_cpython_release_has_one_row_per_platform_and_the_default_uv() {
+        let catalog = toolchain_catalog().unwrap();
+        let uv_version = crate::kernel::provider::cpython::uv_version().unwrap();
         let mut python_keys = std::collections::HashSet::new();
-        let mut uv_keys = std::collections::HashSet::new();
         for &platform in Platform::ALL {
-            let python_rows: Vec<_> = PYTHONS
+            let python_rows: Vec<_> = pythons()
+                .unwrap()
                 .iter()
                 .filter(|pin| pin.platform == platform)
                 .collect();
-            assert_eq!(python_rows.len(), 5, "CPython rows for {platform:?}");
+            assert_eq!(
+                python_rows.len(),
+                catalog.bundles().len(),
+                "CPython rows for {platform:?}"
+            );
             for pin in python_rows {
                 assert!(
                     python_keys.insert((pin.platform, pin.version)),
@@ -393,38 +408,51 @@ mod tests {
                     pin.version
                 );
             }
-
-            let uv_rows: Vec<_> = UV.iter().filter(|pin| pin.platform == platform).collect();
+            let uv_rows: Vec<_> = uv_pins()
+                .unwrap()
+                .iter()
+                .filter(|pin| pin.platform == platform)
+                .collect();
             assert_eq!(uv_rows.len(), 1, "uv rows for {platform:?}");
-            for pin in uv_rows {
-                assert!(
-                    uv_keys.insert((pin.platform, UV_VERSION)),
-                    "duplicate uv pin for {platform:?}"
-                );
-            }
         }
+        // Every release carries the one pinned uv.
+        for bundle in catalog.bundles() {
+            assert_eq!(bundle.component("uv").unwrap().version, uv_version);
+        }
+        assert_eq!(uv_version, "0.12.7");
     }
 
     #[test]
     fn darwin_identity_unchanged() {
-        let darwin_pins: Vec<_> = PYTHONS
-            .iter()
-            .filter(|pin| pin.platform == Platform::Aarch64AppleDarwin)
-            .collect();
-        assert_eq!(darwin_pins.len(), 5);
-        for pin in darwin_pins {
-            let identity = cpython_identity(pin);
-            let expected = match pin.version {
-                "3.12.14" => "a1a7472f00bcc8e7432dcaf8e088192eab9ddb63-cpython-3.12.14",
-                "3.13.15" => "3d4cd599c6aa947638318fba6a27cdf922d71e91-cpython-3.13.15",
-                "3.10.21" => "2d325d7de98a5ef468887be7a900ba353393e6d4-cpython-3.10.21",
-                "3.11.16" => "4f5f15e85142c23c54ceb171e28eed8e37868d58-cpython-3.11.16",
-                "3.14.7" => "a08604ddc4f60d6a41bfde528123267824647022-cpython-3.14.7",
-                other => panic!("unexpected Darwin CPython pin {other}"),
-            };
-            assert_eq!(identity.object_id(), expected);
+        // The goldens minted before the catalog grew: every one is still
+        // shipped with the same bytes, among the newer patches around it.
+        for (version, expected) in [
+            (
+                "3.12.14",
+                "a1a7472f00bcc8e7432dcaf8e088192eab9ddb63-cpython-3.12.14",
+            ),
+            (
+                "3.13.15",
+                "3d4cd599c6aa947638318fba6a27cdf922d71e91-cpython-3.13.15",
+            ),
+            (
+                "3.10.21",
+                "2d325d7de98a5ef468887be7a900ba353393e6d4-cpython-3.10.21",
+            ),
+            (
+                "3.11.16",
+                "4f5f15e85142c23c54ceb171e28eed8e37868d58-cpython-3.11.16",
+            ),
+            (
+                "3.14.7",
+                "a08604ddc4f60d6a41bfde528123267824647022-cpython-3.14.7",
+            ),
+        ] {
+            let pin = lookup(Platform::Aarch64AppleDarwin, version).unwrap();
+            assert_eq!(cpython_identity(pin).object_id(), expected);
         }
-        let uv = UV
+        let uv = uv_pins()
+            .unwrap()
             .iter()
             .find(|pin| pin.platform == Platform::Aarch64AppleDarwin)
             .expect("Darwin uv pin");
@@ -446,7 +474,7 @@ mod tests {
             for invalid in [
                 "03.12",
                 "3.12.014",
-                "3.12.0",
+                "3.9.25",
                 "3.12.14.0",
                 "v3.12",
                 "3.12.14 ",
@@ -568,7 +596,11 @@ mod toolchain_tests {
     #[test]
     fn an_identity_from_a_selected_row_equals_the_identity_from_the_pin() {
         for platform in Platform::ALL {
-            for pin in PYTHONS.iter().filter(|pin| pin.platform == *platform) {
+            for pin in pythons()
+                .unwrap()
+                .iter()
+                .filter(|pin| pin.platform == *platform)
+            {
                 let selected = shipped_selection(pin.version).unwrap();
                 let spec = row(&selected, *platform, "cpython", CPYTHON_RECIPE).unwrap();
                 assert_eq!(
@@ -587,7 +619,11 @@ mod toolchain_tests {
                     format!("{}:{}", pin.version, pin.sha256)
                 );
             }
-            for pin in UV.iter().filter(|pin| pin.platform == *platform) {
+            for pin in uv_pins()
+                .unwrap()
+                .iter()
+                .filter(|pin| pin.platform == *platform)
+            {
                 let selected = shipped_newest().unwrap();
                 let spec = row(&selected, *platform, "uv", UV_RECIPE).unwrap();
                 assert_eq!(

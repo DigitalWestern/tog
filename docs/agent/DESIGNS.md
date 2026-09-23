@@ -483,8 +483,9 @@ sync refuses and names `tog update --toolchain`, which adds the section.
 present as source discovery finds it, not as the lock's existing sections list
 it, which is how a newly added ecosystem gains one — or only the named one; it
 is separate from dependency update and cannot take package names. It
-re-reads sources, chooses the globally selected newest compatible stable/LTS
-release described below, verifies every platform row, writes one lock
+re-reads sources, chooses the release selection describes below (the
+catalog's default when the sources admit it, else the newest compatible
+stable/LTS release), verifies every platform row, writes one lock
 atomically, then runs ordinary sync; it never updates a dependency lock.
 `--frozen` instead validates the committed lock with no catalog fallback and no
 resolver-generated dependency-lock write, exiting before realization on a
@@ -517,15 +518,16 @@ toolchains would need per-subproject sections and are not in this design.
 | Python | cwd | parents through the uv project/workspace root; [uv documents this walk](https://docs.astral.sh/uv/reference/cli/) | `.python-version`, then a `requires-python` declared in `pyproject.toml`, including Poetry's `tool.poetry.dependencies.python`; `setup.py`-computed metadata is deliberately not a source, because reading it means running a build hook | use the supported request grammar below; intersect with metadata; current code parses at `src/pyselect.rs:309-362` but reads one supplied directory at `src/pyselect.rs:368-404` |
 | Node | cwd | nearest package/workspace root | exact `.node-version`, then `engines.node` | intersect exact/range; empty intersection or conflicting same-level declarations is a hard error; current code only has platform rows (`src/npm.rs:114-146`) |
 | Cargo | cwd | Cargo workspace root | nearest `rust-toolchain`, then `rust-toolchain.toml`, then shipped default | channel, targets, and supported components must intersect the catalog; an unsupported or conflicting request is a hard error; current nearest-file walk is `src/cargo.rs:246-264` |
-| Go | module/project root | no workspace expansion; an ancestor `go.work` is refused | `go` is the minimum; non-`default` `toolchain goX.Y.Z` is exact; absent or `toolchain default` means newest compatible once | exact toolchain must be a catalog release and satisfy the minimum; otherwise fail closed; platform filtering is `go_pins` (`src/golang.rs:72-83`) and directive parsing is `src/golang.rs:243-269` |
+| Go | module/project root | no workspace expansion; an ancestor `go.work` is refused | `go` is the minimum; non-`default` `toolchain goX.Y.Z` is exact; absent or `toolchain default` means the default when compatible, else newest compatible, once | exact toolchain must be a catalog release and satisfy the minimum; otherwise fail closed; platform filtering is `go_pins` (`src/golang.rs:72-83`) and directive parsing is `src/golang.rs:243-269` |
 | Ruby | cwd | parents through the project root | exact `.ruby-version`, then a Ruby entry in `.tool-versions`; the Gemfile's `ruby` directive is deliberately not a source, because reading it means evaluating a Ruby program | intersect exact declarations; disagreement is a hard error; current code has only platform rows (`src/ruby.rs:47-67`) |
 | Elixir | cwd | parents through the Mix workspace root | exact `.tool-versions` OTP/Elixir; `mix.exs` compatibility is deliberately not a source, because reading it means evaluating an Elixir program | intersect OTP/Elixir requirements and OTP-qualified Hex/rebar rows; empty intersection is a hard error; current plan checks `mix.exs`/`mix.lock` at `src/elixir.rs:1075-1110` and pins OTP at `src/elixir.rs:26-31` |
 | .NET | project directory | inspect ancestors only to reject inherited SDK inputs | exact project `global.json` with `rollForward = "disable"` | no roll-forward or second source; a mismatch is a hard error; current ancestor rejection and exact gate are `src/dotnet.rs:542-593` |
 
 Python requests use a supported subset of uv's grammar: exact `X.Y.Z`, minor
-`X.Y` (newest compatible catalog release once, then locked), or a PEP 440-style
-specifier set restricted to `>=`, `<`, `==`, `~=`, and `!=`, comma-joined
-(newest satisfying release once, then locked). An explicit CPython prefix is a
+`X.Y` (the default if it is on that minor, else the newest compatible catalog
+release, once, then locked), or a PEP 440-style specifier set restricted to
+`>=`, `<`, `==`, `~=`, and `!=`, comma-joined (the default if it satisfies,
+else the newest satisfying release, once, then locked). An explicit CPython prefix is a
 supported spelling of the same request, not a second implementation:
 `python3.12`, `cpython-3.12`, `cpython@3.12` and their `Python`/`CPython`
 casings are stripped today (`src/pyselect.rs:334-341`), and the unit test
@@ -577,7 +579,12 @@ the same channel, so an LTS-before-stable tie-break could never fire. Channel
 is an admission property instead — only stable/LTS builds enter the catalog,
 and a range takes the newest admitted release.
 Exact requests filter by primary version and ranges take the first satisfying
-candidate, so recipe revisions of one upstream version coexist. The selector
+candidate, so recipe revisions of one upstream version coexist. One rule
+comes first: a catalog names its **default** release (what a project with no
+pin gets), and whenever the request admits the default, the default wins.
+Availability and default are separate facts (#187): a catalog can list every
+patch of every maintained line without moving any unpinned or range-pinned
+project, and the default moves only by an explicit, reviewed change. The selector
 never uses the host: an asymmetric catalog (Darwin-only A, Linux-only B,
 complete C) chooses C and produces byte-identical locks from both platform
 values, and tests compare those bytes, not only the selected version.
@@ -676,11 +683,25 @@ the lock itself is not a GC root.
 The lock needs provider build, component recipe, URL, and a verified,
 algorithm-qualified digest for both triples. Sync downloads only the current
 row and never rewrites the other.
-Until WP3, the compiled rows in the ecosystem modules are the shipped catalog
-(`src/python.rs:22-85`, `src/npm.rs:122-135`, `src/cargo.rs:25-68`,
-`src/golang.rs:32-45`); `src/platform.rs:83-86` is only the supported-platform
-enumeration, so locks are writable offline. WP3 must retain the rows existing
-locks need, and an unrelated refresh cannot alter an Identity or a lock.
+Until WP3, the shipped catalog is the generated documents embedded in the
+binary (`src/tailors/<eco>/catalog.toml`,
+`src/kernel/provider/cpython.catalog.toml`; Rust's rows are still the table
+in `src/kernel/provider/rust.rs`), so locks are writable offline.
+`src/kernel/platform.rs` is only the supported-platform enumeration. WP3 must
+retain the rows existing locks need, and an unrelated refresh cannot alter an
+Identity or a lock.
+
+The documents are WP3's starting point, not a stopgap. Their schema
+(`src/kernel/toolchain/document.rs`: release key, optional revision,
+components, one artifact row per platform, and a separate `default`) is the
+shape a refreshed snapshot takes, and the embedded documents are the
+"shipped catalog only" mode. `tools/catalog.py` holds, per ecosystem, the
+upstream reading WP3's providers need: which listing names the releases,
+which lines are maintained, which checksum is authoritative and which second
+source cross-checks it (Node's `SHASUMS256.txt` is also verified against
+Node's release keys). The generator's rules are the ones a refresh must keep:
+append-only, rows already shipped re-verified byte for byte, the default
+moved only explicitly, and every skipped release reported.
 
 ### Acceptance and ordered implementation
 
