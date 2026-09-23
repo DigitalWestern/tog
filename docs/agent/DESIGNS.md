@@ -1312,9 +1312,12 @@ depends on a wakeup, and the handlers never come off.
   next call installs the rest.
 - *SIGCHLD is always handled while tog supervises.* An inherited
   `SIG_IGN` (or `SA_NOCLDWAIT`) makes the kernel auto-reap children, so
-  `try_wait` gets `ECHILD` and the exit status is lost. That is a bug in
-  today's code, which keeps the ignore. The install therefore replaces an
-  ignored SIGCHLD too. The child still gets the inherited `SIG_IGN` back
+  `try_wait` gets `ECHILD` and the exit status is lost. The per-session
+  install already replaces an ignored SIGCHLD for the session's lifetime
+  (#178, with `inherited_sigchld_ignore_still_reports_the_exit_status` and
+  its `SA_NOCLDWAIT` twin in `tests/supervise_signals.rs`). The
+  install-once handler keeps doing so, and those two cases carry over
+  unchanged. The child still gets the inherited `SIG_IGN` back
   in `prepare_child`, so what the tool sees is unchanged. Tog's
   unsupervised `Command::status` sites benefit the same way.
 - *Global pipe.* One self-pipe, both ends nonblocking, created at the
