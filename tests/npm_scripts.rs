@@ -5,6 +5,9 @@
 //! runs it with a shared TOG_STORE:
 //!     cargo test --test npm_scripts -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use sha2::{Digest as Sha2Digest, Sha512};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

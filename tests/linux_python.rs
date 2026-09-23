@@ -1,6 +1,9 @@
 //! Linux Python round-trip test. Heavy: downloads CPython, uv, and the
 //! manylinux wheels into a throwaway store, so it is ignored.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tog::kernel::platform::Platform;

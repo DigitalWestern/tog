@@ -1,6 +1,9 @@
 //! Electron provisioning. Heavy: downloads the real release
 //! zip (~100 MB), so it is ignored by default.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;

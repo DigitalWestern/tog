@@ -5,6 +5,9 @@
 //! the register/forget preflight and the sweep refusals are covered together.
 //! No network, no toolchains: the store holds one hand-written object.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};

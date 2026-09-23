@@ -13,6 +13,8 @@
 //! `term_across_the_spawn_boundary_is_never_lost`, where a varying delay is
 //! the stimulus being swept rather than a wait.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use std::ffi::CString;

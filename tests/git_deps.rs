@@ -4,6 +4,9 @@
 //! The fixture repository is local and served over `file://`, so this needs no
 //! network beyond the pinned Node toolchain.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};

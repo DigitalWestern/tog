@@ -724,6 +724,8 @@ pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_jso
 /// takes no lease, so it is only for trees outside any store (the `None`
 /// arm of a caller's `Option<&StoreActivity>`); a clone that reads a store
 /// object or writes a managed projection uses `clone_tree_with_activity`.
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io::Result<()> {
     use std::process::Command;
     let clone = if platform.is_macos() {

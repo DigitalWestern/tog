@@ -4,6 +4,9 @@
 //! tests/acceptance.sh runs it with a shared TOG_STORE:
 //!     cargo test --test sandbox_deny -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tog::kernel::platform::Platform;

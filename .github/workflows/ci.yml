@@ -21,6 +21,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo build --locked
+      # Store protection (clippy.toml): raw children and lease acquisition
+      # only at the reviewed, `#[allow]`ed sites. Only this lint is denied.
+      - name: Store children borrow the caller's lease
+        run: |
+          rustup component add clippy
+          cargo clippy --locked --all-targets -- -D clippy::disallowed_methods
       - run: cargo test --locked
       # The offline suite skips sandbox checks bwrap cannot run; here a
       # skip is a failure, so CI proves the Linux sandbox works.

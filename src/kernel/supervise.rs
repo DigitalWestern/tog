@@ -603,6 +603,8 @@ fn reap_after_error(child: &mut Child) {
 /// Spawn a command with inherited stdio and reap its direct child before
 /// returning. The activity argument is borrowed for the whole interval so
 /// the caller cannot accidentally end store protection before reaping.
+// Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
+#[allow(clippy::disallowed_methods)]
 pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<ExitStatus> {
     let _ = activity.mode();
     let session = Session::new()?;
@@ -642,6 +644,8 @@ pub fn status(command: &mut Command, activity: &StoreActivity) -> io::Result<Exi
 /// without putting a large build log behind a pipe that the child could fill.
 /// The returned stderr is bounded to the same prefix used by the sandbox
 /// classifier; all bytes are also relayed to the caller's stderr.
+// Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
+#[allow(clippy::disallowed_methods)]
 pub fn status_with_stderr(
     command: &mut Command,
     activity: &StoreActivity,
@@ -761,6 +765,8 @@ fn drain<R: Read>(reader: &mut Option<R>, destination: &mut Vec<u8>) -> io::Resu
 
 /// Spawn a command, drain captured stdout/stderr without waiting on a full
 /// pipe, and reap its direct child before returning.
+// Reviewed site (tests/architecture.rs): the supervisor itself: spawns under the caller's lease.
+#[allow(clippy::disallowed_methods)]
 pub fn output(command: &mut Command, activity: &StoreActivity) -> io::Result<Output> {
     let _ = activity.mode();
     let session = Session::new()?;

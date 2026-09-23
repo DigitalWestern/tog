@@ -1,6 +1,9 @@
 //! Networked manifest coverage.  Kept ignored because the fixtures exercise
 //! real PyPI resolution and the Linux path requires bubblewrap.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

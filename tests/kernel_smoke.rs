@@ -3,6 +3,9 @@
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
 #[cfg(debug_assertions)]

@@ -143,6 +143,8 @@ fn list_inner(
 
 /// The archive listed by the platform tar without `-v`: one stored name per
 /// line, no columns.
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 fn list_names(
     archive: &Path,
     compression: Compression,
@@ -890,6 +892,8 @@ fn extract_validated_inner(
     Ok(())
 }
 
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 fn status_for(
     command: &mut Command,
     activity: Option<&StoreActivity>,

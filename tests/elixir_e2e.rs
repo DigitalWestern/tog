@@ -8,6 +8,9 @@
 //! `tog build`, a `mix run --no-compile` application probe, a rebuild
 //! after deleting the qualified build output, and object immutability.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

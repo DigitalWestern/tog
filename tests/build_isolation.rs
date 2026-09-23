@@ -4,6 +4,9 @@
 //! TOG_STORE=$HOME/scratch/tmp/nx11-store TMPDIR=$HOME/scratch/tmp
 //! TOG_SANDBOX_TESTS=required cargo test --test build_isolation -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::process::Command;
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;

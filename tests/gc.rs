@@ -4,6 +4,9 @@
 //! TOG_STORE=$HOME/scratch/tmp/nxgc-store TMPDIR=$HOME/scratch/tmp \
 //! cargo test --test gc -- --ignored --nocapture
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};

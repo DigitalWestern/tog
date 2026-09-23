@@ -108,6 +108,8 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
     }
 }
 
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 fn status_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Result<ExitStatus> {
     match activity {
         Some(activity) => crate::kernel::supervise::status(command, activity),
@@ -115,6 +117,8 @@ fn status_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Re
     }
 }
 
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 fn output_for(command: &mut Command, activity: Option<&StoreActivity>) -> io::Result<Output> {
     match activity {
         Some(activity) => crate::kernel::supervise::output(command, activity),

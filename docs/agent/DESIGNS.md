@@ -1194,9 +1194,18 @@ takes activity first, then x-root). The `Store::has`, `stage`,
 `commit_with_deps` and `policy::check_cached` wrappers that minted their own
 lease are test-only now.
 
-`tests/architecture.rs::store_children_borrow_the_callers_lease` pins this.
-It tokenizes production code (comments, strings and `#[cfg(test)]` items
-removed, so a line break or `/* */` inside a call does not hide it) and
+Two checks pin this. The primary one is the compiler's: `clippy.toml`
+disallows `std::process::Command::{spawn,status,output}`, `Store::activity`,
+`Store::try_activity_exclusive` and `StoreActivity::{acquire,try_exclusive}`,
+and CI runs `cargo clippy --locked --all-targets -- -D
+clippy::disallowed_methods`. Clippy resolves the call, so aliases, path
+calls and raw identifiers cannot hide one. Each reviewed site carries
+`#[allow(clippy::disallowed_methods)]` with its reason; test code allows
+the lint wholesale. The second check,
+`tests/architecture.rs::store_children_borrow_the_callers_lease`, runs in
+plain `cargo test`. It tokenizes production code (comments, strings and
+`#[cfg(test)]` items removed, `r#` identifiers normalized, `use … as`
+aliases followed, path calls counted, with adversarial fixtures for each) and
 checks two per-function inventories with exact counts. `LEASE_BOUNDARIES`
 lists every function allowed to take a lease: the store primitives, the
 command entry points (`Context`, `doctor`, `ls`, `gc`, `x clean`),

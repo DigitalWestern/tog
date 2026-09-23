@@ -169,6 +169,8 @@ pub(crate) fn live_identity_for_test() -> Identity {
 /// one production caller is `resolve_ref`'s `ls-remote`: a network query
 /// with no working directory. Every run against a staged or published tree
 /// goes through `run_git_with_activity`.
+// Reviewed site (tests/architecture.rs): `git ls-remote`, a network query with no store path.
+#[allow(clippy::disallowed_methods)]
 fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);

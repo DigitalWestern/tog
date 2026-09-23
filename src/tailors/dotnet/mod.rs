@@ -1326,6 +1326,8 @@ fn dotnet_tmp_path(platform: Platform) -> PathBuf {
     }
 }
 
+// Reviewed site (tests/architecture.rs): host probe (`id -u`); no store.
+#[allow(clippy::disallowed_methods)]
 fn invoking_uid() -> io::Result<u32> {
     let uid = Command::new("/usr/bin/id").arg("-u").output()?.stdout;
     String::from_utf8(uid)

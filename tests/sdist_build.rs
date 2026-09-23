@@ -2,6 +2,9 @@
 //! sdist-only on PyPI) must build into a wheel inside the network-denied
 //! sandbox. Heavy; run: cargo test --test sdist_build -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use tog::kernel::platform::Platform;
 use tog::kernel::store::Store;
 use tog::kernel::types::*;

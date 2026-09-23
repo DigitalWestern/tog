@@ -7,6 +7,8 @@ use crate::kernel::store;
 use std::io;
 use std::io::Write;
 
+// Reviewed site (tests/architecture.rs): operation boundary: command entry point.
+#[allow(clippy::disallowed_methods)]
 pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     let options = gc::Options {
         dry_run: args.dry_run,

@@ -43,6 +43,8 @@ fn parse_glibc_version(text: &str) -> Option<Glibc> {
     Some(Glibc(major, minor))
 }
 
+// Reviewed site (tests/architecture.rs): host probe (`getconf`); no store.
+#[allow(clippy::disallowed_methods)]
 fn detect_host_glibc() -> Result<Glibc, String> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {

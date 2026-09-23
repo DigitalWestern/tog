@@ -1,6 +1,9 @@
 //! End-to-end .NET tailor test. Heavy: downloads the pinned SDK (~230MB)
 //! and the NuGet closure.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

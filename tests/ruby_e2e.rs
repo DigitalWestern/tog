@@ -7,6 +7,9 @@
 //! for the realized Ruby object and proves nothing at runtime depends on a
 //! staging directory, a Homebrew prefix, or a host Ruby.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

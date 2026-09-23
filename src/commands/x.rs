@@ -1654,6 +1654,8 @@ fn registration_for(root: &Path) -> io::Result<Registration> {
 
 /// Remove cached x projections. The store objects remain available for the
 /// ordinary GC pass; deleting a projection is deliberately not object GC.
+// Reviewed site (tests/architecture.rs): operation boundary: command entry point.
+#[allow(clippy::disallowed_methods)]
 pub fn clean(request: CleanRequest) -> io::Result<()> {
     let filter = clean_filter(request)?;
     let x_dir = home()?.join(".tog/x");

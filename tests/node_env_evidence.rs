@@ -13,6 +13,9 @@
 //! selection row that names it, node-gyp's CPython is a stub published under
 //! its real id, and every artifact is seeded into the verified cache.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
 use std::path::{Path, PathBuf};
 use std::process::Command;

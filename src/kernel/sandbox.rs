@@ -310,6 +310,8 @@ impl Sandbox<'_> {
         }
     }
 
+    // Reviewed site (tests/architecture.rs): unmanaged sandbox entry for callers that consume no store.
+    #[allow(clippy::disallowed_methods)]
     fn run_seatbelt_status(
         &self,
         cmd: &[&str],
@@ -468,6 +470,8 @@ impl Sandbox<'_> {
         Ok(output.status)
     }
 
+    // Reviewed site (tests/architecture.rs): unmanaged sandbox entry for callers that consume no store.
+    #[allow(clippy::disallowed_methods)]
     fn run_bwrap_with_stdout(
         &self,
         cmd: &[&str],
@@ -950,6 +954,8 @@ fn bwrap_preflight() -> io::Result<&'static Path> {
     bwrap_preflight_with_activity(None)
 }
 
+// Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
+#[allow(clippy::disallowed_methods)]
 fn bwrap_preflight_with_activity(activity: Option<&StoreActivity>) -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     match PREFLIGHT.get_or_init(|| {

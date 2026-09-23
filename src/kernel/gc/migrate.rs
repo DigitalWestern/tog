@@ -43,6 +43,8 @@ pub fn migrate_metadata<W: Write>(
 /// If another job owns the store the transition is announced as deferred and
 /// the caller proceeds with ordinary non-destructive work; it never weakens
 /// the sweep, which refuses on unresolved evidence regardless.
+// Reviewed site (tests/architecture.rs): operation boundary: exclusive maintenance before any shared lease.
+#[allow(clippy::disallowed_methods)]
 pub fn automatic_maintenance<W: Write>(store: &Store, out: &mut W) -> io::Result<MigrationReport> {
     let Some(activity) = store.try_activity_exclusive()? else {
         out.write_all(

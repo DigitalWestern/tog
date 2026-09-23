@@ -1,6 +1,9 @@
 //! End-to-end package.json script runner test. Heavy: realizes the pinned
 //! Node toolchain, so it is ignored and uses a throwaway store.
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

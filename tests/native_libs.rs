@@ -2,6 +2,9 @@
 //! `TOG_STORE=$HOME/scratch/tmp/nx12-store TMPDIR=$HOME/scratch/tmp
 //! TOG_SANDBOX_TESTS=required cargo test --test native_libs -- --ignored
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tog::kernel::platform::Platform;

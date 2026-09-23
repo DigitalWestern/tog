@@ -4,6 +4,9 @@
 //! TOG_STORE=<dir> TMPDIR=<disk-dir> TOG_SANDBOX_TESTS=required
 //! cargo test --target-dir target --test fmt_e2e -- --ignored --nocapture
 
+// Tests spawn fixtures and take leases freely (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
