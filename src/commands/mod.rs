@@ -191,10 +191,11 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
     if let Update {
         toolchain: Some(ref update),
         no_sync,
+        strict,
         ..
     } = command
     {
-        return toolchain::run(platform, update, no_sync).map(|_| 0);
+        return toolchain::run(platform, update, no_sync, strict).map(|_| 0);
     }
     let needs_maintenance = matches!(
         &command,
@@ -246,6 +247,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
             specs,
             dev,
             no_sync,
+            strict,
         } => deps::run(
             &ctx,
             deps::Request {
@@ -254,12 +256,14 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 dev,
             },
             no_sync,
+            strict,
         )
         .map(|_| 0),
         Remove {
             names,
             dev,
             no_sync,
+            strict,
         } => deps::run(
             &ctx,
             deps::Request {
@@ -268,12 +272,14 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 dev,
             },
             no_sync,
+            strict,
         )
         .map(|_| 0),
         Update {
             names,
             no_sync,
             toolchain: _,
+            strict,
         } => deps::run(
             &ctx,
             deps::Request {
@@ -282,6 +288,7 @@ pub fn dispatch(command: cli::Command) -> io::Result<i32> {
                 dev: false,
             },
             no_sync,
+            strict,
         )
         .map(|_| 0),
         X {

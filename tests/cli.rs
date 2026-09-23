@@ -288,6 +288,9 @@ fn usage_errors_exit_2_with_a_next_step() {
         (&["update", "--toolchain", "serde"], "update --toolchain takes an ecosystem name, not a package; 'serde' is not one of python, node, rust, go, ruby, elixir, dotnet", "tog help update"),
         (&["update", "--toolchain", "pyhton"], "update --toolchain takes an ecosystem name, not a package; 'pyhton' is not one of python, node, rust, go, ruby, elixir, dotnet; did you mean 'python'?", "tog help update"),
         (&["add", "--toolchain"], "add: unknown option '--toolchain'", "tog help add"),
+        (&["--frozen", "add", "x"], "--frozen checks the lock without writing it, and 'add' exists to write it; run 'tog add' without --frozen", "tog help add"),
+        (&["remove", "x", "--frozen"], "--frozen checks the lock without writing it, and 'remove' exists to write it; run 'tog remove' without --frozen", "tog help remove"),
+        (&["--frozen", "update"], "--frozen checks the lock without writing it, and 'update' exists to write it; run 'tog update' without --frozen", "tog help update"),
     ];
     for (args, message, hint) in cases {
         let out = tog(&home.0, &home.0, args);

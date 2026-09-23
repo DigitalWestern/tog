@@ -133,7 +133,9 @@ the program's status through. Which files tog reads per ecosystem:
   command's own option is never searched (`tog gc --register -v` registers
   a directory called `-v`; the command table says which options take a
   value). What reaches that slot is then the option's own business — see
-  the next rule.
+  the next rule. `add`, `remove` and `update` refuse `--frozen`, since
+  they exist to write the lock. Each command's help ends with a line saying
+  where its global options go.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged, and `--` forces
   pass-through (`tog build --release` works). What tog keeps for itself is
@@ -194,7 +196,9 @@ any global option is: `run`, `build` and a script name hand everything after
 them to the program, so there the flags go first (`tog --frozen dev`), and
 `fmt` and `x` take them only ahead of the tool's own arguments. They govern
 the implicit sync of `run`, `env`, `build`, `tog <script>` and a
-package.json `fmt` script. `tog help setup` is the
+package.json `fmt` script. `--strict` also governs the sync after `add`,
+`remove` and `update`; `--frozen` is refused there, because those verbs
+exist to write the lock. `tog help setup` is the
 bare form's screen and `tog help inputs` the files it reads per ecosystem.
 
 `run`, `env`, `build` and `tog <script>` sync on their own when the project
@@ -244,7 +248,11 @@ sync only where the policy chain declares a `[signing]` table.
 **add / remove / update** edit the manifest and lock with the ecosystem's own
 pinned tool (uv, npm, pnpm, cargo, go, bundler, mix), then sync. `--no-sync`
 stops after the edit so the diff can be reviewed; `--dev` (`-D`) selects
-development dependencies (`remove --dev` only for uv and Cargo). Refusals —
+development dependencies (`remove --dev` only for uv and Cargo). The global
+`--strict` governs the edit's policy checks and the sync after it (`tog
+--strict add requests`); `--frozen` is a usage error ahead of all three
+verbs, including `update --toolchain` and `update --self`, because they
+exist to write the lock `--frozen` only checks. Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
 print the exact line and file to run yourself, exit 1, no writes. Every
 dependency argument is validated before delegation, and a request that would

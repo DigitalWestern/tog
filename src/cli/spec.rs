@@ -776,19 +776,32 @@ fn option_line(flag: &str, width: usize, description: &str) -> String {
 
 /// Where a global option may appear for this command. `run` and `build`
 /// hand everything after the verb to the program; `fmt` and `x` own the
-/// options that precede the tool's own arguments.
+/// options that precede the tool's own arguments. On the bare form
+/// `--frozen` and `--strict` are the command's own flags rather than global
+/// ones, and `add`, `remove` and `update` refuse `--frozen` because they
+/// exist to write the lock.
 fn global_option_note(name: &str) -> &'static str {
     match name {
         "run" | "build" => {
-            "Global options (-C, -q, -v, --no-color) go before the command: every\n\
-             argument after it belongs to the program.\n"
+            "Global options (-C, -q, -v, --no-color, --frozen, --strict) go before the\n\
+             command: every argument after it belongs to the program.\n"
         }
-        "sync" => "Global options (-C, -q, -v, --no-color) go anywhere on the line.\n",
+        "sync" => {
+            "Global options (-C, -q, -v, --no-color) go anywhere on the line, and so\n\
+             do this command's own --frozen, --fresh and --strict.\n"
+        }
         "fmt" | "x" => {
-            "Global options (-C, -q, -v, --no-color) go before the command or\n\
-             ahead of the tool's own arguments.\n"
+            "Global options (-C, -q, -v, --no-color, --frozen, --strict) go before the\n\
+             command or ahead of the tool's own arguments.\n"
         }
-        _ => "Global options (-C, -q, -v, --no-color) work before or after the\ncommand.\n",
+        "add" | "remove" | "update" => {
+            "Global options (-C, -q, -v, --no-color, --strict) work before or after\n\
+             the command. --frozen is refused: this command writes the lock.\n"
+        }
+        _ => {
+            "Global options (-C, -q, -v, --no-color, --frozen, --strict) work before or\n\
+             after the command.\n"
+        }
     }
 }
 
