@@ -361,7 +361,23 @@ fn parse_sync(args: &[String]) -> Result<Option<Command>, UsageError> {
             other if !other.starts_with('-') => {
                 return Err(UsageError::new(sync_takes_no_package(other), Some("sync")))
             }
-            other => return Err(reject("sync", other)),
+            // The bare form's hidden names (`sync`, `install`, `i`) are not
+            // taught anymore, so an unknown option names no verb: `tog
+            // install --fersh` reads like `tog --fersh`. The hint still
+            // points at `tog help setup` via `Some("sync")`.
+            other => {
+                let spec = spec("sync").expect("the bare form's entry");
+                return Err(UsageError::new(
+                    with_suggestion(
+                        format!("unknown option '{other}'"),
+                        flag_name(other),
+                        spec.options
+                            .iter()
+                            .flat_map(|(flag, _)| option_spellings(flag)),
+                    ),
+                    Some("sync"),
+                ));
+            }
         }
     }
     Ok(Some(Command::Sync {
@@ -1515,11 +1531,11 @@ mod tests {
         }
         assert_eq!(
             message(&["sync", "--fersh"]),
-            "sync: unknown option '--fersh'; did you mean '--fresh'?"
+            "unknown option '--fersh'; did you mean '--fresh'?"
         );
         assert_eq!(
             message(&["i", "--strict=1"]),
-            "sync: unknown option '--strict=1'; did you mean '--strict'?"
+            "unknown option '--strict=1'; did you mean '--strict'?"
         );
         // A positional is almost always a package name: `tog install
         // requests` from a pip or npm habit. Name the verb that takes one.
@@ -2495,7 +2511,7 @@ mod tests {
         assert!(!run(&["fmt", "--", "-v"]).options.verbose);
         assert!(run(&["fmt", "-v", "--check"]).options.verbose);
         // An unknown option is still an unknown option.
-        assert_eq!(message(&["sync", "-j"]), "sync: unknown option '-j'");
+        assert_eq!(message(&["sync", "-j"]), "unknown option '-j'");
 
         // The value slot of the command's own option is not searched, so
         // `-v` reaches sbom's own grammar. There it is refused: a value
