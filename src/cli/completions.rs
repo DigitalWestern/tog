@@ -276,4 +276,32 @@ mod tests {
         assert_eq!(zsh_quote("a:b [c]"), "a\\:b \\[c\\]");
         assert_eq!(fish_quote("it's"), "it\\'s");
     }
+
+    /// `add`, `remove` and `update` refuse `--frozen` (they exist to write
+    /// the lock), so no shell offers it after them. Global options complete
+    /// only ahead of the verb, where the verb is not yet known; after it
+    /// each shell offers the command's own options alone.
+    #[test]
+    fn completions_never_offer_frozen_after_the_dependency_verbs() {
+        let bash = completions(Shell::Bash);
+        let zsh = completions(Shell::Zsh);
+        let fish = completions(Shell::Fish);
+        for verb in ["add", "remove", "update"] {
+            let case = format!("        {verb}) ");
+            let line = bash.lines().find(|line| line.starts_with(&case)).unwrap();
+            assert!(!line.contains("--frozen"), "bash {verb}: {line}");
+            let case = format!("                {verb})");
+            let mut lines = zsh.lines().skip_while(|line| *line != case);
+            let line = lines.nth(1).unwrap();
+            assert!(line.contains("_arguments"), "zsh {verb}: {line}");
+            assert!(!line.contains("--frozen"), "zsh {verb}: {line}");
+            let seen = format!("__fish_seen_subcommand_from {verb}'");
+            assert!(
+                !fish
+                    .lines()
+                    .any(|line| line.contains(&seen) && line.contains("-l frozen")),
+                "fish {verb} offers --frozen"
+            );
+        }
+    }
 }
