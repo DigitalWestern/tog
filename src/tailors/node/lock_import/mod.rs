@@ -16,7 +16,6 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 mod pnpm;
-mod semver_range;
 mod yaml;
 mod yarn1;
 

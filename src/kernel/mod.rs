@@ -17,6 +17,7 @@ pub mod platform;
 pub mod policy;
 pub mod provider;
 pub mod sandbox;
+pub mod semver;
 pub mod signing;
 pub mod store;
 pub mod supervise;
