@@ -47,10 +47,7 @@ pub(crate) fn projected_env(
 
 /// What toolchain resolution needs to know about each detected ecosystem:
 /// its shipped catalog, and what a closure written before the lock existed
-/// proves. A closure that already records a `toolchain` body key was
-/// written by a lock-aware sync and needs no seeding; one for a foreign
-/// platform still yields evidence, carrying its own platform, because the
-/// seed refuses on that platform rather than guessing from the host.
+/// proves (`comforter::toolchain::legacy_evidence`).
 pub(crate) fn ecosystem_inputs(
     dir: &Path,
     present: &[&dyn Tailor],
@@ -61,11 +58,7 @@ pub(crate) fn ecosystem_inputs(
         let legacy = closures
             .iter()
             .find(|closure| closure.ecosystem == tailor.id())
-            .filter(|closure| closure.body.get("toolchain").is_none())
-            .map(|closure| {
-                let platform = closure.platform.as_deref().and_then(Platform::from_triple);
-                tailor.legacy_toolchain_evidence(tailor.id(), platform, &closure.body)
-            });
+            .and_then(|closure| comforter::toolchain::legacy_evidence(*tailor, &closure.envelope));
         out.push(EcosystemInput {
             lock_ecosystem: tailor.lock_ecosystem().to_string(),
             catalog: tailor.toolchain_catalog()?,

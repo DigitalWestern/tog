@@ -428,19 +428,18 @@ fn run_go(
 
 /// The Go version this project uses, answered the way sync answers it:
 /// the `[toolchain.go]` section of `tog-toolchain.toml` when there is a
-/// lock, otherwise the newest complete catalog release satisfying go.mod's
-/// `go` and `toolchain` directives. It writes nothing, and a lock sync
-/// would refuse (no Go section, or stale against go.mod) is refused here
-/// in the same words.
+/// lock, otherwise the release a Go closure written before the lock existed
+/// proves (the seed the next sync would lock), otherwise the newest complete
+/// catalog release satisfying go.mod's `go` and `toolchain` directives. It
+/// writes nothing, and a lock sync would refuse (no Go section, or stale
+/// against go.mod) is refused here in the same words.
 ///
 /// `tog doctor` and the Go `tog status` row ask this. Sync, plan and build
 /// take the version from the [`Selected`] they are given, and `tog deps`
 /// from the same read-only resolution, so no command names a Go sync does
 /// not use. go's own rule (`go` as a minimum, the lowest toolchain that
 /// satisfies it) is deliberately not applied anywhere: with more than one
-/// pin it would answer with an older release than selection does. A
-/// closure written before the lock existed is not consulted either; status
-/// reports the missing lock on its own line.
+/// pin it would answer with an older release than selection does.
 pub fn project_go_version(platform: Platform, project_dir: &Path) -> io::Result<String> {
     project_go_version_from(toolchain_catalog()?, platform, project_dir)
 }
@@ -458,7 +457,7 @@ fn project_go_version_from(
         vec![EcosystemInput {
             lock_ecosystem: "go".into(),
             catalog,
-            legacy: None,
+            legacy: project_toolchain::legacy_evidence_in(project_dir, &tailor::Go)?,
         }],
         Mode::ReadOnly,
         false,
@@ -1865,6 +1864,32 @@ mod tests {
         assert!(
             !dir.join(crate::kernel::toolchain::lock::LOCK_PATH).exists(),
             "answering wrote a lock"
+        );
+    }
+
+    /// With no lock but a closure written before the lock existed, the
+    /// answer is the release that closure proves, because the next sync
+    /// seeds the lock from it rather than selecting the newest.
+    #[test]
+    fn a_pre_lock_closure_seeds_the_lockless_answer() {
+        let temp = TempDir::new();
+        let dir = gomod_project(&temp, "module m\n\ngo 1.26\n");
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::write(
+            dir.join(".tog/closures/go.json"),
+            serde_json::json!({
+                "schema": "closure/1",
+                "ecosystem": "go",
+                "platform": Platform::X86_64UnknownLinuxGnu.triple(),
+                "body": {"plan": {"go_version": "1.26.0", "modules": []}},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            project_go_version_from(two_pin_catalog(), Platform::X86_64UnknownLinuxGnu, &dir)
+                .unwrap(),
+            "1.26.0"
         );
     }
 

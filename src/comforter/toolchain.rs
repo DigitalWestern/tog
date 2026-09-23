@@ -18,6 +18,7 @@ use crate::kernel::toolchain::input::{self, InputRow};
 use crate::kernel::toolchain::lock::{self, ToolchainLock};
 use crate::kernel::toolchain::{seed, select_for, Catalog, LegacyEvidence, Selected, Source};
 use crate::kernel::ui;
+use crate::tailors::Tailor;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -121,6 +122,41 @@ fn from_section(
         lock_sha256,
         source,
     })
+}
+
+/// What one closure envelope proves about `tailor`'s toolchain, for
+/// `resolve` to seed a missing lock from. A closure that already records a
+/// `toolchain` body key was written by a lock-aware sync and needs no
+/// seeding; one for a foreign platform still yields evidence, carrying its
+/// own platform, because the seed refuses on that platform rather than
+/// guessing from the host.
+pub fn legacy_evidence(
+    tailor: &dyn Tailor,
+    envelope: &serde_json::Value,
+) -> Option<LegacyEvidence> {
+    let body = &envelope["body"];
+    if body.get("toolchain").is_some() {
+        return None;
+    }
+    let platform = envelope["platform"]
+        .as_str()
+        .and_then(Platform::from_triple);
+    Some(tailor.legacy_toolchain_evidence(tailor.id(), platform, body))
+}
+
+/// [`legacy_evidence`] for the closure `tailor` wrote under `dir`, if any:
+/// what a read-only answer (`tog doctor`, `tog status`) passes `resolve`
+/// so it seeds exactly as the next sync would.
+pub fn legacy_evidence_in(dir: &Path, tailor: &dyn Tailor) -> io::Result<Option<LegacyEvidence>> {
+    let path = dir.join(format!(".tog/closures/{}.json", tailor.id()));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| invalid(format!("{}: {error}; run 'tog'", path.display())))?;
+    Ok(legacy_evidence(tailor, &envelope))
 }
 
 /// Which toolchain this project uses, and where the answer came from.
