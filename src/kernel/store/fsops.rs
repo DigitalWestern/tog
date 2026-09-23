@@ -2,7 +2,9 @@
 //! renameat/unlinkat wrappers, same-inode checks, and tree removal that
 //! never follows a symlink. Shared by the registry, object commit, gc, and
 //! the project-write helper in `kernel::fsroot`, which is why the
-//! `pub(crate)` wrappers exist: every raw syscall wrapper lives here.
+//! `pub(crate)` wrappers exist: every raw syscall wrapper lives here. The
+//! store-supervised copy-on-write tree clone lives here too, so a kernel
+//! provider can copy out of a store object without naming the comforter.
 
 use super::*;
 
@@ -448,4 +450,57 @@ pub(super) fn unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Store-aware copy-on-write clone. The copy utility is a child that reads a
+/// store object and writes a managed projection, so its complete spawn/wait
+/// interval must remain under operation protection.
+pub fn clone_tree_for_store(
+    store: &Store,
+    src: &Path,
+    dest: &Path,
+    platform: crate::kernel::platform::Platform,
+) -> io::Result<()> {
+    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+    let clone = if platform.is_macos() {
+        let mut command = std::process::Command::new("/bin/cp");
+        command.args(["-Rc"]).arg(src).arg(dest);
+        crate::kernel::supervise::status(&mut command, &activity)?
+    } else {
+        let mut command = std::process::Command::new("/bin/cp");
+        command.args(["-a", "--reflink=auto"]).arg(src).arg(dest);
+        crate::kernel::supervise::status(&mut command, &activity)?
+    };
+    if !clone.success() {
+        if dest.exists() {
+            crate::kernel::store::remove_tree(dest)?;
+        }
+        let mut plain = std::process::Command::new("/bin/cp");
+        plain.arg("-R").arg(src).arg(dest);
+        let plain_status = crate::kernel::supervise::status(&mut plain, &activity)?;
+        if !plain_status.success() {
+            return Err(io::Error::other("cloning projected tree failed"));
+        }
+    }
+    restore_write_bits(dest)
+}
+
+/// Give the owner write permission back on every entry of a tree cloned
+/// out of the read-only store, without following symlinks.
+pub fn restore_write_bits(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let md = fs::symlink_metadata(path)?;
+    if md.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = md.permissions().mode();
+    if mode & 0o200 == 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    }
+    if md.is_dir() {
+        for entry in fs::read_dir(path)? {
+            restore_write_bits(&entry?.path())?;
+        }
+    }
+    Ok(())
 }

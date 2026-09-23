@@ -1,4 +1,5 @@
-//! Install-time artifact policy.
+//! Install-time artifact policy (kernel provider layer), for any tailor
+//! whose install scripts run with the network denied.
 //!
 //! Install scripts run with the network denied, so a package that downloads
 //! something at install time fails unless tog does one of three things:

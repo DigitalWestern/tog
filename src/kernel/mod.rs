@@ -15,6 +15,7 @@ pub mod gitsrc;
 pub mod objmeta;
 pub mod platform;
 pub mod policy;
+pub mod provider;
 pub mod sandbox;
 pub mod signing;
 pub mod store;

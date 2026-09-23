@@ -127,7 +127,7 @@ store-pinned uv (`uv pip compile --generate-hashes`); hash-pinned
 requirements and `pyproject.toml` dependencies are locked directly, choosing
 the best wheel per platform (native arm64 > abi3 > universal2 > pure >
 sdist). CPython comes from astral-sh/python-build-standalone with sha256s
-pinned in `python/mod.rs`; interpreter selection happens before locking
+pinned in `kernel/provider/cpython.rs`; interpreter selection happens before locking
 (`.python-version` wins, then `requires-python`). Wheels install into the
 env object; sdists build in a network-denied sandbox (legacy setuptools
 records keep `sdist-build/2`, PEP 517 uses `sdist-build/4` with an immutable
@@ -232,11 +232,30 @@ missing or stale lock, a missing section, and a closure built from another
 bundle as `changed` naming `tog-toolchain.toml`, and a verdict that sync
 would refuse is answered ahead of the tailor's own comparison. `tog audit`
 reuses the same combination (`inspect::locked_closure_state`), so each of
-those verdicts makes the record `stale` and fails the gate. Cached `tog x` environments
-key on `x/3`: store root, ecosystem, package request, platform, the primary
-runtime version, the selected `bundle_id` and the realized runtime object,
-so a changed bundle component gives a fresh environment and an `x/2`
-directory is never reused.
+those verdicts makes the record `stale` and fails the gate.
+
+A tailor whose builds run on another ecosystem's toolchain names it as a
+helper (`Tailor::helpers`): Node's node-gyp runs on `python`, Python's
+sdists compile with `rust`. `tailors::helper_selections` decides each one
+the same way for `sync`, `status` and `tog x`: the project's own selection
+when the project has that ecosystem, the tailor's `default_helper`
+otherwise (the shipped 3.12 for node-gyp; none for Rust, where each sdist's
+toolchain file picks). A closure records the decision as
+`toolchain.helpers.<ecosystem>`, the bundle id or `null`, and `status` holds
+a synced closure to it: re-locking the helper ecosystem, or removing its
+manifest so the default applies, is `changed` naming "the <helper>
+toolchain <ecosystem> builds with". A closure written before the record
+existed counts as `null`, which is what it was built on.
+
+Cached `tog x` environments key on `x/3`: store root, ecosystem, package
+request, platform, the primary runtime version, the selected `bundle_id`
+and the realized runtime object, so a changed bundle component gives a
+fresh environment and an `x/2` directory is never reused. A registry tool
+that builds with helpers (npm's node-gyp Python) keys on `x/4` instead: the
+`x/3` fields plus `<helper>=<object id>` for each, decided as above for the
+project `x` runs in and written to the request record's `helpers`. `py:`
+tools have none and keep their `x/3` names; every `npm:` cache from before
+is a miss.
 
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each tailor's `toolchain_catalog` turns its pin
@@ -330,8 +349,15 @@ leave with the dropped attribution frame and the error surfaces.
 
 npm lifecycle scripts (and npm's implicit `node-gyp rebuild`) run at realize
 time in a network-denied sandbox: writes confined to the package directory
-plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python the
-store CPython. This is a cooperative network-denial build sandbox, not
+plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python a
+store CPython: the one the project's `tog-toolchain.toml` names when the
+project also locks Python, the shipped 3.12 otherwise. Its object id is the
+`gyp_python` input of `node-env/5`, so a different interpreter is a different
+environment. Likewise a Python sdist with a Rust extension compiles with the
+project's locked Rust when the lock has a `rust` section, and with the shipped
+Rust its toolchain file resolves to otherwise; `sdist-build/4` already commits
+to that Rust object id through its `rust` input. Both helpers come from
+`kernel/provider/`. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
 get them via declared artifacts: the project pins `url` + `sha256`, tog
 prefetches through the verified cache and plants the file where the package's
@@ -438,6 +464,21 @@ input map would move the added input along with the drift and catch nothing.
 package, and the contract asks the producer's own provisioning decision
 whether that package must carry one.)
 
+`node-env/5` followed on its own. `node-env/4` named the Node object but not
+the CPython node-gyp ran on, which was the shipped pin: a pin change could
+rebuild a native addon under an unchanged id, and a project's locked Python
+was ignored. `/5` adds `gyp_python`, that interpreter's object id, written
+unconditionally (whether any package runs node-gyp is known only after
+extraction). It becomes a recorded dependency only when an install script
+ran with it: the interpreter is realized only then, and a script handed
+`$PYTHON` can leave a symlink or wrapper to it, so the environment it built
+must keep it alive. A pure-JavaScript environment does not retain a CPython.
+Every other `/4` input is
+unchanged, and the test goldens check that dropping `gyp_python` gives back the
+`/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the
+`rust` input was already the Rust object id, so honoring the project's
+selection changes the value and never the shape.
+
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes
 fresh, and the orphaned old-schema objects are swept as ordinary garbage
@@ -514,7 +555,8 @@ every tailor and the kernel):
     selfupdate.rs   tog update --self, and doctor's version row (release lookup)
     x.rs            tog x: run a registry tool without adding it to a project
 
-Kernel (`src/kernel/`, ecosystem-agnostic):
+Kernel (`src/kernel/`, names no tailor; `provider/` holds the pinned toolchains
+and build inputs tailors share, so no tailor reaches into another):
 
     types.rs        Identity, Plan, LockedPackage, GitSource
     digest.rs       validated content digests (sha1/sha256/sha512)
@@ -543,6 +585,13 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
                     select.rs version requests and the global order, source.rs
                     the typed endpoint policy, legacy.rs seeding from closures
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
+    provider/       shared toolchain providers, the pinned things more than one
+                    tailor realizes: cpython.rs (CPython + uv pins, catalog,
+                    realization; node-gyp's interpreter too), rust.rs (Rust
+                    pins, catalog, toolchain files), crates.rs (Cargo.lock
+                    vendoring; sdists with Rust extensions too),
+                    nativelibs.rs (the Linux native library set), artifacts.rs
+                    (install-time artifact policy)
     ui.rs           output conventions: quiet/verbose/color, error channel
 
 Comforter (`src/comforter/`): ecosystem-neutral closure records, projection
@@ -566,11 +615,11 @@ command-line word and message labels, the executable directory,
 resolve-realize-project for one package, the launch environment, whether a
 cached projection still points at its environment, and the packages a
 pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
-directory, the `x/3` key, the lifecycle lock, gc root registration, and the
+directory, the `x/3`/`x/4` key, the lifecycle lock, gc root registration, and the
 policy checks on a cached hit, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition.
 
-    python/mod.rs          pinned CPython provisioning
+    python/mod.rs          CPython pin lookup over kernel/provider/cpython.rs
     python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)
     python/pypi.rs         Python planner (adapter)
     python/wheel.rs        PEP 427 wheel installer
@@ -581,8 +630,6 @@ Corepack `pnpm` delegate path, which is Node by definition.
     python/env.rs          venv-shaped env object realization and projection
     python/build.rs        sandboxed sdist-to-wheel builds
     python/build_requires.rs  PEP 517 build requirements
-    python/nativelibs.rs   pinned, relocatable native libraries for Linux builds
-    python/artifacts.rs    install-time artifact policy
     python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
     node/mod.rs            pins, plan types, scripts, path helpers
     node/plan.rs           package-lock.json planning
@@ -591,7 +638,8 @@ Corepack `pnpm` delegate path, which is Node by definition.
     node/inputs.rs         missing-lock generation, lockfile importers
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
-    cargo/mod.rs           Cargo.lock importer + registry vendor realization
+    cargo/mod.rs           project Cargo env + sandboxed build over
+                           kernel/provider/{rust,crates}.rs
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
     cargo/rustfmt.rs       pinned formatter component for `tog fmt`
     go/mod.rs              module closure via the pinned Go toolchain

@@ -91,6 +91,7 @@ impl RegistryTool for PythonTool {
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
+        _helpers: &std::collections::BTreeMap<String, Selected>,
         attribution: &mut Attribution,
     ) -> io::Result<()> {
         fs::create_dir_all(root)?;

@@ -282,7 +282,60 @@ pub fn locked_closure_state(
         Some(LockVerdict { state: verdict, .. }) if state == State::Synced => state = verdict,
         _ => {}
     }
+    if state == State::Synced {
+        if let Some(verdict) = helper_state(dir, &closure.ecosystem, &closure.body)? {
+            state = verdict;
+        }
+    }
     Ok(state)
+}
+
+/// Whether the helper toolchains a closure recorded (`Tailor::helpers`,
+/// e.g. node-gyp's Python) are still the ones a sync would decide now.
+/// The decision is `tailors::helper_selections` over the project as it
+/// stands: a helper ecosystem the project has is its lock section, any
+/// other the tailor's default. Removing the Python manifest from a
+/// Python-and-Node project therefore moves Node's gyp Python from the
+/// locked one to the shipped default, and Node is out of step until it
+/// syncs.
+///
+/// A helper ecosystem the project has but the lock does not cover is
+/// skipped here: that ecosystem's own row already names the lock verb. A
+/// closure with no recorded decision predates this record and was built on
+/// the shipped helpers, which is what `null` means.
+fn helper_state(dir: &Path, ecosystem: &str, body: &Value) -> io::Result<Option<State>> {
+    let Some(tailor) = tailors::by_id(ecosystem) else {
+        return Ok(None);
+    };
+    if tailor.helpers().is_empty() {
+        return Ok(None);
+    }
+    let present = tailors::detected(dir)?;
+    let root = ProjectRoot::open(dir)?;
+    let lock = ToolchainLock::read_via(&root)?;
+    let mut changed = Vec::new();
+    for helper in tailor.helpers() {
+        let has_helper = present
+            .iter()
+            .any(|present| present.lock_ecosystem() == *helper);
+        let current = if has_helper {
+            match lock.as_ref().and_then(|lock| lock.ecosystem(helper)) {
+                Some(section) => Some(section.bundle_id().to_string()),
+                None => continue,
+            }
+        } else {
+            tailor
+                .default_helper(helper)?
+                .map(|selected| selected.bundle_id())
+        };
+        let recorded = body["toolchain"]["helpers"][*helper]
+            .as_str()
+            .map(str::to_string);
+        if recorded != current {
+            changed.push(format!("the {helper} toolchain {ecosystem} builds with"));
+        }
+    }
+    Ok((!changed.is_empty()).then_some(State::Changed(changed)))
 }
 
 /// Whether every entry of a `Changed` state is a toolchain-lock finding.
@@ -914,7 +967,28 @@ pub(crate) fn with_toolchain_lock(dir: &Path, ecosystem: &str, mut body: Value) 
         .clone();
     lock.set_ecosystem(lock_ecosystem, &bundle, &rows).unwrap();
     fs::write(dir.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
-    body["toolchain"] = json!({"bundle_id": bundle.bundle_id()});
+    // The helper decision the same sync would record beside it.
+    let present = tailors::detected(dir).unwrap();
+    let mut helpers = serde_json::Map::new();
+    for helper in tailor.helpers() {
+        let locked = if present.iter().any(|t| t.lock_ecosystem() == *helper) {
+            lock.ecosystem(helper)
+                .map(|section| section.bundle_id().to_string())
+        } else {
+            None
+        };
+        let decided = locked.or_else(|| {
+            tailor
+                .default_helper(helper)
+                .unwrap()
+                .map(|selected| selected.bundle_id())
+        });
+        helpers.insert(
+            (*helper).to_string(),
+            decided.map_or(Value::Null, Value::String),
+        );
+    }
+    body["toolchain"] = json!({"bundle_id": bundle.bundle_id(), "helpers": helpers});
     body
 }
 
@@ -1106,6 +1180,112 @@ mod tests {
             .contains("rustfmt 1.96.1"));
     }
 
+    /// Re-lock `lock_ecosystem` on a bundle whose first artifact row names
+    /// other bytes: the lock-side change `tog update --toolchain` makes when
+    /// a helper ecosystem moves to another release.
+    fn relock_elsewhere(dir: &Path, lock_ecosystem: &str) {
+        let root = ProjectRoot::open(dir).unwrap();
+        let mut lock = ToolchainLock::read_via(&root).unwrap().unwrap();
+        let tailor = tailors::registry()
+            .iter()
+            .find(|tailor| tailor.lock_ecosystem() == lock_ecosystem)
+            .unwrap();
+        let rows = input::discover(&root, lock_ecosystem).unwrap();
+        let mut bundle = crate::kernel::toolchain::select_for(
+            &tailor.toolchain_catalog().unwrap(),
+            lock_ecosystem,
+            &rows,
+        )
+        .unwrap()
+        .clone();
+        bundle.artifacts[0].digest = crate::kernel::fetch::Digest::sha256(&"e".repeat(64)).unwrap();
+        lock.set_ecosystem(lock_ecosystem, &bundle, &rows).unwrap();
+        fs::write(dir.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+    }
+
+    /// A closure records the helper toolchains its tailor built with, and
+    /// `status` holds it to the decision a sync would make now, in both
+    /// directions tog has: node-gyp's Python for Node, an sdist's Rust for
+    /// Python. Re-locking the helper ecosystem, or removing its manifest so
+    /// the helper falls back to the tailor's default, puts the closure out
+    /// of step even though its own inputs and lock section are unchanged.
+    #[test]
+    fn status_holds_a_closure_to_its_helper_toolchains() {
+        let cases: [(&str, &str, &[(&str, &str)]); 2] = [
+            (
+                "node",
+                "python",
+                &[
+                    ("requirements.txt", "six==1.17.0\n"),
+                    (".python-version", "3.13\n"),
+                ],
+            ),
+            (
+                "python",
+                "rust",
+                &[
+                    ("Cargo.toml", "[package]\nname='x'\n"),
+                    ("Cargo.lock", "version = 4\n"),
+                ],
+            ),
+        ];
+        for (ecosystem, helper, helper_files) in cases {
+            let temp = TempDir::new("status-helpers");
+            let dir = &temp.0;
+            fs::write(dir.join("package.json"), "{}\n").unwrap();
+            fs::write(dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
+            for (name, text) in helper_files {
+                fs::write(dir.join(name), text).unwrap();
+            }
+            let owner = tailors::detected(dir)
+                .unwrap()
+                .into_iter()
+                .find(|tailor| tailor.lock_ecosystem() == helper)
+                .unwrap()
+                .id();
+            // One sync: the helper's section, then the closure beside it.
+            with_toolchain_lock(dir, owner, json!({}));
+            let body = with_toolchain_lock(dir, ecosystem, json!({}));
+            let recorded = body["toolchain"]["helpers"][helper].clone();
+            assert!(recorded.is_string(), "{ecosystem}: {body}");
+            assert_eq!(helper_state(dir, ecosystem, &body).unwrap(), None);
+            let default = tailors::by_id(ecosystem)
+                .unwrap()
+                .default_helper(helper)
+                .unwrap()
+                .map(|selected| json!(selected.bundle_id()))
+                .unwrap_or(Value::Null);
+            assert_ne!(recorded, default, "{ecosystem}: the project's own helper");
+
+            // The helper ecosystem re-locked on other bytes.
+            relock_elsewhere(dir, helper);
+            let expected = State::Changed(vec![format!(
+                "the {helper} toolchain {ecosystem} builds with"
+            )]);
+            assert_eq!(
+                helper_state(dir, ecosystem, &body).unwrap(),
+                Some(expected.clone()),
+                "{ecosystem}: helper lock change"
+            );
+            let body = with_toolchain_lock(dir, ecosystem, json!({}));
+            assert_eq!(helper_state(dir, ecosystem, &body).unwrap(), None);
+
+            // The helper's manifest removed: its section may linger in the
+            // lock, but a sync now decides the tailor's default.
+            for (name, _) in helper_files {
+                fs::remove_file(dir.join(name)).unwrap();
+            }
+            assert_eq!(
+                helper_state(dir, ecosystem, &body).unwrap(),
+                Some(expected),
+                "{ecosystem}: helper input removed"
+            );
+            let mut resynced = body.clone();
+            resynced["toolchain"]["helpers"][helper] = default;
+            assert_eq!(helper_state(dir, ecosystem, &resynced).unwrap(), None);
+        }
+    }
+
     #[test]
     fn status_tracks_inputs_locks_projections_and_platforms() {
         let temp = TempDir::new("status");
@@ -1127,15 +1307,6 @@ mod tests {
         let env = dir.join("env-object");
         fs::create_dir_all(env.join("bin")).unwrap();
         std::os::unix::fs::symlink(&env, dir.join(".venv")).unwrap();
-        let requirements = sha256_file(&dir.join("requirements.txt")).unwrap();
-        write_closure(
-            dir,
-            "python",
-            host,
-            json!({"env_object": env, "python": {"version": "3.12.14"},
-                   "plan": {"packages": []},
-                   "inputs": [{"path": "requirements.txt", "sha256": requirements}]}),
-        );
         // Go: recorded lock hash; cargo: projection missing.
         write_closure(
             dir,
@@ -1148,6 +1319,17 @@ mod tests {
             "cargo",
             host,
             json!({"cargo_lock_sha256": sha256_file(&dir.join("Cargo.lock")).unwrap(), "plan": {"rust_version": "1.96.1", "crates": []}}),
+        );
+        // Python last: its sdists build on the Rust the cargo section just
+        // locked, and one sync records both together.
+        let requirements = sha256_file(&dir.join("requirements.txt")).unwrap();
+        write_closure(
+            dir,
+            "python",
+            host,
+            json!({"env_object": env, "python": {"version": "3.12.14"},
+                   "plan": {"packages": []},
+                   "inputs": [{"path": "requirements.txt", "sha256": requirements}]}),
         );
         let rows = status(platform, dir).unwrap();
         assert_eq!(rows[0].state, State::Synced);

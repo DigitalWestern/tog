@@ -44,8 +44,21 @@ pub fn realize_env_for(
     plan: &Plan,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
+    realize_env_with(store, platform, plan, selected, None)
+}
+
+/// [`realize_env_for`], building any sdist with a Rust extension on `rust`:
+/// the Rust the project's own toolchain lock names, when it has one. `None`
+/// keeps the shipped Rust the sdist's toolchain file resolves to.
+pub fn realize_env_with(
+    store: &Store,
+    platform: Platform,
+    plan: &Plan,
+    selected: &Selected,
+    rust: Option<&Selected>,
+) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    realize_env_at_depth(store, platform, plan, selected, 0)
+    realize_env_at_depth(store, platform, plan, selected, rust, 0)
 }
 
 /// A plan and the toolchain realizing it must name one CPython. They are
@@ -159,8 +172,9 @@ pub(super) fn environment_identity(
     plan: &Plan,
     cpython_id: &str,
     selected: &Selected,
+    rust: Option<&Selected>,
 ) -> io::Result<Identity> {
-    environment_identity_inner(store, platform, plan, cpython_id, selected, None)
+    environment_identity_inner(store, platform, plan, cpython_id, selected, rust, None)
 }
 
 /// The exact producer drift `python-env/3` exists to catch: the plan names
@@ -181,6 +195,7 @@ pub(super) fn environment_identity_skipping_input(
         plan,
         cpython_id,
         selected,
+        None,
         Some(skip_package),
     )
 }
@@ -191,6 +206,7 @@ fn environment_identity_inner(
     plan: &Plan,
     cpython_id: &str,
     selected: &Selected,
+    rust: Option<&Selected>,
     // The drift test seam, carried in release builds too: production always
     // passes `None`, and only `environment_identity_skipping_input` does not.
     skip_package: Option<&str>,
@@ -227,6 +243,7 @@ fn environment_identity_inner(
                     platform,
                     p,
                     selected,
+                    rust,
                     Some(plan),
                 )?;
                 if native_libs_id.is_none() {
@@ -289,9 +306,10 @@ pub(crate) fn planned_env_object_id(
     platform: Platform,
     plan: &Plan,
     selected: &Selected,
+    rust: Option<&Selected>,
 ) -> io::Result<String> {
     let cpython_id = crate::tailors::python::cpython_object_id(selected, platform)?;
-    Ok(environment_identity(store, platform, plan, &cpython_id, selected)?.object_id())
+    Ok(environment_identity(store, platform, plan, &cpython_id, selected, rust)?.object_id())
 }
 
 /// Internal realization entry point used by sdist build environments. The
@@ -302,6 +320,7 @@ pub(crate) fn realize_env_at_depth(
     platform: Platform,
     plan: &Plan,
     selected: &Selected,
+    rust: Option<&Selected>,
     sdist_depth: usize,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
@@ -317,7 +336,7 @@ pub(crate) fn realize_env_at_depth(
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let identity = environment_identity(store, platform, plan, &cpython_id, selected)?;
+    let identity = environment_identity(store, platform, plan, &cpython_id, selected, rust)?;
     let id = identity.object_id();
     if store.has(&id)? {
         crate::kernel::policy::check_cached(store, &id)?;
@@ -354,6 +373,7 @@ pub(crate) fn realize_env_at_depth(
                     platform,
                     source,
                     selected,
+                    rust,
                     Some(plan),
                     sdist_depth + 1,
                 )?
@@ -502,6 +522,7 @@ pub fn project_env_with_inputs(
     selection: &pyselect::PythonSelection,
     inputs: &[InputRecord],
     toolchain: Option<(&Selected, &Path)>,
+    helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
@@ -511,6 +532,7 @@ pub fn project_env_with_inputs(
         Some(selection),
         inputs,
         toolchain,
+        helpers,
         attribution,
     )
 }
@@ -533,6 +555,7 @@ pub fn project_env_with_selection(
         Some(selection),
         &[],
         None,
+        &serde_json::Value::Null,
         attribution,
     )
 }
@@ -544,6 +567,9 @@ pub(super) fn project_env_inner(
     selection: Option<&pyselect::PythonSelection>,
     inputs: &[InputRecord],
     toolchain: Option<(&Selected, &Path)>,
+    // The helper decision (`tailors::helper_record`), stored beside the
+    // toolchain record; `Null` writes none.
+    helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let venv = project_dir.join(".venv");
@@ -552,7 +578,7 @@ pub(super) fn project_env_inner(
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let project_lock = store.project_lock(project_dir)?;
-    let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
+    let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
     let mut refs = ClosureRefs::new();
     refs.object_path(&store, &activity, &env_obj)?;
@@ -561,9 +587,11 @@ pub(super) fn project_env_inner(
     let runtime_record = match toolchain {
         Some((selected, runtime)) => {
             refs.object_path(&store, &activity, runtime)?;
-            Some(crate::comforter::toolchain::closure_record(
-                selected, runtime,
-            ))
+            let mut record = crate::comforter::toolchain::closure_record(selected, runtime);
+            if !helpers.is_null() {
+                record["toolchain"]["helpers"] = helpers.clone();
+            }
+            Some(record)
         }
         None => None,
     };
@@ -730,6 +758,7 @@ mod tests {
             None,
             &[],
             Some((&selected, runtime.as_path())),
+            &serde_json::Value::Null,
             &mut attribution,
         )
         .unwrap();
@@ -920,12 +949,24 @@ mod tests {
             ),
         ] {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
-            let empty =
-                environment_identity(&store, platform, &empty_plan, &cpython, &selected_3_12())
-                    .unwrap();
-            let wheel =
-                environment_identity(&store, platform, &wheel_plan, &cpython, &selected_3_12())
-                    .unwrap();
+            let empty = environment_identity(
+                &store,
+                platform,
+                &empty_plan,
+                &cpython,
+                &selected_3_12(),
+                None,
+            )
+            .unwrap();
+            let wheel = environment_identity(
+                &store,
+                platform,
+                &wheel_plan,
+                &cpython,
+                &selected_3_12(),
+                None,
+            )
+            .unwrap();
             assert_eq!(wheel.inputs["schema"], "python-env/3");
             assert_eq!(wheel.inputs["native"], NATIVE_NONE);
             assert_eq!(wheel.object_id(), golden, "{}", platform.triple());
@@ -996,15 +1037,22 @@ mod tests {
         };
         for platform in Platform::ALL.iter().copied() {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
-            let empty =
-                environment_identity(&store, platform, &empty_plan, &cpython, &selected_3_12())
-                    .unwrap();
+            let empty = environment_identity(
+                &store,
+                platform,
+                &empty_plan,
+                &cpython,
+                &selected_3_12(),
+                None,
+            )
+            .unwrap();
             let one = environment_identity(
                 &store,
                 platform,
                 &one_wheel_plan,
                 &cpython,
                 &selected_3_12(),
+                None,
             )
             .unwrap();
             // The collision `python-env/2` had.
@@ -1048,9 +1096,14 @@ mod tests {
             python_version: "3.12.14".into(),
             packages: vec![fast.clone()],
         };
-        let actual =
-            planned_env_object_id(&store, Platform::host().unwrap(), &plan, &selected_3_12())
-                .unwrap();
+        let actual = planned_env_object_id(
+            &store,
+            Platform::host().unwrap(),
+            &plan,
+            &selected_3_12(),
+            None,
+        )
+        .unwrap();
         let mut inputs = BTreeMap::from([
             ("schema".to_string(), "python-env/3".to_string()),
             (
@@ -1097,13 +1150,23 @@ mod tests {
             packages: vec![fast, isolated],
         };
         let key = cached_build_plan(&store, "setuptools~=83.1", &"a".repeat(64));
-        let first =
-            planned_env_object_id(&store, Platform::host().unwrap(), &plan, &selected_3_12())
-                .unwrap();
+        let first = planned_env_object_id(
+            &store,
+            Platform::host().unwrap(),
+            &plan,
+            &selected_3_12(),
+            None,
+        )
+        .unwrap();
         cached_build_plan(&store, "setuptools~=83.1", &"b".repeat(64));
-        let second =
-            planned_env_object_id(&store, Platform::host().unwrap(), &plan, &selected_3_12())
-                .unwrap();
+        let second = planned_env_object_id(
+            &store,
+            Platform::host().unwrap(),
+            &plan,
+            &selected_3_12(),
+            None,
+        )
+        .unwrap();
         assert_ne!(
             first, second,
             "isolated-build build_env input must affect parent id"
@@ -1133,14 +1196,16 @@ mod tests {
             python_version: "3.12.14".into(),
             packages: vec![native],
         };
-        let planned = planned_env_object_id(&store, platform, &plan, &selected_3_12()).unwrap();
+        let planned =
+            planned_env_object_id(&store, platform, &plan, &selected_3_12(), None).unwrap();
         let cpython_id = python::object_id_for(platform, &plan.python_version).unwrap();
         let realized =
-            environment_identity(&store, platform, &plan, &cpython_id, &selected_3_12()).unwrap();
+            environment_identity(&store, platform, &plan, &cpython_id, &selected_3_12(), None)
+                .unwrap();
         assert_eq!(planned, realized.object_id());
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
             let native_id =
-                crate::tailors::python::nativelibs::object_id_for(&store, platform).unwrap();
+                crate::kernel::provider::nativelibs::object_id_for(&store, platform).unwrap();
             assert_eq!(
                 realized.inputs.get("native_libs").map(String::as_str),
                 Some(native_id.as_str())

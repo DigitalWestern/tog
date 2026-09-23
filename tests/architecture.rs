@@ -117,27 +117,6 @@ fn layer(relative: &Path) -> String {
 /// The one-way exceptions, each documented where it lives. Adding to this
 /// list is a shared-layer review (layering rule 2).
 const ALLOWED: &[(&str, &str, &str)] = &[
-    // Python sdists with Rust extensions build with the cargo tailor's
-    // pinned toolchain. A kernel-level toolchain provider would remove this.
-    (
-        "tailors/python/build.rs",
-        "tailors::cargo",
-        "Rust extension builds",
-    ),
-    // npm install scripts (node-gyp) run under a pinned CPython and the
-    // Python tailor's artifact and native-lib provisioning. Those two
-    // modules are ecosystem-neutral in practice and belong in a shared
-    // toolchain provider.
-    (
-        "tailors/node/realize.rs",
-        "tailors::python",
-        "node-gyp install scripts",
-    ),
-    (
-        "tailors/node/project.rs",
-        "tailors::python",
-        "native-lib env references",
-    ),
     // The dependency-spec validator lives with the command that owns the
     // spec grammar; cli calls it for argv validation only.
     (

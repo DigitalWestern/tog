@@ -717,12 +717,11 @@ mod tests {
     }
 
     /// Tests that inspect pending policy exceptions must not overlap with one
-    /// another or inherit an exception from a previous test.
+    /// another or inherit an exception from a previous test. The lock is the
+    /// crate-wide one: a module-private lock that still clears the shared
+    /// queue could wipe another module's test mid-assertion.
     fn exception_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::kernel::policy::clear();
-        guard
+        crate::kernel::policy::exception_guard()
     }
 
     #[test]

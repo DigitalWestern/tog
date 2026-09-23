@@ -181,7 +181,7 @@ fn seed_electron_shasums(store: &Store, platform: Platform, version: &str, zip_s
     };
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
     let dir = store.root.join("cache/electron-shasums").join(
-        tog::tailors::python::artifacts::electron_cache_directory(&release_url),
+        tog::kernel::provider::artifacts::electron_cache_directory(&release_url),
     );
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -272,6 +272,7 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
         &plan_of(&selected, electron.clone()),
         artifacts,
         &selected,
+        &node::shipped_gyp_python().unwrap(),
     )
     .expect("a scriptless electron realizes without its release zip");
 
@@ -380,6 +381,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
         &plan_of(&selected, electron),
         &artifacts,
         &selected,
+        &node::shipped_gyp_python().unwrap(),
     )
     .expect("realize with consumed artifacts");
 
@@ -473,6 +475,7 @@ fn a_failed_provisioning_publishes_no_environment() {
         &plan_of(&selected, electron),
         &[],
         &selected,
+        &node::shipped_gyp_python().unwrap(),
     )
     .expect_err("a provisioning failure fails the realization");
 
@@ -488,4 +491,166 @@ fn a_failed_provisioning_publishes_no_environment() {
         objects_after, objects_before,
         "no environment was published"
     );
+}
+
+/// A package named `name` whose only content is a `postinstall` script.
+fn script_package(dir: &Path, name: &str, postinstall: &str) -> NpmPackage {
+    let top = format!("{name}-src");
+    let package = dir.join(&top);
+    std::fs::create_dir_all(&package).unwrap();
+    let manifest = serde_json::json!({
+        "name": name,
+        "version": "1.0.0",
+        "scripts": { "postinstall": postinstall },
+    });
+    std::fs::write(package.join("package.json"), manifest.to_string()).unwrap();
+    let tarball = tar(dir, &top);
+    let sri = format!(
+        "sha512-{}",
+        b64(&Sha512::digest(std::fs::read(&tarball).unwrap()))
+    );
+    NpmPackage {
+        path: format!("node_modules/{name}"),
+        name: name.into(),
+        version: "1.0.0".into(),
+        url: format!("file://{}", tarball.display()),
+        integrity: sri,
+        bin: Vec::new(),
+        patch: None,
+        git: None,
+        optional: false,
+    }
+}
+
+fn recorded_object_deps(store: &Store, env: &Path) -> Vec<String> {
+    let id = env.file_name().unwrap().to_str().unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store.root.join("meta").join(format!("{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    meta["dependencies"]
+        .as_array()
+        .expect("object-meta/2 records explicit object dependencies")
+        .iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// An install script is handed `$PYTHON` and can leave a reference to it in
+/// the tree it builds: here a symlink, in real packages a wrapper or a
+/// libpython link. The environment then depends on that interpreter, so the
+/// producer records it once a script ran with it, and a sweep keeps it while
+/// the environment is live. An environment whose packages run no script
+/// never realized the interpreter and does not claim it.
+#[test]
+fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
+    let platform = Platform::host().expect("host platform");
+    if !sandbox_or_skip(
+        "a_lifecycle_reference_to_the_gyp_python_survives_a_sweep",
+        platform,
+    ) {
+        return;
+    }
+    let _serial = serial();
+    let _attribution = policy::Attribution::open("node").expect("test attribution");
+    let dir = temp();
+    let store = store_at(&dir.0);
+    let selected = stub_node_selection(&dir.0, platform);
+    seed_gyp_python(&store, platform);
+    let gyp_python = node::shipped_gyp_python().unwrap();
+    let python_id = tog::tailors::python::runtime_object_id(platform, &gyp_python).unwrap();
+
+    let linker = script_package(&dir.0, "links-python", "ln -s \"$PYTHON\" python-link");
+    let env = node::realize_node_env_for(
+        &store,
+        platform,
+        &plan_of(&selected, linker),
+        &[],
+        &selected,
+        &gyp_python,
+    )
+    .expect("realize a package whose script links $PYTHON");
+    let link = env.join("node_modules/links-python/python-link");
+    let target = std::fs::read_link(&link).expect("the script left its link");
+    assert!(
+        target.starts_with(store.object_path(&python_id)),
+        "{}",
+        target.display()
+    );
+    assert!(
+        recorded_object_deps(&store, &env).contains(&python_id),
+        "the interpreter a script ran with is evidence"
+    );
+
+    let scriptless = script_package(&dir.0, "no-scripts", "true");
+    let mut scriptless_plan = plan_of(&selected, scriptless);
+    // `true` is still a script; a package with none runs nothing.
+    let manifest = dir.0.join("bare-src/package.json");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, r#"{"name":"bare","version":"1.0.0"}"#).unwrap();
+    let bare_tarball = tar(&dir.0, "bare-src");
+    scriptless_plan.packages[0] = NpmPackage {
+        path: "node_modules/bare".into(),
+        name: "bare".into(),
+        version: "1.0.0".into(),
+        url: format!("file://{}", bare_tarball.display()),
+        integrity: format!(
+            "sha512-{}",
+            b64(&Sha512::digest(std::fs::read(&bare_tarball).unwrap()))
+        ),
+        bin: Vec::new(),
+        patch: None,
+        git: None,
+        optional: false,
+    };
+    let bare = node::realize_node_env_for(
+        &store,
+        platform,
+        &scriptless_plan,
+        &[],
+        &selected,
+        &gyp_python,
+    )
+    .expect("realize a package with no scripts");
+    assert!(
+        !recorded_object_deps(&store, &bare).contains(&python_id),
+        "no script ran, so the interpreter is not evidence"
+    );
+
+    // Past the sweep's active window, so only the dependency graph decides.
+    for object in [&env, &bare, &store.object_path(&python_id)] {
+        age(object);
+    }
+    let project = dir.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    store
+        .register_root_record(tog::kernel::store::RootRecord {
+            key: Store::root_key(&project).unwrap(),
+            project_path: project,
+            objects: [env.file_name().unwrap().to_str().unwrap().to_string()].into(),
+            projections: Default::default(),
+            updated: 1,
+        })
+        .unwrap();
+    let mut out = Vec::new();
+    tog::kernel::gc::collect(
+        &store,
+        tog::kernel::gc::Options {
+            keep_days: 0,
+            ..Default::default()
+        },
+        &mut out,
+    )
+    .unwrap_or_else(|error| panic!("sweep: {error}\n{}", String::from_utf8_lossy(&out)));
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        !bare.exists(),
+        "the sweep ran and collected the unrooted environment: {text}"
+    );
+    assert!(
+        store.object_path(&python_id).is_dir(),
+        "the interpreter the live environment links survived: {text}"
+    );
+    assert!(link.symlink_metadata().is_ok());
 }

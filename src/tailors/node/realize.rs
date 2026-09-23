@@ -229,7 +229,7 @@ pub(super) fn native_libs_identity_id(
     has_native: bool,
 ) -> io::Result<Option<String>> {
     if has_native && matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-        Ok(Some(crate::tailors::python::nativelibs::object_id_for(
+        Ok(Some(crate::kernel::provider::nativelibs::object_id_for(
             store, platform,
         )?))
     } else {
@@ -255,31 +255,37 @@ pub fn realize_node_env(
         plan,
         artifacts,
         &crate::tailors::node::shipped_selection()?,
+        &crate::tailors::node::shipped_gyp_python()?,
     )
 }
 
-/// Realize the tree with the Node the project's selection names.
+/// Realize the tree with the Node the project's selection names, running
+/// node-gyp on `gyp_python`: the Python the project's lock names when it
+/// has one, [`shipped_gyp_python`](crate::tailors::node::shipped_gyp_python)
+/// otherwise. Its object id is an input of the `node-env/5` identity.
 pub fn realize_node_env_for(
     store: &Store,
     platform: Platform,
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     selected: &crate::kernel::toolchain::Selected,
+    gyp_python: &crate::kernel::toolchain::Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "node environment")?;
     let node_obj = crate::tailors::node::realize_runtime(store, platform, selected)
         .map_err(wrap_ensure_node_error)?;
-    realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj)
+    realize_node_env_with_node_object(store, platform, plan, artifacts, &node_obj, gyp_python)
 }
 
 /// The producer's provisioning decision, exposed to the `node-env` identity
-/// contract in `objects.rs` so both consult the same rule. Lives here because
-/// this file is the documented node-to-python-artifacts seam
-/// (tests/architecture.rs allow-list).
+/// contract in `objects.rs` so both consult the same rule.
 pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'a str> {
-    crate::tailors::python::artifacts::provisioned_version(name, version)
+    crate::kernel::provider::artifacts::provisioned_version(name, version)
 }
+
+/// The schema the producer writes. `node-env/5` is `/4` plus `gyp_python`.
+pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/5";
 
 /// The two spellings of the `node-env/4` native decision. The producer
 /// writes one of them on every commit, so a dropped `native_libs` key is a
@@ -360,6 +366,7 @@ pub(super) fn node_env_identity(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs_id: Option<&str>,
+    gyp_python_id: &str,
 ) -> io::Result<Identity> {
     node_env_identity_inner(
         store,
@@ -368,6 +375,7 @@ pub(super) fn node_env_identity(
         plan,
         artifacts,
         native_libs_id,
+        gyp_python_id,
         None,
     )
 }
@@ -384,6 +392,7 @@ pub(crate) fn node_env_identity_skipping_input(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs_id: Option<&str>,
+    gyp_python_id: &str,
     skip_entry: &str,
 ) -> io::Result<Identity> {
     node_env_identity_inner(
@@ -393,6 +402,7 @@ pub(crate) fn node_env_identity_skipping_input(
         plan,
         artifacts,
         native_libs_id,
+        gyp_python_id,
         Some(skip_entry),
     )
 }
@@ -405,6 +415,7 @@ fn node_env_identity_inner(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs_id: Option<&str>,
+    gyp_python_id: &str,
     // The drift test seam, carried in release builds too: production always
     // passes `None`, and only `node_env_identity_skipping_input` does not.
     skip_entry: Option<&str>,
@@ -416,9 +427,12 @@ fn node_env_identity_inner(
     // /3: install scripts run sandboxed; name@version joined the per-pkg
     // identity (they reach scripts as npm_package_* env). /4: a plan digest
     // over the packages and declared artifacts plus an explicit native
-    // decision. Remaining known impurity, documented: host Xcode/SDK version
-    // is not fingerprinted (same standing as python sdist builds).
-    inputs.insert("schema".to_string(), "node-env/4".to_string());
+    // decision. /5: the CPython node-gyp runs on, as its object id, so the
+    // project's Python selection (or the shipped default) is part of what an
+    // environment with native addons was built from. Remaining known
+    // impurity, documented: host Xcode/SDK version is not fingerprinted
+    // (same standing as python sdist builds).
+    inputs.insert("schema".to_string(), NODE_ENV_SCHEMA.to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -481,7 +495,7 @@ fn node_env_identity_inner(
     // be replaced, so the package version alone does not determine the bytes
     // that reach the install script.
     for p in &plan.packages {
-        if let Some(input) = crate::tailors::python::artifacts::provisioned_identity_input(
+        if let Some(input) = crate::kernel::provider::artifacts::provisioned_identity_input(
             store, platform, &p.name, &p.version,
         )? {
             inputs.insert(format!("provisioned:{}", p.path), input);
@@ -529,6 +543,9 @@ fn node_env_identity_inner(
     if let Some(native_libs_id) = native_libs_id {
         inputs.insert("native_libs".into(), native_libs_id.into());
     }
+    // Written unconditionally: whether any package runs node-gyp is only
+    // known after extraction, and the identity is decided before it.
+    inputs.insert("gyp_python".into(), gyp_python_id.into());
     Ok(Identity {
         kind: "node-env".into(),
         name: "env".into(),
@@ -1040,8 +1057,13 @@ pub(super) fn realize_node_env_with_node_object(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     node_obj: &Path,
+    gyp_python: &crate::kernel::toolchain::Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
+    // Pure: the interpreter is realized only if a package runs a script.
+    let gyp_python_id =
+        crate::kernel::provider::cpython::cpython_object_id(gyp_python, platform)
+            .map_err(|e| io::Error::new(e.kind(), format!("python for node-gyp: {e}")))?;
     let mut classification_tarballs: Vec<(&NpmPackage, crate::kernel::fetch::CacheLease)> =
         Vec::new();
     let native_libs_id =
@@ -1053,6 +1075,7 @@ pub(super) fn realize_node_env_with_node_object(
         plan,
         artifacts,
         native_libs_id.as_deref(),
+        &gyp_python_id,
     )?;
     let id = identity.object_id();
     if store.has(&id)? {
@@ -1069,7 +1092,7 @@ pub(super) fn realize_node_env_with_node_object(
     let (_leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, plan)?;
 
     let native_libs = if native_libs_id.is_some() {
-        Some(crate::tailors::python::nativelibs::ensure_native_libs(
+        Some(crate::kernel::provider::nativelibs::ensure_native_libs(
             store, platform,
         )?)
     } else {
@@ -1097,6 +1120,7 @@ pub(super) fn realize_node_env_with_node_object(
         plan,
         artifacts,
         native_libs.as_ref().map(|set| set.path.as_path()),
+        gyp_python,
         &mut deps,
     )?;
 
@@ -1143,6 +1167,7 @@ pub(super) fn run_install_scripts(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs: Option<&Path>,
+    gyp_python: &crate::kernel::toolchain::Selected,
     consumed: &mut crate::kernel::store::ObjectDeps,
 ) -> io::Result<()> {
     // Scratch stage dirs (tool shims, per-package HOMEs, snapshots) are
@@ -1157,6 +1182,7 @@ pub(super) fn run_install_scripts(
         plan,
         artifacts,
         native_libs,
+        gyp_python,
         consumed,
         &mut cleanup,
     );
@@ -1254,21 +1280,19 @@ fn plant_declared_artifacts(
     Ok(())
 }
 
-/// node-gyp needs a Python; the store's pinned CPython keeps builds off the
-/// system toolchain drift. Realized lazily, only when needed.
+/// node-gyp needs a Python; a store CPython keeps builds off the system
+/// toolchain drift. It is the one the environment's identity names
+/// (`gyp_python`), realized lazily, only when a package runs a script.
 fn ensure_gyp_python(
     store: &Store,
     platform: Platform,
+    gyp_python: &crate::kernel::toolchain::Selected,
     python_obj: &mut Option<PathBuf>,
 ) -> io::Result<PathBuf> {
     if let Some(p) = python_obj {
         return Ok(p.clone());
     }
-    // node-gyp's interpreter is not a component of the Node release bundle
-    // (the pin table records no version for it), so it comes from the
-    // shipped Python catalog rather than this project's node selection.
-    let python = crate::tailors::python::shipped_selection("3.12")?;
-    let p = crate::tailors::python::realize_runtime(store, platform, &python)
+    let p = crate::kernel::provider::cpython::realize_runtime(store, platform, gyp_python)
         .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
     Ok(python_obj.insert(p).clone())
 }
@@ -1374,7 +1398,7 @@ fn apply_artifact_policy(
             || a.url.contains(&format!("/{}/", p.name))
     });
     let provisioned =
-        crate::tailors::python::artifacts::provision(store, platform, &p.name, &p.version, tmp);
+        crate::kernel::provider::artifacts::provision(store, platform, &p.name, &p.version, tmp);
     if let Some(provisioning) = require_provisioning(p, provisioned)? {
         envs.extend(provisioning.envs);
         for digest in provisioning.cache_digests {
@@ -1388,7 +1412,7 @@ fn apply_artifact_policy(
             )?;
         }
     }
-    if let Some(skip) = crate::tailors::python::artifacts::skip_download_for(&p.name) {
+    if let Some(skip) = crate::kernel::provider::artifacts::skip_download_for(&p.name) {
         for (key, value) in skip.envs {
             envs.push(((*key).to_string(), (*value).to_string()));
         }
@@ -1397,8 +1421,8 @@ fn apply_artifact_policy(
             &format!("{}@{}", p.name, p.version),
             &format!("install-time download skipped; run: {}", skip.hint),
         )?;
-    } else if crate::tailors::python::artifacts::wants_source_build(&script_text, declared_here) {
-        envs.extend(crate::tailors::python::artifacts::source_build_envs());
+    } else if crate::kernel::provider::artifacts::wants_source_build(&script_text, declared_here) {
+        envs.extend(crate::kernel::provider::artifacts::source_build_envs());
         crate::kernel::policy::record(
             crate::kernel::policy::BUILT_FROM_SOURCE,
             &format!("{}@{}", p.name, p.version),
@@ -1419,8 +1443,8 @@ fn apply_artifact_policy(
 /// re-run once the download works realizes the real thing.
 fn require_provisioning(
     p: &NpmPackage,
-    provisioned: io::Result<Option<crate::tailors::python::artifacts::Provisioning>>,
-) -> io::Result<Option<crate::tailors::python::artifacts::Provisioning>> {
+    provisioned: io::Result<Option<crate::kernel::provider::artifacts::Provisioning>>,
+) -> io::Result<Option<crate::kernel::provider::artifacts::Provisioning>> {
     provisioned.map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -1509,6 +1533,7 @@ pub(super) fn run_install_scripts_staged(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs: Option<&Path>,
+    gyp_python: &crate::kernel::toolchain::Selected,
     consumed: &mut crate::kernel::store::ObjectDeps,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
@@ -1542,7 +1567,11 @@ pub(super) fn run_install_scripts_staged(
         let snapshot = snapshot_root.join("package");
         crate::comforter::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
 
-        let python = ensure_gyp_python(store, platform, &mut python_obj)?;
+        let python = ensure_gyp_python(store, platform, gyp_python, &mut python_obj)?;
+        // The script is handed `$PYTHON` and may leave a symlink or wrapper
+        // to it, or link libpython, so the interpreter it ran with is
+        // evidence the environment keeps alive.
+        consumed.object_id(&crate::kernel::store::object_id_from_path(&python)?)?;
         let python_bin = python.join("bin/python3");
 
         let path_env = lifecycle_path_env(&tools_dir, node_obj, staged, &p.path);
@@ -1552,7 +1581,7 @@ pub(super) fn run_install_scripts_staged(
         )?;
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {
-            envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
+            envs = crate::kernel::provider::nativelibs::compose_env(native_libs, &envs);
         }
         let path_env = envs
             .iter()

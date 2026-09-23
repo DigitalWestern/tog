@@ -754,59 +754,10 @@ pub(crate) fn clone_tree_for(src: &Path, dest: &Path, platform: Platform) -> io:
             return Err(io::Error::other("cloning projected tree failed"));
         }
     }
-    restore_write_bits(dest)
+    crate::kernel::store::restore_write_bits(dest)
 }
 
-/// Store-aware copy-on-write clone. The copy utility is a child that reads a
-/// store object and writes a managed projection, so its complete spawn/wait
-/// interval must remain under operation protection.
-pub(crate) fn clone_tree_for_store(
-    store: &Store,
-    src: &Path,
-    dest: &Path,
-    platform: Platform,
-) -> io::Result<()> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let clone = if platform.is_macos() {
-        let mut command = std::process::Command::new("/bin/cp");
-        command.args(["-Rc"]).arg(src).arg(dest);
-        crate::kernel::supervise::status(&mut command, &activity)?
-    } else {
-        let mut command = std::process::Command::new("/bin/cp");
-        command.args(["-a", "--reflink=auto"]).arg(src).arg(dest);
-        crate::kernel::supervise::status(&mut command, &activity)?
-    };
-    if !clone.success() {
-        if dest.exists() {
-            crate::kernel::store::remove_tree(dest)?;
-        }
-        let mut plain = std::process::Command::new("/bin/cp");
-        plain.arg("-R").arg(src).arg(dest);
-        let plain_status = crate::kernel::supervise::status(&mut plain, &activity)?;
-        if !plain_status.success() {
-            return Err(io::Error::other("cloning projected tree failed"));
-        }
-    }
-    restore_write_bits(dest)
-}
-
-fn restore_write_bits(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let md = fs::symlink_metadata(path)?;
-    if md.file_type().is_symlink() {
-        return Ok(());
-    }
-    let mode = md.permissions().mode();
-    if mode & 0o200 == 0 {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
-    }
-    if md.is_dir() {
-        for entry in fs::read_dir(path)? {
-            restore_write_bits(&entry?.path())?;
-        }
-    }
-    Ok(())
-}
+pub(crate) use crate::kernel::store::clone_tree_for_store;
 
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded

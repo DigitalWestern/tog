@@ -282,7 +282,7 @@ impl Tailor for Cargo {
 
     fn fmt_preflight(&self, platform: Platform) -> io::Result<()> {
         // A platform with no pinned component is refused here, before
-        // `Store::open` and before `ensure_rust_for` downloads ~105 MB of
+        // `Store::open` and before the Rust realization downloads ~105 MB of
         // toolchain.
         rustfmt::preflight_platform(platform)
     }

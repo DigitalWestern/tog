@@ -80,6 +80,19 @@ impl Tailor for Node {
         Ok(&node::registry_tool::NodeTool)
     }
 
+    /// node-gyp runs on a Python.
+    fn helpers(&self) -> &'static [&'static str] {
+        &["python"]
+    }
+
+    /// A project without Python gets the shipped 3.12 line for node-gyp.
+    fn default_helper(&self, helper: &str) -> io::Result<Option<Selected>> {
+        match helper {
+            "python" => node::shipped_gyp_python().map(Some),
+            _ => Ok(None),
+        }
+    }
+
     fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
         node::preflight(platform)
     }
@@ -142,7 +155,21 @@ impl Tailor for Node {
             config = node::parse_tog_config(&pkg)?;
         }
         let runtime = node::realize_runtime(store, platform, selected)?;
-        let env = node::realize_node_env_for(store, platform, &plan, &config.artifacts, selected)?;
+        // node-gyp runs on the Python this project's lock names when it has
+        // one; a Node-only project gets the shipped default.
+        let helpers = request.helpers(self)?;
+        let gyp_python = match helpers.get("python") {
+            Some(python) => python.clone(),
+            None => node::shipped_gyp_python()?,
+        };
+        let env = node::realize_node_env_for(
+            store,
+            platform,
+            &plan,
+            &config.artifacts,
+            selected,
+            &gyp_python,
+        )?;
         let inputs = comforter::input_records(
             dir,
             &[dir.join("package.json"), dir.join(&plan.lock_source)],
@@ -156,6 +183,7 @@ impl Tailor for Node {
             fresh,
             &inputs,
             Some((selected, runtime.as_path())),
+            &crate::tailors::helper_record(self, &helpers),
             attribution,
         )?;
         ui::synced("node_modules", &env);

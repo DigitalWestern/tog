@@ -405,6 +405,7 @@ pub(crate) fn sync_preflighted(
             fresh,
             frozen,
             toolchain: selected,
+            selections: &toolchain.entries,
         };
         let changed = tailor.sync(ctx, dir, &request, &mut attribution)?;
         attribution.finish(changed)?;

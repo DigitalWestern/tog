@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-pub(crate) const DEFAULT_VERSION: &str = "3.12.14";
+pub(crate) use crate::kernel::provider::cpython::DEFAULT_VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConstraintSource {

@@ -337,12 +337,12 @@ fn sdist_build_v4_contract(identity: &Identity) -> Result<(), String> {
 /// `manifest_sha256` and emitted the manifest hash itself as a cache digest,
 /// fabricating a digest for a file that never existed in the cache.
 fn native_libs(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String> {
-    if record.identity.version != crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION {
+    if record.identity.version != crate::kernel::provider::nativelibs::NATIVE_LIBS_VERSION {
         return Err(format!(
             "libset version {} predates the pinned manifest this build knows (v{}); its library \
              digests are not recoverable from metadata",
             record.identity.version,
-            crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION
+            crate::kernel::provider::nativelibs::NATIVE_LIBS_VERSION
         ));
     }
     let recorded = input(record, "manifest_sha256")?;
@@ -351,7 +351,7 @@ fn native_libs(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String
         .iter()
         .find(|platform| platform.triple() == platform_input)
         .ok_or_else(|| format!("unknown platform {platform_input}"))?;
-    let manifest = crate::tailors::python::nativelibs::manifest_sha256(*platform)
+    let manifest = crate::kernel::provider::nativelibs::manifest_sha256(*platform)
         .map_err(|error| format!("no pinned library manifest for {platform_input}: {error}"))?;
     if manifest != recorded {
         return Err(format!(
@@ -360,7 +360,7 @@ fn native_libs(record: &Record, _index: &MetaIndex) -> Result<ObjectDeps, String
         ));
     }
     let mut deps = ObjectDeps::new();
-    for sha256 in crate::tailors::python::nativelibs::pinned_package_digests(*platform)
+    for sha256 in crate::kernel::provider::nativelibs::pinned_package_digests(*platform)
         .map_err(|error| format!("pinned library set: {error}"))?
     {
         add_digest(&mut deps, Algo::Sha256, &sha256, "pinned library")?;

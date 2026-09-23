@@ -21,6 +21,7 @@ use crate::kernel::objmeta::KindAdapter;
 use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,6 +49,71 @@ pub struct SyncRequest<'a> {
     pub fresh: bool,
     pub frozen: bool,
     pub toolchain: &'a Selected,
+    /// Every selection the project resolved, keyed by lock ecosystem. A
+    /// tailor that builds with another ecosystem's toolchain (node-gyp's
+    /// Python, an sdist's Rust) reads it through [`SyncRequest::helper`].
+    pub selections: &'a BTreeMap<String, Selected>,
+}
+
+impl SyncRequest<'_> {
+    /// The project's own selection for a helper ecosystem (`python`,
+    /// `rust`), when its toolchain lock names one. `None` means the project
+    /// has no such section, and the caller uses the shipped default.
+    pub fn helper(&self, lock_ecosystem: &str) -> Option<&Selected> {
+        self.selections.get(lock_ecosystem)
+    }
+
+    /// Every helper `tailor` builds with, decided as [`helper_selections`]
+    /// decides them from this sync's selections.
+    pub fn helpers(&self, tailor: &dyn Tailor) -> io::Result<BTreeMap<String, Selected>> {
+        helper_selections(tailor, self.selections)
+    }
+}
+
+/// The helper toolchains `tailor` builds with (`Tailor::helpers`), given the
+/// selections a project resolved for its detected ecosystems: the project's
+/// own selection for a helper ecosystem it has, the tailor's
+/// `default_helper` otherwise. A helper with neither is absent, which means
+/// the build decides per artifact (an sdist's own toolchain file).
+///
+/// `sync`, `status` and `tog x` all decide helpers through this rule, so a
+/// status line predicts what the next sync would build on.
+pub fn helper_selections(
+    tailor: &dyn Tailor,
+    selections: &BTreeMap<String, Selected>,
+) -> io::Result<BTreeMap<String, Selected>> {
+    let mut helpers = BTreeMap::new();
+    for helper in tailor.helpers() {
+        let selected = match selections.get(*helper) {
+            Some(selected) => Some(selected.clone()),
+            None => tailor.default_helper(helper)?,
+        };
+        if let Some(selected) = selected {
+            helpers.insert((*helper).to_string(), selected);
+        }
+    }
+    Ok(helpers)
+}
+
+/// The closure record of a helper decision: one entry per helper `tailor`
+/// declares, the bundle id it built with or `null` when it had none to
+/// record. `status` compares it against the decision a sync would make now.
+pub fn helper_record(
+    tailor: &dyn Tailor,
+    helpers: &BTreeMap<String, Selected>,
+) -> serde_json::Value {
+    let mut record = serde_json::Map::new();
+    for helper in tailor.helpers() {
+        record.insert(
+            (*helper).to_string(),
+            helpers
+                .get(*helper)
+                .map_or(serde_json::Value::Null, |selected| {
+                    serde_json::Value::String(selected.bundle_id())
+                }),
+        );
+    }
+    serde_json::Value::Object(record)
 }
 
 /// One `tog doctor` line contributed by a tailor.
@@ -274,6 +340,22 @@ pub trait Tailor: Sync {
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
         Err(unsupported(self.id(), "x"))
     }
+
+    /// The other ecosystems whose toolchains this tailor's builds run on,
+    /// by lock ecosystem: node-gyp's `python`, an sdist's `rust`. The
+    /// decision is recorded in the closure and is part of what `status`
+    /// compares, so a project that stops (or starts) locking a helper is
+    /// out of step until it syncs.
+    fn helpers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The selection a helper gets when the project does not select one.
+    /// `None` means there is no single default: the build decides per
+    /// artifact.
+    fn default_helper(&self, _helper: &str) -> io::Result<Option<Selected>> {
+        Ok(None)
+    }
 }
 
 /// What `tog x` asks of an ecosystem that installs tools from a public
@@ -339,8 +421,27 @@ pub trait RegistryTool: Sync {
         None
     }
 
+    /// The helper toolchains a realization builds with, a subset of the
+    /// tailor's `helpers`. Each one's runtime object id is part of the
+    /// cache key, and a tool with none keeps the `x/3` key.
+    fn helpers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The store object id of `helper`'s runtime as `selected` names it,
+    /// computed without touching the store, for the cache key.
+    fn helper_object_id(
+        &self,
+        _platform: Platform,
+        helper: &str,
+        _selected: &Selected,
+    ) -> io::Result<String> {
+        Err(io::Error::other(format!("no {helper} helper here")))
+    }
+
     /// Resolve `package` (exactly `version`, or the registry's latest),
-    /// realize it on `toolchain`, and project it into `root`.
+    /// realize it on `toolchain` and the `helpers` it builds with, and
+    /// project it into `root`.
     #[allow(clippy::too_many_arguments)]
     fn realize(
         &self,
@@ -351,6 +452,7 @@ pub trait RegistryTool: Sync {
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
+        helpers: &BTreeMap<String, Selected>,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()>;
 
