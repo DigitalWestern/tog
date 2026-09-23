@@ -1652,42 +1652,50 @@ mod tests {
         assert_eq!(cache, expected_cache);
     }
 
-    /// The `node-env/5` adapter: the `/4` byte sources, and the node-gyp
-    /// Python named by `gyp_python` is not among them. It is realized only
-    /// when a package runs a script, so retaining it would pull a CPython
-    /// into every pure-JavaScript environment's closure.
+    /// The `node-env/5` adapter: the `/4` byte sources, plus the node-gyp
+    /// Python `gyp_python` names whenever the store still has it. The
+    /// producer records it only when a script ran with it, which the
+    /// identity cannot show, so the adapter claims the superset; an
+    /// interpreter already collected is left out rather than refused.
     #[test]
-    fn adapter_node_env_node_env_5_leaves_the_gyp_python_out_of_the_dependencies() {
+    fn adapter_node_env_node_env_5_claims_the_gyp_python_the_store_still_has() {
         let node = oid('1', "nodejs");
         let libs = oid('2', "libset");
         let python = oid('4', "cpython-3.12.14");
         let integrity = sha512('5');
-        let (objects, cache) = proven(
-            ident(
-                "node-env",
-                "env",
-                "24.20.0",
-                &[
-                    ("schema", "node-env/5"),
-                    ("store_root", "/tmp/store"),
-                    ("nodejs", &node),
-                    ("workspaces", ""),
-                    ("native_libs", &libs),
-                    ("native", "native-libs"),
-                    ("plan_digest", &format!("sha256:{}", sha256('8'))),
-                    ("gyp_python", &python),
-                    (
-                        "pkg:node_modules/left-pad",
-                        &format!("sha512:{integrity}:left-pad@1.3.0:patch[]:bin[]"),
-                    ),
-                ],
-            ),
-            vec![stub(&node), stub(&libs)],
+        let identity = ident(
+            "node-env",
+            "env",
+            "24.20.0",
+            &[
+                ("schema", "node-env/5"),
+                ("store_root", "/tmp/store"),
+                ("nodejs", &node),
+                ("workspaces", ""),
+                ("native_libs", &libs),
+                ("native", "native-libs"),
+                ("plan_digest", &format!("sha256:{}", sha256('8'))),
+                ("gyp_python", &python),
+                (
+                    "pkg:node_modules/left-pad",
+                    &format!("sha512:{integrity}:left-pad@1.3.0:patch[]:bin[]"),
+                ),
+            ],
         );
-        let mut expected_objects = vec![node, libs];
-        expected_objects.sort();
-        assert_eq!(objects, expected_objects);
+
+        let (objects, cache) = proven(
+            identity.clone(),
+            vec![stub(&node), stub(&libs), stub(&python)],
+        );
+        let mut expected = vec![node.clone(), libs.clone(), python];
+        expected.sort();
+        assert_eq!(objects, expected);
         assert_eq!(cache, vec![format!("sha512:{integrity}")]);
+
+        let (objects, _) = proven(identity, vec![stub(&node), stub(&libs)]);
+        let mut expected = vec![node, libs];
+        expected.sort();
+        assert_eq!(objects, expected);
     }
 
     /// `plan_digest` and `native` belong to `/4` alone: a `/3` record that

@@ -1568,6 +1568,10 @@ pub(super) fn run_install_scripts_staged(
         crate::comforter::clone_tree_for_store(store, &pkg_dir, &snapshot, platform)?;
 
         let python = ensure_gyp_python(store, platform, gyp_python, &mut python_obj)?;
+        // The script is handed `$PYTHON` and may leave a symlink or wrapper
+        // to it, or link libpython, so the interpreter it ran with is
+        // evidence the environment keeps alive.
+        consumed.object_id(&crate::kernel::store::object_id_from_path(&python)?)?;
         let python_bin = python.join("bin/python3");
 
         let path_env = lifecycle_path_env(&tools_dir, node_obj, staged, &p.path);

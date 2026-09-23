@@ -450,8 +450,11 @@ the CPython node-gyp ran on, which was the shipped pin: a pin change could
 rebuild a native addon under an unchanged id, and a project's locked Python
 was ignored. `/5` adds `gyp_python`, that interpreter's object id, written
 unconditionally (whether any package runs node-gyp is known only after
-extraction). It is an identity input and not a dependency, because the
-interpreter is realized only when a script runs. Every other `/4` input is
+extraction). It becomes a recorded dependency only when an install script
+ran with it: the interpreter is realized only then, and a script handed
+`$PYTHON` can leave a symlink or wrapper to it, so the environment it built
+must keep it alive. A pure-JavaScript environment does not retain a CPython.
+Every other `/4` input is
 unchanged, and the test goldens check that dropping `gyp_python` gives back the
 `/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the
 `rust` input was already the Rust object id, so honoring the project's

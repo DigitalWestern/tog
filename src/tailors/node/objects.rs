@@ -273,13 +273,16 @@ fn node_env_v4(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
     )
 }
 
-/// `node-env/5`: the `/4` byte sources. `gyp_python` names the interpreter
-/// install scripts ran on, which is realized only when a package runs one
-/// and never executed by the finished tree, so it is an identity input and
-/// not a dependency: a pure-JavaScript environment must not pull in a
-/// CPython just to be retained.
+/// `node-env/5`: the `/4` byte sources, plus `gyp_python` when this store
+/// still has that interpreter. The producer records it as a dependency only
+/// when an install script ran with it available (a script can leave a
+/// symlink or wrapper to `$PYTHON`, or link libpython), and whether one ran
+/// is not recoverable from the identity. Claiming it whenever it exists is
+/// the same deliberate superset as the `provisioned:` digests below; an
+/// interpreter already collected cannot have been retained by anything.
 fn node_env_v5(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String> {
-    node_env_inner(
+    let gyp_python = input(record, "gyp_python")?;
+    let mut deps = node_env_inner(
         record,
         index,
         &[
@@ -293,7 +296,11 @@ fn node_env_v5(record: &Record, index: &MetaIndex) -> Result<ObjectDeps, String>
             "native",
             "gyp_python",
         ],
-    )
+    )?;
+    if index.contains(gyp_python) {
+        add_object(&mut deps, gyp_python, index, "gyp_python")?;
+    }
+    Ok(deps)
 }
 
 /// `provisioned:` and `artifact:` digests are claimed unconditionally, which
