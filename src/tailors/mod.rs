@@ -251,6 +251,117 @@ pub trait Tailor: Sync {
     ) -> io::Result<i32> {
         Err(unsupported(self.id(), "fmt"))
     }
+
+    /// `tog x`: how this ecosystem runs a tool straight from its public
+    /// registry, when it can.
+    fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
+        Err(unsupported(self.id(), "x"))
+    }
+}
+
+/// What `tog x` asks of an ecosystem that installs tools from a public
+/// registry (`Tailor::registry_tool`). The command owns everything around
+/// the tool: the `~/.tog/x` directory, its cache key, its lifecycle lock,
+/// its gc root, and the cached-projection checks. The tool owns resolving
+/// one package, realizing and projecting it into that directory, and the
+/// environment a launched executable runs in.
+pub trait RegistryTool: Sync {
+    /// The first word of every `~/.tog/x` directory this tool's caches live
+    /// in (`py`, `npm`). It is part of the cache directory name, so changing
+    /// it orphans every existing cache.
+    fn cache_prefix(&self) -> &'static str;
+
+    /// The store object id of the runtime `toolchain` names, computed
+    /// without touching the store. It is part of the cache key.
+    fn runtime_object_id(&self, platform: Platform, toolchain: &Selected) -> io::Result<String>;
+
+    /// The word that names this registry on the command line: the
+    /// `py:`/`npm:` tool prefix and the `--py`/`--npm` flag.
+    fn spelling(&self) -> &'static str;
+
+    /// The registry's name in `tog x` messages (`PyPI`, `npm`).
+    fn registry_name(&self) -> &'static str;
+
+    /// The ecosystem's name for a project in `tog x` messages (`Python`,
+    /// `Node`).
+    fn project_label(&self) -> &'static str;
+
+    /// Why `tog x` chose this registry from the project it runs in, for the
+    /// trace line.
+    fn detection_reason(&self) -> &'static str;
+
+    /// Whether package names may carry a `scope/` segment (npm's
+    /// `@scope/name`).
+    fn scoped_packages(&self) -> bool {
+        false
+    }
+
+    /// The directory under a cache `root` that holds the executables the
+    /// installed package provides.
+    fn bin_dir(&self, root: &Path) -> PathBuf;
+
+    /// Does the projection in `root` still point at `env_path`, the
+    /// canonical environment object its recorded `closure` names? `x`
+    /// refuses to run a cached tool whose projection points elsewhere.
+    fn projection_points_at(
+        &self,
+        store: &crate::kernel::store::Store,
+        root: &Path,
+        closure: &Value,
+        env_path: &Path,
+    ) -> io::Result<bool>;
+
+    /// The packages a cache root written before `x` recorded its request
+    /// was made for, read back from the manifest this tool generated in
+    /// it. `None` when `root` holds no such manifest.
+    fn legacy_packages(&self, root: &Path) -> Option<Vec<LegacyPackage>>;
+
+    /// What `tog x --clean` adds to its summary when it removed at least
+    /// one of this tool's environments.
+    fn clean_note(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Resolve `package` (exactly `version`, or the registry's latest),
+    /// realize it on `toolchain`, and project it into `root`.
+    #[allow(clippy::too_many_arguments)]
+    fn realize(
+        &self,
+        store: &crate::kernel::store::Store,
+        activity: &crate::kernel::activity::StoreActivity,
+        platform: Platform,
+        root: &Path,
+        package: &str,
+        version: Option<&str>,
+        toolchain: &Selected,
+        attribution: &mut crate::kernel::policy::Attribution,
+    ) -> io::Result<()>;
+
+    /// What an executable launched from a realized `root` runs with.
+    fn launch_env(
+        &self,
+        store: &crate::kernel::store::Store,
+        platform: Platform,
+        root: &Path,
+        toolchain: &Selected,
+    ) -> io::Result<ToolEnv>;
+}
+
+/// One package a pre-record `x` cache root was made for
+/// (`RegistryTool::legacy_packages`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyPackage {
+    pub package: String,
+    pub version: Option<String>,
+}
+
+/// The environment a registry tool launches in (`RegistryTool::launch_env`).
+#[derive(Debug, Clone, Default)]
+pub struct ToolEnv {
+    /// Directories placed ahead of the inherited PATH, in order.
+    pub path: Vec<PathBuf>,
+    /// Variables set on the child.
+    pub vars: Vec<(&'static str, std::ffi::OsString)>,
 }
 
 /// Display order everywhere: `plan` output, `sync` narration, `status`

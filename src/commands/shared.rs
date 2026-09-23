@@ -7,7 +7,7 @@ use crate::commands::inspect;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{lock, runtime, Selected};
-use crate::tailors::Tailor;
+use crate::tailors::{RegistryTool, Tailor};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -107,6 +107,29 @@ pub(crate) fn selected_toolchain(
         }
     }
     runtime::shipped(&tailor.toolchain_catalog()?)
+}
+
+/// The tool `tog x` installs and launches for `ecosystem`
+/// (`Tailor::registry_tool`). An ecosystem with no registry tool answers
+/// `tog x does not support <id>`.
+pub(crate) fn registry_tool(ecosystem: &str) -> io::Result<&'static dyn RegistryTool> {
+    crate::tailors::by_id(ecosystem)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported ecosystem '{ecosystem}'"),
+            )
+        })?
+        .registry_tool()
+}
+
+/// Every ecosystem `tog x` can run a tool from, as (tailor id, tool), in
+/// registry order.
+pub(crate) fn registry_tools() -> Vec<(&'static str, &'static dyn RegistryTool)> {
+    crate::tailors::registry()
+        .iter()
+        .filter_map(|tailor| Some((tailor.id(), tailor.registry_tool().ok()?)))
+        .collect()
 }
 
 pub(crate) fn child_status_code(status: &std::process::ExitStatus) -> i32 {

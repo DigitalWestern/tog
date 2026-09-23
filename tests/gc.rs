@@ -542,3 +542,95 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
     assert!(!pytest_root.exists());
 }
+
+/// `tog x npm:<tool>` end to end: npm resolves through the store Node, the
+/// environment is projected as a `node_modules` forest link under an
+/// `npm-` cache directory, the tool runs on the store Node (never a `node`
+/// from the inherited PATH), a second run is a cache hit, a deleted projection is
+/// repaired, and `--clean` removes the root with the forest hint.
+#[test]
+#[ignore]
+fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
+    let temp = TempDir::new();
+    let store = temp.0.join("store");
+    let home = temp.0.join("home");
+    let project = temp.0.join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
+    // `semver` is a dependency-free package whose bin is a
+    // `#!/usr/bin/env node` script. tog itself needs the system PATH (tar
+    // shells out to gzip), so the inherited PATH leads with a decoy `node`
+    // that fails loudly: the tool prints its answer only if `x` put the
+    // store Node ahead of everything inherited, host Node included.
+    let decoy = temp.0.join("decoy-bin");
+    fs::create_dir_all(&decoy).unwrap();
+    fs::write(
+        decoy.join("node"),
+        "#!/bin/sh\necho 'decoy node ran instead of the store node' >&2\nexit 97\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(decoy.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", decoy.display());
+    let run = || {
+        Command::new(&bin)
+            .current_dir(&project)
+            .env("TOG_STORE", &store)
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env_remove("TOG_POLICY")
+            .env_remove("TOG_STRICT")
+            .env("NO_COLOR", "1")
+            .args(["x", "npm:semver@7.6.3", "1.2.3", "-r", ">=1"])
+            .output()
+            .unwrap()
+    };
+
+    let first = run();
+    let first_stderr = String::from_utf8_lossy(&first.stderr).into_owned();
+    let stdout = ok(first, "first x semver");
+    assert!(first_stderr.contains("resolving"), "{first_stderr}");
+    assert_eq!(stdout.trim(), "1.2.3");
+
+    let x_dir = home.join(".tog/x");
+    let root = fs::read_dir(&x_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.join(".tog/x.json").is_file())
+        .expect("semver x root");
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("npm-semver-"), "{name}");
+    assert!(root.join("node_modules").is_symlink());
+    assert!(root.join(".tog/closures/node.json").is_file());
+
+    // A cache hit resolves nothing.
+    let second = run();
+    let stderr = String::from_utf8_lossy(&second.stderr).into_owned();
+    assert_eq!(ok(second, "cached x semver").trim(), "1.2.3");
+    assert!(!stderr.contains("resolving"), "{stderr}");
+
+    // A deleted projection is reprojected, not trusted.
+    fs::remove_file(root.join("node_modules")).unwrap();
+    assert_eq!(ok(run(), "repair x semver").trim(), "1.2.3");
+    assert!(root.join("node_modules").is_symlink());
+
+    let cleaned = ok(
+        tog_home(
+            &bin,
+            &project,
+            &store,
+            &home,
+            &["x", "--clean", "npm:semver"],
+        ),
+        "clean x semver",
+    );
+    assert!(cleaned.contains("removed x environment"), "{cleaned}");
+    assert!(
+        cleaned.contains("'tog gc --project' also reclaims the node_modules forest"),
+        "{cleaned}"
+    );
+    assert!(!root.exists());
+}

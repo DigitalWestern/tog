@@ -11,7 +11,7 @@ use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
-use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
 use serde_json::Value;
 use std::io;
 use std::path::Path;
@@ -26,6 +26,12 @@ impl Tailor for Python {
 
     fn detect(&self, dir: &Path) -> io::Result<bool> {
         inputs::has_python_input(dir)
+    }
+
+    /// `tog x` resolves from the public registry and projects into its own
+    /// cache directory (`registry_tool.rs`).
+    fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
+        Ok(&python::registry_tool::PythonTool)
     }
 
     /// Host support and a pinned interpreter for the request this project

@@ -13,6 +13,7 @@ pub mod objects;
 pub mod pep440;
 pub mod pypi;
 pub mod pyselect;
+pub mod registry_tool;
 pub mod tailor;
 pub mod wheel;
 

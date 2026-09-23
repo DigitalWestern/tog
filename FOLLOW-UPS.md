@@ -118,12 +118,10 @@ by position.
   (`src/comforter/toolchain.rs`), so the guard proves the inputs of whatever
   directory the path names at recheck time. Carry one held root from
   preflight through publication when the rest of sync does (#132, with #55).
-- **`deps` and `x` as `Tailor` methods.** `src/commands/deps.rs` and
-  `src/commands/x.rs` are the only command files that still name a tailor
-  (Python and Node). A `Tailor::edit_manifest` and a
-  `Tailor::registry_tool` method with "unsupported" defaults would make both
-  registry-driven. Each is its own design review: deps edits user manifests,
-  and x has its own cache and root registration.
+- **`deps` as a `Tailor` method.** `src/commands/deps.rs` still names
+  tailors directly. A `Tailor::edit_manifest` method with an "unsupported"
+  default would make it registry-driven, the way `Tailor::registry_tool`
+  did for `x`. It is its own design review: deps edits user manifests.
 - **Two cross-tailor edges, allow-listed in `tests/architecture.rs`.**
   `tailors/python/build.rs` uses the cargo tailor's pinned toolchain to
   build sdists with Rust extensions. `tailors/node/` uses the Python tailor's

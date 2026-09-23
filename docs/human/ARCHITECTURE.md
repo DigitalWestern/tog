@@ -528,6 +528,18 @@ object kinds it produces, with their live and migration identity grammars and
 legacy-metadata adapters); `src/tailors/mod.rs` holds the trait and the registry the
 commands iterate. See docs/human/ADDING-A-TAILOR.md.
 
+`Tailor::registry_tool` is how `tog x` reaches an ecosystem. Its default
+answers "tog x does not support <id>"; Python and Node return a
+`RegistryTool` (`registry_tool.rs` in each folder) that supplies the cache
+directory prefix (`py`, `npm`), the runtime object id in the cache key, the
+command-line word and message labels, the executable directory,
+resolve-realize-project for one package, the launch environment, whether a
+cached projection still points at its environment, and the packages a
+pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
+directory, the `x/3` key, the lifecycle lock, gc root registration, and the
+policy checks on a cached hit, and is ecosystem-neutral except for the
+Corepack `pnpm` delegate path, which is Node by definition.
+
     python/mod.rs          pinned CPython provisioning
     python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)
     python/pypi.rs         Python planner (adapter)
@@ -541,11 +553,13 @@ commands iterate. See docs/human/ADDING-A-TAILOR.md.
     python/build_requires.rs  PEP 517 build requirements
     python/nativelibs.rs   pinned, relocatable native libraries for Linux builds
     python/artifacts.rs    install-time artifact policy
+    python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
     node/mod.rs            pins, plan types, scripts, path helpers
     node/plan.rs           package-lock.json planning
     node/realize.rs        env realization and sandboxed install scripts
     node/project.rs        node_modules projection and workspace links
     node/inputs.rs         missing-lock generation, lockfile importers
+    node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
     cargo/mod.rs           Cargo.lock importer + registry vendor realization
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation

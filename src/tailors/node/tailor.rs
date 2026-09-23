@@ -12,7 +12,7 @@ use crate::kernel::platform::Platform;
 use crate::kernel::toolchain::{Catalog, LegacyEvidence, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
-use crate::tailors::{ClosureListing, PackageRow, SyncRequest, Tailor};
+use crate::tailors::{ClosureListing, PackageRow, RegistryTool, SyncRequest, Tailor};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io;
@@ -72,6 +72,12 @@ impl Tailor for Node {
 
     fn detect(&self, dir: &Path) -> io::Result<bool> {
         Ok(NODE_INPUTS.iter().any(|name| dir.join(name).is_file()))
+    }
+
+    /// `tog x` resolves from the public registry and projects into its own
+    /// cache directory (`registry_tool.rs`).
+    fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
+        Ok(&node::registry_tool::NodeTool)
     }
 
     fn preflight(&self, platform: Platform, _dir: &Path) -> io::Result<()> {
@@ -305,7 +311,7 @@ fn store_home_from_object(path: &Path) -> Option<PathBuf> {
     Some(objects.parent()?.parent()?.to_path_buf())
 }
 
-fn encoded_workspace(workspace: &str) -> Option<String> {
+pub(super) fn encoded_workspace(workspace: &str) -> Option<String> {
     if workspace.is_empty()
         || workspace
             .split('/')
