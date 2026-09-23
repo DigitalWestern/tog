@@ -545,8 +545,8 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
 
 /// `tog x npm:<tool>` end to end: npm resolves through the store Node, the
 /// environment is projected as a `node_modules` forest link under an
-/// `npm-` cache directory, the tool runs on the store Node (PATH carries no
-/// host Node), a second run is a cache hit, a deleted projection is
+/// `npm-` cache directory, the tool runs on the store Node (never a `node`
+/// from the inherited PATH), a second run is a cache hit, a deleted projection is
 /// repaired, and `--clean` removes the root with the forest hint.
 #[test]
 #[ignore]
@@ -559,14 +559,28 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
     fs::create_dir_all(&project).unwrap();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_tog"));
     // `semver` is a dependency-free package whose bin is a
-    // `#!/usr/bin/env node` script, so it only runs if `x` put the store
-    // Node on PATH.
+    // `#!/usr/bin/env node` script. tog itself needs the system PATH (tar
+    // shells out to gzip), so the inherited PATH leads with a decoy `node`
+    // that fails loudly: the tool prints its answer only if `x` put the
+    // store Node ahead of everything inherited, host Node included.
+    let decoy = temp.0.join("decoy-bin");
+    fs::create_dir_all(&decoy).unwrap();
+    fs::write(
+        decoy.join("node"),
+        "#!/bin/sh\necho 'decoy node ran instead of the store node' >&2\nexit 97\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(decoy.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", decoy.display());
     let run = || {
         Command::new(&bin)
             .current_dir(&project)
             .env("TOG_STORE", &store)
             .env("HOME", &home)
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", &path)
             .env_remove("TOG_POLICY")
             .env_remove("TOG_STRICT")
             .env("NO_COLOR", "1")
