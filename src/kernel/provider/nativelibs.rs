@@ -1,4 +1,5 @@
-//! Pinned, relocatable native libraries for Linux builds.
+//! Pinned, relocatable native libraries for Linux builds (kernel provider
+//! layer): the set both Python sdist builds and npm install scripts mount.
 //!
 //! The table below is a deliberately boring conda-forge closure. It is not a
 //! solver: the records, including their sha256 values, were selected once
@@ -537,7 +538,7 @@ pub fn packages(platform: Platform) -> io::Result<&'static [NativePackage]> {
 /// still hashes to the `manifest_sha256` the record committed to: the object's
 /// identity names the manifest digest, never the individual archives, so a
 /// verified manifest match is the only sound way back to them.
-pub(crate) fn pinned_package_digests(platform: Platform) -> io::Result<Vec<String>> {
+pub fn pinned_package_digests(platform: Platform) -> io::Result<Vec<String>> {
     Ok(packages(platform)?
         .iter()
         .map(|package| package.sha256.to_string())
@@ -578,7 +579,7 @@ fn identity(store: &Store, platform: Platform) -> io::Result<Identity> {
 }
 
 #[cfg(test)]
-pub(crate) fn live_identity_for_test(store: &Store, platform: Platform) -> io::Result<Identity> {
+pub fn live_identity_for_test(store: &Store, platform: Platform) -> io::Result<Identity> {
     identity(store, platform)
 }
 
@@ -588,8 +589,10 @@ pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
     Ok(identity(store, platform)?.object_id())
 }
 
+/// Realize the pinned native library set. The caller has installed the
+/// object-kind rows (`tailors::install_kinds`), as every realization entry
+/// point does before it can publish.
 pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
-    crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "native library set")?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(store, platform)?;
@@ -1151,7 +1154,7 @@ fn safe_relative(relative: &str) -> io::Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-pub(crate) fn rewrite_prefix_file(
+pub fn rewrite_prefix_file(
     path: &Path,
     placeholder: &str,
     object: &Path,

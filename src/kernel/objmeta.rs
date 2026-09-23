@@ -2143,12 +2143,12 @@ mod tests {
     #[test]
     fn adapter_native_libs_recovers_the_pinned_manifest_digests() {
         let platform = crate::kernel::platform::Platform::X86_64UnknownLinuxGnu;
-        let manifest = crate::tailors::python::nativelibs::manifest_sha256(platform).unwrap();
+        let manifest = crate::kernel::provider::nativelibs::manifest_sha256(platform).unwrap();
         let (objects, cache) = proven(
             ident(
                 "native-libs",
                 "libset",
-                crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION,
+                crate::kernel::provider::nativelibs::NATIVE_LIBS_VERSION,
                 &[
                     ("platform", platform.triple()),
                     ("manifest_sha256", &manifest),
@@ -2160,7 +2160,7 @@ mod tests {
         assert!(objects.is_empty());
         let expected: Vec<String> = {
             let mut digests: Vec<String> =
-                crate::tailors::python::nativelibs::pinned_package_digests(platform)
+                crate::kernel::provider::nativelibs::pinned_package_digests(platform)
                     .unwrap()
                     .into_iter()
                     .map(|hex| format!("sha256:{hex}"))
@@ -2185,7 +2185,7 @@ mod tests {
             ident(
                 "native-libs",
                 "libset",
-                crate::tailors::python::nativelibs::NATIVE_LIBS_VERSION,
+                crate::kernel::provider::nativelibs::NATIVE_LIBS_VERSION,
                 &[
                     ("platform", platform.triple()),
                     ("manifest_sha256", &sha256('0')),
@@ -2200,7 +2200,7 @@ mod tests {
     #[test]
     fn adapter_native_libs_refuses_an_older_libset_version() {
         let platform = crate::kernel::platform::Platform::X86_64UnknownLinuxGnu;
-        let manifest = crate::tailors::python::nativelibs::manifest_sha256(platform).unwrap();
+        let manifest = crate::kernel::provider::nativelibs::manifest_sha256(platform).unwrap();
         let reason = unresolved(
             ident(
                 "native-libs",

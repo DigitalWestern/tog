@@ -181,7 +181,7 @@ fn seed_electron_shasums(store: &Store, platform: Platform, version: &str, zip_s
     };
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
     let dir = store.root.join("cache/electron-shasums").join(
-        tog::tailors::python::artifacts::electron_cache_directory(&release_url),
+        tog::kernel::provider::artifacts::electron_cache_directory(&release_url),
     );
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(

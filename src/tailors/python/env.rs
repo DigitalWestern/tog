@@ -552,7 +552,7 @@ pub(super) fn project_env_inner(
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let project_lock = store.project_lock(project_dir)?;
-    let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
+    let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let backup = reserve_backup_real_dir_for_store(&venv, &store)?;
     let mut refs = ClosureRefs::new();
     refs.object_path(&store, &activity, &env_obj)?;
@@ -1140,7 +1140,7 @@ mod tests {
         assert_eq!(planned, realized.object_id());
         if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
             let native_id =
-                crate::tailors::python::nativelibs::object_id_for(&store, platform).unwrap();
+                crate::kernel::provider::nativelibs::object_id_for(&store, platform).unwrap();
             assert_eq!(
                 realized.inputs.get("native_libs").map(String::as_str),
                 Some(native_id.as_str())

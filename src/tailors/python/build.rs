@@ -222,7 +222,7 @@ fn native_libs_identity_id(
     fast_requirements: bool,
 ) -> io::Result<Option<String>> {
     if (native_build || !fast_requirements) && native_libs_supported(platform) {
-        Ok(Some(crate::tailors::python::nativelibs::object_id_for(
+        Ok(Some(crate::kernel::provider::nativelibs::object_id_for(
             store, platform,
         )?))
     } else {
@@ -578,8 +578,9 @@ fn rust_plan_inputs(
         )
     })?;
     let manifest = source.join(manifest_rel);
-    let rust_version = crate::tailors::cargo::resolve_toolchain(platform, source)?.to_string();
-    let rust_id = crate::tailors::cargo::rust_object_id(platform, &rust_version)?;
+    let rust_version =
+        crate::kernel::provider::rust::resolve_toolchain(platform, source)?.to_string();
+    let rust_id = crate::kernel::provider::rust::rust_object_id(platform, &rust_version)?;
     let generated_path =
         store.cache_path("cargo-lock", &cargo_lock_cache_key(sdist_sha256, &rust_id));
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
@@ -606,7 +607,8 @@ fn rust_plan_inputs(
     } else {
         // This is the one cold path that must invoke Cargo. Persist the lock
         // before any later wheel-cache lookup so warm rebuilds stay offline.
-        let rust_obj = crate::tailors::cargo::ensure_rust_for(store, platform, &rust_version)?;
+        let rust_obj =
+            crate::kernel::provider::rust::ensure_rust_for(store, platform, &rust_version)?;
         let plan_home = work.join("cargo-plan-home");
         let lock = generate_cargo_lock(store, &rust_obj, &manifest, source, &plan_home)?;
         let text = fs::read_to_string(lock)?;
@@ -614,8 +616,8 @@ fn rust_plan_inputs(
         fs::write(&generated_path, &text)?;
         (text, true)
     };
-    let cargo_plan = crate::tailors::cargo::plan_cargo(&lock_text, &rust_version)?;
-    let vendor_id = crate::tailors::cargo::vendor_object_id(&cargo_plan)?;
+    let cargo_plan = crate::kernel::provider::crates::plan_cargo(&lock_text, &rust_version)?;
+    let vendor_id = crate::kernel::provider::crates::vendor_object_id(&cargo_plan)?;
     Ok(RustPlanInputs {
         rust_version,
         rust_id,
@@ -638,17 +640,19 @@ fn prepare_rust(
             "Rust build trigger found, but the sdist has no Cargo.toml",
         )
     })?;
-    let rust_obj = crate::tailors::cargo::ensure_rust_for(store, platform, &inputs.rust_version)?;
-    let cargo_plan = crate::tailors::cargo::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
-    let vendor_obj = crate::tailors::cargo::realize_vendor(store, &cargo_plan)?;
+    let rust_obj =
+        crate::kernel::provider::rust::ensure_rust_for(store, platform, &inputs.rust_version)?;
+    let cargo_plan =
+        crate::kernel::provider::crates::plan_cargo(&inputs.lock_text, &inputs.rust_version)?;
+    let vendor_obj = crate::kernel::provider::crates::realize_vendor(store, &cargo_plan)?;
     let cargo_home = work.join("cargo-home");
     fs::create_dir_all(&cargo_home)?;
     // An sdist's vendored crates can themselves come from git sources.
     fs::write(
         cargo_home.join("config.toml"),
-        crate::tailors::cargo::tog_config_text_for(
+        crate::kernel::provider::crates::tog_config_text_for(
             &vendor_obj,
-            &crate::tailors::cargo::plan_git_sources(&cargo_plan),
+            &crate::kernel::provider::crates::plan_git_sources(&cargo_plan),
         )?,
     )?;
     Ok((rust_obj, vendor_obj))
@@ -713,7 +717,7 @@ fn run_sdist_build(
     }
     envs.push(("PATH".into(), base_path));
     if let Some(native_libs) = native_libs {
-        envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
+        envs = crate::kernel::provider::nativelibs::compose_env(native_libs, &envs);
     }
     let path = envs
         .iter()
@@ -930,7 +934,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     }
 
     let native_libs = if native_libs_id.is_some() {
-        Some(crate::tailors::python::nativelibs::ensure_native_libs(
+        Some(crate::kernel::provider::nativelibs::ensure_native_libs(
             store, platform,
         )?)
     } else {

@@ -15,31 +15,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub(super) const RUSTFMT_VERSION: &str = "1.96.1";
-
-/// The layout recipe this binary knows for the rustfmt component. The
-/// catalog emits it and the object identity commits to it; a locked row
-/// naming another one is refused rather than laid out by guess.
-pub(super) const RUSTFMT_RECIPE: &str = "rustfmt/1";
-
-pub(super) struct RustfmtComponent {
-    pub(super) platform: Platform,
-    pub(super) url: &'static str,
-    pub(super) sha256: &'static str,
-}
-
-pub(super) const RUSTFMT_COMPONENTS: &[RustfmtComponent] = &[
-    RustfmtComponent {
-        platform: Platform::Aarch64AppleDarwin,
-        url: "https://static.rust-lang.org/dist/rustfmt-1.96.1-aarch64-apple-darwin.tar.xz",
-        sha256: "ed0cc9d72c04e7c3c4b7a82ab7f1ce5e33132017d062d8f9be6adf6472e8f165",
-    },
-    RustfmtComponent {
-        platform: Platform::X86_64UnknownLinuxGnu,
-        url: "https://static.rust-lang.org/dist/rustfmt-1.96.1-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "dcee5627f709f387cdca416a1d2ae9e6c2581cd117cdb4fd097c56c196384662",
-    },
-];
+use crate::kernel::provider::rust::{
+    RustfmtComponent, RUSTFMT_COMPONENTS, RUSTFMT_RECIPE, RUSTFMT_VERSION,
+};
 
 fn component(platform: Platform) -> io::Result<&'static RustfmtComponent> {
     RUSTFMT_COMPONENTS

@@ -229,7 +229,7 @@ pub(super) fn native_libs_identity_id(
     has_native: bool,
 ) -> io::Result<Option<String>> {
     if has_native && matches!(platform, Platform::X86_64UnknownLinuxGnu) {
-        Ok(Some(crate::tailors::python::nativelibs::object_id_for(
+        Ok(Some(crate::kernel::provider::nativelibs::object_id_for(
             store, platform,
         )?))
     } else {
@@ -274,11 +274,9 @@ pub fn realize_node_env_for(
 }
 
 /// The producer's provisioning decision, exposed to the `node-env` identity
-/// contract in `objects.rs` so both consult the same rule. Lives here because
-/// this file is the documented node-to-python-artifacts seam
-/// (tests/architecture.rs allow-list).
+/// contract in `objects.rs` so both consult the same rule.
 pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'a str> {
-    crate::tailors::python::artifacts::provisioned_version(name, version)
+    crate::kernel::provider::artifacts::provisioned_version(name, version)
 }
 
 /// The two spellings of the `node-env/4` native decision. The producer
@@ -481,7 +479,7 @@ fn node_env_identity_inner(
     // be replaced, so the package version alone does not determine the bytes
     // that reach the install script.
     for p in &plan.packages {
-        if let Some(input) = crate::tailors::python::artifacts::provisioned_identity_input(
+        if let Some(input) = crate::kernel::provider::artifacts::provisioned_identity_input(
             store, platform, &p.name, &p.version,
         )? {
             inputs.insert(format!("provisioned:{}", p.path), input);
@@ -1069,7 +1067,7 @@ pub(super) fn realize_node_env_with_node_object(
     let (_leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, plan)?;
 
     let native_libs = if native_libs_id.is_some() {
-        Some(crate::tailors::python::nativelibs::ensure_native_libs(
+        Some(crate::kernel::provider::nativelibs::ensure_native_libs(
             store, platform,
         )?)
     } else {
@@ -1267,8 +1265,8 @@ fn ensure_gyp_python(
     // node-gyp's interpreter is not a component of the Node release bundle
     // (the pin table records no version for it), so it comes from the
     // shipped Python catalog rather than this project's node selection.
-    let python = crate::tailors::python::shipped_selection("3.12")?;
-    let p = crate::tailors::python::realize_runtime(store, platform, &python)
+    let python = crate::kernel::provider::cpython::shipped_selection("3.12")?;
+    let p = crate::kernel::provider::cpython::realize_runtime(store, platform, &python)
         .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
     Ok(python_obj.insert(p).clone())
 }
@@ -1374,7 +1372,7 @@ fn apply_artifact_policy(
             || a.url.contains(&format!("/{}/", p.name))
     });
     let provisioned =
-        crate::tailors::python::artifacts::provision(store, platform, &p.name, &p.version, tmp);
+        crate::kernel::provider::artifacts::provision(store, platform, &p.name, &p.version, tmp);
     if let Some(provisioning) = require_provisioning(p, provisioned)? {
         envs.extend(provisioning.envs);
         for digest in provisioning.cache_digests {
@@ -1388,7 +1386,7 @@ fn apply_artifact_policy(
             )?;
         }
     }
-    if let Some(skip) = crate::tailors::python::artifacts::skip_download_for(&p.name) {
+    if let Some(skip) = crate::kernel::provider::artifacts::skip_download_for(&p.name) {
         for (key, value) in skip.envs {
             envs.push(((*key).to_string(), (*value).to_string()));
         }
@@ -1397,8 +1395,8 @@ fn apply_artifact_policy(
             &format!("{}@{}", p.name, p.version),
             &format!("install-time download skipped; run: {}", skip.hint),
         )?;
-    } else if crate::tailors::python::artifacts::wants_source_build(&script_text, declared_here) {
-        envs.extend(crate::tailors::python::artifacts::source_build_envs());
+    } else if crate::kernel::provider::artifacts::wants_source_build(&script_text, declared_here) {
+        envs.extend(crate::kernel::provider::artifacts::source_build_envs());
         crate::kernel::policy::record(
             crate::kernel::policy::BUILT_FROM_SOURCE,
             &format!("{}@{}", p.name, p.version),
@@ -1419,8 +1417,8 @@ fn apply_artifact_policy(
 /// re-run once the download works realizes the real thing.
 fn require_provisioning(
     p: &NpmPackage,
-    provisioned: io::Result<Option<crate::tailors::python::artifacts::Provisioning>>,
-) -> io::Result<Option<crate::tailors::python::artifacts::Provisioning>> {
+    provisioned: io::Result<Option<crate::kernel::provider::artifacts::Provisioning>>,
+) -> io::Result<Option<crate::kernel::provider::artifacts::Provisioning>> {
     provisioned.map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -1552,7 +1550,7 @@ pub(super) fn run_install_scripts_staged(
         )?;
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {
-            envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
+            envs = crate::kernel::provider::nativelibs::compose_env(native_libs, &envs);
         }
         let path_env = envs
             .iter()

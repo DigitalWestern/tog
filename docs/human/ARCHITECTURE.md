@@ -127,7 +127,7 @@ store-pinned uv (`uv pip compile --generate-hashes`); hash-pinned
 requirements and `pyproject.toml` dependencies are locked directly, choosing
 the best wheel per platform (native arm64 > abi3 > universal2 > pure >
 sdist). CPython comes from astral-sh/python-build-standalone with sha256s
-pinned in `python/mod.rs`; interpreter selection happens before locking
+pinned in `kernel/provider/cpython.rs`; interpreter selection happens before locking
 (`.python-version` wins, then `requires-python`). Wheels install into the
 env object; sdists build in a network-denied sandbox (legacy setuptools
 records keep `sdist-build/2`, PEP 517 uses `sdist-build/4` with an immutable
@@ -514,7 +514,8 @@ every tailor and the kernel):
     selfupdate.rs   tog update --self, and doctor's version row (release lookup)
     x.rs            tog x: run a registry tool without adding it to a project
 
-Kernel (`src/kernel/`, ecosystem-agnostic):
+Kernel (`src/kernel/`, names no tailor; `provider/` holds the pinned toolchains
+and build inputs tailors share, so no tailor reaches into another):
 
     types.rs        Identity, Plan, LockedPackage, GitSource
     digest.rs       validated content digests (sha1/sha256/sha512)
@@ -543,6 +544,13 @@ Kernel (`src/kernel/`, ecosystem-agnostic):
                     select.rs version requests and the global order, source.rs
                     the typed endpoint policy, legacy.rs seeding from closures
     sandbox.rs      hermetic build sandbox (Seatbelt / bubblewrap)
+    provider/       shared toolchain providers, the pinned things more than one
+                    tailor realizes: cpython.rs (CPython + uv pins, catalog,
+                    realization; node-gyp's interpreter too), rust.rs (Rust
+                    pins, catalog, toolchain files), crates.rs (Cargo.lock
+                    vendoring; sdists with Rust extensions too),
+                    nativelibs.rs (the Linux native library set), artifacts.rs
+                    (install-time artifact policy)
     ui.rs           output conventions: quiet/verbose/color, error channel
 
 Comforter (`src/comforter/`): ecosystem-neutral closure records, projection
@@ -570,7 +578,7 @@ directory, the `x/3` key, the lifecycle lock, gc root registration, and the
 policy checks on a cached hit, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition.
 
-    python/mod.rs          pinned CPython provisioning
+    python/mod.rs          CPython pin lookup over kernel/provider/cpython.rs
     python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)
     python/pypi.rs         Python planner (adapter)
     python/wheel.rs        PEP 427 wheel installer
@@ -581,8 +589,6 @@ Corepack `pnpm` delegate path, which is Node by definition.
     python/env.rs          venv-shaped env object realization and projection
     python/build.rs        sandboxed sdist-to-wheel builds
     python/build_requires.rs  PEP 517 build requirements
-    python/nativelibs.rs   pinned, relocatable native libraries for Linux builds
-    python/artifacts.rs    install-time artifact policy
     python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
     node/mod.rs            pins, plan types, scripts, path helpers
     node/plan.rs           package-lock.json planning
@@ -591,7 +597,8 @@ Corepack `pnpm` delegate path, which is Node by definition.
     node/inputs.rs         missing-lock generation, lockfile importers
     node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs
-    cargo/mod.rs           Cargo.lock importer + registry vendor realization
+    cargo/mod.rs           project Cargo env + sandboxed build over
+                           kernel/provider/{rust,crates}.rs
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
     cargo/rustfmt.rs       pinned formatter component for `tog fmt`
     go/mod.rs              module closure via the pinned Go toolchain

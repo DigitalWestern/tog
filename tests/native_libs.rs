@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tog::kernel::platform::Platform;
+use tog::kernel::provider::nativelibs::{compose_env, ensure_native_libs, size_bytes};
 use tog::kernel::sandbox::{run_build_spec, BuildSpec};
 use tog::kernel::store::Store;
-use tog::tailors::python::nativelibs::{compose_env, ensure_native_libs, size_bytes};
 
 struct TempDir(PathBuf);
 
@@ -92,6 +92,7 @@ fn linux_native_libs_pkg_config_sdist_and_runtime() {
         }
     };
     let store = Store::open().expect("store");
+    tog::tailors::install_kinds();
     let native = ensure_native_libs(&store, Platform::host().unwrap()).expect("native libset");
     let bytes = size_bytes(&native.path).expect("native libset size");
     println!(

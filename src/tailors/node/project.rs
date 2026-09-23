@@ -615,7 +615,7 @@ pub fn project_node_env_recorded(
         .ok_or_else(|| err("environment object is not in a Tog store"))?;
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
-    let native_reference = crate::tailors::python::nativelibs::env_reference(&env_obj)?;
+    let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let native_id = native_reference_id(&native_reference)?;
     let valid_env = env_obj
         .file_name()

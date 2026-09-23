@@ -41,10 +41,11 @@ fn electron_is_provisioned_where_its_installer_looks() {
 
     // A real, published release.
     let version = "39.0.0";
-    let provisioning =
-        tog::tailors::python::artifacts::provision(&store, platform, "electron", version, &scratch)
-            .expect("provision")
-            .expect("electron is provisioned");
+    let provisioning = tog::kernel::provider::artifacts::provision(
+        &store, platform, "electron", version, &scratch,
+    )
+    .expect("provision")
+    .expect("electron is provisioned");
 
     let cache_root = provisioning
         .envs
@@ -53,7 +54,7 @@ fn electron_is_provisioned_where_its_installer_looks() {
         .map(|(_, value)| PathBuf::from(value))
         .expect("the installer's cache variable is set");
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
-    let dir = cache_root.join(tog::tailors::python::artifacts::electron_cache_directory(
+    let dir = cache_root.join(tog::kernel::provider::artifacts::electron_cache_directory(
         &release_url,
     ));
     let (os, arch) = match platform {
