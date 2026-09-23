@@ -426,79 +426,44 @@ fn run_go(
         .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
 }
 
-/// Toolchain selection from go.mod directives: `go` is a minimum,
-/// `toolchain` a suggestion; pick the lowest pin satisfying both.
-pub fn resolve_toolchain(platform: Platform, gomod: &str) -> io::Result<&'static str> {
-    let pins = go_pins(platform)?;
-    let mut min_go: Option<Vec<u64>> = None;
-    let mut suggestion: Option<Vec<u64>> = None;
-    for line in gomod.lines() {
-        let line = line.trim();
-        if let Some(v) = line.strip_prefix("go ") {
-            min_go = Some(go_version_key(v.trim(), &pins)?);
-        } else if let Some(v) = line.strip_prefix("toolchain ") {
-            let v = v.trim();
-            if v == "default" {
-                continue;
-            }
-            let v = v.strip_prefix("go").unwrap_or(v);
-            suggestion = Some(go_version_key(v, &pins)?);
-        }
-    }
-    let floor = |k: &Option<Vec<u64>>| k.clone().unwrap_or_default();
-    let (need_a, need_b) = (floor(&min_go), floor(&suggestion));
-    pins.iter()
-        .copied()
-        .filter_map(|p| go_version_key(p, &pins).ok().map(|k| (k, p)))
-        .filter(|(k, _)| *k >= need_a && *k >= need_b)
-        .min_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, p)| p)
-        .ok_or_else(|| {
-            err(format!(
-                "no pinned Go toolchain satisfies this module's go/toolchain \
-                 directives; pinned: {}",
-                pins.join(", ")
-            ))
-        })
+/// The Go version this project uses, answered the way sync answers it:
+/// the `[toolchain.go]` section of `tog-toolchain.toml` when there is a
+/// lock, otherwise the newest complete catalog release satisfying go.mod's
+/// `go` and `toolchain` directives. It writes nothing, and a lock sync
+/// would refuse (no Go section, or stale against go.mod) is refused here
+/// in the same words.
+///
+/// `tog doctor` and the Go `tog status` row ask this. Sync, plan and build
+/// take the version from the [`Selected`] they are given, and `tog deps`
+/// from the same read-only resolution, so no command names a Go sync does
+/// not use. go's own rule (`go` as a minimum, the lowest toolchain that
+/// satisfies it) is deliberately not applied anywhere: with more than one
+/// pin it would answer with an older release than selection does. A
+/// closure written before the lock existed is not consulted either; status
+/// reports the missing lock on its own line.
+pub fn project_go_version(platform: Platform, project_dir: &Path) -> io::Result<String> {
+    project_go_version_from(toolchain_catalog()?, platform, project_dir)
 }
 
-/// Resolve the Go version a project's go.mod asks for.
-///
-/// This is the pre-lock answer, and the callers left are the ones with no
-/// selection in hand: `tog doctor` and `tog status`, which report on a
-/// project without syncing it, and `tog deps`. Sync, plan and build take
-/// the version from the [`Selected`] they are given instead, so what they
-/// realize is what the lock says. Note the two do not use the same rule
-/// when a catalog carries several pins: this one answers with the lowest
-/// pin that satisfies the directives, the way the go command treats `go` as
-/// a minimum, while selection answers with the newest release that
-/// satisfies the same request.
-pub fn resolve_project_toolchain(
+fn project_go_version_from(
+    catalog: Catalog,
     platform: Platform,
     project_dir: &Path,
-) -> io::Result<&'static str> {
-    let gomod = fs::read_to_string(project_dir.join("go.mod"))
-        .map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
-    resolve_toolchain(platform, &gomod)
-}
-
-/// Go version ordering: numeric dot components, missing patch = 0.
-/// Prerelease suffixes (rc/beta) are rejected — no pins carry them.
-fn go_version_key(v: &str, pins: &[&str]) -> io::Result<Vec<u64>> {
-    let mut key: Vec<u64> = Vec::new();
-    for part in v.split('.') {
-        key.push(part.parse::<u64>().map_err(|_| {
-            err(format!(
-                "unsupported Go version {v:?} (prerelease/custom toolchains \
-                 are not supported; pinned: {})",
-                pins.join(", ")
-            ))
-        })?);
-    }
-    while key.len() < 3 {
-        key.push(0);
-    }
-    Ok(key)
+) -> io::Result<String> {
+    use crate::comforter::toolchain::{self as project_toolchain, EcosystemInput, Mode};
+    let root = ProjectRoot::open(project_dir)?;
+    let resolved = project_toolchain::resolve(
+        &root,
+        platform,
+        vec![EcosystemInput {
+            lock_ecosystem: "go".into(),
+            catalog,
+            legacy: None,
+        }],
+        Mode::ReadOnly,
+        false,
+    )?;
+    Ok(resolved.get("go")?.version("go")?.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1753,59 +1718,99 @@ mod tests {
         assert_eq!(pin.url, "https://go.dev/dl/go1.27.0.darwin-arm64.tar.gz");
     }
 
-    #[test]
-    fn toolchain_selection_rules() {
-        assert_eq!(
-            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.21\n").unwrap(),
-            "1.27.0"
-        );
-        assert_eq!(
-            resolve_toolchain(
-                Platform::Aarch64AppleDarwin,
-                "module m\n\ngo 1.27\n\ntoolchain go1.27.0\n"
-            )
-            .unwrap(),
-            "1.27.0"
-        );
-        assert_eq!(
-            resolve_toolchain(
-                Platform::Aarch64AppleDarwin,
-                "module m\n\ngo 1.24\n\ntoolchain default\n"
-            )
-            .unwrap(),
-            "1.27.0"
-        );
-        // Requirement above every pin -> fail.
-        assert!(resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.99\n").is_err());
-        // Prerelease -> fail with instructions.
-        assert!(
-            resolve_toolchain(Platform::Aarch64AppleDarwin, "module m\n\ngo 1.27rc1\n").is_err()
-        );
+    /// A project directory holding just this go.mod.
+    fn gomod_project(temp: &TempDir, gomod: &str) -> PathBuf {
+        let dir = temp.0.join("proj");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), gomod).unwrap();
+        dir
     }
 
     #[test]
-    fn linux_toolchain_selection_rules() {
-        let platform = Platform::X86_64UnknownLinuxGnu;
-        for directive in ["go 1.21", "go 1.27", "go 1.27.0"] {
-            assert_eq!(
-                resolve_toolchain(platform, &format!("module m\n\n{directive}\n")).unwrap(),
-                "1.27.0",
-                "directive {directive}"
-            );
+    fn toolchain_selection_rules() {
+        for platform in [
+            Platform::Aarch64AppleDarwin,
+            Platform::X86_64UnknownLinuxGnu,
+        ] {
+            for gomod in [
+                "module m\n\ngo 1.21\n",
+                "module m\n\ngo 1.27\n",
+                "module m\n\ngo 1.27.0\n",
+                "module m\n\ngo 1.21\n\ntoolchain go1.27.0\n",
+                "module m\n\ngo 1.24\n\ntoolchain default\n",
+            ] {
+                let temp = TempDir::new();
+                let dir = gomod_project(&temp, gomod);
+                assert_eq!(
+                    project_go_version(platform, &dir).unwrap(),
+                    "1.27.0",
+                    "{gomod:?}"
+                );
+            }
+            // A requirement above every pin, and a prerelease, are refused.
+            for gomod in [
+                "module m\n\ngo 1.99\n",
+                "module m\n\ngo 1.27\n\ntoolchain go1.28\n",
+                "module m\n\ngo 1.27rc1\n",
+                "module m\n\ngo 1.27\n\ntoolchain go1.27rc1\n",
+            ] {
+                let temp = TempDir::new();
+                let dir = gomod_project(&temp, gomod);
+                assert!(project_go_version(platform, &dir).is_err(), "{gomod:?}");
+            }
         }
-        assert_eq!(
-            resolve_toolchain(platform, "module m\n\ngo 1.21\n\ntoolchain go1.27.0\n").unwrap(),
-            "1.27.0"
-        );
-        assert_eq!(
-            resolve_toolchain(platform, "module m\n\ngo 1.21\n\ntoolchain default\n").unwrap(),
-            "1.27.0"
-        );
-        assert!(resolve_toolchain(platform, "module m\n\ngo 1.28\n").is_err());
-        assert!(resolve_toolchain(platform, "module m\n\ngo 1.27\n\ntoolchain go1.28\n").is_err());
-        assert!(resolve_toolchain(platform, "module m\n\ngo 1.27rc1\n").is_err());
+    }
+
+    /// Two Go releases that both satisfy `go 1.26`.
+    fn two_pin_catalog() -> Catalog {
+        use crate::kernel::toolchain::fixtures::bundle;
+        Catalog::new(
+            "go",
+            vec![
+                bundle("go-1.26.0", "go", "1.26.0", Platform::ALL),
+                bundle("go-1.27.0", "go", "1.27.0", Platform::ALL),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// With no lock, doctor and status name what selection would lock: the
+    /// newest satisfying release, not go's lowest-satisfying one.
+    #[test]
+    fn the_lockless_answer_is_the_newest_satisfying_release() {
+        use crate::kernel::toolchain::{input, select_for};
+        let temp = TempDir::new();
+        let dir = gomod_project(&temp, "module m\n\ngo 1.26\n");
+        let catalog = two_pin_catalog();
+        let rows = input::discover(&ProjectRoot::open(&dir).unwrap(), "go").unwrap();
+        let selected = select_for(&catalog, "go", &rows).unwrap();
+        assert_eq!(selected.component("go").unwrap().version, "1.27.0");
+        let answer =
+            project_go_version_from(catalog.clone(), Platform::X86_64UnknownLinuxGnu, &dir)
+                .unwrap();
+        assert_eq!(answer, "1.27.0");
         assert!(
-            resolve_toolchain(platform, "module m\n\ngo 1.27\n\ntoolchain go1.27rc1\n").is_err()
+            !dir.join(crate::kernel::toolchain::lock::LOCK_PATH).exists(),
+            "answering wrote a lock"
+        );
+    }
+
+    /// A committed lock that pins the older release wins over selection.
+    #[test]
+    fn a_lock_that_pins_the_older_release_wins() {
+        use crate::kernel::toolchain::input;
+        use crate::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+        let temp = TempDir::new();
+        let dir = gomod_project(&temp, "module m\n\ngo 1.26\n");
+        let catalog = two_pin_catalog();
+        let rows = input::discover(&ProjectRoot::open(&dir).unwrap(), "go").unwrap();
+        let older = catalog.release("go-1.26.0").unwrap().clone();
+        let mut lock = ToolchainLock::new(env!("CARGO_PKG_VERSION"));
+        lock.set_ecosystem("go", &older, &rows).unwrap();
+        fs::write(dir.join(LOCK_PATH), lock.canonical_bytes()).unwrap();
+        assert_eq!(
+            project_go_version_from(catalog, Platform::X86_64UnknownLinuxGnu, &dir).unwrap(),
+            "1.26.0"
         );
     }
 
@@ -2156,7 +2161,6 @@ mod tests {
         )
         .unwrap();
         let gomod = fs::read_to_string(project.join("go.mod")).unwrap();
-        assert!(resolve_toolchain(Platform::host().unwrap(), &gomod).unwrap() == "1.27.0");
         write_plan_cache(
             &project,
             &plan_cache_key("1.27.0", &gomod, &gosum, &source_digest(&project).unwrap()),
