@@ -148,6 +148,14 @@ by position.
   exception rather than a refusal, and a source that fails to parse gets the
   same row as one with the field absent. Decide in or out, and make a parse
   failure always stale (#134).
+- **GC loose ends from #162.** Three small `src/kernel/store/roots.rs`
+  fixes: a case-mismatched `gc --dry-run --forget` key previews fewer
+  deletions on macOS (#163); the root/2 importer calls a path inside this
+  store's own object "another store" (#164); re-importing a
+  `node-forest/2` closure adds a legacy `projection_id` projection sync
+  never published (#165).
+- **`gc --migrate-metadata` as a `fix:` line (#166).** It resolves only a
+  transient failure. Recommended: keep `fix:`.
 - **Two PEP 440 version grammars.** `src/kernel/toolchain/select.rs` has
   the small numeric `Version`/specifier subset the toolchain selector needs;
   `src/tailors/python/pep440.rs` has the full grammar. The Python source
