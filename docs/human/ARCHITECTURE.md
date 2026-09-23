@@ -341,6 +341,11 @@ it, so preview and sweep are the same phases over the same snapshot.
 Whether an object may be deleted is decided by `meta/<id>.json`
 (`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
 digests, and an `evidence` marker, `"explicit"` or `"adapted:<kind>@<n>"`.
+Explicit evidence names what the realization actually read, which can be
+less than its identity names: a node env's identity carries every declared
+artifact and provisioned download the plan could use, but only the ones an
+install script was given are cache dependencies, because a commit refuses to
+claim a cache entry that is not present.
 Adapters in `src/kernel/objmeta.rs` upgrade legacy records to this form; each is a
 pure function of one record plus a read-only index, dispatched on the
 (kind, schema) pair, and never guesses from a current default pin. Unknown

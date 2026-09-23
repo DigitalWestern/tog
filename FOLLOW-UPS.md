@@ -63,7 +63,7 @@ by position.
   hand. That includes `tog build` syncing a stale ecosystem first; the
   ignored e2e suites could drop their explicit `sync` step to cover it.
 
-- **npm regressions from the 2026-09-11 hit-rate run.** All four synced on
+- **npm regressions from the 2026-09-11 hit-rate run.** Each synced on
   2026-09-05 at the same pinned commits. Error text is in
   `docs/agent/HITRATE.md`.
   - *vitejs/vite:* a git-tracked `node_modules` directory inside a pnpm
@@ -73,10 +73,6 @@ by position.
     (`replace_project_symlink`, `src/comforter/mod.rs`). Needs a rule:
     either a path that already owns a real `node_modules` is not a workspace
     to project, or the pnpm importer's workspace list is too broad.
-  - *microsoft/playwright:* `commit env: cache dependency sha256:… is
-    unavailable`. The env commit names a cache object that is missing during
-    a single sync. Likely object metadata's cache-dependency recording.
-    Reproduce with a fresh store before assuming anything.
   - *mermaid-js/mermaid:* `pnpm patch fastdom has no package@version
     identity`. pnpm `patchedDependencies` keyed by a bare package name
     applies to every version. Decide whether to support it by applying the

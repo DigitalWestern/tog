@@ -1440,6 +1440,7 @@ mod tests {
             lock_source: "package-lock.json".into(),
         };
         let mut cleanup: Vec<PathBuf> = Vec::new();
+        let mut consumed = crate::kernel::store::ObjectDeps::new();
         run_install_scripts_staged(
             &store,
             Platform::host().unwrap(),
@@ -1448,9 +1449,15 @@ mod tests {
             &plan,
             &[],
             None,
+            &mut consumed,
             &mut cleanup,
         )
         .expect("no lifecycle work to do");
+        assert_eq!(
+            consumed,
+            crate::kernel::store::ObjectDeps::new(),
+            "no lifecycle ran, so no cache entry was consumed"
+        );
         assert!(
             cleanup.is_empty(),
             "no scratch stage dirs were taken: {cleanup:?}"

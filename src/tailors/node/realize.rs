@@ -913,17 +913,16 @@ fn place_git_packages(
     Ok(())
 }
 
-/// Provenance for the committed env object.
+/// Provenance for the committed env object: the bytes placed into the tree.
 ///
 /// Registry packages retain their exact SRI digest; git packages retain the
-/// realized source object; lifecycle inputs are explicit cache digests rather
-/// than guesses from the identity map. Called before the package vectors are
-/// merged and dropped.
+/// realized source object. Called before the package vectors are merged and
+/// dropped. Lifecycle inputs (declared artifacts, provisioned downloads) are
+/// added by `run_install_scripts` as it consumes them: the identity names
+/// every one the plan could use, but only the ones a script actually read
+/// were fetched, and a commit refuses to claim a cache entry that is absent.
 fn env_object_deps(
-    store: &Store,
-    platform: Platform,
     plan: &NpmPlan,
-    artifacts: &[DeclaredArtifact],
     node_obj: &Path,
     native_libs_id: Option<&str>,
     git_objects: &[(NpmPackage, PathBuf)],
@@ -943,23 +942,6 @@ fn env_object_deps(
         } else {
             deps.cache_digest(Digest::from_sri(&package.integrity)?);
         }
-        if let Some(input) = crate::tailors::python::artifacts::provisioned_identity_input(
-            store,
-            platform,
-            &package.name,
-            &package.version,
-        )? {
-            let (_, sha256) = input.rsplit_once(':').ok_or_else(|| {
-                err(format!(
-                    "provisioned artifact identity for {} has no sha256",
-                    package.name
-                ))
-            })?;
-            deps.cache_digest(Digest::sha256(sha256)?);
-        }
-    }
-    for artifact in artifacts {
-        deps.cache_digest(Digest::sha256(&artifact.sha256)?);
     }
     Ok(deps)
 }
@@ -1098,15 +1080,7 @@ pub(super) fn realize_node_env_with_node_object(
     extract_tarball_packages(store, platform, &staged, &mut tarballs)?;
     place_git_packages(store, platform, &staged, &mut git_objects)?;
     // Capture provenance before the package vectors are merged and dropped.
-    let deps = env_object_deps(
-        store,
-        platform,
-        plan,
-        artifacts,
-        node_obj,
-        native_libs_id.as_deref(),
-        &git_objects,
-    )?;
+    let mut deps = env_object_deps(plan, node_obj, native_libs_id.as_deref(), &git_objects)?;
 
     let mut tarballs = tarballs;
     tarballs.append(&mut git_objects);
@@ -1123,6 +1097,7 @@ pub(super) fn realize_node_env_with_node_object(
         plan,
         artifacts,
         native_libs.as_ref().map(|set| set.path.as_path()),
+        &mut deps,
     )?;
 
     commit_env_object(store, &identity, &staged, &deps)
@@ -1156,6 +1131,10 @@ pub(super) fn classify_lifecycle_result(result: io::Result<()>) -> Result<(), Li
 /// default, while strict policy preserves the fail-closed behavior. Isolation
 /// per package: a fresh scratch HOME each, tool shims in a directory scripts
 /// cannot write, declared artifacts planted per consuming HOME.
+///
+/// Every cache entry a script is given (a planted declared artifact, a
+/// provisioned download) is added to `consumed`, the env object's evidence.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_install_scripts(
     store: &Store,
     platform: Platform,
@@ -1164,6 +1143,7 @@ pub(super) fn run_install_scripts(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs: Option<&Path>,
+    consumed: &mut crate::kernel::store::ObjectDeps,
 ) -> io::Result<()> {
     // Scratch stage dirs (tool shims, per-package HOMEs, snapshots) are
     // removed on every exit, including the fatal Unsupported paths (missing
@@ -1177,6 +1157,7 @@ pub(super) fn run_install_scripts(
         plan,
         artifacts,
         native_libs,
+        consumed,
         &mut cleanup,
     );
     for t in cleanup {
@@ -1249,13 +1230,16 @@ fn ensure_lifecycle_tools(
 }
 
 /// Plant declared artifacts where this package's installer looks (paths are
-/// HOME-relative; HOME is this scratch dir).
+/// HOME-relative; HOME is this scratch dir). Each planted artifact is
+/// recorded in `consumed`.
 fn plant_declared_artifacts(
     store: &Store,
     artifacts: &[DeclaredArtifact],
     tmp: &Path,
+    consumed: &mut crate::kernel::store::ObjectDeps,
 ) -> io::Result<()> {
     for a in artifacts {
+        consumed.cache_digest(Digest::sha256(&a.sha256)?);
         let src = download_verified_held(store, &a.url, &a.sha256)
             .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
         let dest = tmp.join(&a.path);
@@ -1375,6 +1359,7 @@ fn apply_artifact_policy(
     artifacts: &[DeclaredArtifact],
     phases: &[(&str, String)],
     envs: &mut Vec<(String, String)>,
+    consumed: &mut crate::kernel::store::ObjectDeps,
 ) -> io::Result<()> {
     let script_text = phases
         .iter()
@@ -1391,6 +1376,9 @@ fn apply_artifact_policy(
     match crate::tailors::python::artifacts::provision(store, platform, &p.name, &p.version, tmp) {
         Ok(Some(provisioning)) => {
             envs.extend(provisioning.envs);
+            for digest in provisioning.cache_digests {
+                consumed.cache_digest(digest);
+            }
             for (subject, detail) in &provisioning.records {
                 crate::kernel::policy::record(
                     crate::kernel::policy::ARTIFACT_PROVISIONED,
@@ -1507,6 +1495,7 @@ pub(super) fn run_install_scripts_staged(
     plan: &NpmPlan,
     artifacts: &[DeclaredArtifact],
     native_libs: Option<&Path>,
+    consumed: &mut crate::kernel::store::ObjectDeps,
     cleanup: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
@@ -1529,7 +1518,7 @@ pub(super) fn run_install_scripts_staged(
         // one package's scripts and the next.
         let tmp = store.stage()?;
         cleanup.push(tmp.clone());
-        plant_declared_artifacts(store, artifacts, &tmp)?;
+        plant_declared_artifacts(store, artifacts, &tmp, consumed)?;
 
         // Snapshot lives in its own stage dir: neither readable nor writable
         // inside the sandbox, so a failing script cannot tamper with what
@@ -1544,7 +1533,9 @@ pub(super) fn run_install_scripts_staged(
 
         let path_env = lifecycle_path_env(&tools_dir, node_obj, staged, &p.path);
         let mut envs = lifecycle_base_envs(platform, node_obj, &python_bin, &tmp, p);
-        apply_artifact_policy(store, platform, p, &tmp, artifacts, &phases, &mut envs)?;
+        apply_artifact_policy(
+            store, platform, p, &tmp, artifacts, &phases, &mut envs, consumed,
+        )?;
         envs.push(("PATH".into(), path_env.clone()));
         if let Some(native_libs) = native_libs {
             envs = crate::tailors::python::nativelibs::compose_env(native_libs, &envs);
