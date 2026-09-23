@@ -81,10 +81,16 @@ impl Version {
         &self.0
     }
 
-    /// `3.12.14` starts with `3.12`; `3.120.0` does not.
+    /// `3.12.14` starts with `3.12`; `3.120.0` does not. The prefix keeps
+    /// every component it states, so `24.0` names the 24.0 line and
+    /// `24.20.0` does not start with it; the candidate is zero-padded, so
+    /// `24` starts with `24.0`.
     pub fn starts_with(&self, prefix: &Version) -> bool {
-        let (parts, prefix) = (self.trimmed(), prefix.trimmed());
-        parts.len() >= prefix.len() && parts[..prefix.len()] == prefix[..]
+        prefix
+            .0
+            .iter()
+            .enumerate()
+            .all(|(index, part)| self.0.get(index).copied().unwrap_or(0) == *part)
     }
 }
 
@@ -149,6 +155,12 @@ pub enum VersionRequest {
     Prefix(Version),
     /// The newest release satisfying every specifier (`>=3.11,<3.13`).
     Specifiers(Vec<Specifier>),
+    /// The newest release satisfying any one alternative, each alternative
+    /// being requests that all apply (node semver's `^20.19 || >=22.12`,
+    /// Poetry's `^3.9 || ^3.12`). Every alternative states at least one
+    /// request: an alternative that states nothing makes the whole
+    /// disjunction unconstrained, and the reader lowers that to no request.
+    AnyOf(Vec<Vec<VersionRequest>>),
     /// The newest complete release.
     Newest,
 }
@@ -161,6 +173,9 @@ impl VersionRequest {
             VersionRequest::Specifiers(specifiers) => {
                 specifiers.iter().all(|s| s.matches(candidate))
             }
+            VersionRequest::AnyOf(alternatives) => alternatives
+                .iter()
+                .any(|all| all.iter().all(|request| request.matches(candidate))),
             VersionRequest::Newest => true,
         }
     }
@@ -186,6 +201,16 @@ impl fmt::Display for VersionRequest {
                     })
                     .collect();
                 f.write_str(&parts.join(","))
+            }
+            VersionRequest::AnyOf(alternatives) => {
+                let parts: Vec<String> = alternatives
+                    .iter()
+                    .map(|all| {
+                        let all: Vec<String> = all.iter().map(ToString::to_string).collect();
+                        all.join(" ")
+                    })
+                    .collect();
+                f.write_str(&parts.join(" || "))
             }
             VersionRequest::Newest => f.write_str("newest"),
         }
