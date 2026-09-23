@@ -264,9 +264,10 @@ other platform: a closure realized on one platform is not evidence for the
 other. The closure's version strings are only a claim. Each tailor's
 `legacy_toolchain_evidence` also reads the runtime object the closure
 names (through its environment object for Python and Node) in the active
-store, located read-only by `Store::existing` and read by
-`Store::published_identity` with no lease, lock file or touch, so `status`
-and `doctor` seed the way sync does without writing. An object the store
+store, located by `Store::existing` and read by `Store::published_identity`.
+The seeding lookup itself only reads: no lease, lock file, touch or created
+directory (the command around it, `status` and `doctor` included, may
+already have opened the store). An object the store
 holds proves the artifact rows its identity was built from
 (`comforter::toolchain::prove_legacy_runtime`), and those proofs decide
 between releases that share a version. An object the store lacks proves

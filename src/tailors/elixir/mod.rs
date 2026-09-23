@@ -176,7 +176,7 @@ pub fn legacy_toolchain_evidence(
         |identity, evidence| {
             // `beam_identity` spells the pair `<otp>-elixir<elixir>`.
             let Some((otp, elixir)) = identity.version.split_once("-elixir") else {
-                return Err(ProofGap::Unproved(format!(
+                return Err(ProofGap::Contradicted(format!(
                     "the closure's beam object {} records no OTP/Elixir pair",
                     identity.object_id()
                 )));

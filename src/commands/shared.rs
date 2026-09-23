@@ -55,12 +55,14 @@ pub(crate) fn ecosystem_inputs(
     present: &[&dyn Tailor],
 ) -> io::Result<Vec<EcosystemInput>> {
     let closures = inspect::closures(dir)?;
-    // Only a pre-lock closure looks anything up, and then read-only: the
-    // store is located, never created or leased.
-    let store = if closures
-        .iter()
-        .any(|closure| comforter::toolchain::needs_seeding(&closure.envelope))
-    {
+    // Only a present tailor's own pre-lock closure looks anything up, and
+    // then read-only: the store is located, never created or leased.
+    let store = if present.iter().any(|tailor| {
+        closures.iter().any(|closure| {
+            closure.ecosystem == tailor.id()
+                && comforter::toolchain::needs_seeding(&closure.envelope)
+        })
+    }) {
         Store::existing()?
     } else {
         None

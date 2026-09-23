@@ -128,11 +128,12 @@ impl Store {
 
     /// The identity a fully published object records, read without a
     /// lease, a publish lock, an mtime touch, or the crashed-publication
-    /// cleanup `has` performs: `Ok(None)` when this store holds no complete
-    /// object `id`. The metadata must describe `id` (its identity hashes to
-    /// it), or this is an error. For read-only callers that only need to
-    /// know what an object is; a concurrent sweep can make the answer
-    /// `None`, never a wrong identity.
+    /// cleanup `has` performs. `Ok(None)` means only that the object is
+    /// absent or mid-publication; a permission error, a symlink or a
+    /// non-directory object, and metadata that is not a regular file or does
+    /// not describe `id` (its identity must hash to it) are errors. For
+    /// read-only callers that only need to know what an object is; a
+    /// concurrent sweep can make the answer `None`, never a wrong identity.
     pub fn published_identity(&self, id: &str) -> io::Result<Option<Identity>> {
         if !is_object_id(id) {
             return Err(io::Error::new(
@@ -140,15 +141,53 @@ impl Store {
                 format!("malformed object id {id:?}"),
             ));
         }
-        if self.is_complete(id) != Some(true) {
+        use std::os::unix::fs::PermissionsExt;
+        let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
+        // Only absence is "not held". Anything else the filesystem says
+        // (permission, a symlink or file where the object should be) is an
+        // error, never a miss.
+        let object = match fs::symlink_metadata(self.object_path(id)) {
+            Ok(object) => object,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if object.file_type().is_symlink() || !object.is_dir() {
+            return Err(invalid(format!(
+                "store object {id} is not a real directory"
+            )));
+        }
+        // Commit order is rename, chmod read-only, then metadata: a
+        // writable root, or a missing record, is a publication in flight.
+        if object.permissions().mode() & 0o222 != 0 {
             return Ok(None);
         }
+        published_identity_failpoint("before-metadata-open");
         let path = self.root.join("meta").join(format!("{id}.json"));
-        match crate::kernel::objmeta::read_record_at(&path) {
-            Ok(record) => Ok(Some(record.identity)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(invalid(format!("store object {id} metadata is a symlink")))
+            }
+            Err(error) => return Err(error),
+        };
+        if !file.metadata()?.is_file() {
+            return Err(invalid(format!(
+                "store object {id} metadata is not a regular file"
+            )));
         }
+        let value: serde_json::Value = serde_json::from_reader(file)
+            .map_err(|error| invalid(format!("parse store object {id} metadata: {error}")))?;
+        // The record must describe `id`: its identity hashes to it. A
+        // sweep and a republish of the same id in between leave a record
+        // that still does, so the answer is that identity or nothing.
+        let record = crate::kernel::objmeta::read_record_value(id, value)?;
+        published_identity_failpoint("after-metadata-read");
+        Ok(Some(record.identity))
     }
 
     /// An object is valid only when fully published: directory present,
@@ -480,6 +519,26 @@ pub(super) fn make_read_only(path: &Path) -> io::Result<()> {
 /// The object/cache mtime is the cheap activity marker used by GC. Opening
 /// the path and setting its timestamp avoids a platform-specific touch
 /// executable and also works for read-only published directories/files.
+#[cfg(test)]
+thread_local! {
+    /// A test's hook at the named points of `published_identity`, so a
+    /// sweep or republish can be interleaved deterministically.
+    pub(crate) static PUBLISHED_IDENTITY_FAILPOINT: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn published_identity_failpoint(at: &str) {
+    PUBLISHED_IDENTITY_FAILPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(at);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn published_identity_failpoint(_at: &str) {}
+
 pub(crate) fn touch_path(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.set_modified(SystemTime::now())
 }

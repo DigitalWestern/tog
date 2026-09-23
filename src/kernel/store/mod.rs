@@ -82,21 +82,39 @@ impl Store {
     }
 
     /// The store `open` would use, without creating or changing anything:
-    /// `None` when there is no store directory there yet. For readers that
-    /// must leave the store exactly as they found it (legacy toolchain
-    /// seeding under `status` and `doctor`); anything that commits, leases
-    /// or sweeps uses `open`.
+    /// `None` when there is no store (or no `objects` namespace) there yet.
+    /// The layout invariant is `open`'s: the canonical root, `objects` and
+    /// `meta` must be real directories, never symlinks, and anything else
+    /// is an error rather than an absent store. For readers that must leave
+    /// the store exactly as they found it (legacy toolchain seeding);
+    /// anything that commits, leases or sweeps uses `open`.
     pub fn existing() -> io::Result<Option<Store>> {
         let (root, _) = Self::configured_root();
-        match fs::metadata(root.join("objects")) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => return Ok(None),
+        let root = match root.canonicalize() {
+            Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
+        };
+        let real_directory = |path: &Path, absent_is_none: bool| -> io::Result<bool> {
+            match fs::symlink_metadata(path) {
+                Ok(stat) if !stat.file_type().is_symlink() && stat.is_dir() => Ok(true),
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("store path {} is not a real directory", path.display()),
+                )),
+                Err(error) if absent_is_none && error.kind() == io::ErrorKind::NotFound => {
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        real_directory(&root, false)?;
+        if !real_directory(&root.join("objects"), true)? {
+            return Ok(None);
         }
-        Ok(Some(Store {
-            root: root.canonicalize()?,
-        }))
+        // A missing `meta` only means nothing has finished publishing.
+        real_directory(&root.join("meta"), true)?;
+        Ok(Some(Store { root }))
     }
 
     pub fn open() -> io::Result<Store> {
@@ -979,6 +997,164 @@ mod tests {
             BTreeSet::from([forest("one"), forest("two")])
         );
         assert_eq!(store.roots().unwrap().len(), 1);
+    }
+
+    /// Leave `identity` as a finished publication does, without the publish
+    /// machinery: a read-only object root, then its metadata record.
+    fn publish_bare(store: &Store, identity: &Identity) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let id = identity.object_id();
+        let path = store.object_path(&id);
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
+            store.root.join("meta").join(format!("{id}.json")),
+            serde_json::to_vec(&serde_json::json!({"identity": identity})).unwrap(),
+        )
+        .unwrap();
+        id
+    }
+
+    fn sweep_bare(store: &Store, id: &str) {
+        let _ = fs::remove_file(store.root.join("meta").join(format!("{id}.json")));
+        let _ = fs::remove_dir(store.object_path(id));
+    }
+
+    /// Run `published_identity` with `hook` interleaved at its failpoints.
+    fn published_with(
+        store: &Store,
+        id: &str,
+        hook: impl FnMut(&str) + 'static,
+    ) -> io::Result<Option<Identity>> {
+        objects::PUBLISHED_IDENTITY_FAILPOINT
+            .with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let result = store.published_identity(id);
+        objects::PUBLISHED_IDENTITY_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+        result
+    }
+
+    /// A sweep or a republish racing the read gives the validated identity
+    /// or nothing, never another object's identity, and only absence (or a
+    /// publication in flight) is `None`: a symlink or a file where an
+    /// object or its record belongs is an error.
+    #[test]
+    fn published_identity_is_the_validated_identity_or_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let published = identity();
+        let seen_id =
+            |seen: io::Result<Option<Identity>>| seen.unwrap().map(|found| found.object_id());
+        let id = publish_bare(&store, &published);
+        assert_eq!(seen_id(store.published_identity(&id)), Some(id.clone()));
+
+        // Swept before the record is opened.
+        let (s, i) = (store.clone(), id.clone());
+        let seen = published_with(&store, &id, move |at| {
+            if at == "before-metadata-open" {
+                sweep_bare(&s, &i);
+            }
+        });
+        assert_eq!(seen_id(seen), None);
+
+        // Swept after the record was read: what was read was validated.
+        let id = publish_bare(&store, &published);
+        let (s, i) = (store.clone(), id.clone());
+        let seen = published_with(&store, &id, move |at| {
+            if at == "after-metadata-read" {
+                sweep_bare(&s, &i);
+            }
+        });
+        assert_eq!(seen_id(seen), Some(published.object_id()));
+
+        // Swept and republished under the same id before the record opens.
+        let id = publish_bare(&store, &published);
+        let (s, i, again) = (store.clone(), id.clone(), published.clone());
+        let seen = published_with(&store, &id, move |at| {
+            if at == "before-metadata-open" {
+                sweep_bare(&s, &i);
+                publish_bare(&s, &again);
+            }
+        });
+        assert_eq!(seen_id(seen), Some(published.object_id()));
+
+        // A record swapped for another identity under this id is refused.
+        let (s, i) = (store.clone(), id.clone());
+        let seen = published_with(&store, &id, move |at| {
+            if at == "before-metadata-open" {
+                let mut other = identity();
+                other.name = "other".into();
+                fs::write(
+                    s.root.join("meta").join(format!("{i}.json")),
+                    serde_json::to_vec(&serde_json::json!({"identity": other})).unwrap(),
+                )
+                .unwrap();
+            }
+        });
+        assert!(seen.is_err());
+
+        // A publication in flight (writable root, then no record) is None.
+        let mut flight = identity();
+        flight.name = "flight".into();
+        let flight_id = flight.object_id();
+        fs::create_dir_all(store.object_path(&flight_id)).unwrap();
+        assert!(store.published_identity(&flight_id).unwrap().is_none());
+        fs::set_permissions(
+            store.object_path(&flight_id),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        assert!(store.published_identity(&flight_id).unwrap().is_none());
+
+        // Wrong types are errors, not misses.
+        let mut linked = identity();
+        linked.name = "linked".into();
+        let linked_id = linked.object_id();
+        std::os::unix::fs::symlink(store.object_path(&id), store.object_path(&linked_id)).unwrap();
+        assert!(store.published_identity(&linked_id).is_err());
+        let mut meta_link = identity();
+        meta_link.name = "meta-link".into();
+        let meta_link_id = publish_bare(&store, &meta_link);
+        let record = store.root.join("meta").join(format!("{meta_link_id}.json"));
+        fs::remove_file(&record).unwrap();
+        std::os::unix::fs::symlink(store.root.join("meta").join(format!("{id}.json")), &record)
+            .unwrap();
+        assert!(store.published_identity(&meta_link_id).is_err());
+    }
+
+    /// `existing` finds a store without creating one, and holds it to
+    /// `open`'s layout: a symlinked or non-directory namespace is an error.
+    #[test]
+    fn existing_never_creates_and_refuses_a_bent_layout() {
+        let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("TOG_STORE");
+        let temp = TempDir::new();
+        let check = |root: &Path| {
+            std::env::set_var("TOG_STORE", root);
+            Store::existing()
+        };
+        let missing = temp.0.join("missing");
+        let absent = check(&missing);
+        let real = check(&temp.0);
+        let bent = temp.0.join("bent");
+        fs::create_dir_all(&bent).unwrap();
+        std::os::unix::fs::symlink(temp.0.join("objects"), bent.join("objects")).unwrap();
+        let linked = check(&bent);
+        let flat = temp.0.join("flat");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(flat.join("objects"), b"").unwrap();
+        let file = check(&flat);
+        match old {
+            Some(value) => std::env::set_var("TOG_STORE", value),
+            None => std::env::remove_var("TOG_STORE"),
+        }
+        assert!(absent.unwrap().is_none());
+        assert!(!missing.exists());
+        assert_eq!(real.unwrap().unwrap().root, temp.0.canonicalize().unwrap());
+        assert!(linked.is_err());
+        assert!(file.is_err());
     }
 
     /// `gc --register` over a project holding one closure per ecosystem at

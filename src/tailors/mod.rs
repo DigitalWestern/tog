@@ -836,6 +836,122 @@ mod tests {
         }
     }
 
+    /// Once the store holds the object a closure names, an identity the
+    /// tailor cannot read as its own is a contradiction: it refuses even a
+    /// version only one release carries, where no proof would be needed.
+    #[test]
+    fn a_found_object_with_a_malformed_identity_refuses_a_unique_version() {
+        use crate::comforter::toolchain::{object_ref_for_test, publish_for_test};
+        use crate::kernel::toolchain::Source;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let platform = LINUX;
+        type Mutate = fn(&mut crate::kernel::types::Identity);
+        let cases: [(&str, &str, usize, Mutate, &str); 7] = [
+            (
+                "python",
+                "/env_object",
+                1,
+                |env| {
+                    env.inputs
+                        .insert("cpython".into(), "not-an-object-id".into());
+                },
+                "names no well-formed cpython object id",
+            ),
+            (
+                "node",
+                "/env_object",
+                1,
+                |env| {
+                    env.inputs.remove("nodejs");
+                },
+                "names no well-formed nodejs object id",
+            ),
+            (
+                "go",
+                "/go_object",
+                0,
+                |go| {
+                    go.inputs.remove("artifact_sha256");
+                },
+                "records no artifact_sha256",
+            ),
+            (
+                "cargo",
+                "/rust_object",
+                0,
+                |rust| {
+                    rust.inputs.remove("cargo_sha256");
+                },
+                "records no cargo_sha256",
+            ),
+            (
+                "ruby",
+                "/ruby_object",
+                0,
+                |ruby| {
+                    ruby.inputs.remove("schema");
+                },
+                "records no recipe",
+            ),
+            (
+                "dotnet",
+                "/sdk_object",
+                0,
+                |sdk| {
+                    sdk.inputs.insert("artifact_sha512".into(), "zz".into());
+                },
+                "has a malformed artifact_sha512",
+            ),
+            (
+                "elixir",
+                "/beam_object",
+                0,
+                |beam| {
+                    beam.version = "29.0.5".into();
+                },
+                "records no OTP/Elixir pair",
+            ),
+        ];
+        for (id, pointer, index, mutate, why) in cases {
+            let tailor = by_id(id).unwrap();
+            let catalog = tailor.toolchain_catalog().unwrap();
+            let bundle = catalog.select(&Request::newest()).unwrap().clone();
+            let selected = Selected {
+                ecosystem: tailor.lock_ecosystem().to_string(),
+                bundle: bundle.clone(),
+                lock_sha256: None,
+                source: Source::Shipped,
+            };
+            let store = scratch_store(&temp, id);
+            let (_, mut objects) = legacy_runtime(id, platform, &selected, &store);
+            mutate(&mut objects[index]);
+            for object in &objects {
+                publish_for_test(&store, object);
+            }
+            let named = objects[index].object_id();
+            let reference = if pointer == "/env_object" {
+                json!(store.object_path(&named))
+            } else {
+                object_ref_for_test(&store, &named)
+            };
+            let mut body = legacy_body(id, &bundle);
+            body[&pointer[1..]] = reference;
+            // Unmodified, the version alone seeds this catalog.
+            let bare = tailor.legacy_toolchain_evidence(id, Some(platform), &body, None);
+            assert!(seed(&catalog, &bare).is_ok(), "{id}");
+            let evidence =
+                tailor.legacy_toolchain_evidence(id, Some(platform), &body, Some(&store));
+            assert!(
+                evidence.unproved.is_empty(),
+                "{id}: {:?}",
+                evidence.unproved
+            );
+            let error = seed(&catalog, &evidence).unwrap_err().to_string();
+            assert!(error.contains(why), "{id}: {error}");
+            assert!(error.contains("tog update --toolchain"), "{id}: {error}");
+        }
+    }
+
     #[test]
     fn an_unconstrained_python_project_keeps_the_shipped_default() {
         use crate::kernel::toolchain::input::InputRow;

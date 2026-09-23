@@ -162,7 +162,8 @@ pub fn needs_seeding(envelope: &serde_json::Value) -> bool {
 
 /// [`legacy_evidence`] for the closure `tailor` wrote under `dir`, if any:
 /// what a read-only answer (`tog doctor`, `tog status`) passes `resolve`
-/// so it seeds exactly as the next sync would.
+/// so it seeds exactly as the next sync would. This lookup itself only
+/// reads the store; the command around it may already hold it open.
 pub fn legacy_evidence_in(dir: &Path, tailor: &dyn Tailor) -> io::Result<Option<LegacyEvidence>> {
     let path = dir.join(format!(".tog/closures/{}.json", tailor.id()));
     let bytes = match std::fs::read(&path) {
@@ -182,11 +183,15 @@ pub fn legacy_evidence_in(dir: &Path, tailor: &dyn Tailor) -> io::Result<Option<
 /// Why a closure's runtime object proves no artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProofGap {
-    /// Nothing to read: the closure names no object, or the active store
-    /// does not hold it. Seeding may still go on from the versions.
+    /// Nothing to read: the closure names no object, there is no store,
+    /// the reference was recorded in another store, or this store does not
+    /// hold the object. Seeding may still go on from the versions.
     Unproved(String),
-    /// The store holds the object and it disagrees with the closure.
-    /// Seeding refuses.
+    /// The reference is malformed, or the store holds the object and it
+    /// disagrees with the closure or cannot be read as the tailor's
+    /// identity (another kind, platform or version, a missing or malformed
+    /// digest, recipe or next-object input, unusable metadata). Seeding
+    /// refuses.
     Contradicted(String),
 }
 
@@ -210,8 +215,9 @@ pub struct LegacyRuntime<'a> {
 /// object of `runtime.kind` in `store` whose metadata identity hashes to
 /// that name, and whose platform, when it records one, is the closure's.
 /// `artifacts` reads that identity (checking the version the closure
-/// records against it) into proved rows. Nothing here writes, leases or
-/// touches the store. The outcome lands in `evidence`: proved rows, or the
+/// records against it) into proved rows; once the object is found, any
+/// field it lacks or spells wrong is a contradiction. Nothing here writes,
+/// leases or touches the store. The outcome lands in `evidence`: proved rows, or the
 /// gap `seed` refuses or explains with.
 pub fn prove_legacy_runtime(
     evidence: &mut LegacyEvidence,
@@ -327,8 +333,8 @@ fn legacy_runtime_identity(
                     .filter(|next| store::is_object_id(next))
                     .cloned()
                     .ok_or_else(|| {
-                        ProofGap::Unproved(format!(
-                            "the closure's {kind} object {id} names no {input} object"
+                        ProofGap::Contradicted(format!(
+                            "the closure's {kind} object {id} names no well-formed {input} object id"
                         ))
                     })?;
             }
@@ -367,7 +373,7 @@ pub fn proved_from_identity(
     recipe: &str,
 ) -> Result<ProvedArtifact, ProofGap> {
     let hex = identity.inputs.get(input).ok_or_else(|| {
-        ProofGap::Unproved(format!(
+        ProofGap::Contradicted(format!(
             "the closure's {} object {} records no {input}",
             identity.kind,
             identity.object_id()
@@ -400,7 +406,7 @@ pub fn schema_recipe(identity: &Identity) -> Result<&str, ProofGap> {
         .get("schema")
         .map(String::as_str)
         .ok_or_else(|| {
-            ProofGap::Unproved(format!(
+            ProofGap::Contradicted(format!(
                 "the closure's {} object {} records no recipe",
                 identity.kind,
                 identity.object_id()
@@ -980,9 +986,10 @@ mod tests {
         out
     }
 
-    /// `status` and `doctor` seed through `legacy_evidence_in`: the closure's
-    /// Go object is proved through the store `TOG_STORE` names, without a
-    /// lease, a lock file, a touch or a created directory, and metadata that
+    /// `legacy_evidence_in` (the seeding lookup `status` and `doctor` use)
+    /// proves the closure's Go object through the store `TOG_STORE` names
+    /// without itself taking a lease, a lock file, a touch or creating a
+    /// directory, and metadata that
     /// does not describe the recorded id is a contradiction, not a proof.
     #[test]
     fn legacy_evidence_reads_the_active_store_and_writes_nothing() {
