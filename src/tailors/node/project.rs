@@ -204,6 +204,7 @@ pub fn project_node_env(
         fresh,
         &[],
         None,
+        &serde_json::Value::Null,
         attribution,
     )
 }
@@ -595,6 +596,9 @@ pub fn project_node_env_recorded(
     // Node object realized from it, recorded so a later run resolves the
     // same bytes through the closure instead of the pin table.
     toolchain: Option<(&crate::kernel::toolchain::Selected, &Path)>,
+    // The helper decision (`tailors::helper_record`), stored beside the
+    // toolchain record; `Null` writes none.
+    helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     if !mutable.is_empty() {
@@ -647,8 +651,13 @@ pub fn project_node_env_recorded(
     store.ensure_namespace(Path::new("backups"))?;
     // The record names the bundle and the object; the direct reference is
     // what keeps that object alive, so it is taken wherever references are.
-    let runtime_record = toolchain
-        .map(|(selected, runtime)| crate::comforter::toolchain::closure_record(selected, runtime));
+    let runtime_record = toolchain.map(|(selected, runtime)| {
+        let mut record = crate::comforter::toolchain::closure_record(selected, runtime);
+        if !helpers.is_null() {
+            record["toolchain"]["helpers"] = helpers.clone();
+        }
+        record
+    });
     let mut refs = crate::comforter::ClosureRefs::new();
     if strict_refs {
         refs.object_path(&store, &activity, &env_obj)?;

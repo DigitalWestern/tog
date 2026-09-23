@@ -31,6 +31,26 @@ impl RegistryTool for NodeTool {
         node::runtime_object_id(platform, toolchain)
     }
 
+    /// node-gyp's Python: a native npm tool builds on it, so its object is
+    /// part of the key (`x/4`).
+    fn helpers(&self) -> &'static [&'static str] {
+        &["python"]
+    }
+
+    fn helper_object_id(
+        &self,
+        platform: Platform,
+        helper: &str,
+        selected: &Selected,
+    ) -> io::Result<String> {
+        match helper {
+            "python" => crate::kernel::provider::cpython::cpython_object_id(selected, platform),
+            other => Err(io::Error::other(format!(
+                "npm tools have no {other} helper"
+            ))),
+        }
+    }
+
     fn spelling(&self) -> &'static str {
         "npm"
     }
@@ -149,6 +169,7 @@ impl RegistryTool for NodeTool {
         package: &str,
         version: Option<&str>,
         toolchain: &Selected,
+        helpers: &std::collections::BTreeMap<String, Selected>,
         attribution: &mut Attribution,
     ) -> io::Result<()> {
         fs::create_dir_all(root)?;
@@ -191,15 +212,14 @@ impl RegistryTool for NodeTool {
             )));
         }
         let plan = node::plan_npm(platform, &fs::read_to_string(&lock)?)?;
-        // `x` runs outside any project lock, so node-gyp gets the shipped Python.
-        let env = node::realize_node_env_for(
-            store,
-            platform,
-            &plan,
-            &[],
-            toolchain,
-            &node::shipped_gyp_python()?,
-        )?;
+        // node-gyp runs on the Python the caller decided: the project's
+        // locked one when `x` runs inside a project that has Python, the
+        // shipped default otherwise.
+        let gyp_python = match helpers.get("python") {
+            Some(python) => python.clone(),
+            None => node::shipped_gyp_python()?,
+        };
+        let env = node::realize_node_env_for(store, platform, &plan, &[], toolchain, &gyp_python)?;
         node::project_node_env(root, &env, platform, &plan, &[], false, attribution)?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())

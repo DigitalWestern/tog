@@ -114,6 +114,33 @@ fn runtime_object_id(
     registry_tool(ecosystem)?.runtime_object_id(platform, toolchain)
 }
 
+/// The helper toolchains an `x` environment of `ecosystem` builds with
+/// (`RegistryTool::helpers`), decided as `sync` decides them for the
+/// project `x` runs in, and each one's runtime object id for the key.
+fn x_helpers(
+    platform: Platform,
+    cwd: &Path,
+    ecosystem: &str,
+) -> io::Result<(
+    std::collections::BTreeMap<String, Selected>,
+    Vec<(String, String)>,
+)> {
+    let tool = registry_tool(ecosystem)?;
+    let helpers =
+        crate::commands::shared::selected_helpers(platform, cwd, ecosystem, tool.helpers())
+            .map_err(|error| other(format!("x: {error}")))?;
+    let ids = helpers
+        .iter()
+        .map(|(helper, selected)| {
+            Ok((
+                helper.clone(),
+                tool.helper_object_id(platform, helper, selected)?,
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok((helpers, ids))
+}
+
 /// The name of the directory a cached `x` environment lives in under
 /// `~/.tog/x`, for a caller that has to find one without re-deriving the
 /// key by hand.
@@ -130,6 +157,7 @@ pub fn environment_name(
     };
     let toolchain = x_toolchain(platform, cwd, ecosystem)?;
     let runtime_object = runtime_object_id(platform, ecosystem, &toolchain)?;
+    let (_, helper_objects) = x_helpers(platform, cwd, ecosystem)?;
     x_root_name(
         &store,
         platform,
@@ -138,6 +166,7 @@ pub fn environment_name(
         version,
         &toolchain,
         &runtime_object,
+        &helper_objects,
     )
 }
 
@@ -154,6 +183,14 @@ pub fn environment_name(
 /// projection actually points at. A directory an older tog made under the
 /// `x/2` key is never reused, and stays a GC root until `tog x --clean`.
 /// The name's first word is the registry tool's `cache_prefix`.
+///
+/// A tool that builds with helper toolchains (npm's node-gyp Python) keys
+/// on each helper's runtime object too, under `x/4`: the `x/3` preimage
+/// with `<helper>=<object id>` fields appended. A tool with none keeps its
+/// `x/3` name byte for byte, so `py:` caches survive; every `npm:` cache
+/// from `x/3` is a miss, because none of them could say which Python its
+/// native addons were built on.
+#[allow(clippy::too_many_arguments)]
 fn x_root_name(
     store: &Store,
     platform: Platform,
@@ -162,18 +199,26 @@ fn x_root_name(
     version: Option<&str>,
     toolchain: &Selected,
     runtime_object: &str,
+    helper_objects: &[(String, String)],
 ) -> io::Result<String> {
-    let key = hex::encode(Sha256::digest(
-        format!(
-            "x/3\0{}\0{ecosystem}\0{package}\0{}\0{}\0{}\0{}\0{runtime_object}",
-            store.root.display(),
-            version.unwrap_or(""),
-            platform.triple(),
-            toolchain.primary_version(),
-            toolchain.bundle_id()
-        )
-        .as_bytes(),
-    ));
+    let fields = format!(
+        "\0{}\0{ecosystem}\0{package}\0{}\0{}\0{}\0{}\0{runtime_object}",
+        store.root.display(),
+        version.unwrap_or(""),
+        platform.triple(),
+        toolchain.primary_version(),
+        toolchain.bundle_id()
+    );
+    let preimage = if helper_objects.is_empty() {
+        format!("x/3{fields}")
+    } else {
+        let mut preimage = format!("x/4{fields}");
+        for (helper, object) in helper_objects {
+            preimage.push_str(&format!("\0{helper}={object}"));
+        }
+        preimage
+    };
+    let key = hex::encode(Sha256::digest(preimage.as_bytes()));
     Ok(format!(
         "{}-{}-{}",
         registry_tool(ecosystem)?.cache_prefix(),
@@ -586,7 +631,7 @@ fn write_x_request_for_store(
     package: &str,
     version: Option<&str>,
     state: &str,
-    runtime: Option<(&Selected, &str)>,
+    runtime: Option<(&Selected, &str, &[(String, String)])>,
 ) -> io::Result<()> {
     write_x_request_inner(
         root,
@@ -606,7 +651,7 @@ fn write_x_request_inner(
     version: Option<&str>,
     state: &str,
     store_root: Option<&Path>,
-    runtime: Option<(&Selected, &str)>,
+    runtime: Option<(&Selected, &str, &[(String, String)])>,
 ) -> io::Result<()> {
     let path = root.join(X_REQUEST_FILE);
     if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -633,9 +678,20 @@ fn write_x_request_inner(
     // What the directory name was computed from, so a reader of the record
     // can tell which runtime this environment belongs to without
     // recomputing the key.
-    if let Some((toolchain, runtime_object)) = runtime {
+    if let Some((toolchain, runtime_object, helper_objects)) = runtime {
         record["bundle_id"] = serde_json::Value::String(toolchain.bundle_id());
         record["runtime_object"] = serde_json::Value::String(runtime_object.to_string());
+        // The helper runtimes the key names (node-gyp's Python), if any.
+        if !helper_objects.is_empty() {
+            record["helpers"] = serde_json::Value::Object(
+                helper_objects
+                    .iter()
+                    .map(|(helper, object)| {
+                        (helper.clone(), serde_json::Value::String(object.clone()))
+                    })
+                    .collect(),
+            );
+        }
     }
     fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
     fs::rename(tmp, path)
@@ -1832,6 +1888,7 @@ pub fn launch(
     let tool = registry_tool(ecosystem)?;
     let toolchain = x_toolchain(platform, cwd, ecosystem)?;
     let runtime_object = tool.runtime_object_id(platform, &toolchain)?;
+    let (helpers, helper_objects) = x_helpers(platform, cwd, ecosystem)?;
     let root = x_home.join(".tog/x").join(x_root_name(
         &store,
         platform,
@@ -1840,6 +1897,7 @@ pub fn launch(
         version,
         &toolchain,
         &runtime_object,
+        &helper_objects,
     )?);
     let _x_lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(bin);
@@ -1856,7 +1914,11 @@ pub fn launch(
             package,
             version,
             "realizing",
-            Some((&toolchain, runtime_object.as_str())),
+            Some((
+                &toolchain,
+                runtime_object.as_str(),
+                helper_objects.as_slice(),
+            )),
         )?;
         tool.realize(
             &store,
@@ -1866,6 +1928,7 @@ pub fn launch(
             package,
             version,
             &toolchain,
+            &helpers,
             &mut attribution,
         )?;
         attribution.finish(true)?;
@@ -1876,7 +1939,11 @@ pub fn launch(
             package,
             version,
             "ready",
-            Some((&toolchain, runtime_object.as_str())),
+            Some((
+                &toolchain,
+                runtime_object.as_str(),
+                helper_objects.as_slice(),
+            )),
         )?;
     } else {
         // `x_request_is_ready` already validated this projection against
@@ -1890,7 +1957,11 @@ pub fn launch(
                 package,
                 version,
                 "ready",
-                Some((&toolchain, runtime_object.as_str())),
+                Some((
+                    &toolchain,
+                    runtime_object.as_str(),
+                    helper_objects.as_slice(),
+                )),
             )?;
         }
         attribution.discard();
@@ -1931,6 +2002,7 @@ fn node_cache_root(
     version: Option<&str>,
     toolchain: &Selected,
     runtime_object: &str,
+    helper_objects: &[(String, String)],
 ) -> io::Result<PathBuf> {
     Ok(home()?.join(".tog/x").join(x_root_name(
         store,
@@ -1940,6 +2012,7 @@ fn node_cache_root(
         version,
         toolchain,
         runtime_object,
+        helper_objects,
     )?))
 }
 
@@ -2016,6 +2089,7 @@ pub(crate) fn realize_node_tool(
     let tool = registry_tool("node")?;
     let toolchain = x_toolchain(platform, project, "node")?;
     let runtime_object = tool.runtime_object_id(platform, &toolchain)?;
+    let (helpers, helper_objects) = x_helpers(platform, project, "node")?;
     let root = node_cache_root(
         store,
         platform,
@@ -2023,6 +2097,7 @@ pub(crate) fn realize_node_tool(
         Some(version),
         &toolchain,
         &runtime_object,
+        &helper_objects,
     )?;
     // Take the same shared lifecycle lock `tog x` takes, and hand it back
     // to the caller. `tog x --clean` removes a cached root under an
@@ -2046,6 +2121,7 @@ pub(crate) fn realize_node_tool(
         package,
         Some(version),
         &toolchain,
+        &helpers,
         attribution,
     )?;
     if !executable.is_file() {
@@ -2175,6 +2251,7 @@ mod tests {
                 Some("0.6.1"),
                 toolchain,
                 runtime_object,
+                &[],
             )
             .unwrap()
         };
@@ -2231,12 +2308,16 @@ mod tests {
         assert!(registry_tool("cobol").is_err());
     }
 
-    /// The `x/3` cache directory names, byte for byte. A cached
+    /// The `x/3` and `x/4` cache directory names, byte for byte. A cached
     /// environment is found again only by recomputing this name, so any
     /// change to the key's bytes (its preimage, the hash, or the `py`/`npm`
     /// prefix a registry tool supplies) orphans every cache directory an
     /// earlier tog made. The toolchain is a fixed bundle, not the shipped
     /// catalog, so a catalog bump does not move these goldens.
+    ///
+    /// `py:` has no helpers and keeps its `x/3` name. `npm:` keys on its
+    /// node-gyp Python under `x/4`; the helper-less spelling of the same
+    /// request is still the `x/3` golden, so only the helper moved it.
     #[test]
     fn x_root_names_are_byte_identical_goldens() {
         let store = Store {
@@ -2253,11 +2334,13 @@ mod tests {
                 "ruff",
                 Some("0.6.1"),
                 &python,
-                "cpython-object"
+                "cpython-object",
+                &[],
             )
             .unwrap(),
             "py-ruff-215b4362097370ce"
         );
+        assert!(registry_tool("python").unwrap().helpers().is_empty());
         assert_eq!(
             x_root_name(
                 &store,
@@ -2266,11 +2349,28 @@ mod tests {
                 "@angular/cli",
                 None,
                 &node,
-                "nodejs-object"
+                "nodejs-object",
+                &[],
             )
             .unwrap(),
             "npm-_angular_cli-5dd983d9952f7476"
         );
+        assert_eq!(registry_tool("node").unwrap().helpers(), ["python"]);
+        let npm = |gyp_python: &str| {
+            x_root_name(
+                &store,
+                platform,
+                "node",
+                "@angular/cli",
+                None,
+                &node,
+                "nodejs-object",
+                &[("python".to_string(), gyp_python.to_string())],
+            )
+            .unwrap()
+        };
+        assert_eq!(npm("cpython-object"), "npm-_angular_cli-c9f235c1ffa1b37a");
+        assert_ne!(npm("other-cpython-object"), npm("cpython-object"));
     }
 
     #[test]
@@ -2306,6 +2406,61 @@ mod tests {
         assert!(error.to_string().contains("invalid package"), "{error}");
         assert!(validate_from_bin("../tool").is_err());
         assert!(validate_version("1.0\n--index-url evil").is_err());
+    }
+
+    /// An npm tool run inside a project builds its native addons on the
+    /// Python a sync of that project would give node-gyp: the project's own
+    /// (3.13 here) when it has Python, the shipped default otherwise. The
+    /// helper's object is in the key, so the two never share a cache
+    /// directory, and a `py:` tool's name does not depend on it.
+    #[test]
+    fn an_npm_tool_keys_on_the_projects_gyp_python() {
+        let platform = Platform::host().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "tog-x-gyp-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store_root = base.join("store");
+        let locks_python = base.join("locks-python");
+        let node_only = base.join("node-only");
+        for (project, python) in [(&locks_python, true), (&node_only, false)] {
+            fs::create_dir_all(project.join(".tog")).unwrap();
+            fs::write(project.join("package.json"), "{}\n").unwrap();
+            if python {
+                fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
+                fs::write(project.join(".python-version"), "3.13\n").unwrap();
+            }
+        }
+
+        let (helpers, ids) = x_helpers(platform, &locks_python, "node").unwrap();
+        assert!(helpers["python"]
+            .version("cpython")
+            .unwrap()
+            .starts_with("3.13."));
+        assert_eq!(ids.len(), 1);
+        assert!(ids[0].1.contains("-cpython-3.13."), "{ids:?}");
+        let (helpers, ids) = x_helpers(platform, &node_only, "node").unwrap();
+        let shipped = crate::tailors::node::shipped_gyp_python().unwrap();
+        assert_eq!(helpers["python"].bundle_id(), shipped.bundle_id());
+        assert_eq!(
+            ids[0].1,
+            crate::kernel::provider::cpython::cpython_object_id(&shipped, platform).unwrap()
+        );
+        let (helpers, ids) = x_helpers(platform, &locks_python, "python").unwrap();
+        assert!(helpers.is_empty() && ids.is_empty());
+
+        let name = |project: &Path, ecosystem: &str, package: &str| {
+            environment_name(&store_root, platform, project, ecosystem, package, None).unwrap()
+        };
+        assert_ne!(
+            name(&locks_python, "node", "prettier"),
+            name(&node_only, "node", "prettier")
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

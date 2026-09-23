@@ -784,7 +784,29 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
                 .ends_with(&format!("-cpython-{expected}")),
             "{name}: {inputs}"
         );
+        // The closure records which Python that was, for `status`.
+        assert!(
+            closure["toolchain"]["helpers"]["python"].is_string(),
+            "{name}: {closure}"
+        );
         envs.push(env_object);
     }
     assert_ne!(envs[0], envs[1]);
+
+    // Without its Python manifest the project's next sync would give
+    // node-gyp the shipped default, so Node is no longer synced even though
+    // nothing Node reads changed.
+    let project = temp.0.join("locks-python");
+    std::fs::remove_file(project.join("pyproject.toml")).unwrap();
+    std::fs::remove_file(project.join(".python-version")).unwrap();
+    let status = tog(binary, &project, &store_root, &["status"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert!(
+        text.contains("the python toolchain node builds with"),
+        "{text}"
+    );
 }

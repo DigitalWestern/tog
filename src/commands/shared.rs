@@ -125,6 +125,50 @@ pub(crate) fn selected_toolchain(
     runtime::shipped(&tailor.toolchain_catalog()?)
 }
 
+/// The helper toolchains (`Tailor::helpers`) `ecosystem` builds with at
+/// `cwd`, outside `sync`, decided by the rule sync uses
+/// (`tailors::helper_selections`): a helper ecosystem the nearest project
+/// has is that project's selection, read as [`selected_toolchain`] reads
+/// it; any other gets the tailor's default. Only `names` are decided.
+pub(crate) fn selected_helpers(
+    platform: Platform,
+    cwd: &Path,
+    ecosystem: &str,
+    names: &[&str],
+) -> io::Result<std::collections::BTreeMap<String, Selected>> {
+    let tailor = crate::tailors::by_id(ecosystem).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported ecosystem '{ecosystem}'"),
+        )
+    })?;
+    // The project boundary `selected_toolchain` stops at.
+    let project = cwd.ancestors().find(|dir| {
+        dir.join(lock::LOCK_PATH).symlink_metadata().is_ok() || dir.join(".tog").is_dir()
+    });
+    let present = match project {
+        Some(dir) => crate::tailors::detected(dir)?,
+        None => Vec::new(),
+    };
+    let mut selections = std::collections::BTreeMap::new();
+    for helper in names {
+        if let (Some(dir), Some(owner)) = (
+            project,
+            present
+                .iter()
+                .find(|tailor| tailor.lock_ecosystem() == *helper),
+        ) {
+            selections.insert(
+                (*helper).to_string(),
+                selected_toolchain(platform, dir, owner.id())?,
+            );
+        }
+    }
+    let mut helpers = crate::tailors::helper_selections(tailor, &selections)?;
+    helpers.retain(|helper, _| names.contains(&helper.as_str()));
+    Ok(helpers)
+}
+
 /// The tool `tog x` installs and launches for `ecosystem`
 /// (`Tailor::registry_tool`). An ecosystem with no registry tool answers
 /// `tog x does not support <id>`.

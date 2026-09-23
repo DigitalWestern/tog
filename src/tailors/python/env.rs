@@ -522,6 +522,7 @@ pub fn project_env_with_inputs(
     selection: &pyselect::PythonSelection,
     inputs: &[InputRecord],
     toolchain: Option<(&Selected, &Path)>,
+    helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
@@ -531,6 +532,7 @@ pub fn project_env_with_inputs(
         Some(selection),
         inputs,
         toolchain,
+        helpers,
         attribution,
     )
 }
@@ -553,6 +555,7 @@ pub fn project_env_with_selection(
         Some(selection),
         &[],
         None,
+        &serde_json::Value::Null,
         attribution,
     )
 }
@@ -564,6 +567,9 @@ pub(super) fn project_env_inner(
     selection: Option<&pyselect::PythonSelection>,
     inputs: &[InputRecord],
     toolchain: Option<(&Selected, &Path)>,
+    // The helper decision (`tailors::helper_record`), stored beside the
+    // toolchain record; `Null` writes none.
+    helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let venv = project_dir.join(".venv");
@@ -581,9 +587,11 @@ pub(super) fn project_env_inner(
     let runtime_record = match toolchain {
         Some((selected, runtime)) => {
             refs.object_path(&store, &activity, runtime)?;
-            Some(crate::comforter::toolchain::closure_record(
-                selected, runtime,
-            ))
+            let mut record = crate::comforter::toolchain::closure_record(selected, runtime);
+            if !helpers.is_null() {
+                record["toolchain"]["helpers"] = helpers.clone();
+            }
+            Some(record)
         }
         None => None,
     };
@@ -750,6 +758,7 @@ mod tests {
             None,
             &[],
             Some((&selected, runtime.as_path())),
+            &serde_json::Value::Null,
             &mut attribution,
         )
         .unwrap();

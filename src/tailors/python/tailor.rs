@@ -30,6 +30,13 @@ impl Tailor for Python {
 
     /// `tog x` resolves from the public registry and projects into its own
     /// cache directory (`registry_tool.rs`).
+    /// An sdist with a Rust extension compiles with a Rust. With no locked
+    /// Rust there is no single default: each sdist's own toolchain file
+    /// picks among the shipped pins.
+    fn helpers(&self) -> &'static [&'static str] {
+        &["rust"]
+    }
+
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
         Ok(&python::registry_tool::PythonTool)
     }
@@ -75,8 +82,9 @@ impl Tailor for Python {
         let runtime = python::realize_runtime(store, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
+        let helpers = request.helpers(self)?;
         let env =
-            super::env::realize_env_with(store, platform, &plan, selected, request.helper("rust"))?;
+            super::env::realize_env_with(store, platform, &plan, selected, helpers.get("rust"))?;
         super::env::project_env_with_inputs(
             dir,
             &env,
@@ -84,6 +92,7 @@ impl Tailor for Python {
             &selection,
             &inputs,
             Some((selected, runtime.as_path())),
+            &crate::tailors::helper_record(self, &helpers),
             attribution,
         )?;
         ui::synced(".venv", &env);

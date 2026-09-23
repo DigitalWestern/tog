@@ -2677,6 +2677,7 @@ mod tests {
             false,
             &inputs,
             None,
+            &serde_json::Value::Null,
             &mut attribution,
         )
         .unwrap();
@@ -2783,6 +2784,7 @@ mod tests {
             false,
             &[],
             Some((&selected, runtime.as_path())),
+            &serde_json::Value::Null,
             &mut attribution,
         )
         .unwrap();
@@ -2903,6 +2905,7 @@ mod tests {
             false,
             &[],
             Some((&selected, runtime.as_path())),
+            &serde_json::Value::Null,
             &mut attribution,
         )
         .unwrap();

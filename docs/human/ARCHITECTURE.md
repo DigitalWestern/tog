@@ -232,11 +232,30 @@ missing or stale lock, a missing section, and a closure built from another
 bundle as `changed` naming `tog-toolchain.toml`, and a verdict that sync
 would refuse is answered ahead of the tailor's own comparison. `tog audit`
 reuses the same combination (`inspect::locked_closure_state`), so each of
-those verdicts makes the record `stale` and fails the gate. Cached `tog x` environments
-key on `x/3`: store root, ecosystem, package request, platform, the primary
-runtime version, the selected `bundle_id` and the realized runtime object,
-so a changed bundle component gives a fresh environment and an `x/2`
-directory is never reused.
+those verdicts makes the record `stale` and fails the gate.
+
+A tailor whose builds run on another ecosystem's toolchain names it as a
+helper (`Tailor::helpers`): Node's node-gyp runs on `python`, Python's
+sdists compile with `rust`. `tailors::helper_selections` decides each one
+the same way for `sync`, `status` and `tog x`: the project's own selection
+when the project has that ecosystem, the tailor's `default_helper`
+otherwise (the shipped 3.12 for node-gyp; none for Rust, where each sdist's
+toolchain file picks). A closure records the decision as
+`toolchain.helpers.<ecosystem>`, the bundle id or `null`, and `status` holds
+a synced closure to it: re-locking the helper ecosystem, or removing its
+manifest so the default applies, is `changed` naming "the <helper>
+toolchain <ecosystem> builds with". A closure written before the record
+existed counts as `null`, which is what it was built on.
+
+Cached `tog x` environments key on `x/3`: store root, ecosystem, package
+request, platform, the primary runtime version, the selected `bundle_id`
+and the realized runtime object, so a changed bundle component gives a
+fresh environment and an `x/2` directory is never reused. A registry tool
+that builds with helpers (npm's node-gyp Python) keys on `x/4` instead: the
+`x/3` fields plus `<helper>=<object id>` for each, decided as above for the
+project `x` runs in and written to the request record's `helpers`. `py:`
+tools have none and keep their `x/3` names; every `npm:` cache from before
+is a miss.
 
 The catalog a lock is minted from
 (`src/kernel/toolchain/`). Each tailor's `toolchain_catalog` turns its pin
@@ -596,7 +615,7 @@ command-line word and message labels, the executable directory,
 resolve-realize-project for one package, the launch environment, whether a
 cached projection still points at its environment, and the packages a
 pre-record cache root was made for. `commands/x.rs` keeps the `~/.tog/x`
-directory, the `x/3` key, the lifecycle lock, gc root registration, and the
+directory, the `x/3`/`x/4` key, the lifecycle lock, gc root registration, and the
 policy checks on a cached hit, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition.
 
