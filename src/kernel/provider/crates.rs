@@ -10,6 +10,7 @@
 //! The pin rows and identity constructors are `pub` so the owning
 //! tailor keeps its identity goldens and object-kind rows beside it.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
@@ -202,9 +203,13 @@ fn normalize_checksum(checksum: &str) -> io::Result<String> {
 ///
 /// The Rust object remains a separate closure dependency because the vendor
 /// tree is produced by the host tar, not by a build that reads the toolchain.
-pub fn realize_vendor(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
+pub fn realize_vendor(
+    store: &Store,
+    activity: &StoreActivity,
+    plan: &CargoPlan,
+) -> io::Result<PathBuf> {
     crate::kernel::provider::rust::preflight_platform(Platform::host()?)?;
-    realize_vendor_inner(store, plan)
+    realize_vendor_inner(store, activity, plan)
 }
 
 /// Parse a Cargo lock `source` for a git dependency pinned to a commit.
@@ -361,12 +366,15 @@ fn reject_workspace_inheritance(crate_dir: &Path, name: &str) -> io::Result<()> 
     Ok(())
 }
 
-fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> {
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+fn realize_vendor_inner(
+    store: &Store,
+    activity: &StoreActivity,
+    plan: &CargoPlan,
+) -> io::Result<PathBuf> {
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
@@ -376,8 +384,8 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
     let mut git_roots = Vec::new();
     for krate in &crates {
         if let Some(git) = &krate.git {
-            let object =
-                crate::kernel::gitsrc::ensure_git_source(store, &git.inner).map_err(|e| {
+            let object = crate::kernel::gitsrc::ensure_git_source(store, activity, &git.inner)
+                .map_err(|e| {
                     io::Error::new(
                         e.kind(),
                         format!(
@@ -394,23 +402,24 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
             git_roots.push((krate.clone(), object));
             continue;
         }
-        let archive = download_verified_held(store, &krate.url, &krate.sha256).map_err(|e| {
-            err(format!(
-                "{}@{}: fetch {}: {e}",
-                krate.name, krate.version, krate.url
-            ))
-        })?;
+        let archive =
+            download_verified_held(store, activity, &krate.url, &krate.sha256).map_err(|e| {
+                err(format!(
+                    "{}@{}: fetch {}: {e}",
+                    krate.name, krate.version, krate.url
+                ))
+            })?;
         archives.push(archive);
     }
 
-    let staged = store.stage_with_activity(&activity)?;
+    let staged = store.stage_with_activity(activity)?;
     for (krate, root) in &git_roots {
         // Cargo's directory source wants the crate's own directory, so a
         // workspace repository is searched for the crate the lock names.
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         let source_dir = crate_dir_in_repo(root, &krate.name, &krate.version)?;
         crate::kernel::store::clone_tree_with_activity(
-            &activity,
+            activity,
             &source_dir,
             &crate_dir,
             Platform::host()?,
@@ -462,7 +471,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
             .args(["-C"])
             .arg(&crate_dir)
             .args(["--strip-components", "1"]);
-        let status = crate::kernel::supervise::status(&mut command, &activity).map_err(|e| {
+        let status = crate::kernel::supervise::status(&mut command, activity).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("{}@{}: spawn tar: {e}", krate.name, krate.version),
@@ -523,7 +532,7 @@ fn realize_vendor_inner(store: &Store, plan: &CargoPlan) -> io::Result<PathBuf> 
         }
     }
     store
-        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
 }

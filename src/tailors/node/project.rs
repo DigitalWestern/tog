@@ -187,6 +187,7 @@ pub(super) fn replace_with_symlink(path: &Path, target: &Path, label: &str) -> i
 /// inside those packages succeed and realpath stays coherent; the closure
 /// records them as unattested.
 pub fn project_node_env(
+    activity: &StoreActivity,
     project_dir: &Path,
     env_obj: &Path,
     platform: Platform,
@@ -196,6 +197,7 @@ pub fn project_node_env(
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_node_env_recorded(
+        activity,
         project_dir,
         env_obj,
         platform,
@@ -607,6 +609,7 @@ fn node_closure_body(
 /// (package.json and the lockfile the plan came from).
 #[allow(clippy::too_many_arguments)]
 pub fn project_node_env_recorded(
+    activity: &StoreActivity,
     project_dir: &Path,
     env_obj: &Path,
     platform: Platform,
@@ -639,7 +642,6 @@ pub fn project_node_env_recorded(
     validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
     let store = crate::comforter::store_from_object_path(env_obj)
         .ok_or_else(|| err("environment object is not in a Tog store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let env_obj = env_obj.canonicalize()?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let native_id = native_reference_id(&native_reference)?;
@@ -682,16 +684,16 @@ pub fn project_node_env_recorded(
     });
     let mut refs = crate::comforter::ClosureRefs::new();
     if strict_refs {
-        refs.object_path(&store, &activity, &env_obj)?;
+        refs.object_path(&store, activity, &env_obj)?;
         if let Some((_, runtime)) = toolchain {
-            refs.object_path(&store, &activity, runtime)?;
+            refs.object_path(&store, activity, runtime)?;
         }
         if let Some(native_id) = native_id {
-            refs.object_id(&store, &activity, native_id)?;
+            refs.object_id(&store, activity, native_id)?;
         }
-        refs.forest(&store, &activity, forest)?;
+        refs.forest(&store, activity, forest)?;
         for backup in &backup_paths {
-            refs.backup(&store, &activity, backup)?;
+            refs.backup(&store, activity, backup)?;
         }
     }
     // The root is durable before any stale managed link is removed, any user
@@ -703,7 +705,7 @@ pub fn project_node_env_recorded(
         crate::comforter::persist_root_for_refs_with_project_lock(
             project_dir,
             &store,
-            &activity,
+            activity,
             &refs,
             &project_lock,
         )?;
@@ -717,7 +719,7 @@ pub fn project_node_env_recorded(
     }
     remove_stale_workspace_links(project_dir, &store, home, &previous_workspaces, &workspaces)?;
     build_project_forest(
-        &activity,
+        activity,
         platform,
         &env_obj,
         &paths,
@@ -772,7 +774,7 @@ pub fn project_node_env_recorded(
         "node",
         body,
         &store,
-        &activity,
+        activity,
         refs,
         &project_lock,
         attribution,

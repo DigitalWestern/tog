@@ -12,6 +12,9 @@ use tog::tailors::python::build;
 #[ignore]
 fn docopt_sdist_builds_in_sandbox() {
     let store = Store::open().expect("store");
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let pkg = LockedPackage {
         name: "docopt".into(),
         version: "0.6.2".into(),
@@ -23,6 +26,7 @@ fn docopt_sdist_builds_in_sandbox() {
     };
     let wheel = build::build_sdist_wheel(
         &store,
+        activity,
         Platform::host().unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),

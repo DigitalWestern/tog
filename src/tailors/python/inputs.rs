@@ -108,7 +108,9 @@ pub fn read_plan(
     let mut selection = pyselect::locked(platform, version, &manifest.python)?;
     if manifest.requires_setup() {
         let dynamic_dependencies = manifest.dynamic_dependencies;
-        if let Err(error) = manifest.prepare_setup(platform, dir, &project, store, selected) {
+        if let Err(error) =
+            manifest.prepare_setup(platform, dir, &project, store, activity, selected)
+        {
             // Every ordinary failure in here is already `InvalidData`
             // (`unreadable` in the manifest layer hardcodes it, and it
             // wraps the sandboxed egg_info probe), so the kind cannot
@@ -417,7 +419,7 @@ pub fn locked_requirements(
         "{input} is not hash-pinned; resolving with the store uv..."
     ));
     // Store-pinned uv, not host uv: a bare machine needs only tog.
-    let uv = python::realize_uv(store, platform, selected)?.join("uv");
+    let uv = python::realize_uv(store, activity, platform, selected)?.join("uv");
     let compile_input = compile_path.and_then(|path| path.to_str()).unwrap_or(input);
     let mut command = std::process::Command::new(&uv);
     command.args(["pip", "compile", compile_input, "--generate-hashes"]);

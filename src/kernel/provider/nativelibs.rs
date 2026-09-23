@@ -593,15 +593,18 @@ pub fn object_id_for(store: &Store, platform: Platform) -> io::Result<String> {
 /// Realize the pinned native library set. The caller has installed the
 /// object-kind rows (`tailors::install_kinds`), as every realization entry
 /// point does before it can publish.
-pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<NativeLibSet> {
+pub fn ensure_native_libs(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+) -> io::Result<NativeLibSet> {
     crate::kernel::platform::require_host(platform, "native library set")?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(store, platform)?;
     let id = identity.object_id();
     let object = store.object_path(&id);
     let manifest_sha256 = identity.inputs["manifest_sha256"].clone();
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         validate_layout(&object)?;
         return Ok(NativeLibSet {
             id,
@@ -611,11 +614,11 @@ pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<Nativ
         });
     }
 
-    let work = store.stage_with_activity(&activity)?;
+    let work = store.stage_with_activity(activity)?;
     let package_work = work.join("packages");
     fs::create_dir_all(&package_work)?;
     let packages = packages(platform)?;
-    let result = realize_staged(store, &activity, &work, &package_work, &object, packages);
+    let result = realize_staged(store, activity, &work, &package_work, &object, packages);
     if let Err(error) = result {
         let _ = crate::kernel::store::remove_tree(&work);
         return Err(error);
@@ -626,7 +629,7 @@ pub fn ensure_native_libs(store: &Store, platform: Platform) -> io::Result<Nativ
         deps.cache_digest(FetchDigest::sha256(package.sha256)?);
     }
     let (object, _) =
-        store.commit_with_activity_and_deps(&activity, &identity, &work, &[], &deps)?;
+        store.commit_with_activity_and_deps(activity, &identity, &work, &[], &deps)?;
     validate_layout(&object)?;
     Ok(NativeLibSet {
         id,
@@ -646,8 +649,8 @@ fn realize_staged(
 ) -> io::Result<()> {
     let mut placeholders = Vec::new();
     for (index, package) in packages.iter().enumerate() {
-        let archive =
-            download_verified_held(store, &package.url(), package.sha256).map_err(|e| {
+        let archive = download_verified_held(store, activity, &package.url(), package.sha256)
+            .map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!("fetch native package {}: {e}", package.filename),

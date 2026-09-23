@@ -35,7 +35,8 @@ impl Tailor for Ruby {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
-        let ruby_obj = ruby::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
+        let activity = &ctx.activity;
+        let ruby_obj = ruby::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
         let (plan, _) = ruby::plan_ruby(&ctx.store, &ctx.activity, dir, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
@@ -47,13 +48,15 @@ impl Tailor for Ruby {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let activity = &ctx.activity;
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let ruby_obj = ruby::realize_runtime(store, platform, toolchain)?;
+        let ruby_obj = ruby::realize_runtime(store, activity, platform, toolchain)?;
         let (plan, lock_sha256) = ruby::plan_ruby(store, &ctx.activity, dir, &ruby_obj, toolchain)?;
         let gems = ruby::realize_gems(store, &ctx.activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
+            activity,
             dir,
             &ruby_obj,
             &gems,
@@ -74,12 +77,19 @@ impl Tailor for Ruby {
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let activity = &ctx.activity;
         let mut prefix = Vec::new();
         if dir.join(".tog/closures/ruby.json").exists() {
             let closure = comforter::read_closure(dir, "ruby")?;
-            let ruby_obj =
-                comforter::closure_object(&ctx.store, &closure, "ruby_object", "bin/ruby")?;
-            let gems_obj = comforter::closure_object(&ctx.store, &closure, "gems_object", "")?;
+            let ruby_obj = comforter::closure_object(
+                &ctx.store,
+                activity,
+                &closure,
+                "ruby_object",
+                "bin/ruby",
+            )?;
+            let gems_obj =
+                comforter::closure_object(&ctx.store, activity, &closure, "gems_object", "")?;
             // Ruby FIRST, then gem binstubs (a gem exe must never shadow ruby).
             prefix.push(ruby_obj.join("bin").to_string_lossy().into_owned());
             prefix.push(gems_obj.join("bin").to_string_lossy().into_owned());

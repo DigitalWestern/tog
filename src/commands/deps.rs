@@ -1106,11 +1106,16 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn uv_command(store: &Store, platform: Platform, project: &Path) -> io::Result<(Command, String)> {
+fn uv_command(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    project: &Path,
+) -> io::Result<(Command, String)> {
     let toolchain = selected_toolchain(platform, project, "python")?;
     let version = toolchain.version("cpython")?.to_string();
-    let uv = python::realize_uv(store, platform, &toolchain)?.join("uv");
-    let interpreter = python::realize_runtime(store, platform, &toolchain)?;
+    let uv = python::realize_uv(store, activity, platform, &toolchain)?.join("uv");
+    let interpreter = python::realize_runtime(store, activity, platform, &toolchain)?;
     let mut command = Command::new(uv);
     command
         .current_dir(project)
@@ -1148,7 +1153,7 @@ fn uv_compile(
     extra: &[String],
     _attribution: &mut policy::Attribution,
 ) -> io::Result<()> {
-    let (mut command, version) = uv_command(store, platform, project)?;
+    let (mut command, version) = uv_command(store, activity, platform, project)?;
     command
         .args(["pip", "compile"])
         .arg(input)
@@ -1176,7 +1181,7 @@ fn python_uv(
     _attribution: &mut policy::Attribution,
 ) -> io::Result<Vec<String>> {
     validate_delegate_specs(texts)?;
-    let (mut command, _) = uv_command(store, platform, project)?;
+    let (mut command, _) = uv_command(store, activity, platform, project)?;
     match verb {
         Verb::Add => {
             command.args(["add", "--no-sync"]);
@@ -1676,6 +1681,7 @@ fn node(
     if lock_name == "package-lock.json" {
         let node_obj = node::realize_runtime(
             store,
+            activity,
             platform,
             &selected_toolchain(platform, project, "node")?,
         )?;
@@ -1743,6 +1749,7 @@ fn node(
     }
     let node_obj = node::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "node")?,
     )?;
@@ -1849,6 +1856,7 @@ fn cargo_delegate(
     cargo::toolchain_file_components(platform, project)?;
     let rust_obj = cargo::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "cargo")?,
     )?;
@@ -1909,6 +1917,7 @@ fn go_delegate(
     }
     let go_obj = go::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "go")?,
     )?;
@@ -1952,6 +1961,7 @@ fn ruby_delegate(
     validate_delegate_specs(texts)?;
     let ruby_obj = ruby::realize_runtime(
         store,
+        activity,
         platform,
         &selected_toolchain(platform, project, "ruby")?,
     )?;
@@ -2030,6 +2040,7 @@ fn elixir_delegate(
         Verb::Update => {
             let beam = elixir::realize_runtime(
                 store,
+                activity,
                 platform,
                 &selected_toolchain(platform, project, "elixir")?,
             )?;

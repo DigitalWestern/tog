@@ -12,6 +12,7 @@
 //! Every entry's environment variable was read out of the package's own
 //! source, not from memory; add entries the same way.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use std::fs;
@@ -212,6 +213,7 @@ pub fn provisioned_identity_input(
 
 pub fn provision(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     name: &str,
     version: &str,
@@ -235,6 +237,7 @@ pub fn provision(
     let (sha256, sums, release_url, zip_name) = resolve_electron(store, platform, version)?;
     let zip = crate::kernel::fetch::download_verified_held(
         store,
+        activity,
         &format!("{release_url}/{zip_name}"),
         &sha256,
     )?;

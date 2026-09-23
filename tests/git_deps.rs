@@ -89,6 +89,9 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     let root = temp("npm");
     let (url, commit) = fixture_repo(&root.0);
     let store = store_at(&root.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let attribution = policy::Attribution::open("node").expect("test attribution");
 
     let lock = format!(
@@ -104,7 +107,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     assert_eq!(source.commit, commit);
     assert_eq!(package.integrity, format!("git:{commit}"));
 
-    let env = node::realize_node_env(&store, platform, &plan, &[]).expect("realize");
+    let env = node::realize_node_env(&store, activity, platform, &plan, &[]).expect("realize");
     assert_eq!(
         std::fs::read_to_string(env.join("node_modules/git-dep/index.js")).unwrap(),
         "module.exports = 'from-git';\n"
@@ -113,7 +116,8 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     assert!(!env.join("node_modules/git-dep/.git").exists());
 
     // The commit is the identity: the same plan hits the cache.
-    let again = node::realize_node_env(&store, platform, &plan, &[]).expect("second realize");
+    let again =
+        node::realize_node_env(&store, activity, platform, &plan, &[]).expect("second realize");
     assert_eq!(env, again);
 
     let kinds: Vec<String> = attribution
@@ -199,12 +203,15 @@ fn git_relative_submodule_is_pinned_and_raw() {
     let root = temp("submodule");
     let (url, commit) = relative_submodule_fixture(&root.0, false);
     let store = store_at(&root.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let source = GitSource {
         url: normalize_url(&url),
         commit,
         subdirectory: None,
     };
-    let object = ensure_git_source(&store, &source).expect("realize relative submodule");
+    let object = ensure_git_source(&store, activity, &source).expect("realize relative submodule");
     assert_eq!(
         std::fs::read_to_string(object.join("sub/sub.txt")).unwrap(),
         "submodule\n"
@@ -217,7 +224,7 @@ fn git_relative_submodule_is_pinned_and_raw() {
         commit,
         subdirectory: None,
     };
-    let error = ensure_git_source(&store, &transformed)
+    let error = ensure_git_source(&store, activity, &transformed)
         .expect_err("attribute-transformed submodule must be rejected")
         .to_string();
     assert!(error.contains("transformed"), "{error}");
@@ -254,6 +261,9 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     let root = temp("py");
     let (url, commit) = python_fixture_repo(&root.0);
     let store = store_at(&root.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let _attribution = policy::Attribution::open("python").expect("test attribution");
 
     let requirement = format!("gitdep @ {url}@{commit}");
@@ -276,7 +286,8 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         python_version: "3.12.14".into(),
         packages,
     };
-    let env = tog::tailors::python::env::realize_env(&store, platform, &plan).expect("realize");
+    let env =
+        tog::tailors::python::env::realize_env(&store, activity, platform, &plan).expect("realize");
     let site = env.join("lib/python3.12/site-packages/gitdep/__init__.py");
     assert_eq!(
         std::fs::read_to_string(&site).unwrap(),
@@ -284,8 +295,8 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     );
 
     // The commit determines the environment: realizing again is a cache hit.
-    let again =
-        tog::tailors::python::env::realize_env(&store, platform, &plan).expect("second realize");
+    let again = tog::tailors::python::env::realize_env(&store, activity, platform, &plan)
+        .expect("second realize");
     assert_eq!(env, again);
 }
 
@@ -315,6 +326,9 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     let root = temp("cargo");
     let (url, commit) = cargo_fixture_repo(&root.0);
     let store = store_at(&root.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let _attribution = policy::Attribution::open("cargo").expect("test attribution");
 
     let source = format!("git+{url}?rev={commit}#{commit}");
@@ -328,7 +342,7 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
         "the crate carries its git source"
     );
 
-    let vendor = tog::tailors::cargo::realize_vendor(&store, &plan).expect("vendor");
+    let vendor = tog::tailors::cargo::realize_vendor(&store, activity, &plan).expect("vendor");
     let crate_dir = vendor.join("gitdep-1.0.0");
     assert_eq!(
         std::fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -345,6 +359,7 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     );
 
     // Realizing again is a cache hit on the same object.
-    let again = tog::tailors::cargo::realize_vendor(&store, &plan).expect("second vendor");
+    let again =
+        tog::tailors::cargo::realize_vendor(&store, activity, &plan).expect("second vendor");
     assert_eq!(vendor, again);
 }

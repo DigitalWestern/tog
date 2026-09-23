@@ -9,6 +9,7 @@
 pub mod status;
 pub mod toolchain;
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
 use crate::kernel::signing::SigningKey;
@@ -762,6 +763,7 @@ pub(crate) use crate::kernel::store::clone_tree_with_activity;
 /// closure must never inject arbitrary executable paths into `tog run`.
 pub fn closure_object(
     store: &crate::kernel::store::Store,
+    activity: &StoreActivity,
     closure: &serde_json::Value,
     key: &str,
     probe: &str,
@@ -782,7 +784,7 @@ pub fn closure_object(
     {
         return Err(bad("malformed id"));
     }
-    if !store.has(id)? {
+    if !store.has_with_activity(activity, id)? {
         return Err(bad("object not in the store"));
     }
     let path = store.object_path(id);
@@ -1295,6 +1297,9 @@ mod closure_platform_tests {
     }
 
     fn complete_object(store: &Store, name: &str) -> String {
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         crate::kernel::objmeta::register_test_kinds();
         let identity = crate::kernel::types::Identity {
             kind: "test".into(),
@@ -1303,10 +1308,11 @@ mod closure_platform_tests {
             inputs: Default::default(),
         };
         let id = identity.object_id();
-        let staged = store.stage().unwrap();
+        let staged = store.stage_with_activity(activity).unwrap();
         fs::write(staged.join("payload"), name).unwrap();
         store
-            .commit_with_deps(
+            .commit_with_activity_and_deps(
+                activity,
                 &identity,
                 &staged,
                 &[],

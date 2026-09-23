@@ -326,6 +326,7 @@ fn extract_go_toolchain_inner(
 /// only way a Go object is built.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
@@ -336,16 +337,15 @@ pub fn realize_runtime(
     let row = runtime_row(platform, selected)?;
     let identity = runtime_identity(platform, &row.version, row.digest.hex());
     let id = identity.object_id();
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
-    let tarball = download_verified_digest_held(store, &row.url, &row.digest)?;
-    let staged = store.stage_with_activity(&activity)?;
-    extract_go_toolchain_for(&activity, &tarball, &staged)?;
+    let tarball = download_verified_digest_held(store, activity, &row.url, &row.digest)?;
+    let staged = store.stage_with_activity(activity)?;
+    extract_go_toolchain_for(activity, &tarball, &staged)?;
     store
-        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(row.digest.clone());
             deps
@@ -383,12 +383,22 @@ fn shipped_selection(platform: Platform, version: &str) -> io::Result<Selected> 
 /// with no project selection to honor (`tog deps`, tests). A run inside a
 /// project realizes through [`realize_runtime`] with the toolchain its lock
 /// selected.
-pub fn ensure_go(store: &Store, version: &str) -> io::Result<PathBuf> {
-    ensure_go_for(store, Platform::host()?, version)
+pub fn ensure_go(store: &Store, activity: &StoreActivity, version: &str) -> io::Result<PathBuf> {
+    ensure_go_for(store, activity, Platform::host()?, version)
 }
 
-pub fn ensure_go_for(store: &Store, platform: Platform, version: &str) -> io::Result<PathBuf> {
-    realize_runtime(store, platform, &shipped_selection(platform, version)?)
+pub fn ensure_go_for(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    version: &str,
+) -> io::Result<PathBuf> {
+    realize_runtime(
+        store,
+        activity,
+        platform,
+        &shipped_selection(platform, version)?,
+    )
 }
 
 /// The forced environment for EVERY tog-controlled go invocation.
@@ -789,6 +799,7 @@ fn download_closure(
 /// checked: per-module errors ride in the stream.
 fn closure_from_download(
     store: &Store,
+    activity: &StoreActivity,
     out: &std::process::Output,
     gosum: &str,
 ) -> io::Result<Vec<GoModule>> {
@@ -799,7 +810,7 @@ fn closure_from_download(
     let mut de = serde_json::Deserializer::from_str(&stdout).into_iter::<DownloadEntry>();
     while let Some(entry) = de.next() {
         let entry = entry.map_err(|e| err(format!("go mod download JSON: {e}")))?;
-        if let Some(module) = verified_module(store, entry, &ledger)? {
+        if let Some(module) = verified_module(store, activity, entry, &ledger)? {
             modules.push(module);
         }
     }
@@ -818,6 +829,7 @@ fn closure_from_download(
 /// or a build-GRAPH-only module whose zip sum the tidied go.sum omits.
 fn verified_module(
     store: &Store,
+    activity: &StoreActivity,
     entry: DownloadEntry,
     ledger: &std::collections::BTreeSet<String>,
 ) -> io::Result<Option<GoModule>> {
@@ -879,8 +891,8 @@ fn verified_module(
             entry.path, entry.version
         )));
     }
-    let (zip_sha256, _) = cache_insert(store, Path::new(zip))?;
-    let (modfile_sha256, _) = cache_insert(store, Path::new(gomod_file))?;
+    let (zip_sha256, _) = cache_insert(store, activity, Path::new(zip))?;
+    let (modfile_sha256, _) = cache_insert(store, activity, Path::new(gomod_file))?;
     let info = entry.info.as_deref().ok_or_else(|| {
         err(format!(
             "{}@{}: download entry has no Info file",
@@ -897,7 +909,7 @@ fn verified_module(
             entry.path, entry.version, info_json["Version"]
         )));
     }
-    let (info_sha256, _) = cache_insert(store, Path::new(info))?;
+    let (info_sha256, _) = cache_insert(store, activity, Path::new(info))?;
     Ok(Some(GoModule {
         path: entry.path,
         version: entry.version,
@@ -958,7 +970,7 @@ pub fn plan_go(
 
     let work = scratch.join("plan");
     let out = download_closure(activity, go_obj, &work, &gate_cache, &gomod, &gosum)?;
-    let result = closure_from_download(store, &out, &gosum);
+    let result = closure_from_download(store, activity, &out, &gosum);
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut modules = result?;
     modules.sort_by(|a, b| (&a.path, &a.version).cmp(&(&b.path, &b.version)));
@@ -1056,7 +1068,12 @@ pub fn escape_go_path(s: &str) -> io::Result<String> {
 
 /// Stage the cache/download skeleton for a plan (zips, .mod, .info,
 /// tog-verified .ziphash) from the verified artifact cache.
-pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> io::Result<()> {
+pub fn stage_modcache_skeleton(
+    store: &Store,
+    activity: &StoreActivity,
+    plan: &GoPlan,
+    staged: &Path,
+) -> io::Result<()> {
     validate_plan(plan)?;
     for m in &plan.modules {
         let dir = staged
@@ -1074,7 +1091,7 @@ pub fn stage_modcache_skeleton(store: &Store, plan: &GoPlan, staged: &Path) -> i
             // trusted, because go skips extraction checks when zip+ziphash
             // already exist, so a poisoned cache byte would go straight
             // into the object.
-            let src = cache_verified_held(store, hash)
+            let src = cache_verified_held(store, activity, hash)
                 .map_err(|e| io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version)))?;
             // COPY, never hardlink: builds must not reach the cache.
             fs::copy(&src, dir.join(format!("{ver}.{ext}")))?;
@@ -1157,7 +1174,7 @@ pub fn realize_modcache(
     }
 
     let staged = store.stage_with_activity(activity)?;
-    stage_modcache_skeleton(store, plan, &staged)?;
+    stage_modcache_skeleton(store, activity, plan, &staged)?;
     // Offline extraction by the store Go: it re-verifies ziphash and runs
     // its full zip validation while materializing <module>@<version>/ dirs.
     if !plan.modules.is_empty() {
@@ -1216,6 +1233,7 @@ pub fn realize_modcache(
 /// is the selection the run honored: the closure records it so the release
 /// this Go object came from is readable without re-deriving it from go.mod.
 pub fn project_go_env(
+    activity: &StoreActivity,
     project_dir: &Path,
     go_obj: &Path,
     modcache_obj: &Path,
@@ -1228,7 +1246,6 @@ pub fn project_go_env(
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&go_obj)
         .ok_or_else(|| err("Go object is not in a Tog store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let object_ref = |path: &Path| -> io::Result<serde_json::Value> {
         let id = path
             .file_name()
@@ -1239,8 +1256,8 @@ pub fn project_go_env(
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `go_object` are the same object; the direct
     // reference is what keeps it alive across a GC.
-    refs.object_path(&store, &activity, &go_obj)?;
-    refs.object_path(&store, &activity, &modcache_obj)?;
+    refs.object_path(&store, activity, &go_obj)?;
+    refs.object_path(&store, activity, &modcache_obj)?;
     let mut body = serde_json::json!({
         "go_object": object_ref(&go_obj.canonicalize()?)?,
         "modcache_object": object_ref(&modcache_obj.canonicalize()?)?,
@@ -1258,15 +1275,7 @@ pub fn project_go_env(
             body.insert(key.clone(), value.clone());
         }
     }
-    crate::comforter::write_closure(
-        project_dir,
-        "go",
-        body,
-        &store,
-        &activity,
-        refs,
-        attribution,
-    )
+    crate::comforter::write_closure(project_dir, "go", body, &store, activity, refs, attribution)
 }
 
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
@@ -1527,6 +1536,8 @@ mod tests {
         let store = Store {
             root: temp.0.join("absent-store"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let platform = Platform::host().unwrap();
 
         let foreign = Selected {
@@ -1535,7 +1546,7 @@ mod tests {
             lock_sha256: None,
             source: Source::Lock,
         };
-        let error = realize_runtime(&store, platform, &foreign)
+        let error = realize_runtime(&store, activity, platform, &foreign)
             .unwrap_err()
             .to_string();
         assert!(error.contains("node selection"), "{error}");
@@ -1547,7 +1558,7 @@ mod tests {
             lock_sha256: None,
             source: Source::Lock,
         };
-        let error = realize_runtime(&store, platform, &unknown)
+        let error = realize_runtime(&store, activity, platform, &unknown)
             .unwrap_err()
             .to_string();
         assert!(error.contains("recipe example/1"), "{error}");
@@ -1560,7 +1571,7 @@ mod tests {
             lock_sha256: None,
             source: Source::Lock,
         };
-        let error = realize_runtime(&store, platform, &elsewhere)
+        let error = realize_runtime(&store, activity, platform, &elsewhere)
             .unwrap_err()
             .to_string();
         assert!(error.contains("go artifact"), "{error}");
@@ -1619,6 +1630,9 @@ mod tests {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
         let store = Store { root: store_root };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let selected = selection();
         let go_id = {
             let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
@@ -1653,6 +1667,7 @@ mod tests {
             modules: Vec::new(),
         };
         project_go_env(
+            activity,
             &project,
             &store.object_path(&go_id),
             &store.object_path(&modcache_id),
@@ -1693,6 +1708,10 @@ mod tests {
         let store = Store {
             root: store_root.canonicalize().unwrap(),
         };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
         let selected = selection();
         let go_id = {
             let row = runtime_row(Platform::host().unwrap(), &selected).unwrap();
@@ -1727,6 +1746,7 @@ mod tests {
             modules: Vec::new(),
         };
         project_go_env(
+            activity,
             &project,
             &store.object_path(&go_id),
             &store.object_path(&modcache_id),
@@ -1748,6 +1768,7 @@ mod tests {
         assert!(record.projections.is_empty(), "{:?}", record.projections);
 
         // `gc --register` rebuilds the same record from this closure alone.
+        drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
@@ -1764,6 +1785,9 @@ mod tests {
             fs::create_dir_all(store_root.join(sub)).unwrap();
         }
         let store = Store { root: store_root };
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let platform = Platform::host().unwrap();
         let default_identity = go_identity(go_pin(platform, GO_VERSION).unwrap());
         let default_id = default_identity.object_id();
@@ -1789,7 +1813,7 @@ mod tests {
         .unwrap();
         let before = tree_snapshot(&store.root);
 
-        let error = ensure_go_for(&store, platform, "1.26.0")
+        let error = ensure_go_for(&store, activity, platform, "1.26.0")
             .unwrap_err()
             .to_string();
         assert!(error.contains("resolved Go 1.26.0"), "{error}");
@@ -2180,14 +2204,17 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("TOG_STORE", temp.join("store"));
         let store = Store::open().unwrap();
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         std::env::remove_var("TOG_STORE");
         // Real fixture artifacts through the verified cache.
         let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
-        let (zip_hash, _) = cache_insert(&store, &fix.join("quote-v1.5.2.zip")).unwrap();
-        let (mod_hash, _) = cache_insert(&store, &fix.join("quote-v1.5.2.mod")).unwrap();
+        let (zip_hash, _) = cache_insert(&store, activity, &fix.join("quote-v1.5.2.zip")).unwrap();
+        let (mod_hash, _) = cache_insert(&store, activity, &fix.join("quote-v1.5.2.mod")).unwrap();
         let info = temp.join("info");
         std::fs::write(&info, r#"{"Version":"v1.5.2"}"#).unwrap();
-        let (info_hash, info_cache) = cache_insert(&store, &info).unwrap();
+        let (info_hash, info_cache) = cache_insert(&store, activity, &info).unwrap();
         let module = GoModule {
             path: "rsc.io/quote".into(),
             version: "v1.5.2".into(),
@@ -2204,7 +2231,7 @@ mod tests {
         };
         let staged = temp.join("staged");
         std::fs::create_dir_all(&staged).unwrap();
-        stage_modcache_skeleton(&store, &plan, &staged).unwrap();
+        stage_modcache_skeleton(&store, activity, &plan, &staged).unwrap();
         let base = staged.join("cache/download/rsc.io/quote/@v");
         assert_eq!(
             std::fs::read_to_string(base.join("v1.5.2.ziphash")).unwrap(),
@@ -2225,7 +2252,7 @@ mod tests {
         }
         let staged2 = temp.join("staged2");
         std::fs::create_dir_all(&staged2).unwrap();
-        let e = stage_modcache_skeleton(&store, &plan, &staged2).unwrap_err();
+        let e = stage_modcache_skeleton(&store, activity, &plan, &staged2).unwrap_err();
         assert!(e.to_string().contains(&info_hash), "{e}");
         let _ = std::fs::remove_dir_all(&temp);
     }

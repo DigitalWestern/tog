@@ -524,91 +524,403 @@ fn agent_docs_are_two_files() {
     assert_eq!(names, ["DESIGNS.md", "HITRATE.md"]);
 }
 
+/// One Rust token, with comments and whitespace gone and every literal
+/// collapsed to `Lit`, so a scan cannot be fooled by `.status /* c */ ()`,
+/// by a call split across lines, or by a string that happens to spell code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token {
+    Ident(String),
+    Punct(char),
+    Lit,
+}
+
+fn tokenize(text: &str) -> Vec<Token> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            // Block comments nest in Rust.
+            let mut depth = 0;
+            while i < n {
+                if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else if let Some(end) = raw_string_end(&chars, i) {
+            out.push(Token::Lit);
+            i = end;
+        } else if c == '"' || (c == 'b' && i + 1 < n && chars[i + 1] == '"') {
+            i += if c == 'b' { 2 } else { 1 };
+            while i < n && chars[i] != '"' {
+                if chars[i] == '\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            out.push(Token::Lit);
+        } else if c == '\'' || (c == 'b' && i + 1 < n && chars[i + 1] == '\'') {
+            let start = if c == 'b' { i + 1 } else { i };
+            // A char literal closes within a few characters; otherwise this
+            // quote starts a lifetime or label, which is an identifier here.
+            let close = if start + 1 < n && chars[start + 1] == '\\' {
+                (start + 2..n.min(start + 12)).find(|&j| chars[j] == '\'')
+            } else if start + 2 < n && chars[start + 2] == '\'' {
+                Some(start + 2)
+            } else {
+                None
+            };
+            match close {
+                Some(j) => {
+                    out.push(Token::Lit);
+                    i = j + 1;
+                }
+                None => {
+                    i = start + 1;
+                    while i < n && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                        i += 1;
+                    }
+                }
+            }
+        } else if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < n && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            out.push(Token::Ident(chars[start..i].iter().collect()));
+        } else if c.is_ascii_digit() {
+            while i < n && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                // `0..n` is a range, not a float.
+                if chars[i] == '.' && i + 1 < n && chars[i + 1] == '.' {
+                    break;
+                }
+                i += 1;
+            }
+            out.push(Token::Lit);
+        } else {
+            out.push(Token::Punct(c));
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Where a raw string literal (`r"…"`, `r#"…"#`, `br"…"`) starting at `i`
+/// ends, if one does.
+fn raw_string_end(chars: &[char], i: usize) -> Option<usize> {
+    let n = chars.len();
+    let mut j = i;
+    if chars[j] == 'b' {
+        j += 1;
+    }
+    if j >= n || chars[j] != 'r' {
+        return None;
+    }
+    if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        return None;
+    }
+    j += 1;
+    let mut hashes = 0;
+    while j < n && chars[j] == '#' {
+        hashes += 1;
+        j += 1;
+    }
+    if j >= n || chars[j] != '"' {
+        return None;
+    }
+    j += 1;
+    while j < n {
+        if chars[j] == '"' && (1..=hashes).all(|k| j + k < n && chars[j + k] == '#') {
+            return Some(j + 1 + hashes);
+        }
+        j += 1;
+    }
+    Some(n)
+}
+
+fn is_ident(token: Option<&Token>, name: &str) -> bool {
+    matches!(token, Some(Token::Ident(text)) if text == name)
+}
+
+fn is_punct(token: Option<&Token>, c: char) -> bool {
+    token == Some(&Token::Punct(c))
+}
+
+/// Production tokens of a file, each tagged with the innermost named `fn`
+/// around it. Items under `#[cfg(test)]` (test modules and test-only
+/// helpers) are dropped whole.
+fn production_tokens(text: &str) -> Vec<(Token, String)> {
+    let tokens = tokenize(text);
+    let mut out = Vec::new();
+    // (fn name, brace depth its body opened at)
+    let mut functions: Vec<(String, usize)> = Vec::new();
+    let mut pending_fn: Option<String> = None;
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < tokens.len() {
+        // `# [ cfg ( test ) ]` drops the next item: through its matching
+        // brace, or through the `;` or `,` that ends an item, field or
+        // expression without a body. A `}` that closes the enclosing block
+        // ends it too and is kept.
+        if is_punct(tokens.get(i), '#')
+            && is_punct(tokens.get(i + 1), '[')
+            && is_ident(tokens.get(i + 2), "cfg")
+            && is_punct(tokens.get(i + 3), '(')
+            && is_ident(tokens.get(i + 4), "test")
+            && is_punct(tokens.get(i + 5), ')')
+            && is_punct(tokens.get(i + 6), ']')
+        {
+            let mut j = i + 7;
+            let mut braces = 0usize;
+            let mut groups = 0usize;
+            let mut consumed_close = true;
+            while j < tokens.len() {
+                let arrow = j > 0 && tokens[j - 1] == Token::Punct('-');
+                match &tokens[j] {
+                    Token::Punct('{') => braces += 1,
+                    Token::Punct('}') if braces == 0 => {
+                        consumed_close = false;
+                        break;
+                    }
+                    Token::Punct('}') => {
+                        braces -= 1;
+                        if braces == 0 && groups == 0 {
+                            break;
+                        }
+                    }
+                    Token::Punct('(' | '[') if braces == 0 => groups += 1,
+                    Token::Punct(')' | ']') if braces == 0 => groups = groups.saturating_sub(1),
+                    Token::Punct('<') if braces == 0 => groups += 1,
+                    Token::Punct('>') if braces == 0 && !arrow => groups = groups.saturating_sub(1),
+                    Token::Punct(';' | ',') if braces == 0 && groups == 0 => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            i = if consumed_close { j + 1 } else { j };
+            continue;
+        }
+        let token = tokens[i].clone();
+        match &token {
+            Token::Ident(word) if word == "fn" => {
+                if let Some(Token::Ident(name)) = tokens.get(i + 1) {
+                    pending_fn = Some(name.clone());
+                }
+            }
+            Token::Punct(';') if pending_fn.is_some() => {
+                // A body-less signature (a trait method declaration).
+                if functions.last().map(|(_, d)| *d) != Some(depth) {
+                    pending_fn = None;
+                }
+            }
+            Token::Punct('{') => {
+                depth += 1;
+                if let Some(name) = pending_fn.take() {
+                    functions.push((name, depth));
+                }
+            }
+            Token::Punct('}') => {
+                if functions.last().is_some_and(|(_, d)| *d == depth) {
+                    functions.pop();
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        let owner = functions
+            .last()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default();
+        out.push((token, owner));
+        i += 1;
+    }
+    out
+}
+
+/// Per-function counts of `(file, fn)` sites matching `hit` at a token.
+fn count_sites(
+    skip: &[&str],
+    hit: impl Fn(&[(Token, String)], usize) -> bool,
+) -> Vec<(String, String, usize)> {
+    let mut counts: Vec<(String, String, usize)> = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || skip.contains(&relative.as_str()) {
+            continue;
+        }
+        let tokens = production_tokens(&text);
+        for index in 0..tokens.len() {
+            if !hit(&tokens, index) {
+                continue;
+            }
+            let owner = tokens[index].1.clone();
+            match counts
+                .iter_mut()
+                .find(|(file, function, _)| *file == relative && *function == owner)
+            {
+                Some(entry) => entry.2 += 1,
+                None => counts.push((relative.clone(), owner, 1)),
+            }
+        }
+    }
+    counts.sort();
+    counts
+}
+
+fn expected_sites(list: &[(&str, &str, usize)]) -> Vec<(String, String, usize)> {
+    let mut expected: Vec<(String, String, usize)> = list
+        .iter()
+        .map(|(file, function, count)| (file.to_string(), function.to_string(), *count))
+        .collect();
+    expected.sort();
+    expected
+}
+
+fn token_at(tokens: &[(Token, String)], index: usize) -> Option<&Token> {
+    tokens.get(index).map(|(token, _)| token)
+}
+
 /// A child process that reads or writes a store path runs through
 /// `kernel::supervise` with the caller's activity lease, so protection is
 /// provable at the call site. The only raw `.status()`, `.output()` or
-/// `.spawn()` left in production code are the functions below, each of
-/// which touches no store path; the comment above each group says why. A
-/// new raw spawn fails here until it either borrows a lease or joins this
-/// list with a reason.
-const RAW_CHILD_SITES: &[(&str, &str)] = &[
+/// `.spawn()` calls left in production code are counted here, per function;
+/// each touches no store path, and the comment above each group says why.
+/// A new raw child, even in a listed function, fails until it borrows a
+/// lease or is added here with a reason.
+const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     // `None` arm of `Option<&StoreActivity>`: no store is involved.
-    ("src/comforter/mod.rs", "clone_tree_for"),
-    ("src/kernel/archive.rs", "list_names"),
-    ("src/kernel/archive.rs", "status_for"),
-    ("src/tailors/python/build_requires.rs", "output_for"),
-    ("src/tailors/python/build_requires.rs", "status_for"),
+    ("src/comforter/mod.rs", "clone_tree_for", 3),
+    ("src/kernel/archive.rs", "list_names", 1),
+    ("src/kernel/archive.rs", "status_for", 1),
+    ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity", 2),
+    ("src/tailors/python/build_requires.rs", "output_for", 1),
+    ("src/tailors/python/build_requires.rs", "status_for", 1),
     // `git ls-remote`: a network query with no working directory.
-    ("src/kernel/gitsrc.rs", "run_git"),
-    // The `None` arm of the bwrap `--version` and classification probes.
-    ("src/kernel/sandbox.rs", "bwrap_preflight_with_activity"),
+    ("src/kernel/gitsrc.rs", "run_git", 1),
     // Unmanaged sandbox entry points, for callers that consume no store.
-    ("src/kernel/sandbox.rs", "run_bwrap_with_stdout"),
-    ("src/kernel/sandbox.rs", "run_seatbelt_status"),
-    // Host probes.
-    ("src/commands/selfupdate.rs", "smoke_test"),
-    ("src/tailors/dotnet/mod.rs", "invoking_uid"),
-    ("src/tailors/python/pypi.rs", "detect_host_glibc"),
+    ("src/kernel/sandbox.rs", "run_bwrap_with_stdout", 1),
+    ("src/kernel/sandbox.rs", "run_seatbelt_status", 1),
+    // Host probes, and the downloaded tog's `--version` before it is
+    // installed.
+    ("src/commands/selfupdate.rs", "smoke_test", 1),
+    ("src/tailors/dotnet/mod.rs", "invoking_uid", 1),
+    ("src/tailors/python/pypi.rs", "detect_host_glibc", 1),
+];
+
+/// The functions allowed to take an activity lease (`.activity(`,
+/// `try_activity_exclusive`, `StoreActivity::acquire`/`try_exclusive`),
+/// with how many times. Each is an operation boundary: it owns the work its
+/// lease protects and passes that lease down. A helper that receives a
+/// store from a caller already holding a lease must take the caller's
+/// `&StoreActivity` instead, because a nested acquisition under the
+/// thread's own exclusive lease is refused.
+const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
+    // The primitives themselves.
+    ("src/kernel/store/mod.rs", "activity", 1),
+    ("src/kernel/store/mod.rs", "try_activity_exclusive", 1),
+    // Command entry points: the shared lease every tailor command borrows
+    // (`Context`), and the commands that open the store without one.
+    ("src/kernel/context.rs", "open_with_project_dir", 1),
+    ("src/commands/doctor.rs", "run", 1),
+    ("src/commands/ls.rs", "run", 1),
+    ("src/commands/gc.rs", "run", 1),
+    ("src/commands/x.rs", "clean", 1),
+    // Exclusive maintenance that runs before any shared lease is taken.
+    ("src/kernel/gc/migrate.rs", "automatic_maintenance", 1),
+    ("src/kernel/gc/mod.rs", "collect", 1),
+    // Public root-registry calls for callers holding no lease (tests and
+    // library users). Each has a `_with_activity` form that production uses.
+    ("src/kernel/store/roots.rs", "register_root", 1),
+    ("src/kernel/store/roots.rs", "register_root_record", 1),
+    ("src/kernel/store/roots.rs", "register_root_from_project", 1),
+    ("src/kernel/store/roots.rs", "remove_root_entry", 1),
+    ("src/kernel/store/roots.rs", "forget_root", 1),
+    // Compiled only under `cfg(test)` (declared so in kernel/mod.rs): a
+    // lease on a scratch directory for tests with no store.
+    ("src/kernel/testutil.rs", "detached_lease", 1),
 ];
 
 #[test]
 fn store_children_borrow_the_callers_lease() {
-    let mut found = Vec::new();
-    for (relative, text) in all_sources() {
-        if !relative.starts_with("src/") || relative == "src/kernel/supervise.rs" {
-            continue;
-        }
-        let clean = blank_literals(outside_test_modules(&text));
-        let mut current: Option<String> = None;
-        let mut test_only = false;
-        let mut previous = "";
-        for line in clean.lines() {
-            let trimmed = line.trim_start();
-            let indent = line.len() - trimmed.len();
-            if indent <= 4 {
-                if let Some(name) = fn_name(trimmed) {
-                    test_only = previous.trim() == "#[cfg(test)]";
-                    current = Some(name);
-                }
-            }
-            if !trimmed.is_empty() {
-                previous = line;
-            }
-            if test_only {
-                continue;
-            }
-            if [".status()", ".output()", ".spawn()"]
-                .iter()
-                .any(|call| line.contains(call))
-            {
-                let site = (relative.clone(), current.clone().unwrap_or_default());
-                if !found.contains(&site) {
-                    found.push(site);
-                }
-            }
-        }
-    }
-    found.sort();
-    let mut expected: Vec<(String, String)> = RAW_CHILD_SITES
-        .iter()
-        .map(|(file, function)| (file.to_string(), function.to_string()))
-        .collect();
-    expected.sort();
+    let raw = count_sites(&["src/kernel/supervise.rs"], |tokens, i| {
+        let call = |name: &str| {
+            is_ident(token_at(tokens, i + 1), name) && is_punct(token_at(tokens, i + 2), '(')
+        };
+        let spawns = call("status") || call("output") || call("spawn");
+        // `.status()` as a method, or `Command::status(&mut c)` spelled out.
+        (is_punct(token_at(tokens, i), '.') && spawns && is_punct(token_at(tokens, i + 3), ')'))
+            || (is_ident(token_at(tokens, i), "Command")
+                && is_punct(token_at(tokens, i + 1), ':')
+                && is_punct(token_at(tokens, i + 2), ':')
+                && ["status", "output", "spawn"]
+                    .iter()
+                    .any(|name| is_ident(token_at(tokens, i + 3), name)))
+    });
     assert_eq!(
-        found, expected,
+        raw,
+        expected_sites(RAW_CHILD_SITES),
         "a production child runs without the caller's activity lease; pass \
          `&StoreActivity` to `kernel::supervise` (or, for a child that touches \
-         no store path, name it in RAW_CHILD_SITES and DESIGNS.md)"
+         no store path, count it in RAW_CHILD_SITES with the reason)"
     );
 
-    // The helpers that run children must not mint a lease of their own: a
-    // fresh lease per child is exactly what cannot be proved at the call
-    // site.
-    for relative in ["src/kernel/supervise.rs", "src/kernel/sandbox.rs"] {
-        let text = fs::read_to_string(repo().join(relative)).unwrap();
-        assert!(
-            !non_test(&text).contains(".activity("),
-            "{relative} takes its own activity lease; borrow the caller's"
-        );
-    }
+    let leases = count_sites(&["src/kernel/activity.rs"], |tokens, i| {
+        let method = |name: &str| {
+            is_punct(token_at(tokens, i), '.')
+                && is_ident(token_at(tokens, i + 1), name)
+                && is_punct(token_at(tokens, i + 2), '(')
+        };
+        let associated = |name: &str| {
+            is_ident(token_at(tokens, i), "StoreActivity")
+                && is_punct(token_at(tokens, i + 1), ':')
+                && is_punct(token_at(tokens, i + 2), ':')
+                && is_ident(token_at(tokens, i + 3), name)
+        };
+        method("activity")
+            || method("try_activity_exclusive")
+            || associated("acquire")
+            || associated("try_exclusive")
+    });
+    assert_eq!(
+        leases,
+        expected_sites(LEASE_BOUNDARIES),
+        "an activity lease is taken outside the reviewed operation boundaries; \
+         take the caller's `&StoreActivity` instead (or, for a new operation \
+         boundary, count it in LEASE_BOUNDARIES)"
+    );
+}
+
+#[test]
+fn the_scan_sees_through_comments_and_line_breaks() {
+    let text = "fn a() { c.status /* c */ (); }\n\
+                fn b() { c\n  .output(\n  ); let s = \".spawn()\"; }\n\
+                #[cfg(test)]\nfn t() { c.spawn(); }\n\
+                fn d() { let x = 'a'; store . activity (m); }";
+    let owners: Vec<String> = production_tokens(text)
+        .windows(2)
+        .filter(|pair| {
+            pair[0].0 == Token::Punct('.')
+                && matches!(&pair[1].0, Token::Ident(name)
+                    if ["status", "output", "spawn", "activity"].contains(&name.as_str()))
+        })
+        .map(|pair| pair[0].1.clone())
+        .collect();
+    assert_eq!(owners, ["a", "b", "d"]);
 }

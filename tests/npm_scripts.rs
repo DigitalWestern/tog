@@ -201,9 +201,17 @@ fn make_fixture_tarball(
 }
 
 fn seed_verified_fixture(store: &Store, tarball: &Path, sri: &str) {
-    let digest = Digest::from_sri(sri).unwrap();
-    fetch::download_verified_digest(store, &format!("file://{}", tarball.display()), &digest)
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
+    let digest = Digest::from_sri(sri).unwrap();
+    fetch::download_verified_digest(
+        store,
+        activity,
+        &format!("file://{}", tarball.display()),
+        &digest,
+    )
+    .unwrap();
 }
 
 fn add_fixture_dependency(project: &Path, package_name: &str, sri: &str) {
@@ -280,7 +288,11 @@ fn network_access_during_install_script_fails() {
         let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
         let sri = std::env::var("TOG_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let result = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]);
+        let activity = &store
+            .activity(tog::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let result =
+            node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[]);
         let err = result.expect_err("install script reaching the network must fail");
         assert!(
             err.to_string().contains("network-denied"),
@@ -330,8 +342,12 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
         let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
         let sri = std::env::var("TOG_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
-        let err = node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[])
-            .expect_err("strict sync must reject the cached exception");
+        let activity = &store
+            .activity(tog::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let err =
+            node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[])
+                .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
         assert!(err.to_string().contains("'tog --fresh' will not help"));
         return;
@@ -345,16 +361,29 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
          () => process.exit(0)).on('error', () => process.exit(1))\"",
     );
     let store = store_at(&dir);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     policy::init(&dir, false).unwrap();
     let plan = plan_for(&tarball, &sri);
     let mut attribution = policy::Attribution::open("node").expect("test attribution");
-    let env = node::realize_node_env(&store, platform, &plan, &[]).expect("permissive realize");
+    let env =
+        node::realize_node_env(&store, activity, platform, &plan, &[]).expect("permissive realize");
     let package_dir = env.join("node_modules/fixture-pkg");
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    node::project_node_env(&dir, &env, platform, &plan, &[], false, &mut attribution)
-        .expect("project");
+    node::project_node_env(
+        activity,
+        &dir,
+        &env,
+        platform,
+        &plan,
+        &[],
+        false,
+        &mut attribution,
+    )
+    .expect("project");
     attribution.finish(true).expect("test closure attribution");
     let closure = comforter::read_closure(&dir, "node").unwrap();
     let exceptions = closure["exceptions"].as_array().unwrap();
@@ -398,8 +427,11 @@ fn benign_install_script_runs_and_output_is_captured() {
         "node -e \"require('fs').writeFileSync('built.txt','ok')\"",
     );
     let store = store_at(&dir);
-    let env =
-        node::realize_node_env(&store, platform, &plan_for(&tarball, &sri), &[]).expect("realize");
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let env = node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[])
+        .expect("realize");
     let built = env.join("node_modules/fixture-pkg/built.txt");
     assert_eq!(std::fs::read_to_string(built).unwrap(), "ok");
     let _ = std::fs::remove_dir_all(&dir);
@@ -420,8 +452,11 @@ fn linux_npm_roundtrip() {
     let temp = TempDir::new();
     let project = &temp.0;
     let store = store_at(project);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let store_root = store.root.clone();
-    let node = node::ensure_node_for(&store, platform).expect("pinned Linux Node");
+    let node = node::ensure_node_for(&store, activity, platform).expect("pinned Linux Node");
     let node_bin = node.join("bin");
     std::fs::write(
         project.join("package.json"),
@@ -628,8 +663,12 @@ fn skip_download_switch_is_injected_and_recorded() {
         "node -e \"if(process.env.PUPPETEER_SKIP_DOWNLOAD!=='true'){process.exit(3)};require('fs').writeFileSync('skipped.txt','ok')\"",
     );
     let store = store_at(&dir);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let env = node::realize_node_env(
         &store,
+        activity,
         platform,
         &plan_named(&tarball, &sri, "puppeteer"),
         &[],
@@ -659,8 +698,12 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
         "node -e \"if(process.env.npm_config_build_from_source!=='true'){process.exit(3)};require('fs').writeFileSync('compiled.txt','ok')\" # prebuild-install",
     );
     let store = store_at(&dir);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let env = node::realize_node_env(
         &store,
+        activity,
         platform,
         &plan_named(&tarball, &sri, "fake-prebuilt"),
         &[],

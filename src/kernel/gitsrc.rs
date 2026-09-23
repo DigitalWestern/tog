@@ -6,6 +6,7 @@
 //! the network, so it happens at realization time like any other download —
 //! never inside a build sandbox.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::store::Store;
 pub use crate::kernel::types::GitSource;
 use crate::kernel::types::Identity;
@@ -498,23 +499,26 @@ thread_local! {
 }
 
 /// Realize a git source in the store and return its object path.
-pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBuf> {
+pub fn ensure_git_source(
+    store: &Store,
+    activity: &StoreActivity,
+    source: &GitSource,
+) -> io::Result<PathBuf> {
     validate_source(source)?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity(source);
     let id = identity.object_id();
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
-    let work = store.stage_with_activity(&activity)?;
+    let work = store.stage_with_activity(activity)?;
     let result = (|| -> io::Result<()> {
         git_ok_with_activity(
             &["init", "-q", "--template="],
             Some(&work),
             "git init",
-            &activity,
+            activity,
         )?;
         // Besides naming the fetched repository, origin is what Git uses to
         // resolve relative URLs in .gitmodules. Without it, a submodule such
@@ -523,7 +527,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
             &["remote", "add", "origin", &source.url],
             Some(&work),
             "git remote add origin",
-            &activity,
+            activity,
         )?;
         // Asking for the pinned commit by sha is the cheap path, and it works
         // whichever branch (if any) the commit sits on. Servers that refuse
@@ -540,7 +544,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                     &source.commit,
                 ],
                 Some(&work),
-                &activity,
+                activity,
             )?;
             Ok(output.status.success())
         };
@@ -559,7 +563,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                 ],
                 Some(&work),
                 &format!("git fetch {}", source.url),
-                &activity,
+                activity,
             )?;
         }
         // Name a missing commit plainly. Otherwise checkout reports "unable
@@ -568,7 +572,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
         let present = run_git_with_activity(
             &["cat-file", "-e", &format!("{}^{{commit}}", source.commit)],
             Some(&work),
-            &activity,
+            activity,
         )?;
         if !present.status.success() {
             return Err(err(format!(
@@ -581,13 +585,13 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
             &["checkout", "-q", "--detach", &source.commit],
             Some(&work),
             &format!("git checkout {}", source.commit),
-            &activity,
+            activity,
         )?;
         let head = git_ok_with_activity(
             &["rev-parse", "HEAD"],
             Some(&work),
             "git rev-parse HEAD",
-            &activity,
+            activity,
         )?;
         if head.to_ascii_lowercase() != source.commit.to_ascii_lowercase() {
             return Err(err(format!(
@@ -625,10 +629,10 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
                 submodule_args,
                 Some(&work),
                 "git submodule update",
-                &activity,
+                activity,
             )?;
         }
-        validate_checkout_tree_with_activity(&work, &activity)?;
+        validate_checkout_tree_with_activity(&work, activity)?;
         remove_git_dirs(&work)?;
         validate_symlinks(&work)
     })();
@@ -638,7 +642,7 @@ pub fn ensure_git_source(store: &Store, source: &GitSource) -> io::Result<PathBu
     }
     store
         .commit_with_activity_and_deps(
-            &activity,
+            activity,
             &identity,
             &work,
             &[],
@@ -817,12 +821,15 @@ mod realization_tests {
         let root = temp("realize");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let source = GitSource {
             url: normalize_url(&url),
             commit: commit.clone(),
             subdirectory: None,
         };
-        let object = ensure_git_source(&store, &source).unwrap();
+        let object = ensure_git_source(&store, activity, &source).unwrap();
         assert_eq!(
             std::fs::read_to_string(object.join("index.js")).unwrap(),
             "module.exports = 42;\n"
@@ -836,7 +843,7 @@ mod realization_tests {
             "the .git directory must not be stored"
         );
         // Second call is a cache hit on the same object.
-        let again = ensure_git_source(&store, &source).unwrap();
+        let again = ensure_git_source(&store, activity, &source).unwrap();
         assert_eq!(object, again);
     }
 
@@ -848,12 +855,17 @@ mod realization_tests {
         let root = temp("wrong");
         let (url, _) = fixture_repo(&root.0);
         let store = store_at(&root.0);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let source = GitSource {
             url: normalize_url(&url),
             commit: "0".repeat(40),
             subdirectory: None,
         };
-        let error = ensure_git_source(&store, &source).unwrap_err().to_string();
+        let error = ensure_git_source(&store, activity, &source)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("fetch") || error.contains("checkout"),
             "{error}"
@@ -875,8 +887,12 @@ mod realization_tests {
 
     fn realize(root: &Path, url: &str, commit: &str) -> io::Result<PathBuf> {
         let store = store_at(root);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         ensure_git_source(
             &store,
+            activity,
             &GitSource {
                 url: normalize_url(url),
                 commit: commit.to_string(),
@@ -1000,12 +1016,15 @@ mod realization_tests {
         let root = temp("ref");
         let (url, commit) = fixture_repo(&root.0);
         let store = store_at(&root.0);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let unpinned = GitSource {
             url: normalize_url(&url),
             commit: "main".into(),
             subdirectory: None,
         };
-        let error = ensure_git_source(&store, &unpinned)
+        let error = ensure_git_source(&store, activity, &unpinned)
             .unwrap_err()
             .to_string();
         assert!(error.contains("full commit"), "{error}");
@@ -1039,7 +1058,11 @@ mod realization_tests {
             commit,
             subdirectory: None,
         };
-        let error = ensure_git_source(&store_at(&root.0), &source)
+        let store = store_at(&root.0);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let error = ensure_git_source(&store, activity, &source)
             .unwrap_err()
             .to_string();
         assert!(error.contains("transformed"), "{error}");
@@ -1056,8 +1079,12 @@ mod realization_tests {
         fs::write(checkout.join("line\nname"), b"content\n").unwrap();
         std::os::unix::fs::symlink("line\nname", checkout.join("safe-link")).unwrap();
         let store = store_at(&root.0);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let platform = crate::kernel::platform::Platform::host().unwrap();
-        let (hash, filename) = pack_checkout(&store, platform, &checkout, "pkg", "1.0").unwrap();
+        let (hash, filename) =
+            pack_checkout(&store, activity, platform, &checkout, "pkg", "1.0").unwrap();
         let archive = store.cache_path("sha256", &hash);
         let unpacked = root.0.join("unpacked");
         fs::create_dir_all(&unpacked).unwrap();
@@ -1087,7 +1114,8 @@ mod realization_tests {
         fs::create_dir_all(checkout_two.join("empty")).unwrap();
         std::os::unix::fs::symlink("line\nname", checkout_two.join("safe-link")).unwrap();
         fs::write(checkout_two.join("line\nname"), b"content\n").unwrap();
-        let (same_hash, _) = pack_checkout(&store, platform, &checkout_two, "pkg", "1.0").unwrap();
+        let (same_hash, _) =
+            pack_checkout(&store, activity, platform, &checkout_two, "pkg", "1.0").unwrap();
         assert_eq!(hash, same_hash);
     }
 
@@ -1132,7 +1160,11 @@ mod realization_tests {
         let long_dir = "d".repeat(119);
         fs::create_dir_all(checkout.join(&long_dir)).unwrap();
         fs::write(checkout.join(&long_dir).join("f".repeat(119)), b"too long").unwrap();
-        let error = pack_checkout(&store_at(&root.0), platform, &checkout, "pkg", "1.0")
+        let store = store_at(&root.0);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let error = pack_checkout(&store, activity, platform, &checkout, "pkg", "1.0")
             .expect_err("ustar path overflow must fail packing")
             .to_string();
         assert!(error.contains("packing"), "{error}");
@@ -1143,8 +1175,13 @@ mod realization_tests {
         fs::create_dir_all(&link_checkout).unwrap();
         fs::write(link_checkout.join("target"), b"content\n").unwrap();
         std::os::unix::fs::symlink("x".repeat(101), link_checkout.join("link")).unwrap();
+        let link_store = store_at(&link_root.0);
+        let link_activity = &link_store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
         let error = pack_checkout(
-            &store_at(&link_root.0),
+            &link_store,
+            link_activity,
             platform,
             &link_checkout,
             "pkg",
@@ -1174,6 +1211,7 @@ impl Drop for StageGuard {
 /// hash, and that hash is what the wheel's identity commits to.
 pub fn pack_checkout(
     store: &Store,
+    activity: &StoreActivity,
     platform: crate::kernel::platform::Platform,
     source_root: &Path,
     name: &str,
@@ -1184,8 +1222,7 @@ pub fn pack_checkout(
             "refusing to pack {name:?}-{version:?}: names and versions must be [A-Za-z0-9._+-]"
         )));
     }
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
-    let work = store.stage_with_activity(&activity)?;
+    let work = store.stage_with_activity(activity)?;
     let _cleanup = StageGuard(work.clone());
     let prefix = format!("{name}-{version}");
     let filename = format!("{prefix}.tar.gz");
@@ -1193,7 +1230,7 @@ pub fn pack_checkout(
     // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
     // would take a rewrite expression built from these strings.
     let staged = work.join(&prefix);
-    crate::comforter::clone_tree_with_activity(&activity, source_root, &staged, platform)?;
+    crate::comforter::clone_tree_with_activity(activity, source_root, &staged, platform)?;
     validate_symlinks(&staged)?;
     normalize_for_packing(&staged)?;
 
@@ -1263,7 +1300,7 @@ pub fn pack_checkout(
         .arg(&work)
         .arg("-T")
         .arg(&list);
-    let tar_status = crate::kernel::supervise::status(&mut tar, &activity)?;
+    let tar_status = crate::kernel::supervise::status(&mut tar, activity)?;
     if !tar_status.success() {
         let _ = fs::remove_file(&uncompressed);
         return Err(err(format!(
@@ -1275,7 +1312,7 @@ pub fn pack_checkout(
     gzip.args(["-n", "-9", "-c"])
         .arg(&uncompressed)
         .stdout(fs::File::create(&archive)?);
-    let gzip_status = crate::kernel::supervise::status(&mut gzip, &activity)?;
+    let gzip_status = crate::kernel::supervise::status(&mut gzip, activity)?;
     let _ = fs::remove_file(&uncompressed);
     if !gzip_status.success() {
         return Err(err(format!(
@@ -1285,7 +1322,7 @@ pub fn pack_checkout(
             gzip_status,
         )));
     }
-    let (sha256, _) = crate::kernel::fetch::cache_insert(store, &archive)?;
+    let (sha256, _) = crate::kernel::fetch::cache_insert(store, activity, &archive)?;
     Ok((sha256, filename))
 }
 

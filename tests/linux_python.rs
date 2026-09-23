@@ -124,7 +124,10 @@ fn linux_python_sync_run_and_uv_round_trip() {
     let store = Store {
         root: store_path.canonicalize().unwrap(),
     };
-    let uv = python::ensure_uv_for(&store, Platform::host().unwrap()).unwrap();
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let uv = python::ensure_uv_for(&store, activity, Platform::host().unwrap()).unwrap();
     let uv_version = Command::new(uv.join("uv"))
         .arg("--version")
         .output()

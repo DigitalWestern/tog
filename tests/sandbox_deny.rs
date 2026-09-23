@@ -34,6 +34,9 @@ fn network_access_during_build_fails() {
     let sha = hex::encode(Sha256::digest(&bytes));
 
     let store = Store::open().expect("store");
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let pkg = LockedPackage {
         name: "evil".into(),
         version: "0.1".into(),
@@ -46,6 +49,7 @@ fn network_access_during_build_fails() {
 
     let result = build::build_sdist_wheel(
         &store,
+        activity,
         Platform::host().unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),

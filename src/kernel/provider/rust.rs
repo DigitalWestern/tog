@@ -11,6 +11,7 @@
 //! The pin rows and identity constructors are `pub` so the owning
 //! tailor keeps its identity goldens and object-kind rows beside it.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_digest_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -321,30 +322,35 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// is the only way a Rust object is built.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::kernel::platform::require_host(platform, "Rust toolchain")?;
     let rows = runtime_rows(platform, selected)?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let identity = identity_of(platform, &rows);
     let id = identity.object_id();
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
 
     let mut tarballs = Vec::new();
     for row in &rows {
-        tarballs.push(download_verified_digest_held(store, &row.url, &row.digest)?);
+        tarballs.push(download_verified_digest_held(
+            store,
+            activity,
+            &row.url,
+            &row.digest,
+        )?);
     }
 
     let names: Vec<&str> = rows.iter().map(|row| row.component.as_str()).collect();
-    let staged = store.stage_with_activity(&activity)?;
-    extract_rust_components_for(&activity, &staged, platform, &names, &tarballs)?;
+    let staged = store.stage_with_activity(activity)?;
+    extract_rust_components_for(activity, &staged, platform, &names, &tarballs)?;
 
     store
-        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             for row in &rows {
                 deps.cache_digest(row.digest.clone());

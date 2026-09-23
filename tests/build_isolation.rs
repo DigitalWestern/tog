@@ -76,6 +76,9 @@ fn python_import(wheel: &std::path::Path, code: &str) {
 #[ignore]
 fn pure_python_flit_sdist_uses_isolated_build_env() {
     let Some(store) = test_store() else { return };
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let _attribution_guard = attribution_guard();
     let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
@@ -87,6 +90,7 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
     );
     let wheel = build::build_sdist_wheel(
         &store,
+        activity,
         Platform::host().unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),
@@ -104,6 +108,9 @@ fn pure_python_flit_sdist_uses_isolated_build_env() {
 #[ignore]
 fn insightface_sdist_builds_with_runtime_numpy_constraint() {
     let Some(store) = test_store() else { return };
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let _attribution_guard = attribution_guard();
     let attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let pkg = package(
@@ -115,6 +122,7 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
     );
     let wheel = build::build_sdist_wheel_with_runtime_plan(
         &store,
+        activity,
         Platform::host().unwrap(),
         &pkg,
         &python::shipped_selection("3.12.14").unwrap(),
@@ -136,6 +144,9 @@ fn insightface_sdist_builds_with_runtime_numpy_constraint() {
 #[ignore]
 fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
     let Some(store) = test_store() else { return };
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let _attribution_guard = attribution_guard();
     let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
     let tokenizers = package(
@@ -147,6 +158,7 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
     );
     let wheel = match build::build_sdist_wheel(
         &store,
+        activity,
         Platform::host().unwrap(),
         &tokenizers,
         &python::shipped_selection("3.12.14").unwrap(),
@@ -168,6 +180,7 @@ fn tokenizers_rust_sdist_builds_offline_after_vendoring() {
             );
             build::build_sdist_wheel(
                 &store,
+                activity,
                 Platform::host().unwrap(),
                 &fallback,
                 &python::shipped_selection("3.12.14").unwrap(),

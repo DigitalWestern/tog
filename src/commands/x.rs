@@ -1979,7 +1979,7 @@ pub fn launch(
             "'{package}' installed but provides no '{bin}' executable; name it with --from: 'tog x --from {package} <tool>'"
         )));
     }
-    let launch_env = tool.launch_env(&store, platform, &root, &toolchain)?;
+    let launch_env = tool.launch_env(&store, activity, platform, &root, &toolchain)?;
     let mut path: Vec<String> = launch_env
         .path
         .iter()
@@ -2118,7 +2118,7 @@ pub(crate) fn realize_node_tool(
     if executable.is_file() {
         check_cached_projection(store, activity, &root, "node")?;
         if let Some(expected) = corepack_hash {
-            verify_corepack_hash(store, &root, package, version, expected)?;
+            verify_corepack_hash(store, activity, &root, package, version, expected)?;
         }
         return Ok((root, x_lock, false));
     }
@@ -2139,13 +2139,14 @@ pub(crate) fn realize_node_tool(
         )));
     }
     if let Some(expected) = corepack_hash {
-        verify_corepack_hash(store, &root, package, version, expected)?;
+        verify_corepack_hash(store, activity, &root, package, version, expected)?;
     }
     Ok((root, x_lock, true))
 }
 
 fn verify_corepack_hash(
     store: &Store,
+    activity: &StoreActivity,
     root: &Path,
     package: &str,
     version: &str,
@@ -2186,7 +2187,7 @@ fn verify_corepack_hash(
         ))
     })?;
     let cache_path = store.cache_path(digest.algo(), digest.hex());
-    let bytes = fetch::read_cache_verified_digest(store, &digest).map_err(|error| {
+    let bytes = fetch::read_cache_verified_digest(store, activity, &digest).map_err(|error| {
         other(format!(
             "x: cannot verify packageManager {name} for {package}@{version}: verified pnpm artifact cache {} is not reachable ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
             cache_path.display()

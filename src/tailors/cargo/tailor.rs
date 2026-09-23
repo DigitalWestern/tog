@@ -68,13 +68,14 @@ impl Tailor for Cargo {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let activity = &ctx.activity;
         let toolchain = request.toolchain;
         let fresh = request.fresh;
 
         let store = &ctx.store;
         let inputs = inputs::load_cargo_inputs(ctx.platform, dir, store, &ctx.activity, toolchain)?;
         let rust_obj = &inputs.rust_obj;
-        let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
+        let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
         if fresh {
             let cargo_home = inputs.root.join(".tog/cargo-home");
             if std::fs::symlink_metadata(&cargo_home).is_ok() {
@@ -82,6 +83,7 @@ impl Tailor for Cargo {
             }
         }
         cargo::project_cargo_env(
+            activity,
             &inputs.root,
             rust_obj,
             &vendor_obj,
@@ -124,10 +126,12 @@ impl Tailor for Cargo {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let activity = &ctx.activity;
         let store = &ctx.store;
         let inputs = inputs::load_cargo_inputs(ctx.platform, cwd, store, &ctx.activity, toolchain)?;
-        let vendor_obj = cargo::realize_vendor(store, &inputs.plan)?;
+        let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
         cargo::project_cargo_env(
+            activity,
             &inputs.root,
             &inputs.rust_obj,
             &vendor_obj,
@@ -154,14 +158,20 @@ impl Tailor for Cargo {
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let activity = &ctx.activity;
         let mut prefix = Vec::new();
         let cargo_home = dir.join(".tog/cargo-home");
         if cargo_home.exists() {
             let closure = comforter::read_closure(dir, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
             // inject arbitrary executable paths.
-            let rust_obj =
-                comforter::closure_object(&ctx.store, &closure, "rust_object", "bin/rustc")?;
+            let rust_obj = comforter::closure_object(
+                &ctx.store,
+                activity,
+                &closure,
+                "rust_object",
+                "bin/rustc",
+            )?;
             prefix.push(cargo_home.join("bin").to_string_lossy().into_owned());
             prefix.push(rust_obj.join("bin").to_string_lossy().into_owned());
             command.env("CARGO_HOME", cargo_home.canonicalize()?);
@@ -320,7 +330,7 @@ impl Tailor for Cargo {
         // one selection names both, and both are realized from its rows.
         let rust_version = toolchain.version("rustc")?.to_string();
         let unavailable = cargo::toolchain_file_components(platform, cwd)?;
-        let rust_object = cargo::realize_runtime(store, platform, toolchain)?;
+        let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
         let workspace_root =

@@ -2,6 +2,7 @@
 //! requirement to one exact PyPI artifact (wheel preferred, sdist
 //! fallback), cutting the pattern (Plan) the kernel realizes.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
@@ -770,15 +771,15 @@ pub fn plan_python(
 /// resolution uses it; project locking runs uv in the project directory.
 pub(crate) fn lock_requirement_text_with_uv(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     requirements_text: &str,
     selected: &crate::kernel::toolchain::Selected,
     constraints: Option<&str>,
 ) -> io::Result<String> {
     let python_version = selected.version("cpython")?;
-    let uv = crate::tailors::python::realize_uv(store, platform, selected)?.join("uv");
+    let uv = crate::tailors::python::realize_uv(store, activity, platform, selected)?.join("uv");
     // One lease covers the scratch directory and the uv child.
-    let activity = &store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let scratch = store.stage_with_activity(activity)?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");

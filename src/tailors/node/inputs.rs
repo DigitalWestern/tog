@@ -43,7 +43,7 @@ pub fn ensure_npm_lock(
     // tog. npm-cli's shebang is `env node`, so the store bin leads PATH.
     // The npm that writes this lock is the one bundled in the Node the
     // project's toolchain selection names.
-    let node = node::realize_runtime(store, platform, selected)?;
+    let node = node::realize_runtime(store, activity, platform, selected)?;
     let path = format!(
         "{}:{}",
         node.join("bin").display(),

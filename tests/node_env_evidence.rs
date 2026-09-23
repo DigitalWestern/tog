@@ -195,6 +195,9 @@ fn seed_electron_shasums(store: &Store, platform: Platform, version: &str, zip_s
 /// `ensure_gyp_python` looks up, so lifecycle setup finds it cached instead
 /// of downloading the real interpreter. No script here calls it.
 fn seed_gyp_python(store: &Store, platform: Platform) {
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     tog::tailors::install_kinds();
     let selected = tog::tailors::python::shipped_selection("3.12").unwrap();
     let spec = selected.artifact(platform, "cpython").unwrap();
@@ -212,10 +215,11 @@ fn seed_gyp_python(store: &Store, platform: Platform) {
         tog::tailors::python::runtime_object_id(platform, &selected).unwrap(),
         "the stub is published under the id the producer looks up"
     );
-    let staged = store.stage().unwrap();
+    let staged = store.stage_with_activity(activity).unwrap();
     std::fs::create_dir_all(staged.join("bin")).unwrap();
     store
-        .commit_with_deps(
+        .commit_with_activity_and_deps(
+            activity,
             &identity,
             &staged,
             &[],
@@ -260,6 +264,9 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
     let platform = Platform::host().expect("host platform");
     let dir = temp();
     let store = store_at(&dir.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let version = "42.5.0";
     let selected = stub_node_selection(&dir.0, platform);
     let electron = electron_package(&dir.0, version, None);
@@ -268,6 +275,7 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
 
     let env = node::realize_node_env_for(
         &store,
+        activity,
         platform,
         &plan_of(&selected, electron.clone()),
         artifacts,
@@ -351,6 +359,10 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     let _attribution = policy::Attribution::open("node").expect("test attribution");
     let dir = temp();
     let store = store_at(&dir.0);
+    let lease = store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let activity = &lease;
     let version = "42.5.0";
     let selected = stub_node_selection(&dir.0, platform);
     seed_gyp_python(&store, platform);
@@ -358,7 +370,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     // provisioning is a cache hit and never reaches GitHub.
     let zip = dir.0.join("electron.zip");
     std::fs::write(&zip, b"not really a zip").unwrap();
-    let (zip_sha256, _) = tog::kernel::fetch::cache_insert(&store, &zip).unwrap();
+    let (zip_sha256, _) = tog::kernel::fetch::cache_insert(&store, activity, &zip).unwrap();
     seed_electron_shasums(&store, platform, version, &zip_sha256);
     let declared = dir.0.join("declared.bin");
     std::fs::write(&declared, b"declared artifact bytes").unwrap();
@@ -370,13 +382,15 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     }];
     let unreferenced = dir.0.join("unreferenced.bin");
     std::fs::write(&unreferenced, b"nobody names this").unwrap();
-    let (unreferenced_sha256, _) = tog::kernel::fetch::cache_insert(&store, &unreferenced).unwrap();
+    let (unreferenced_sha256, _) =
+        tog::kernel::fetch::cache_insert(&store, activity, &unreferenced).unwrap();
     // The script proves both inputs were really handed to it.
     let script = "test -f \"$electron_config_cache\"/*/electron-v*.zip && test -f \"$HOME/.cache/declared.bin\"";
     let electron = electron_package(&dir.0, version, Some(script));
 
     let env = node::realize_node_env_for(
         &store,
+        activity,
         platform,
         &plan_of(&selected, electron),
         &artifacts,
@@ -410,6 +424,8 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     let project = dir.0.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project = project.canonicalize().unwrap();
+    // Registration takes the exclusive lease; end this one first.
+    drop(lease);
     store
         .register_root_record(tog::kernel::store::RootRecord {
             key: Store::root_key(&project).unwrap(),
@@ -455,9 +471,12 @@ fn a_failed_provisioning_publishes_no_environment() {
     let platform = Platform::host().expect("host platform");
     let dir = temp();
     let store = store_at(&dir.0);
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let version = "42.5.0";
     let selected = stub_node_selection(&dir.0, platform);
-    node::realize_runtime(&store, platform, &selected).unwrap();
+    node::realize_runtime(&store, activity, platform, &selected).unwrap();
     seed_gyp_python(&store, platform);
     seed_electron_shasums(&store, platform, version, &"0".repeat(64));
     let cache = store.root.join("cache/sha256");
@@ -471,6 +490,7 @@ fn a_failed_provisioning_publishes_no_environment() {
 
     let error = node::realize_node_env_for(
         &store,
+        activity,
         platform,
         &plan_of(&selected, electron),
         &[],
@@ -555,6 +575,10 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     let _attribution = policy::Attribution::open("node").expect("test attribution");
     let dir = temp();
     let store = store_at(&dir.0);
+    let lease = store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let activity = &lease;
     let selected = stub_node_selection(&dir.0, platform);
     seed_gyp_python(&store, platform);
     let gyp_python = node::shipped_gyp_python().unwrap();
@@ -563,6 +587,7 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     let linker = script_package(&dir.0, "links-python", "ln -s \"$PYTHON\" python-link");
     let env = node::realize_node_env_for(
         &store,
+        activity,
         platform,
         &plan_of(&selected, linker),
         &[],
@@ -605,6 +630,7 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     };
     let bare = node::realize_node_env_for(
         &store,
+        activity,
         platform,
         &scriptless_plan,
         &[],
@@ -624,6 +650,8 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     let project = dir.0.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project = project.canonicalize().unwrap();
+    // Registration takes the exclusive lease; end this one first.
+    drop(lease);
     store
         .register_root_record(tog::kernel::store::RootRecord {
             key: Store::root_key(&project).unwrap(),

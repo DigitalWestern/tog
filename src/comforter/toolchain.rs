@@ -11,6 +11,7 @@
 //! source file edited while a long sync ran aborts instead of pairing new
 //! inputs with old outputs.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Digest;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -796,10 +797,11 @@ pub fn closure_record(selected: &Selected, runtime_object: &Path) -> serde_json:
 /// store exactly as every other closure object reference is.
 pub fn runtime_object(
     store: &Store,
+    activity: &StoreActivity,
     closure_body: &serde_json::Value,
     probe: &str,
 ) -> io::Result<PathBuf> {
-    super::closure_object(store, closure_body, "runtime_object", probe)
+    super::closure_object(store, activity, closure_body, "runtime_object", probe)
 }
 
 /// An `{id, path}` closure reference to `id` in `store`, as closure writers

@@ -460,6 +460,7 @@ pub trait RegistryTool: Sync {
     fn launch_env(
         &self,
         store: &crate::kernel::store::Store,
+        activity: &crate::kernel::activity::StoreActivity,
         platform: Platform,
         root: &Path,
         toolchain: &Selected,

@@ -50,6 +50,9 @@ impl Drop for TempStore {
 #[ignore]
 fn realize_env_and_run_python() {
     let store = Store::open().expect("store");
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let plan = Plan {
         ecosystem: "python".into(),
         python_version: "3.12.14".into(),
@@ -64,8 +67,9 @@ fn realize_env_and_run_python() {
         }],
     };
 
-    let env = tog::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
-        .expect("realize");
+    let env =
+        tog::tailors::python::env::realize_env(&store, activity, Platform::host().unwrap(), &plan)
+            .expect("realize");
     assert!(env.join("bin/python").exists());
     assert!(env.join("pyvenv.cfg").is_file());
 
@@ -85,8 +89,9 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 = tog::tailors::python::env::realize_env(&store, Platform::host().unwrap(), &plan)
-        .expect("realize again");
+    let env2 =
+        tog::tailors::python::env::realize_env(&store, activity, Platform::host().unwrap(), &plan)
+            .expect("realize again");
     assert_eq!(env, env2);
 }
 
@@ -101,6 +106,9 @@ fn tailor_grammar_drift_panics_before_publishing() {
     let store = Store {
         root: temp.0.canonicalize().unwrap(),
     };
+    let activity = &store
+        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .unwrap();
     let identity = Identity {
         kind: "cpython".into(),
         name: "cpython".into(),
@@ -117,16 +125,22 @@ fn tailor_grammar_drift_panics_before_publishing() {
             ("platform".into(), "x86_64-unknown-linux-gnu".into()),
         ]),
     };
-    let valid_staged = store.stage().unwrap();
+    let valid_staged = store.stage_with_activity(activity).unwrap();
     fs::write(valid_staged.join("payload"), b"valid").unwrap();
     store
-        .commit_with_deps(&valid_identity, &valid_staged, &[], &ObjectDeps::new())
+        .commit_with_activity_and_deps(
+            activity,
+            &valid_identity,
+            &valid_staged,
+            &[],
+            &ObjectDeps::new(),
+        )
         .expect("valid tailor identity is the control");
-    let staged = store.stage().unwrap();
+    let staged = store.stage_with_activity(activity).unwrap();
     fs::write(staged.join("payload"), b"malformed").unwrap();
     let result = catch_unwind(AssertUnwindSafe(|| {
         store
-            .commit_with_deps(&identity, &staged, &[], &ObjectDeps::new())
+            .commit_with_activity_and_deps(activity, &identity, &staged, &[], &ObjectDeps::new())
             .unwrap();
     }));
     let payload = result.expect_err("malformed tailor identity was published");

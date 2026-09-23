@@ -35,10 +35,11 @@ impl Tailor for Dotnet {
     }
 
     fn plan(&self, ctx: &Context, dir: &Path, toolchain: &Selected) -> io::Result<Option<String>> {
+        let activity = &ctx.activity;
         // Preflight before SDK realization: a broken layout should fail
         // loudly here, not after a toolchain download.
         dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
-        let sdk = dotnet::realize_runtime(&ctx.store, ctx.platform, toolchain)?;
+        let sdk = dotnet::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
         let (plan, _) = dotnet::plan_dotnet(&ctx.store, &ctx.activity, dir, &sdk, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
@@ -50,14 +51,17 @@ impl Tailor for Dotnet {
         request: &SyncRequest,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
+        let activity = &ctx.activity;
         let toolchain = request.toolchain;
         let platform = ctx.platform;
         let store = &ctx.store;
         dotnet::preflight(dir, toolchain.version("dotnet-sdk")?)?;
-        let sdk = dotnet::realize_runtime(store, platform, toolchain)?;
+        let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(store, &ctx.activity, dir, &sdk, toolchain)?;
-        let packages = dotnet::realize_packages(store, platform, &plan, &sdk, dir, toolchain)?;
+        let packages =
+            dotnet::realize_packages(store, activity, platform, &plan, &sdk, dir, toolchain)?;
         dotnet::project_dotnet_env(
+            activity,
             dir,
             &sdk,
             &packages,
@@ -91,12 +95,15 @@ impl Tailor for Dotnet {
         toolchain: &Selected,
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
+        let activity = &ctx.activity;
         let platform = ctx.platform;
         let store = &ctx.store;
-        let sdk = dotnet::realize_runtime(store, platform, toolchain)?;
+        let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
         let (plan, lock_sha256) = dotnet::plan_dotnet(store, &ctx.activity, cwd, &sdk, toolchain)?;
-        let packages = dotnet::realize_packages(store, platform, &plan, &sdk, cwd, toolchain)?;
+        let packages =
+            dotnet::realize_packages(store, activity, platform, &plan, &sdk, cwd, toolchain)?;
         dotnet::project_dotnet_env(
+            activity,
             cwd,
             &sdk,
             &packages,
@@ -124,6 +131,7 @@ impl Tailor for Dotnet {
         cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
+        let activity = &ctx.activity;
         let mut prefix = Vec::new();
         if dir.join(".tog/closures/dotnet.json").exists() {
             // This prevents accidental unsandboxed builds, not deliberate bypasses
@@ -134,8 +142,10 @@ impl Tailor for Dotnet {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
             }
             let closure = comforter::read_closure(dir, "dotnet")?;
-            let sdk = comforter::closure_object(&ctx.store, &closure, "sdk_object", "dotnet")?;
-            let packages = comforter::closure_object(&ctx.store, &closure, "packages_object", "")?;
+            let sdk =
+                comforter::closure_object(&ctx.store, activity, &closure, "sdk_object", "dotnet")?;
+            let packages =
+                comforter::closure_object(&ctx.store, activity, &closure, "packages_object", "")?;
             prefix.push(sdk.to_string_lossy().into_owned());
             let scratch = std::env::temp_dir().join(format!("tog-dn-run-{}", std::process::id()));
             std::fs::create_dir_all(&scratch)?;

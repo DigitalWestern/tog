@@ -398,6 +398,7 @@ pub(crate) fn lock_cache_key(
 
 pub(crate) fn resolve_build_plan(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &crate::kernel::toolchain::Selected,
     requires: &[String],
@@ -416,6 +417,7 @@ pub(crate) fn resolve_build_plan(
             let text = requires_resolution_text(requires);
             let lock = crate::tailors::python::pypi::lock_requirement_text_with_uv(
                 store,
+                activity,
                 platform,
                 &text,
                 selected,

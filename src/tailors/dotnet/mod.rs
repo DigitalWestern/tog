@@ -292,14 +292,18 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
 }
 
 /// Ensure the pinned .NET SDK is realized (muxer at <obj>/dotnet).
-pub fn ensure_sdk(store: &Store) -> io::Result<PathBuf> {
-    ensure_sdk_for(store, Platform::host()?)
+pub fn ensure_sdk(store: &Store, activity: &StoreActivity) -> io::Result<PathBuf> {
+    ensure_sdk_for(store, activity, Platform::host()?)
 }
 
 /// The shipped SDK, for callers with no project selection: tests and the
 /// host-side work that precedes a project's first sync.
-pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> {
-    realize_runtime(store, platform, &shipped_selection()?)
+pub fn ensure_sdk_for(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+) -> io::Result<PathBuf> {
+    realize_runtime(store, activity, platform, &shipped_selection()?)
 }
 
 /// Realize the SDK the selection names: its bytes, its version, its digest.
@@ -307,25 +311,25 @@ pub fn ensure_sdk_for(store: &Store, platform: Platform) -> io::Result<PathBuf> 
 /// reads the pin table.
 pub fn realize_runtime(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET SDK")?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let spec = sdk_spec(platform, selected)?;
     let identity = sdk_identity(&spec);
     let id = identity.object_id();
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, &activity, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
     let digest = Digest::sha512(&spec.sha512)?;
-    let tarball = download_verified_digest_held(store, &spec.url, &digest)?;
-    let staged = store.stage_with_activity(&activity)?;
-    extract_sdk_archive_for(&activity, &tarball, &staged)?;
+    let tarball = download_verified_digest_held(store, activity, &spec.url, &digest)?;
+    let staged = store.stage_with_activity(activity)?;
+    extract_sdk_archive_for(activity, &tarball, &staged)?;
     store
-        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &{
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
             deps.cache_digest(digest);
             deps
@@ -1105,6 +1109,7 @@ fn rewrite_metadata_source(path: &Path) -> io::Result<()> {
 /// precedent). Network denied at install: the feed is local.
 pub fn realize_packages(
     store: &Store,
+    activity: &StoreActivity,
     platform: Platform,
     plan: &DotnetPlan,
     sdk_obj: &Path,
@@ -1113,7 +1118,6 @@ pub fn realize_packages(
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET packages")?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let spec = sdk_spec(platform, selected)?;
     let _ = preflight(project_dir, &spec.version)?;
     validate_plan(plan, &spec.version)?;
@@ -1121,7 +1125,7 @@ pub fn realize_packages(
     // Fetch every nupkg (nuget.org flatcontainer only in v0). No upfront
     // per-file hash exists (contentHash is semantic): download to tmp,
     // record raw sha256 via cache_insert, verify semantically below.
-    let scratch = store.stage_with_activity(&activity)?;
+    let scratch = store.stage_with_activity(activity)?;
     let feed = scratch.join("feed");
     fs::create_dir_all(&feed)?;
     let mut raw_hashes = BTreeMap::new();
@@ -1139,7 +1143,7 @@ pub fn realize_packages(
         use std::io::Read;
         let mut reader = resp.into_reader().take(1 << 30);
         io::copy(&mut reader, &mut file)?;
-        let (raw_sha256, _) = cache_insert(store, &tmp)?;
+        let (raw_sha256, _) = cache_insert(store, activity, &tmp)?;
         raw_hashes.insert(format!("{}@{}", idl, p.version), raw_sha256);
         fs::rename(&tmp, feed.join(format!("{idl}.{verl}.nupkg")))?;
     }
@@ -1152,15 +1156,15 @@ pub fn realize_packages(
         .to_string();
     let identity = nuget_identity(plan, &sdk_id, &raw_hashes)?;
     let id = identity.object_id();
-    if store.has_with_activity(&activity, &id)? {
-        crate::kernel::policy::check_cached(store, &id)?;
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         let _ = crate::kernel::store::remove_tree(&scratch);
         return Ok(store.object_path(&id));
     }
 
     // Locked-mode restore from a synthetic project into the staged folder:
     // the user's project and global.json are never evaluated in realization.
-    let staged = store.stage_with_activity(&activity)?;
+    let staged = store.stage_with_activity(activity)?;
     let verifier = scratch.join("verifier");
     fs::create_dir_all(&verifier)?;
     prepare_scratch(&scratch)?;
@@ -1212,7 +1216,7 @@ pub fn realize_packages(
             scratch: scratch.clone(),
             path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
         },
-        &activity,
+        activity,
     );
     if let Err(e) = result {
         let _ = crate::kernel::store::remove_tree(&scratch);
@@ -1249,11 +1253,12 @@ pub fn realize_packages(
         deps.cache_digest(Digest::sha256(raw_sha256)?);
     }
     store
-        .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &deps)
+        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
         .map(|(path, _)| path)
 }
 
 pub fn project_dotnet_env(
+    activity: &StoreActivity,
     project_dir: &Path,
     sdk_obj: &Path,
     packages_obj: &Path,
@@ -1266,16 +1271,15 @@ pub fn project_dotnet_env(
     let packages_obj = packages_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&sdk_obj)
         .ok_or_else(|| err(".NET SDK object is not in a Tog store"))?;
-    let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
     let mut refs = crate::comforter::ClosureRefs::new();
-    refs.object_path(&store, &activity, &sdk_obj)?;
-    refs.object_path(&store, &activity, &packages_obj)?;
+    refs.object_path(&store, activity, &sdk_obj)?;
+    refs.object_path(&store, activity, &packages_obj)?;
     crate::comforter::write_closure(
         project_dir,
         "dotnet",
         closure_body(&sdk_obj, &packages_obj, plan, lock_sha256, selected)?,
         &store,
-        &activity,
+        activity,
         refs,
         attribution,
     )
@@ -1946,6 +1950,10 @@ mod tests {
         let store = Store {
             root: store_root.canonicalize().unwrap(),
         };
+        let lease = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let activity = &lease;
         let sdk_id = format!("{}-dotnet-sdk-{SDK_VERSION}", "1".repeat(40));
         let packages_id = format!("{}-packages-0", "2".repeat(40));
         for id in [&sdk_id, &packages_id] {
@@ -1969,6 +1977,7 @@ mod tests {
             packages: Vec::new(),
         };
         project_dotnet_env(
+            activity,
             &project,
             &store.object_path(&sdk_id),
             &store.object_path(&packages_id),
@@ -1990,6 +1999,7 @@ mod tests {
         assert!(record.projections.is_empty(), "{:?}", record.projections);
 
         // `gc --register` rebuilds the same record from this closure alone.
+        drop(lease);
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);

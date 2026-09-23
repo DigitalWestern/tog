@@ -1181,17 +1181,31 @@ Every child process that reads or writes a store path runs through
 the helpers that spawn (archive extraction, clone, git, the tailors' tool
 runners, the sandboxed builds) take the token as a parameter, and the
 operation that owns the work holds one lease across its stage directory, its
-children and its commit. Command-level callers pass `Context::activity`; a
-realization entry point that is its own operation (`realize_runtime` and
-friends) takes its lease once at the top. The `x` cache check borrows the
-lease its caller holds, so nothing takes the activity lock underneath the
-x-root lock (GC takes activity first, then x-root).
+children and its commit. Command-level callers pass `Context::activity`.
+The realization and projection entry points (`realize_runtime`,
+`realize_env`, `realize_node_env*`, the `ensure_*` toolchain helpers,
+`RegistryTool::realize`/`launch_env`), node lifecycle scripts, `setup.py
+egg_info`, build-requirement resolution and the verified-download cache
+(`fetch::download_verified*`, `cache_verified*`, `cache_insert`) all take
+the caller's lease too, so a caller holding the exclusive lease never hits
+a nested acquisition. The `x` cache check borrows the lease its caller
+holds, so nothing takes the activity lock underneath the x-root lock (GC
+takes activity first, then x-root). The `Store::has`, `stage`,
+`commit_with_deps` and `policy::check_cached` wrappers that minted their own
+lease are test-only now.
 
 `tests/architecture.rs::store_children_borrow_the_callers_lease` pins this.
-It lists the only production functions outside `supervise.rs` that still
-call `.status()`, `.output()` or `.spawn()` directly, and it refuses a
-lease taken inside `supervise.rs` or `sandbox.rs`. The list and the reason
-for each row:
+It tokenizes production code (comments, strings and `#[cfg(test)]` items
+removed, so a line break or `/* */` inside a call does not hide it) and
+checks two per-function inventories with exact counts. `LEASE_BOUNDARIES`
+lists every function allowed to take a lease: the store primitives, the
+command entry points (`Context`, `doctor`, `ls`, `gc`, `x clean`),
+automatic maintenance and `gc::collect`, the public root-registry calls
+for lease-free callers, and the test-only `detached_lease`. Any other
+`.activity(`, `try_activity_exclusive` or `StoreActivity::acquire` fails
+the test. `RAW_CHILD_SITES` lists the only production functions outside
+`supervise.rs` that still call `.status()`, `.output()` or `.spawn()`
+directly. The list and the reason for each row:
 
 | Function | What it runs | Why it takes no token |
 |---|---|---|

@@ -6,6 +6,7 @@
 //! exact artifact URL selected from their own file list; they still enter the
 //! ordinary Python `Plan` and realization path.
 
+use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::sandbox::BuildSpec;
@@ -140,6 +141,7 @@ impl Manifest {
         dir: &Path,
         project: &ProjectRoot,
         store: &Store,
+        activity: &StoreActivity,
         selected: &crate::kernel::toolchain::Selected,
     ) -> io::Result<()> {
         let python_version = selected.version("cpython")?;
@@ -175,12 +177,11 @@ impl Manifest {
             }
         }
 
-        let build_env = build::ensure_build_environment(store, platform, selected)
+        let build_env = build::ensure_build_environment(store, activity, platform, selected)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
-        let cpython = crate::tailors::python::realize_runtime(store, platform, selected)
+        let cpython = crate::tailors::python::realize_runtime(store, activity, platform, selected)
             .map_err(|error| unreadable(&dir.join("setup.py"), error))?;
         // One lease covers the scratch directory and the sandboxed probe.
-        let activity = &store.activity(crate::kernel::activity::ActivityMode::Shared)?;
         let scratch = store.stage_with_activity(activity)?;
         let egg_base = scratch.join("egg-info");
         let log = scratch.join("egg-info.log");
@@ -421,12 +422,15 @@ mod tests {
         let store = Store {
             root: root.join("absent-store"),
         };
+        let lease = crate::kernel::testutil::detached_lease();
+        let activity = &lease.1;
         let error = manifest
             .prepare_setup(
                 platform,
                 &dir,
                 &project,
                 &store,
+                activity,
                 &crate::tailors::python::shipped_selection(python_version).unwrap(),
             )
             .unwrap_err();

@@ -270,7 +270,7 @@ pub fn ensure_rustfmt(
             platform.triple()
         ));
     }
-    let archive = download_verified_digest_held(store, &row.url, &row.digest)?;
+    let archive = download_verified_digest_held(store, activity, &row.url, &row.digest)?;
     let staged = store.stage_with_activity(activity)?;
     if let Err(error) = stage_rustfmt(
         activity,

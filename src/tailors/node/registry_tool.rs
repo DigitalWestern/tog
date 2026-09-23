@@ -190,7 +190,7 @@ impl RegistryTool for NodeTool {
             "resolving {package}@{} with the store npm...",
             version.unwrap_or("latest")
         ));
-        let node_obj = node::realize_runtime(store, platform, toolchain)?;
+        let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
         let mut command = Command::new(node_obj.join("bin/npm"));
         command.args(["install", "--package-lock-only", "--ignore-scripts"]);
         if !ui::verbose() {
@@ -219,8 +219,25 @@ impl RegistryTool for NodeTool {
             Some(python) => python.clone(),
             None => node::shipped_gyp_python()?,
         };
-        let env = node::realize_node_env_for(store, platform, &plan, &[], toolchain, &gyp_python)?;
-        node::project_node_env(root, &env, platform, &plan, &[], false, attribution)?;
+        let env = node::realize_node_env_for(
+            store,
+            activity,
+            platform,
+            &plan,
+            &[],
+            toolchain,
+            &gyp_python,
+        )?;
+        node::project_node_env(
+            activity,
+            root,
+            &env,
+            platform,
+            &plan,
+            &[],
+            false,
+            attribution,
+        )?;
         ui::synced(&format!("x {package}"), &env);
         Ok(())
     }
@@ -229,11 +246,12 @@ impl RegistryTool for NodeTool {
     fn launch_env(
         &self,
         store: &Store,
+        activity: &StoreActivity,
         platform: Platform,
         root: &Path,
         toolchain: &Selected,
     ) -> io::Result<ToolEnv> {
-        let node_obj = node::realize_runtime(store, platform, toolchain)?;
+        let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
         Ok(ToolEnv {
             path: vec![self.bin_dir(root), node_obj.join("bin")],
             vars: Vec::new(),
