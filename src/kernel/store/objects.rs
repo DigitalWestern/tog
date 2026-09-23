@@ -126,6 +126,31 @@ impl Store {
         )
     }
 
+    /// The identity a fully published object records, read without a
+    /// lease, a publish lock, an mtime touch, or the crashed-publication
+    /// cleanup `has` performs: `Ok(None)` when this store holds no complete
+    /// object `id`. The metadata must describe `id` (its identity hashes to
+    /// it), or this is an error. For read-only callers that only need to
+    /// know what an object is; a concurrent sweep can make the answer
+    /// `None`, never a wrong identity.
+    pub fn published_identity(&self, id: &str) -> io::Result<Option<Identity>> {
+        if !is_object_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("malformed object id {id:?}"),
+            ));
+        }
+        if self.is_complete(id) != Some(true) {
+            return Ok(None);
+        }
+        let path = self.root.join("meta").join(format!("{id}.json"));
+        match crate::kernel::objmeta::read_record_at(&path) {
+            Ok(record) => Ok(Some(record.identity)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// An object is valid only when fully published: directory present,
     /// root read-only, and metadata written (in that commit order). A
     /// crash mid-publication leaves an invalid object, which is swept and

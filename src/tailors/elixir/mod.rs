@@ -147,19 +147,97 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 }
 
 /// A pre-lock Elixir closure records both halves of the BEAM pair under
-/// `plan.otp_version` and `plan.elixir_version`.
+/// `plan.otp_version` and `plan.elixir_version`, and the composite BEAM
+/// object under `beam_object`: the four archives and recipes its identity
+/// names are the proof.
 pub fn legacy_toolchain_evidence(
     platform: Option<Platform>,
     body: &serde_json::Value,
+    store: Option<&crate::kernel::store::Store>,
 ) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(
+    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime, ProofGap};
+    let mut evidence = crate::comforter::legacy_toolchain_evidence(
         platform,
         body,
         &[
             ("otp", "/plan/otp_version"),
             ("elixir", "/plan/elixir_version"),
         ],
-    )
+    );
+    project_toolchain::prove_legacy_runtime(
+        &mut evidence,
+        store,
+        body,
+        LegacyRuntime {
+            pointer: "/beam_object",
+            via: &[],
+            kind: "beam",
+        },
+        |identity, evidence| {
+            // `beam_identity` spells the pair `<otp>-elixir<elixir>`.
+            let Some((otp, elixir)) = identity.version.split_once("-elixir") else {
+                return Err(ProofGap::Unproved(format!(
+                    "the closure's beam object {} records no OTP/Elixir pair",
+                    identity.object_id()
+                )));
+            };
+            project_toolchain::expect_legacy_version(identity, evidence, "otp", otp)?;
+            project_toolchain::expect_legacy_version(identity, evidence, "elixir", elixir)?;
+            let recipe = project_toolchain::schema_recipe(identity)?;
+            // Linux OTP is our relocated build, laid out under the
+            // relocation recipe the identity records beside the schema.
+            let otp_recipe = match identity.inputs.get("relocation_schema") {
+                Some(relocation) => relocation.as_str(),
+                None => recipe,
+            };
+            Ok(vec![
+                project_toolchain::proved_from_identity(
+                    identity,
+                    "otp",
+                    "otp_sha256",
+                    "sha256",
+                    otp_recipe,
+                )?,
+                project_toolchain::proved_from_identity(
+                    identity,
+                    "elixir",
+                    "elixir_sha256",
+                    "sha256",
+                    recipe,
+                )?,
+                project_toolchain::proved_from_identity(
+                    identity,
+                    "hex",
+                    "hex_sha512",
+                    "sha512",
+                    recipe,
+                )?,
+                project_toolchain::proved_from_identity(
+                    identity,
+                    "rebar3",
+                    "rebar3_sha512",
+                    "sha512",
+                    recipe,
+                )?,
+            ])
+        },
+    );
+    evidence
+}
+
+/// The BEAM object a pre-lock sync from `selected` into `store` left for
+/// legacy seeding to read, and the body field that names it.
+#[cfg(test)]
+pub(crate) fn legacy_runtime_for_test(
+    platform: Platform,
+    selected: &Selected,
+    store: &Store,
+) -> (serde_json::Value, Vec<Identity>) {
+    let beam = beam_identity(&beam_spec(platform, selected).unwrap(), &store.root).unwrap();
+    let body = serde_json::json!({
+        "beam_object": crate::comforter::toolchain::object_ref_for_test(store, &beam.object_id()),
+    });
+    (body, vec![beam])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

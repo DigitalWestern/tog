@@ -341,19 +341,79 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
 }
 
 /// A pre-lock Python closure records the selected CPython version under
-/// `python.version` (older closures: `plan.python_version`).
+/// `python.version` (older closures: `plan.python_version`), and its
+/// environment object under `env_object`, whose `cpython` input is the
+/// interpreter object: the artifact that object was built from is the
+/// proof.
 pub fn legacy_toolchain_evidence(
     platform: Option<Platform>,
     body: &serde_json::Value,
+    store: Option<&crate::kernel::store::Store>,
 ) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(
+    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
+    let mut evidence = crate::comforter::legacy_toolchain_evidence(
         platform,
         body,
         &[
             ("cpython", "/python/version"),
             ("cpython", "/plan/python_version"),
         ],
+    );
+    project_toolchain::prove_legacy_runtime(
+        &mut evidence,
+        store,
+        body,
+        LegacyRuntime {
+            pointer: "/env_object",
+            via: &[("python-env", "cpython")],
+            kind: "cpython",
+        },
+        |identity, evidence| {
+            project_toolchain::expect_legacy_version(
+                identity,
+                evidence,
+                "cpython",
+                &identity.version,
+            )?;
+            // A CPython identity carries no schema: its layout is the one
+            // the catalog names `cpython/legacy`.
+            Ok(vec![project_toolchain::proved_from_identity(
+                identity,
+                "cpython",
+                "artifact_sha256",
+                "sha256",
+                CPYTHON_RECIPE,
+            )?])
+        },
+    );
+    evidence
+}
+
+/// The objects a pre-lock Python sync from `selected` left for legacy
+/// seeding to read: the interpreter the producer builds and an environment
+/// naming it, and the body field that names the environment.
+#[cfg(test)]
+pub(crate) fn legacy_runtime_for_test(
+    platform: Platform,
+    selected: &Selected,
+    store: &Store,
+) -> (serde_json::Value, Vec<Identity>) {
+    let cpython = cpython_identity_of(
+        &row(selected, platform, "cpython", CPYTHON_RECIPE).unwrap(),
+        platform,
     )
+    .unwrap();
+    let env = Identity {
+        kind: "python-env".into(),
+        name: "env".into(),
+        version: cpython.version.clone(),
+        inputs: BTreeMap::from([
+            ("schema".to_string(), "python-env/3".to_string()),
+            ("cpython".to_string(), cpython.object_id()),
+        ]),
+    };
+    let body = serde_json::json!({"env_object": store.object_path(&env.object_id())});
+    (body, vec![cpython, env])
 }
 
 pub fn preflight(platform: Platform, version: &str) -> io::Result<()> {

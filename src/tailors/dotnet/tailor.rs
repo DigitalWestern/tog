@@ -146,8 +146,9 @@ impl Tailor for Dotnet {
         _ecosystem: &str,
         platform: Option<Platform>,
         body: &Value,
+        store: Option<&crate::kernel::store::Store>,
     ) -> LegacyEvidence {
-        dotnet::legacy_toolchain_evidence(platform, body)
+        dotnet::legacy_toolchain_evidence(platform, body, store)
     }
 
     fn listing(&self, _ecosystem: &str, body: &Value) -> ClosureListing {

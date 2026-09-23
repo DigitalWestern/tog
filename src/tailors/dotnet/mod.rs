@@ -84,16 +84,61 @@ pub fn toolchain_catalog() -> io::Result<Catalog> {
     )
 }
 
-/// A pre-lock .NET closure records the SDK under `plan.sdk_version`.
+/// A pre-lock .NET closure records the SDK under `plan.sdk_version` and the
+/// SDK object under `sdk_object`: the archive and recipe that object's
+/// identity names are the proof.
 pub fn legacy_toolchain_evidence(
     platform: Option<Platform>,
     body: &serde_json::Value,
+    store: Option<&crate::kernel::store::Store>,
 ) -> LegacyEvidence {
-    crate::comforter::legacy_toolchain_evidence(
+    use crate::comforter::toolchain::{self as project_toolchain, LegacyRuntime};
+    let mut evidence = crate::comforter::legacy_toolchain_evidence(
         platform,
         body,
         &[("dotnet-sdk", "/plan/sdk_version")],
-    )
+    );
+    project_toolchain::prove_legacy_runtime(
+        &mut evidence,
+        store,
+        body,
+        LegacyRuntime {
+            pointer: "/sdk_object",
+            via: &[],
+            kind: "dotnet-sdk",
+        },
+        |identity, evidence| {
+            project_toolchain::expect_legacy_version(
+                identity,
+                evidence,
+                "dotnet-sdk",
+                &identity.version,
+            )?;
+            Ok(vec![project_toolchain::proved_from_identity(
+                identity,
+                "dotnet-sdk",
+                "artifact_sha512",
+                "sha512",
+                project_toolchain::schema_recipe(identity)?,
+            )?])
+        },
+    );
+    evidence
+}
+
+/// The SDK object a pre-lock sync from `selected` left for legacy seeding
+/// to read, and the body field that names it.
+#[cfg(test)]
+pub(crate) fn legacy_runtime_for_test(
+    platform: Platform,
+    selected: &Selected,
+    store: &Store,
+) -> (serde_json::Value, Vec<Identity>) {
+    let sdk = sdk_identity(&sdk_spec(platform, selected).unwrap());
+    let body = serde_json::json!({
+        "sdk_object": crate::comforter::toolchain::object_ref_for_test(store, &sdk.object_id()),
+    });
+    (body, vec![sdk])
 }
 
 pub fn preflight_platform(platform: Platform) -> io::Result<()> {

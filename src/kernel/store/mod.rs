@@ -71,10 +71,36 @@ fn open_error(path: &Path, from_env: bool, error: io::Error) -> io::Error {
 }
 
 impl Store {
-    pub fn open() -> io::Result<Store> {
+    /// Where `open` puts the store, and whether `TOG_STORE` chose it.
+    fn configured_root() -> (PathBuf, bool) {
         let explicit = std::env::var_os("TOG_STORE").map(PathBuf::from);
         let from_env = explicit.is_some();
-        let root = explicit.unwrap_or_else(|| home().join(".tog/store"));
+        (
+            explicit.unwrap_or_else(|| home().join(".tog/store")),
+            from_env,
+        )
+    }
+
+    /// The store `open` would use, without creating or changing anything:
+    /// `None` when there is no store directory there yet. For readers that
+    /// must leave the store exactly as they found it (legacy toolchain
+    /// seeding under `status` and `doctor`); anything that commits, leases
+    /// or sweeps uses `open`.
+    pub fn existing() -> io::Result<Option<Store>> {
+        let (root, _) = Self::configured_root();
+        match fs::metadata(root.join("objects")) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        Ok(Some(Store {
+            root: root.canonicalize()?,
+        }))
+    }
+
+    pub fn open() -> io::Result<Store> {
+        let (root, from_env) = Self::configured_root();
         fs::create_dir_all(&root).map_err(|error| open_error(&root, from_env, error))?;
         let root = root
             .canonicalize()

@@ -6,6 +6,7 @@ use crate::comforter::{self, toolchain::EcosystemInput};
 use crate::commands::inspect;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
+use crate::kernel::store::Store;
 use crate::kernel::toolchain::{lock, runtime, Selected};
 use crate::tailors::{RegistryTool, Tailor};
 use std::io;
@@ -47,18 +48,31 @@ pub(crate) fn projected_env(
 
 /// What toolchain resolution needs to know about each detected ecosystem:
 /// its shipped catalog, and what a closure written before the lock existed
-/// proves (`comforter::toolchain::legacy_evidence`).
+/// proves (`comforter::toolchain::legacy_evidence`), checked against the
+/// active store's objects.
 pub(crate) fn ecosystem_inputs(
     dir: &Path,
     present: &[&dyn Tailor],
 ) -> io::Result<Vec<EcosystemInput>> {
     let closures = inspect::closures(dir)?;
+    // Only a pre-lock closure looks anything up, and then read-only: the
+    // store is located, never created or leased.
+    let store = if closures
+        .iter()
+        .any(|closure| comforter::toolchain::needs_seeding(&closure.envelope))
+    {
+        Store::existing()?
+    } else {
+        None
+    };
     let mut out = Vec::new();
     for tailor in present {
         let legacy = closures
             .iter()
             .find(|closure| closure.ecosystem == tailor.id())
-            .and_then(|closure| comforter::toolchain::legacy_evidence(*tailor, &closure.envelope));
+            .and_then(|closure| {
+                comforter::toolchain::legacy_evidence(*tailor, &closure.envelope, store.as_ref())
+            });
         out.push(EcosystemInput {
             lock_ecosystem: tailor.lock_ecosystem().to_string(),
             catalog: tailor.toolchain_catalog()?,
