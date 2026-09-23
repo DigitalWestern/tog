@@ -58,8 +58,14 @@ jobs:
           switch=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)
           echo "kernel.apparmor_restrict_unprivileged_userns: $switch"
           # What bwrap says on its own, with no tog involved: the answer
-          # doctor has to match.
-          if /usr/bin/bwrap --unshare-user --ro-bind / / /usr/bin/true 2> bwrap.err; then
+          # doctor has to match. The namespace set is the one tog's preflight
+          # asks for (bwrap_preflight_with_activity in src/kernel/sandbox.rs),
+          # so a denial of any of them (the net namespace's RTM_NEWADDR, say)
+          # shows up here too.
+          if /usr/bin/bwrap --unshare-user --unshare-net --unshare-pid \
+              --unshare-ipc --unshare-uts --hostname tog --unshare-cgroup-try \
+              --die-with-parent --new-session --clearenv \
+              --ro-bind / / --dev /dev --proc /proc /usr/bin/true 2> bwrap.err; then
             bwrap=works
           else
             bwrap=refused
