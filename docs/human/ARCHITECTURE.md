@@ -295,8 +295,10 @@ erlef and `tog-toolchains` OTP builds with Hex and rebar3 from
 `builds.hex.pm`, .NET release metadata), verifies every row against a
 second published checksum where one exists, and reports each release it
 skips because a supported platform has no build. It is append-only: rows
-already shipped are re-verified and must be identical, and the default
-moves only with `--set-default <release>`. `--check` rewrites nothing and
+already shipped are re-verified against the choices they record and must be
+identical, an upstream re-publish becomes a new release with a higher
+`revision` beside the old one, and the default moves only with
+`--set-default <release>`. `--check` rewrites nothing and
 fails if the file would change. A unit test holds each file to the
 generator's canonical spelling, and `tests/catalog_upstream.rs`
 (`--ignored`) re-checks the default, newest and oldest release of each

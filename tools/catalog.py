@@ -19,6 +19,10 @@ the only thing that writes those files. For each ecosystem it:
 
 The default never moves unless `--set-default <release key>` says so.
 
+A release upstream re-publishes (a Homebrew portable-ruby rebuild, a newer
+Hex or rebar3 for a BEAM pair) never replaces the shipped row: it is a new
+release with its own key and a higher `revision`, and `--check` reports it.
+
 Usage, from the repository root:
 
     python3 tools/catalog.py                 # every ecosystem
@@ -28,8 +32,10 @@ Usage, from the repository root:
 
 Needs network access, `gpgv` (Node's SHASUMS256.txt signatures) and `tar`.
 GitHub API calls use $GH_TOKEN / $GITHUB_TOKEN, or `gh auth token`, when
-available. Downloads are cached under $TMPDIR/tog-catalog-cache. Standard
-library only.
+available. Release listings and checksum files are fetched fresh on every
+run; only archives, which a versioned URL names immutably, are cached under
+$TMPDIR/tog-catalog-cache (a cached archive is re-hashed on every use).
+Standard library only. Offline tests: `python3 tools/test_catalog.py`.
 """
 import argparse
 import concurrent.futures
@@ -41,6 +47,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 import urllib.error
 import urllib.parse
@@ -75,7 +82,11 @@ class Failure(Exception):
 
 
 # --------------------------------------------------------------------------
-# HTTP, with a small on-disk cache so a rerun does not refetch everything.
+# HTTP. Listings, indexes and checksum files change upstream (a new release,
+# a re-published asset), so they are always fetched fresh: a cached answer
+# would hide a release or let `--check` pass on yesterday's data. Only an
+# archive's bytes are cached, because its URL names one immutable upload,
+# and every use hashes the cached bytes again. Nothing is cached for a 404.
 
 CACHE = os.path.join(os.environ.get("TMPDIR", "/tmp"), "tog-catalog-cache")
 _token = None
@@ -95,16 +106,9 @@ def github_token():
     return _token
 
 
-def fetch(url, cache=True, missing_ok=False):
-    """GET `url`; bytes, or None when `missing_ok` and the answer is 404."""
-    path = os.path.join(CACHE, hashlib.sha256(url.encode()).hexdigest())
-    if cache and os.path.exists(path):
-        with open(path, "rb") as f:
-            return f.read()
-    if cache and os.path.exists(path + ".404"):
-        if missing_ok:
-            return None
-        raise Failure(f"{url}: 404")
+def http_get(url):
+    """One GET: the body, or None for a 404. The single network seam (the
+    offline tests replace it)."""
     headers = {"User-Agent": "tog-catalog-generator"}
     if url.startswith("https://api.github.com/"):
         headers["Accept"] = "application/vnd.github+json"
@@ -114,46 +118,54 @@ def fetch(url, cache=True, missing_ok=False):
     for _ in range(4):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as r:
-                body = r.read()
-            break
+                return r.read()
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                if cache:
-                    os.makedirs(CACHE, exist_ok=True)
-                    open(path + ".404", "w").close()
-                if missing_ok:
-                    return None
-                raise Failure(f"{url}: 404")
+                return None
             last = e
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = e
-    else:
-        raise Failure(f"{url}: {last}")
-    if cache:
+    raise Failure(f"{url}: {last}")
+
+
+def fetch(url, missing_ok=False):
+    """A fresh GET of `url`; None when `missing_ok` and the answer is 404."""
+    body = http_get(url)
+    if body is None:
+        if missing_ok:
+            return None
+        raise Failure(f"{url}: 404")
+    return body
+
+
+def fetch_json(url):
+    return json.loads(fetch(url))
+
+
+def fetch_text(url, missing_ok=False):
+    body = fetch(url, missing_ok=missing_ok)
+    return None if body is None else body.decode()
+
+
+def archive_path(url):
+    """The archive at `url`, downloaded once into the cache."""
+    path = os.path.join(CACHE, hashlib.sha256(url.encode()).hexdigest())
+    if not os.path.exists(path):
+        body = fetch(url)
         os.makedirs(CACHE, exist_ok=True)
         with open(path + ".part", "wb") as f:
             f.write(body)
         os.replace(path + ".part", path)
-    return body
-
-
-def fetch_json(url, cache=True):
-    return json.loads(fetch(url, cache=cache))
-
-
-def fetch_text(url, cache=True, missing_ok=False):
-    body = fetch(url, cache=cache, missing_ok=missing_ok)
-    return None if body is None else body.decode()
+    return path
 
 
 def download_digest(url, algo):
-    """Download `url` (cached) and return its hex digest under `algo`."""
-    return hashlib.new(algo, fetch(url)).hexdigest()
-
-
-def cached_path(url):
-    fetch(url)
-    return os.path.join(CACHE, hashlib.sha256(url.encode()).hexdigest())
+    """The hex digest under `algo` of the archive at `url`."""
+    h = hashlib.new(algo)
+    with open(archive_path(url), "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def parallel(fn, items, workers=12):
@@ -289,6 +301,12 @@ class Report:
         self.skipped = []
         self.verified_rows = 0
         self.notes = []
+        self.republished = []
+
+    def republish(self, key, why):
+        """A new revision of a release already shipped: upstream moved."""
+        self.added.append(key)
+        self.republished.append((key, why))
 
     def skip(self, what, why):
         self.skipped.append((what, why))
@@ -303,8 +321,16 @@ class Report:
             print(f"  + {key}")
         for what, why in self.skipped:
             print(f"  - skipped {what}: {why}")
+        for key, why in self.republished:
+            print(f"  ! {key} is a new revision: {why}")
         for text in self.notes:
             print(f"  note: {text}")
+
+
+def next_revision(releases):
+    """The revision after every shipped release of one upstream version; a
+    release written without one counts as revision 1."""
+    return max((r.get("revision") or 1) for r in releases) + 1
 
 
 def normalized(rel):
@@ -334,8 +360,8 @@ def expect_equal(what, a, b):
 
 
 def go_rows(report):
-    everything = fetch_json("https://go.dev/dl/?mode=json&include=all", cache=False)
-    supported = fetch_json("https://go.dev/dl/?mode=json", cache=False)
+    everything = fetch_json("https://go.dev/dl/?mode=json&include=all")
+    supported = fetch_json("https://go.dev/dl/?mode=json")
     lines = {".".join(r["version"][2:].split(".")[:2]) for r in supported}
     by_version = {}
     for r in everything:
@@ -403,21 +429,31 @@ def generate_go(existing, report):
 # not yet ended.
 
 
-def node_keyring():
-    path = os.path.join(CACHE, "node-release-keys.kbx")
-    body = fetch("https://raw.githubusercontent.com/nodejs/release-keys/main/gpg/pubring.kbx", cache=False)
-    os.makedirs(CACHE, exist_ok=True)
+SCRATCH = None
+
+
+def scratch_file(name, body):
+    """`body` written under this run's scratch directory."""
+    global SCRATCH
+    if SCRATCH is None:
+        SCRATCH = tempfile.mkdtemp(prefix="tog-catalog-")
+    path = os.path.join(SCRATCH, name)
     with open(path, "wb") as f:
         f.write(body)
     return path
+
+
+def node_keyring():
+    body = fetch("https://raw.githubusercontent.com/nodejs/release-keys/main/gpg/pubring.kbx")
+    return scratch_file("node-release-keys.kbx", body)
 
 
 def node_shasums(version, keyring):
     base = f"https://nodejs.org/dist/v{version}/"
     text = fetch(base + "SHASUMS256.txt")
     sig = fetch(base + "SHASUMS256.txt.sig")
-    text_path = cached_path(base + "SHASUMS256.txt")
-    sig_path = cached_path(base + "SHASUMS256.txt.sig")
+    text_path = scratch_file(f"node-{version}-SHASUMS256.txt", text)
+    sig_path = scratch_file(f"node-{version}-SHASUMS256.txt.sig", sig)
     result = subprocess.run(["gpgv", "--keyring", keyring, sig_path, text_path],
                             capture_output=True, text=True)
     if result.returncode != 0:
@@ -441,8 +477,8 @@ def node_release(version, sums):
 
 
 def generate_node(existing, report):
-    index = fetch_json("https://nodejs.org/dist/index.json", cache=False)
-    schedule = fetch_json("https://raw.githubusercontent.com/nodejs/Release/main/schedule.json", cache=False)
+    index = fetch_json("https://nodejs.org/dist/index.json")
+    schedule = fetch_json("https://raw.githubusercontent.com/nodejs/Release/main/schedule.json")
     lines = {
         line[1:]
         for line, span in schedule.items()
@@ -502,7 +538,7 @@ def pbs_sums(tag):
 
 
 def generate_python(existing, report, default_key):
-    cycle = fetch_json("https://peps.python.org/api/release-cycle.json", cache=False)
+    cycle = fetch_json("https://peps.python.org/api/release-cycle.json")
     minors = {line for line, info in cycle.items() if info["status"] in ("bugfix", "security")}
     tags = sorted((t for t in github_tags(PBS) if re.fullmatch(r"\d{8}", t)), reverse=True)
     sums = dict(zip(tags, parallel(pbs_sums, tags)))
@@ -598,17 +634,18 @@ def generate_python(existing, report, default_key):
 # realizes). Each bottle is downloaded, hashed, compared with GitHub's
 # digest, and its layout checked against the `ruby-toolchain/1` recipe.
 # Supported lines are ruby-lang's branches still in normal or security
-# maintenance; a version rebuilt by Homebrew (`3.3.4_1`) ships its newest
-# rebuild.
+# maintenance. A version enters with Homebrew's newest rebuild of it
+# (`3.3.4_1`); a later rebuild of a shipped version is a new release,
+# `ruby-3.3.4_2` with `revision = 2`, beside the old one.
 
 PORTABLE = "Homebrew/homebrew-portable-ruby"
 BOTTLE_TAGS = {DARWIN: "arm64_big_sur", LINUX: "x86_64_linux"}
 
 
 def ruby_lines():
-    text = fetch_text("https://raw.githubusercontent.com/ruby/www.ruby-lang.org/master/_data/branches.yml", cache=False)
+    text = fetch_text("https://raw.githubusercontent.com/ruby/www.ruby-lang.org/master/_data/branches.yml")
     lines = set()
-    for block in text.split("\n- ")[1:]:
+    for block in re.split(r"^- ", text, flags=re.M)[1:]:
         name = re.search(r"name:\s*['\"]?([\d.]+)", block)
         status = re.search(r"status:\s*(.+)", block)
         if name and status and status.group(1).strip() in ("normal maintenance", "security maintenance"):
@@ -669,7 +706,7 @@ def run_linux_bottle(path, tag, version):
     return True
 
 
-def ruby_release(tag, release_json):
+def ruby_release(tag, release_json, key=None, revision=None):
     version = tag.split("_")[0]
     digests = asset_digests(release_json)
     rows = []
@@ -681,11 +718,11 @@ def ruby_release(tag, release_json):
         digest = "sha256:" + download_digest(url, "sha256")
         if digests[name] is not None:
             expect_equal(f"ruby {name} GitHub digest", digests[name], digest)
-        check_bottle_layout(cached_path(url), tag)
+        check_bottle_layout(archive_path(url), tag)
         if platform == LINUX:
-            run_linux_bottle(cached_path(url), tag, version)
+            run_linux_bottle(archive_path(url), tag, version)
         rows.append(row(platform, "ruby", "homebrew-portable-ruby", tag, "ruby-toolchain/1", url, digest))
-    return release(f"ruby-{version}", [component("ruby", version)], rows), None
+    return release(key or f"ruby-{version}", [component("ruby", version)], rows, revision), None
 
 
 def generate_ruby(existing, report):
@@ -694,7 +731,9 @@ def generate_ruby(existing, report):
     out = {}
     for rel in existing:
         tag = rel["artifacts"][0]["build"]
-        fresh, _ = ruby_release(tag, releases[tag])
+        if tag not in releases:
+            raise Failure(f"ruby: {rel['key']}: portable-ruby no longer publishes {tag}")
+        fresh, _ = ruby_release(tag, releases[tag], rel["key"], rel.get("revision"))
         check_row("ruby", rel["key"], rel, fresh)
         out[rel["key"]] = rel
     newest = {}
@@ -711,16 +750,25 @@ def generate_ruby(existing, report):
             continue
         if version not in newest or revision > newest[version][0]:
             newest[version] = (revision, tag)
-    for version, (_, tag) in sorted(newest.items(), key=lambda kv: version_key(kv[0])):
-        key = f"ruby-{version}"
-        if key in out:
+    for version, (rebuild, tag) in sorted(newest.items(), key=lambda kv: version_key(kv[0])):
+        shipped = [r for r in out.values() if r["components"][0]["version"] == version]
+        if any(r["artifacts"][0]["build"] == tag for r in shipped):
             continue
-        fresh, missing = ruby_release(tag, releases[tag])
+        if shipped:
+            # Homebrew rebuilt a version this catalog ships: the old bottle
+            # stays (locks name it), the rebuild is a revision beside it.
+            key, revision = f"ruby-{tag}", max(rebuild, next_revision(shipped))
+        else:
+            key, revision = f"ruby-{version}", None
+        fresh, missing = ruby_release(tag, releases[tag], key, revision)
         if fresh is None:
             report.skip(key, f"portable-ruby {tag} has no {missing} bottle")
             continue
         out[key] = fresh
-        report.added.append(key)
+        if shipped:
+            report.republish(key, f"Homebrew rebuilt ruby {version} as {tag}")
+        else:
+            report.added.append(key)
     report.skip("ruby-lang lines without a portable-ruby build",
                 ", ".join(sorted(l for l in lines if not any(v.startswith(l + ".") for v in newest))) or "none")
     return out
@@ -732,7 +780,11 @@ def generate_ruby(existing, report):
 # only when both exist. Elixir is the platform-neutral `elixir-otp-<major>`
 # zip; Hex and rebar3 follow Mix's own rule over builds.hex.pm's install
 # CSVs (the newest row whose Elixir and OTP are not newer than the pair).
-# Elixir zips, Hex and rebar3 are small and downloaded to hash.
+# Elixir zips, Hex and rebar3 are small and downloaded to hash. Mix's rule
+# only chooses the tools of a new pair: a shipped pair is verified against
+# the Hex and rebar3 it records, and when builds.hex.pm later publishes a
+# newer eligible one, that is a new revision of the pair
+# (`beam-otp29.0.5-elixir1.20.4-r2`, `revision = 2`), never an edit.
 
 ERLEF = "erlef/otp_builds"
 TOG_TOOLCHAINS = "DigitalWestern/tog-toolchains"
@@ -751,7 +803,7 @@ def mix_pick(csv_text, elixir, otp_major):
         if len(fields) < 4:
             continue
         artifact, digest, elixir_dir, otp = fields[:4]
-        if elixir_version_key(elixir_dir) <= elixir_version_key(elixir) and otp <= str(otp_major):
+        if elixir_version_key(elixir_dir) <= elixir_version_key(elixir) and int(otp) <= int(otp_major):
             return artifact, digest, elixir_dir, otp
     return None
 
@@ -784,8 +836,8 @@ def generate_elixir(existing, report):
     if no_linux:
         report.skip(f"{len(no_linux)} OTP releases ({', '.join(sorted(no_linux, key=version_key)[-4:])}, ...)",
                     "no Linux build in tog-toolchains (DESIGNS WP3 PR 8 rebuilds OTP)")
-    hex_csv = fetch_text("https://builds.hex.pm/installs/hex.csv", cache=False)
-    rebar_csv = fetch_text("https://builds.hex.pm/installs/rebar.csv", cache=False)
+    hex_csv = fetch_text("https://builds.hex.pm/installs/hex.csv")
+    rebar_csv = fetch_text("https://builds.hex.pm/installs/rebar.csv")
     elixirs = {}
     for r in github_releases(ELIXIR):
         m = re.fullmatch(r"v(\d+\.\d+\.\d+)", r["tag_name"])
@@ -806,23 +858,37 @@ def generate_elixir(existing, report):
             expect_equal(f"elixir {elixir} {name} GitHub digest", digests[name], digest)
         return url, digest
 
-    def installs_row(csv_text, tool, elixir, major):
-        picked = mix_pick(csv_text, elixir, major)
-        if picked is None:
-            return None
+    def installs_row(csv_text, tool, picked):
+        """The row for one builds.hex.pm install `(version, sha512, elixir
+        dir, otp)`, its bytes checked against the CSV's sha512."""
         version, sha512, elixir_dir, otp = picked
         suffix = ".ez" if tool == "hex" else ""
         url = f"https://builds.hex.pm/installs/{elixir_dir}/{tool}-{version}-otp-{otp}{suffix}"
         expect_equal(f"{tool} {url} sha512", sha512, download_digest(url, "sha512"))
         return version, f"{tool}-{version}-otp-{otp}", url, f"sha512:{sha512}"
 
-    def bundle(otp, elixir):
+    def recorded_pick(csv_text, tool, rel):
+        """The install a shipped pair records, as the CSV lists it today."""
+        url = next(a["url"] for a in rel["artifacts"] if a["component"] == tool)
+        m = re.fullmatch(rf"https://builds\.hex\.pm/installs/([^/]+)/{tool}-(.+)-otp-(\d+)(?:\.ez)?", url)
+        if m is None:
+            raise Failure(f"elixir: {rel['key']}: {url} is not a builds.hex.pm install")
+        elixir_dir, version, otp = m.groups()
+        for fields in (line.split(",") for line in csv_text.strip().splitlines()):
+            if len(fields) >= 4 and (fields[0], fields[2], fields[3]) == (version, elixir_dir, otp):
+                return tuple(fields[:4])
+        raise Failure(f"elixir: {rel['key']}: builds.hex.pm no longer lists {url}")
+
+    def bundle(otp, elixir, hex_pick=None, rebar_pick=None, key=None, revision=None):
+        """The pair's release; Hex and rebar3 are Mix's choice unless given."""
         major = otp.split(".")[0]
         z = zip_row(elixir, major)
-        hexr = installs_row(hex_csv, "hex", elixir, major)
-        rebar = installs_row(rebar_csv, "rebar3", elixir, major)
-        if z is None or hexr is None or rebar is None:
+        hex_pick = hex_pick or mix_pick(hex_csv, elixir, major)
+        rebar_pick = rebar_pick or mix_pick(rebar_csv, elixir, major)
+        if z is None or hex_pick is None or rebar_pick is None:
             return None
+        hexr = installs_row(hex_csv, "hex", hex_pick)
+        rebar = installs_row(rebar_csv, "rebar3", rebar_pick)
         dtag, ddigest = darwin[otp]
         ltag, lname, ldigest = linux[otp]
         rows = [
@@ -836,25 +902,44 @@ def generate_elixir(existing, report):
             rows.append(row(platform, "hex", "builds.hex.pm", hexr[1], "beam-toolchain/1", hexr[2], hexr[3]))
             rows.append(row(platform, "rebar3", "builds.hex.pm", rebar[1], "beam-toolchain/1", rebar[2], rebar[3]))
         return release(
-            f"beam-otp{otp}-elixir{elixir}",
+            key or f"beam-otp{otp}-elixir{elixir}",
             [component("otp", otp), component("elixir", elixir), component("hex", hexr[0]),
              component("rebar3", rebar[0])],
             rows,
+            revision,
         )
+
+    def pair(rel):
+        versions = {c["name"]: c["version"] for c in rel["components"]}
+        return versions["otp"], versions["elixir"]
+
+    def tools(rel):
+        return sorted({(a["component"], a["url"]) for a in rel["artifacts"] if a["component"] in ("hex", "rebar3")})
 
     out = {}
     for rel in existing:
-        versions = {c["name"]: c["version"] for c in rel["components"]}
-        fresh = bundle(versions["otp"], versions["elixir"])
+        otp, elixir = pair(rel)
+        if otp not in darwin or otp not in linux or elixir not in elixirs:
+            raise Failure(f"elixir: {rel['key']}: an upstream no longer publishes OTP {otp} or Elixir {elixir}")
+        fresh = bundle(otp, elixir, recorded_pick(hex_csv, "hex", rel), recorded_pick(rebar_csv, "rebar3", rel),
+                       rel["key"], rel.get("revision"))
         check_row("elixir", rel["key"], rel, fresh)
         out[rel["key"]] = rel
     for otp in otps:
         major = otp.split(".")[0]
         for elixir in sorted(elixirs, key=version_key):
             key = f"beam-otp{otp}-elixir{elixir}"
-            if key in out:
-                continue
             if f"elixir-otp-{major}.zip" not in asset_digests(elixirs[elixir]):
+                continue
+            shipped = [r for r in out.values() if pair(r) == (otp, elixir)]
+            if shipped:
+                fresh = bundle(otp, elixir)
+                if fresh is None or any(tools(r) == tools(fresh) for r in shipped):
+                    continue
+                revision = next_revision(shipped)
+                key = f"{key}-r{revision}"
+                out[key] = bundle(otp, elixir, key=key, revision=revision)
+                report.republish(key, "builds.hex.pm publishes a newer Hex or rebar3 Mix would install")
                 continue
             fresh = bundle(otp, elixir)
             if fresh is None:
@@ -902,11 +987,11 @@ def dotnet_cross_check(rel):
 
 
 def generate_dotnet(existing, report):
-    index = fetch_json("https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json", cache=False)
+    index = fetch_json("https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json")
     sdks = {}
     for channel in index["releases-index"]:
         supported = channel["support-phase"] in ("active", "maintenance")
-        meta = fetch_json(channel["releases.json"], cache=False) if supported or existing else None
+        meta = fetch_json(channel["releases.json"]) if supported or existing else None
         if meta is None:
             continue
         for r in meta["releases"]:
@@ -959,11 +1044,15 @@ def run(eco, args):
         raise Failure(f"{eco}: default {default} is not a release of the catalog")
     text = render(eco, default, list(out.values()))
     path = os.path.join(REPO, FILES[eco])
-    current = open(path).read() if os.path.exists(path) else None
+    current = None
+    if os.path.exists(path):
+        with open(path) as f:
+            current = f.read()
     report.print()
     if args.check:
         if current != text:
-            print(f"{eco}: {FILES[eco]} differs from what upstream publishes today")
+            print(f"{eco}: {FILES[eco]} differs from what upstream publishes today "
+                  f"({len(report.added)} new, {len(report.republished)} of them new revisions)")
             return False
         return True
     if current != text:

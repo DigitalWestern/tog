@@ -1050,12 +1050,13 @@ mod tests {
                 document.default,
                 "{ecosystem}"
             );
-            // Unique versions: a release key names one primary version.
+            // One release per upstream version, unless the generator added
+            // a re-published one as a higher explicit revision beside it.
             let mut versions = std::collections::BTreeSet::new();
             for bundle in &document.bundles {
                 assert!(
-                    versions.insert(bundle.primary_versions().unwrap()),
-                    "{ecosystem}: {} repeats a version",
+                    versions.insert((bundle.primary_versions().unwrap(), bundle.revision)),
+                    "{ecosystem}: {} repeats a version and revision",
                     bundle.release
                 );
             }

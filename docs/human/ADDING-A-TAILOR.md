@@ -30,7 +30,12 @@ Rules the tailor must keep:
   depend on them), prints each release it skipped and why, and never moves
   the default. `--set-default <release>` moves it, deliberately and in its
   own reviewable diff. `--check` writes nothing and exits non-zero if the
-  file would change. `tests/catalog_upstream.rs` re-checks samples later:
+  file would change. An upstream re-publish (a Homebrew rebuild, a newer
+  Hex for a BEAM pair) is a new release beside the old one, with a higher
+  `revision`, and `--check` names it. Listings and checksum files are
+  fetched fresh every run; only archives are cached. The generator's own
+  offline tests: `python3 tools/test_catalog.py` (Python 3.11+).
+  `tests/catalog_upstream.rs` re-checks samples later:
   `cargo test --test catalog_upstream -- --ignored`.
 - Every artifact row `toolchain_catalog` emits must be served from an
   endpoint `SourcePolicy::shipped()` (`src/kernel/toolchain/source.rs`)
